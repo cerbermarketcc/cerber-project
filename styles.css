@@ -693,6 +693,15 @@ body[data-theme="dark"] .logo {
   background: rgba(0, 0, 0, 0.18);
 }
 
+.nav-pop {
+  background: transparent;
+  pointer-events: none;
+}
+
+.nav-pop.open {
+  pointer-events: auto;
+}
+
 .nav-pop.open,
 .account-pop.open,
 .modal-backdrop.open {
@@ -702,23 +711,62 @@ body[data-theme="dark"] .logo {
 .nav-card {
   position: absolute;
   left: 50%;
-  bottom: calc(150px + var(--safe-bottom));
-  display: grid;
-  width: min(340px, calc(100vw - 30px));
+  bottom: calc(88px + var(--safe-bottom));
+  display: flex;
+  align-items: center;
   gap: 8px;
-  padding: 12px;
-  border-radius: 24px;
-  background: var(--paper);
+  width: auto;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #171717;
   box-shadow: var(--shadow);
   transform: translateX(-50%);
 }
 
-.nav-card button {
-  min-height: 44px;
+.nav-icon,
+.nav-close {
+  position: relative;
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
   border: 0;
-  border-radius: 14px;
-  background: var(--soft);
-  color: var(--ink);
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+}
+
+.nav-icon.active {
+  background: #fff;
+  color: #171717;
+}
+
+.nav-icon svg,
+.nav-close svg,
+.filter-head svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-icon i {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff5a68;
+}
+
+.nav-close {
+  margin-left: 8px;
+  color: #171717;
+  background: #fff;
 }
 
 .account-card {
@@ -763,6 +811,155 @@ body[data-theme="dark"] .logo {
   background: var(--paper);
   box-shadow: var(--shadow);
   transform: translate(-50%, -50%);
+}
+
+.filter-panel {
+  top: auto;
+  bottom: 0;
+  width: min(640px, 100vw);
+  max-height: calc(92vh - var(--safe-bottom));
+  padding: 24px 22px calc(22px + var(--safe-bottom));
+  border-radius: 28px 28px 0 0;
+  transform: translateX(-50%);
+}
+
+.filter-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.filter-head h2 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.filter-head button {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.filter-head button:first-child {
+  justify-self: start;
+  color: var(--accent);
+}
+
+.filter-head button:last-child {
+  justify-self: end;
+}
+
+.filter-form {
+  display: grid;
+  gap: 18px;
+}
+
+.sort-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sort-pills label {
+  min-height: 42px;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+}
+
+.sort-pills input {
+  display: none;
+}
+
+.sort-pills label:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.orders-screen {
+  min-height: calc(100vh - 180px);
+  padding: 34px 18px 150px;
+}
+
+.big-title {
+  margin: 30px 0 20px;
+  font-size: clamp(54px, 16vw, 78px);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.order-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.order-tabs button {
+  min-height: 64px;
+  border: 1px solid transparent;
+  border-radius: 28px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 18px;
+}
+
+.order-tabs button.active {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.order-tabs span {
+  display: inline-grid;
+  min-width: 34px;
+  min-height: 34px;
+  margin-left: 8px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--soft);
+}
+
+.empty-orders {
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  margin-top: 120px;
+  text-align: center;
+}
+
+.empty-orders h2 {
+  margin: 0;
+  font-size: 30px;
+}
+
+.empty-orders p {
+  margin: 0 0 50px;
+  color: var(--muted);
+  font-size: 22px;
+}
+
+.empty-orders button {
+  width: min(360px, 90%);
+  min-height: 66px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.order-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 22px;
+  background: var(--paper);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
 }
 
 .modal h2 {

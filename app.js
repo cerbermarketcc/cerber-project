@@ -3,7 +3,7 @@ const SESSION_KEY = "cerber_current_user_v1";
 const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
-const API_ENABLED = location.protocol !== "file:";
+const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
 
@@ -12,6 +12,45 @@ const NEW_STORE_STATS = {
   orders: 0,
   reviews: 1,
   rating: 5
+};
+
+const filterOptions = {
+  countries: {
+    moldova: {
+      label: "Молдова",
+      cities: {
+        chisinau: { label: "Кишинёв", districts: ["Центр", "Ботаника", "Буюканы", "Рышкановка", "Чеканы"] },
+        balti: { label: "Бельцы", districts: ["Центр", "Дачия", "Слободзея", "БАМ"] },
+        cahul: { label: "Кагул", districts: ["Центр", "Липованка", "Фрунзе"] },
+        orhei: { label: "Оргеев", districts: ["Центр", "Нордик", "Лупоайка"] },
+        ungheni: { label: "Унгены", districts: ["Центр", "Дэнуцены", "Берешты"] }
+      }
+    },
+    transnistria: {
+      label: "Приднестровье",
+      cities: {
+        tiraspol: { label: "Тирасполь", districts: ["Центр", "Балка", "Октябрьский", "Кировский"] },
+        bender: { label: "Бендеры", districts: ["Центр", "Борисовка", "Солнечный", "Шёлковый"] },
+        rybnitsa: { label: "Рыбница", districts: ["Центр", "Вальченко", "Южный"] },
+        dubossary: { label: "Дубоссары", districts: ["Центр", "Большой Фонтан", "Лунга"] },
+        slobodzeya: { label: "Слободзея", districts: ["Центр", "Новая Слободзея", "Парканская зона"] }
+      }
+    }
+  },
+  categories: [
+    "Все товары",
+    "Электронные товары",
+    "SIM-Карты",
+    "Аккаунты",
+    "Безопасность",
+    "Документы",
+    "Дизайн/Кодинг",
+    "Реклама/Рассылки",
+    "Финансы",
+    "Доставки/Перевозки",
+    "Работа",
+    "Разное"
+  ]
 };
 
 const defaults = {
@@ -49,7 +88,15 @@ const defaults = {
       reviewsList: [defaultReview("review-demo-1")]
     }
   ],
-  messages: []
+  messages: [],
+  orders: [],
+  filters: {
+    country: "moldova",
+    city: "chisinau",
+    district: "",
+    category: "Все товары",
+    sort: "relevance"
+  }
 };
 
 let db = loadDb();
@@ -57,6 +104,7 @@ let route = "home";
 let activeStoreId = "";
 let activeStoreTab = "positions";
 let authMode = "login";
+let activeOrdersTab = "all";
 
 const root = document.getElementById("app");
 
@@ -281,6 +329,9 @@ function merge(base, saved) {
 }
 
 function normalizeDb(next) {
+  if (!Array.isArray(next.orders)) next.orders = [];
+  if (!next.filters) next.filters = structuredClone(defaults.filters);
+  normalizeOrders(next);
   next.stores = (next.stores || []).map((store) => {
     const seed = defaults.stores.find((item) => item.id === store.id);
     return {
@@ -291,6 +342,18 @@ function normalizeDb(next) {
       products: Array.isArray(store.products) ? store.products : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
+  });
+}
+
+function normalizeOrders(next) {
+  const now = Date.now();
+  next.orders = (next.orders || []).map((order) => {
+    const createdAt = order.createdAt || now;
+    const age = now - Number(createdAt);
+    if (order.status === "active" && !order.disputeOpen && age >= 12 * 60 * 60 * 1000) {
+      return { ...order, status: "closed", closedAt: now, closeReason: "Автоматически закрыт как успешный" };
+    }
+    return { ...order, createdAt };
   });
 }
 
@@ -393,7 +456,9 @@ async function persistRemoteState() {
           theme: db.theme,
           lang: db.lang,
           stores: db.stores,
-          messages: db.messages
+          messages: db.messages,
+          orders: db.orders,
+          filters: db.filters
         }
       })
     });
@@ -403,6 +468,7 @@ async function persistRemoteState() {
 }
 
 function saveDb() {
+  normalizeOrders(db);
   saveAuth();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
@@ -455,6 +521,23 @@ function showToast(message) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 2600);
 }
 
+function navIcon(name) {
+  const icons = {
+    home: `<svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10.5V21h5v-6h4v6h5V10.5"/></svg>`,
+    stores: `<svg viewBox="0 0 24 24"><path d="M4 10h16l-1-5H5l-1 5Z"/><path d="M5 10v10h14V10"/><path d="M8 14h8"/></svg>`,
+    orders: `<svg viewBox="0 0 24 24"><path d="M7 8V6a5 5 0 0 1 10 0v2"/><path d="M5 8h14l1 13H4L5 8Z"/></svg>`,
+    messages: `<svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg>`,
+    filters: `<svg viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><path d="M4 12h3"/><path d="M11 12h9"/><path d="M4 18h12"/><path d="M19 18h1"/><circle cx="16" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>`,
+    close: `<svg viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></svg>`
+  };
+  return icons[name] || "";
+}
+
+function navButton(name, label, attrs = "") {
+  const active = route === name || (name === "stores" && route === "catalog");
+  return `<button class="nav-icon ${active ? "active" : ""}" aria-label="${label}" title="${label}" ${attrs}>${navIcon(name)}</button>`;
+}
+
 function layout(content) {
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
@@ -469,7 +552,7 @@ function layout(content) {
       </header>
       ${content}
     </main>
-    <button class="menu" data-menu><span></span><span></span><span></span></button>
+    <button class="menu" data-menu aria-label="Меню"><span></span><span></span><span></span></button>
     <section class="dock">
       <button class="theme-toggle" data-theme-toggle>
         <span>${db.theme === "dark" ? tr("themeDark") : tr("themeLight")}</span>
@@ -484,12 +567,12 @@ function layout(content) {
     </section>
     <div class="nav-pop" data-nav-pop>
       <div class="nav-card">
-        <button data-route="home">Главная</button>
-        <button data-route="catalog">${tr("positions")}</button>
-        <button data-route="messages">${tr("messages")}</button>
-        ${isAdmin() ? `<button data-route="admin">${tr("admin")}</button>` : ""}
-        ${sellerStores().length ? `<button data-route="seller">${tr("seller")}</button>` : ""}
-        <button data-logout>${tr("logout")}</button>
+        ${navButton("home", "Главная", `data-route="home"`)}
+        ${navButton("stores", "Магазины", `data-route="catalog"`)}
+        ${navButton("orders", "Заказы", `data-route="orders"`)}
+        <button class="nav-icon ${route === "messages" ? "active" : ""}" aria-label="${tr("messages")}" title="${tr("messages")}" data-route="messages">${navIcon("messages")}<i></i></button>
+        ${navButton("filters", "Фильтры", `data-filters`)}
+        <button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button>
       </div>
     </div>
     <div class="account-pop" data-account-pop>
@@ -638,6 +721,140 @@ function renderHome() {
       .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("");
     bindStoreCards();
+  };
+}
+
+function renderCatalog() {
+  route = "catalog";
+  const cards = db.stores.map((store) => storeCard(store)).join("");
+  layout(`
+    <section class="hero">
+      <h1>Магазины</h1>
+      <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
+    </section>
+    <section class="feed" data-feed>${cards}</section>
+  `);
+  document.querySelector("[data-search]").oninput = (event) => {
+    const q = event.target.value.toLowerCase();
+    document.querySelector("[data-feed]").innerHTML = db.stores
+      .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
+      .map((store) => storeCard(store)).join("");
+    bindStoreCards();
+  };
+}
+
+function userOrders() {
+  const user = currentUser();
+  normalizeOrders(db);
+  return (db.orders || []).filter((order) => sameLogin(order.login, user?.login));
+}
+
+function renderOrders(tab = activeOrdersTab) {
+  route = "orders";
+  activeOrdersTab = tab;
+  const orders = userOrders();
+  const active = orders.filter((order) => order.status === "active" && !order.disputeOpen);
+  const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const list = tab === "active" ? active : tab === "disputes" ? disputes : orders;
+  layout(`
+    <section class="screen orders-screen">
+      <h1 class="big-title">Заказы</h1>
+      <div class="order-tabs">
+        <button class="${tab === "all" ? "active" : ""}" data-order-tab="all">Все <span>${orders.length}</span></button>
+        <button class="${tab === "active" ? "active" : ""}" data-order-tab="active">Активные <span>${active.length}</span></button>
+        <button class="${tab === "disputes" ? "active" : ""}" data-order-tab="disputes">Споры <span>${disputes.length}</span></button>
+      </div>
+      ${list.length ? list.map(orderCard).join("") : `
+        <article class="empty-orders">
+          <h2>Нет заказов</h2>
+          <p>Вы еще не купили ни одного товара</p>
+          <button data-route="catalog">Купить</button>
+        </article>
+      `}
+    </section>
+  `);
+  document.querySelectorAll("[data-order-tab]").forEach((button) => {
+    button.onclick = () => renderOrders(button.dataset.orderTab);
+  });
+}
+
+function orderCard(order) {
+  const status = order.disputeOpen ? "Спор" : order.status === "closed" ? "Закрыт" : "Активный";
+  return `
+    <article class="order-card">
+      <div>
+        <h3>${esc(order.product || "Заказ")}</h3>
+        <p>${esc(order.storeName || "")}</p>
+      </div>
+      <span>${status}</span>
+    </article>
+  `;
+}
+
+function renderFilters() {
+  const filters = db.filters || structuredClone(defaults.filters);
+  const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
+  const city = country.cities[filters.city] || Object.values(country.cities)[0];
+  showModal(`
+    <div class="filter-head">
+      <button data-clear-filters>Очистить</button>
+      <h2>Фильтры</h2>
+      <button data-close-modal>${navIcon("close")}</button>
+    </div>
+    <form class="filter-form" data-filter-form>
+      <label class="field">Страна
+        <select name="country">
+          ${Object.entries(filterOptions.countries).map(([key, item]) => `<option value="${key}" ${filters.country === key ? "selected" : ""}>${item.label}</option>`).join("")}
+        </select>
+      </label>
+      <label class="field">Город
+        <select name="city">
+          ${Object.entries(country.cities).map(([key, item]) => `<option value="${key}" ${filters.city === key ? "selected" : ""}>${item.label}</option>`).join("")}
+        </select>
+      </label>
+      <label class="field">Район
+        <select name="district">
+          <option value="">Все районы</option>
+          ${city.districts.map((district) => `<option value="${esc(district)}" ${filters.district === district ? "selected" : ""}>${esc(district)}</option>`).join("")}
+        </select>
+      </label>
+      <label class="field">Категория товара
+        <select name="category">
+          ${filterOptions.categories.map((category) => `<option value="${esc(category)}" ${filters.category === category ? "selected" : ""}>${esc(category)}</option>`).join("")}
+        </select>
+      </label>
+      <div class="sort-pills">
+        <label><input type="radio" name="sort" value="relevance" ${filters.sort !== "priceAsc" && filters.sort !== "priceDesc" ? "checked" : ""}> Релевантности</label>
+        <label><input type="radio" name="sort" value="priceAsc" ${filters.sort === "priceAsc" ? "checked" : ""}> Возрастанию цены</label>
+        <label><input type="radio" name="sort" value="priceDesc" ${filters.sort === "priceDesc" ? "checked" : ""}> Убыванию цены</label>
+      </div>
+      <button class="primary">Применить</button>
+    </form>
+  `, "filter-panel");
+  document.querySelector("[name='country']").onchange = (event) => {
+    db.filters = { ...filters, country: event.target.value, city: Object.keys(filterOptions.countries[event.target.value].cities)[0], district: "" };
+    document.querySelector("[data-modal]").classList.remove("open");
+    renderFilters();
+  };
+  document.querySelector("[data-clear-filters]").onclick = () => {
+    db.filters = structuredClone(defaults.filters);
+    saveDb();
+    document.querySelector("[data-modal]").classList.remove("open");
+    renderCurrent();
+  };
+  document.querySelector("[data-filter-form]").onsubmit = (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    db.filters = {
+      country: data.get("country"),
+      city: data.get("city"),
+      district: data.get("district"),
+      category: data.get("category"),
+      sort: data.get("sort")
+    };
+    saveDb();
+    document.querySelector("[data-modal]").classList.remove("open");
+    renderCurrent();
   };
 }
 
@@ -890,8 +1107,8 @@ function fileToDataUrl(file) {
   });
 }
 
-function showModal(html) {
-  document.querySelector("[data-modal]").innerHTML = `<div class="modal">${html}</div>`;
+function showModal(html, className = "") {
+  document.querySelector("[data-modal]").innerHTML = `<div class="modal ${className}">${html}</div>`;
   document.querySelector("[data-modal]").classList.add("open");
 }
 
@@ -907,6 +1124,12 @@ function bindGlobal() {
   document.querySelectorAll("[data-route]").forEach((button) => {
     button.onclick = () => routeTo(button.dataset.route);
   });
+  document.querySelectorAll("[data-filters]").forEach((button) => {
+    button.onclick = () => {
+      document.querySelector("[data-nav-pop]").classList.remove("open");
+      renderFilters();
+    };
+  });
   document.querySelectorAll("[data-store-tab]").forEach((button) => {
     button.onclick = () => renderStore(button.dataset.storeId, button.dataset.storeTab);
   });
@@ -914,7 +1137,7 @@ function bindGlobal() {
   document.querySelector("[data-account]").onclick = () => document.querySelector("[data-account-pop]").classList.add("open");
   document.querySelectorAll("[data-nav-pop], [data-account-pop], [data-modal]").forEach((overlay) => {
     overlay.onclick = (event) => {
-      if (event.target === overlay || event.target.closest("[data-close-modal]")) overlay.classList.remove("open");
+      if (event.target === overlay || event.target.closest("[data-close-modal]") || event.target.closest("[data-close-nav]")) overlay.classList.remove("open");
     };
   });
   document.querySelector("[data-theme-toggle]").onclick = (event) => {
@@ -946,6 +1169,7 @@ function bindStoreCards() {
 }
 
 function routeTo(next) {
+  if (next === "filters") return renderFilters();
   route = next;
   renderCurrent();
 }
@@ -953,12 +1177,13 @@ function routeTo(next) {
 function renderCurrent() {
   if (!db.currentUser || !currentUser()) return renderAuth();
   if (route === "home") return renderHome();
+  if (route === "catalog") return renderCatalog();
+  if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
   if (route === "chat") return renderChat(activeStoreId || db.stores[0].id);
-  if (route === "catalog") return renderStore(db.stores[0].id);
   renderHome();
 }
 

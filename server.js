@@ -120,7 +120,18 @@ async function ensureSeed() {
   await supabase.from("stores").upsert({ id: defaultStore.id, data: defaultStore }, { onConflict: "id" });
   await supabase.from("app_settings").upsert({
     id: "main",
-    data: { theme: "light", lang: "ru" }
+    data: {
+      theme: "light",
+      lang: "ru",
+      orders: [],
+      filters: {
+        country: "moldova",
+        city: "chisinau",
+        district: "",
+        category: "Все товары",
+        sort: "relevance"
+      }
+    }
   }, { onConflict: "id" });
 }
 
@@ -141,7 +152,9 @@ async function stateFor(user) {
       lang: settings?.data?.lang || "ru",
       users: profiles || [],
       stores: (stores || []).map((row) => row.data),
-      messages: (messages || []).map((row) => row.data)
+      messages: (messages || []).map((row) => row.data),
+      orders: settings?.data?.orders || [],
+      filters: settings?.data?.filters || {}
     }
   };
 }
@@ -229,7 +242,12 @@ app.put("/api/state", async (req, res, next) => {
     const state = req.body.state || {};
     await supabase.from("app_settings").upsert({
       id: "main",
-      data: { theme: state.theme || "light", lang: state.lang || "ru" }
+      data: {
+        theme: state.theme || "light",
+        lang: state.lang || "ru",
+        orders: Array.isArray(state.orders) ? state.orders : [],
+        filters: state.filters || {}
+      }
     }, { onConflict: "id" });
 
     if (Array.isArray(state.stores)) {
