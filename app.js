@@ -589,6 +589,7 @@ function navIcon(name) {
     support: `<svg viewBox="0 0 24 24"><path d="M4 13a8 8 0 0 1 16 0"/><path d="M4 13v4a2 2 0 0 0 2 2h2v-8H6a2 2 0 0 0-2 2Z"/><path d="M20 13v4a2 2 0 0 1-2 2h-2v-8h2a2 2 0 0 1 2 2Z"/></svg>`,
     rules: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.7 2.7 0 1 1 4.4 2.1c-1.1.8-1.9 1.3-1.9 2.9"/><path d="M12 17h.01"/></svg>`,
     logout: `<svg viewBox="0 0 24 24"><path d="M14 4h-8v16h8"/><path d="M10 12h10"/><path d="m17 9 3 3-3 3"/></svg>`,
+    attach: `<svg viewBox="0 0 24 24"><path d="m21 11.5-8.7 8.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.7-8.7"/></svg>`,
     close: `<svg viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></svg>`
   };
   return icons[name] || "";
@@ -638,6 +639,18 @@ const rulesText = `
   <p>5.3. Купоны, выданные по результатам решения диспута, не могут быть отменены магазином в одностороннем порядке. Исключение составляют добровольные купоны, не относящиеся к обязательству по диспуту.</p>
   <p>5.4. Вознаграждение покупателю за сообщение о нарушении выплачивается только в случае, если нарушение подтверждено и магазин выплачивает штраф.</p>
 `;
+
+const supportTopics = [
+  "Общие вопросы",
+  "Ввод/вывод средств",
+  "Настройка магазина",
+  "Сотрудничество",
+  "Восстановление доступа",
+  "Добавление города/района",
+  "Аукцион",
+  "Сообщить о баге (предлагается вознаграждение)",
+  "Открытие магазина"
+];
 
 function layout(content) {
   document.body.dataset.theme = db.theme;
@@ -1120,19 +1133,63 @@ function renderMessages() {
   `);
 }
 
+function renderSupport() {
+  route = "support";
+  layout(`
+    <section class="screen support-screen">
+      <article class="support-card">
+        <h1>Новый тикет в поддержку</h1>
+        <form class="form" data-support-form>
+          <label class="field">Тема
+            <select name="subject" required>
+              <option value="" disabled selected>Выберите тему</option>
+              ${supportTopics.map((topic) => `<option value="${esc(topic)}">${esc(topic)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">Сообщение
+            <textarea name="body" required></textarea>
+          </label>
+          <div class="support-actions">
+            <button class="attach-button" type="button" aria-label="Прикрепить файл">${navIcon("attach") || "⌘"}</button>
+            <button class="primary" type="submit">Отправить</button>
+          </div>
+        </form>
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-support-form]").onsubmit = (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const subject = data.get("subject");
+    const body = data.get("body");
+    db.messages.unshift({
+      id: `support-${Date.now()}`,
+      storeId: "support",
+      storeTag: "supportcerber",
+      toLogin: "support",
+      fromLogin: db.currentUser,
+      subject,
+      body,
+      date: new Date().toLocaleString(),
+      system: "support"
+    });
+    saveDb();
+    showToast("Тикет отправлен в поддержку");
+    renderMessages();
+  };
+}
+
 function renderSimplePage(kind) {
   const titles = {
     wallet: "Кошелек",
     referrals: "Реферальная программа",
     exchange: "Заявки на обмен",
-    support: "Поддержка",
     rules: "Правила"
   };
   const bodies = {
     wallet: "Баланс, пополнение и история операций будут здесь.",
     referrals: "Реферальные ссылки, начисления и приглашенные пользователи будут здесь.",
     exchange: "Заявки на обмен валют и статусы операций будут здесь.",
-    support: "Раздел поддержки будет подключен следующим шагом.",
     rules: "Правила сервиса будут оформлены здесь."
   };
   layout(`
@@ -1326,7 +1383,8 @@ function renderCurrent() {
   if (route === "catalog") return renderCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
-  if (["wallet", "referrals", "exchange", "support", "rules"].includes(route)) return renderSimplePage(route);
+  if (route === "support") return renderSupport();
+  if (["wallet", "referrals", "exchange", "rules"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
