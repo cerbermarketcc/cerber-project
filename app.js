@@ -145,6 +145,10 @@ const defaults = {
   ],
   messages: [],
   orders: [],
+  referrals: [],
+  referralPayments: [],
+  referralCodes: {},
+  balances: {},
   filters: {
     country: "moldova",
     city: "chisinau",
@@ -160,6 +164,7 @@ let activeStoreId = "";
 let activeStoreTab = "positions";
 let authMode = "login";
 let activeOrdersTab = "all";
+let activeReferralTab = "referrals";
 
 const root = document.getElementById("app");
 
@@ -385,7 +390,14 @@ function merge(base, saved) {
 
 function normalizeDb(next) {
   if (!Array.isArray(next.orders)) next.orders = [];
+  if (!Array.isArray(next.referrals)) next.referrals = [];
+  if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
+  if (!next.referralCodes) next.referralCodes = {};
+  if (!next.balances) next.balances = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
+  (next.users || []).forEach((user) => {
+    if (!next.balances[user.login]) next.balances[user.login] = 0;
+  });
   normalizeOrders(next);
   next.stores = (next.stores || []).map((store) => {
     const seed = defaults.stores.find((item) => item.id === store.id);
@@ -513,6 +525,10 @@ async function persistRemoteState() {
           stores: db.stores,
           messages: db.messages,
           orders: db.orders,
+          referrals: db.referrals,
+          referralPayments: db.referralPayments,
+          referralCodes: db.referralCodes,
+          balances: db.balances,
           filters: db.filters
         }
       })
@@ -557,6 +573,74 @@ function sellerStores() {
   return db.stores.filter((store) => sameLogin(store.ownerLogin, db.currentUser));
 }
 
+function userBalance(login = db.currentUser) {
+  return Number(db.balances?.[login] || 0);
+}
+
+function referralCodeFor(login = db.currentUser) {
+  const key = loginKey(login);
+  if (!key) return "";
+  if (!db.referralCodes) db.referralCodes = {};
+  if (!db.referralCodes[key]) {
+    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    db.referralCodes[key] = seed.slice(0, 4) + Math.random().toString(36).slice(2, 10).toUpperCase();
+    saveDb();
+  }
+  return db.referralCodes[key];
+}
+
+function referralLinkFor(login = db.currentUser) {
+  const origin = location.protocol === "file:" ? "https://cerber.vip" : location.origin;
+  return `${origin}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
+}
+
+function pendingReferralCode() {
+  const fromUrl = new URLSearchParams(location.search).get("ref");
+  if (fromUrl) {
+    localStorage.setItem("cerber_pending_ref_v1", fromUrl);
+    return fromUrl;
+  }
+  return localStorage.getItem("cerber_pending_ref_v1") || "";
+}
+
+function registerReferral(newLogin) {
+  const code = pendingReferralCode();
+  if (!code) return;
+  const ownerEntry = Object.entries(db.referralCodes || {}).find(([, value]) => value === code);
+  if (!ownerEntry) return;
+  const referrerLogin = ownerEntry[0];
+  if (sameLogin(referrerLogin, newLogin)) return;
+  if (db.referrals.some((item) => sameLogin(item.login, newLogin))) return;
+  db.referrals.push({
+    id: `ref-${Date.now()}`,
+    referrerLogin,
+    login: newLogin,
+    registeredAt: new Date().toLocaleString(),
+    deposits: 0,
+    earned: 0
+  });
+  localStorage.removeItem("cerber_pending_ref_v1");
+}
+
+function addReferralDeposit(referralLogin, amount) {
+  const referral = db.referrals.find((item) => sameLogin(item.login, referralLogin));
+  if (!referral) return;
+  const value = Number(amount) || 0;
+  const reward = Math.round(value * 0.03 * 100) / 100;
+  referral.deposits = Number(referral.deposits || 0) + value;
+  referral.earned = Number(referral.earned || 0) + reward;
+  db.balances[referral.referrerLogin] = userBalance(referral.referrerLogin) + reward;
+  db.referralPayments.unshift({
+    id: `pay-${Date.now()}`,
+    referrerLogin: referral.referrerLogin,
+    referralLogin,
+    amount: value,
+    reward,
+    date: new Date().toLocaleString()
+  });
+  saveDb();
+}
+
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -590,6 +674,8 @@ function navIcon(name) {
     rules: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.7 2.7 0 1 1 4.4 2.1c-1.1.8-1.9 1.3-1.9 2.9"/><path d="M12 17h.01"/></svg>`,
     logout: `<svg viewBox="0 0 24 24"><path d="M14 4h-8v16h8"/><path d="M10 12h10"/><path d="m17 9 3 3-3 3"/></svg>`,
     attach: `<svg viewBox="0 0 24 24"><path d="m21 11.5-8.7 8.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.7-8.7"/></svg>`,
+    qr: `<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4z"/><path d="M14 4h6v6h-6z"/><path d="M4 14h6v6H4z"/><path d="M14 14h2v2h-2z"/><path d="M18 14h2v6h-4v-2h2z"/><path d="M14 18h2v2h-2z"/></svg>`,
+    share: `<svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.7 10.7 6.6-4.4"/><path d="m8.7 13.3 6.6 4.4"/></svg>`,
     close: `<svg viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></svg>`
   };
   return icons[name] || "";
@@ -660,7 +746,7 @@ function layout(content) {
         <button class="logo-button" data-route="home"><img class="logo" src="assets/logo1-white.png" alt="CERBER"></button>
         <button class="balance" data-account>
           <strong>0 LTC</strong>
-          <span>0 $</span>
+          <span>${userBalance().toFixed(2)} $</span>
           <img class="avatar" src="assets/user-avatar.png" alt="">
         </button>
       </header>
@@ -785,6 +871,8 @@ async function handleAuth(event) {
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
+        registerReferral(payload.user?.login || login);
+        saveDb();
         authMode = "login";
         return renderHome();
       } catch (error) {
@@ -795,6 +883,7 @@ async function handleAuth(event) {
     if (db.users.some((user) => sameLogin(user.login, login))) return renderAuth(tr("already"));
     db.users.push({ login, password, name: data.get("name").trim() || login, role: "user" });
     db.currentUser = login;
+    registerReferral(login);
     saveDb();
     authMode = "login";
     return renderHome();
@@ -1179,6 +1268,152 @@ function renderSupport() {
   };
 }
 
+function renderReferrals(tab = activeReferralTab) {
+  route = "referrals";
+  activeReferralTab = tab;
+  const code = referralCodeFor();
+  const link = referralLinkFor();
+  const refs = db.referrals.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
+  const payments = db.referralPayments.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
+  const totalDeposits = payments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const totalEarned = payments.reduce((sum, item) => sum + Number(item.reward || 0), 0);
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(link)}`;
+  const shortLink = link.length > 31 ? `${link.slice(0, 28)}...` : link;
+  layout(`
+    <section class="screen referral-screen">
+      <h1>Реферальная программа</h1>
+      <div class="pill-tabs referral-tabs">
+        <button class="${tab === "referrals" ? "" : "muted"}" data-ref-tab="referrals">Рефералы</button>
+        <button class="${tab === "analytics" ? "" : "muted"}" data-ref-tab="analytics">Аналитика</button>
+      </div>
+      ${tab === "analytics" ? referralAnalytics(payments, totalDeposits, totalEarned) : `
+        <article class="ref-card">
+          <div class="ref-card-head">
+            <h2>${code ? "Ваша реферальная ссылка" : "Создать реферальную ссылку"}</h2>
+            ${code ? `<span>Активна</span>` : ""}
+          </div>
+          <p>Делитесь Вашей ссылкой и зарабатывайте 3% от пополнений приглашенных пользователей.</p>
+          ${code ? `
+            <div class="ref-link-row">
+              <button data-copy-ref>${esc(shortLink)}</button>
+              <button data-copy-ref aria-label="Скопировать">⧉</button>
+              <button class="qr-button" data-show-qr aria-label="QR">${navIcon("qr")}</button>
+            </div>
+          ` : `<button class="primary" data-create-ref>Создать ссылку</button>`}
+        </article>
+        <article class="ref-terms"><strong>Все условия</strong><button data-ref-terms>Подробнее</button></article>
+        <div class="ref-section-head">
+          <h2>Рефералы</h2>
+          <label class="search"><b>⌕</b><input data-ref-search placeholder="Поиск реферала по ID"></label>
+        </div>
+        <section data-ref-list>
+          ${refs.length ? refs.map(referralCard).join("") : `<article class="empty-ref"><h3>Рефералов пока нет</h3><p>Здесь будет отображаться список ваших рефералов</p></article>`}
+        </section>
+      `}
+    </section>
+  `);
+  document.querySelectorAll("[data-ref-tab]").forEach((button) => {
+    button.onclick = () => renderReferrals(button.dataset.refTab);
+  });
+  document.querySelector("[data-create-ref]")?.addEventListener("click", () => {
+    referralCodeFor();
+    saveDb();
+    renderReferrals("referrals");
+  });
+  document.querySelectorAll("[data-copy-ref]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(link);
+        showToast("Ссылка скопирована");
+      } catch {
+        showToast(link);
+      }
+    };
+  });
+  document.querySelector("[data-show-qr]")?.addEventListener("click", () => showReferralQr(qrUrl, code, link));
+  document.querySelector("[data-ref-terms]")?.addEventListener("click", () => {
+    showModal(`<h2>Условия реферальной программы</h2><p>За каждого пользователя, зарегистрированного по вашей ссылке, вы будете видеть регистрацию в списке рефералов.</p><p>С каждого будущего пополнения реферала начисляется 3% на ваш личный баланс CERBER.</p><p>Начисленные средства можно будет использовать для покупок внутри площадки после подключения платежей.</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+  });
+  document.querySelector("[data-ref-search]")?.addEventListener("input", (event) => {
+    const q = event.target.value.toLowerCase();
+    document.querySelector("[data-ref-list]").innerHTML = refs
+      .filter((item) => item.login.toLowerCase().includes(q))
+      .map(referralCard).join("") || `<article class="empty-ref"><h3>Ничего не найдено</h3></article>`;
+  });
+}
+
+function referralCard(item) {
+  return `
+    <article class="ref-item">
+      <div>
+        <h3>${esc(item.login)}</h3>
+        <p>${esc(item.registeredAt)}</p>
+      </div>
+      <div>
+        <strong>${Number(item.deposits || 0).toFixed(2)} $</strong>
+        <span>+${Number(item.earned || 0).toFixed(2)} $</span>
+      </div>
+    </article>
+  `;
+}
+
+function referralAnalytics(payments, totalDeposits, totalEarned) {
+  const points = Array.from({ length: 31 }, (_, index) => `${20 + index}.05.26`);
+  return `
+    <label class="field period-field">Выберите период<input type="text" readonly placeholder="Май 2026"></label>
+    <article class="analytics-card">
+      <div class="chart">
+        ${Array.from({ length: 11 }, (_, i) => `<span style="bottom:${i * 10}%"></span>`).join("")}
+        <svg viewBox="0 0 320 210" preserveAspectRatio="none">
+          <polyline points="${points.map((_, i) => `${10 + i * 10},198`).join(" ")}"></polyline>
+          ${points.map((_, i) => `<circle cx="${10 + i * 10}" cy="198" r="4"></circle>`).join("")}
+        </svg>
+      </div>
+      <div class="analytics-summary">
+        <div><strong>${totalDeposits.toFixed(2)} $</strong><span>Пополнения</span></div>
+        <div><strong>${totalEarned.toFixed(2)} $</strong><span>Ваши 3%</span></div>
+      </div>
+    </article>
+    <h2 class="details-title">Детализация</h2>
+    ${payments.length ? payments.map((item) => `
+      <article class="ref-item">
+        <div><h3>${esc(item.referralLogin)}</h3><p>${esc(item.date)}</p></div>
+        <div><strong>${Number(item.amount).toFixed(2)} $</strong><span>+${Number(item.reward).toFixed(2)} $</span></div>
+      </article>
+    `).join("") : `<article class="empty-ref"><h3>Платежей пока нет</h3><p>Здесь будет отображаться список ваших платежей</p></article>`}
+  `;
+}
+
+function showReferralQr(qrUrl, code, link) {
+  showModal(`
+    <button class="qr-close" data-close-modal>${navIcon("close")}</button>
+    <img class="qr-image" src="${qrUrl}" alt="QR">
+    <div class="divider"></div>
+    <p class="qr-code">${esc(code)} <button data-copy-code>⧉</button></p>
+    <button class="primary" data-share-ref>Поделиться ${navIcon("share")}</button>
+  `, "qr-modal");
+  document.querySelector("[data-copy-code]").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      showToast("Код скопирован");
+    } catch {
+      showToast(code);
+    }
+  };
+  document.querySelector("[data-share-ref]").onclick = async () => {
+    if (navigator.share) {
+      await navigator.share({ title: "CERBER", text: "Моя реферальная ссылка", url: link }).catch(() => {});
+    } else {
+      try {
+        await navigator.clipboard.writeText(link);
+        showToast("Ссылка скопирована");
+      } catch {
+        showToast(link);
+      }
+    }
+  };
+}
+
 function renderSimplePage(kind) {
   const titles = {
     wallet: "Кошелек",
@@ -1384,7 +1619,8 @@ function renderCurrent() {
   if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
   if (route === "support") return renderSupport();
-  if (["wallet", "referrals", "exchange", "rules"].includes(route)) return renderSimplePage(route);
+  if (route === "referrals") return renderReferrals(activeReferralTab);
+  if (["wallet", "exchange", "rules"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);

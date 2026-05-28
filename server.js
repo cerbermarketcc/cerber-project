@@ -124,6 +124,10 @@ async function ensureSeed() {
       theme: "light",
       lang: "ru",
       orders: [],
+      referrals: [],
+      referralPayments: [],
+      referralCodes: {},
+      balances: {},
       filters: {
         country: "moldova",
         city: "chisinau",
@@ -154,6 +158,10 @@ async function stateFor(user) {
       stores: (stores || []).map((row) => row.data),
       messages: (messages || []).map((row) => row.data),
       orders: settings?.data?.orders || [],
+      referrals: settings?.data?.referrals || [],
+      referralPayments: settings?.data?.referralPayments || [],
+      referralCodes: settings?.data?.referralCodes || {},
+      balances: settings?.data?.balances || {},
       filters: settings?.data?.filters || {}
     }
   };
@@ -246,6 +254,10 @@ app.put("/api/state", async (req, res, next) => {
         theme: state.theme || "light",
         lang: state.lang || "ru",
         orders: Array.isArray(state.orders) ? state.orders : [],
+        referrals: Array.isArray(state.referrals) ? state.referrals : [],
+        referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
+        referralCodes: state.referralCodes || {},
+        balances: state.balances || {},
         filters: state.filters || {}
       }
     }, { onConflict: "id" });
