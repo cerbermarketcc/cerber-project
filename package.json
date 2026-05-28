@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node -e \"console.log('CERBER build ready')\"",
     "start": "node server.js"
   },
   "dependencies": {
