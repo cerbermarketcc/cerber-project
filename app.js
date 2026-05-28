@@ -14,26 +14,81 @@ const NEW_STORE_STATS = {
   rating: 5
 };
 
+function city(label, districts = []) {
+  const base = ["Центр", "Северная зона", "Южная зона", "Восточная зона", "Западная зона", "Автовокзал", "Промзона"];
+  return { label, districts: districts.length ? districts : base };
+}
+
 const filterOptions = {
   countries: {
     moldova: {
       label: "Молдова",
       cities: {
-        chisinau: { label: "Кишинёв", districts: ["Центр", "Ботаника", "Буюканы", "Рышкановка", "Чеканы"] },
-        balti: { label: "Бельцы", districts: ["Центр", "Дачия", "Слободзея", "БАМ"] },
-        cahul: { label: "Кагул", districts: ["Центр", "Липованка", "Фрунзе"] },
-        orhei: { label: "Оргеев", districts: ["Центр", "Нордик", "Лупоайка"] },
-        ungheni: { label: "Унгены", districts: ["Центр", "Дэнуцены", "Берешты"] }
+        chisinau: city("Кишинёв", ["Центр", "Ботаника", "Буюканы", "Рышкановка", "Чеканы", "Телецентр", "Скулянка", "Малая Малина", "Старая Почта", "Аэропорт"]),
+        balti: city("Бельцы", ["Центр", "Дачия", "Слободзея", "БАМ", "Пемза", "Молодово", "Селекция", "Северный вокзал"]),
+        bender: city("Бендеры", ["Центр", "Борисовка", "Солнечный", "Шёлковый", "Липканы", "Кавказ", "Хомутяновка"]),
+        basarabeasca: city("Бессарабка"),
+        biruinta: city("Бируинца"),
+        briceni: city("Бричаны"),
+        bucovati: city("Быковец"),
+        cahul: city("Кагул", ["Центр", "Липованка", "Фрунзе", "Южный", "Промзона"]),
+        calarasi: city("Калараш"),
+        cantemir: city("Кантемир"),
+        causeni: city("Каушаны"),
+        ceadir_lunga: city("Чадыр-Лунга"),
+        cimishlia: city("Чимишлия"),
+        codru: city("Кодру"),
+        comrat: city("Комрат", ["Центр", "Туканы", "Заялпужье", "Промзона"]),
+        cornesti: city("Корнешты"),
+        costesti: city("Костешты"),
+        criuleni: city("Криуляны"),
+        cupcini: city("Купчинь"),
+        donduseni: city("Дондюшаны"),
+        drochia: city("Дрокия"),
+        durlesti: city("Дурлешты", ["Центр", "Новая Дурлешты", "Старая Дурлешты", "Думбрава"]),
+        edinet: city("Единцы"),
+        falesti: city("Фалешты"),
+        floresti: city("Флорешты"),
+        frunza: city("Фрунзе"),
+        glodeni: city("Глодяны"),
+        hincesti: city("Хынчешты"),
+        ialoveni: city("Яловены"),
+        leova: city("Леова"),
+        lipcani: city("Липканы"),
+        nisporeni: city("Ниспорены"),
+        ocnita: city("Окница"),
+        orhei: city("Оргеев", ["Центр", "Нордик", "Лупоайка", "Слободка", "Промзона"]),
+        otaci: city("Отачь"),
+        rezina: city("Резина"),
+        riscani: city("Рышканы"),
+        singera: city("Сынжера", ["Центр", "Добруджа", "Ревака"]),
+        singerei: city("Сынжерей"),
+        soldanesti: city("Шолданешты"),
+        soroca: city("Сороки", ["Центр", "Бужэука", "Сорока Ноуэ", "Застынка"]),
+        stefan_voda: city("Штефан-Водэ"),
+        straseni: city("Страшены"),
+        taraclia: city("Тараклия"),
+        telenesti: city("Теленешты"),
+        ungheni: city("Унгены", ["Центр", "Дэнуцены", "Берешты", "Молодёжный", "ЖД район"]),
+        vadul_lui_voda: city("Вадул-луй-Водэ"),
+        vatra: city("Ватра"),
+        vulcanesti: city("Вулканешты")
       }
     },
     transnistria: {
       label: "Приднестровье",
       cities: {
-        tiraspol: { label: "Тирасполь", districts: ["Центр", "Балка", "Октябрьский", "Кировский"] },
-        bender: { label: "Бендеры", districts: ["Центр", "Борисовка", "Солнечный", "Шёлковый"] },
-        rybnitsa: { label: "Рыбница", districts: ["Центр", "Вальченко", "Южный"] },
-        dubossary: { label: "Дубоссары", districts: ["Центр", "Большой Фонтан", "Лунга"] },
-        slobodzeya: { label: "Слободзея", districts: ["Центр", "Новая Слободзея", "Парканская зона"] }
+        tiraspol: city("Тирасполь", ["Центр", "Балка", "Октябрьский", "Кировский", "Западный", "Терновка", "Ближний Хутор"]),
+        bender: city("Бендеры", ["Центр", "Борисовка", "Солнечный", "Шёлковый", "Липканы", "Кавказ", "Хомутяновка"]),
+        rybnitsa: city("Рыбница", ["Центр", "Вальченко", "Южный", "Северный", "Промзона"]),
+        dubossary: city("Дубоссары", ["Центр", "Большой Фонтан", "Лунга", "Коржево", "Промзона"]),
+        slobodzeya: city("Слободзея", ["Центр", "Новая Слободзея", "Парканская зона", "Суклея"]),
+        grigoriopol: city("Григориополь"),
+        camenca: city("Каменка"),
+        dnestrovsk: city("Днестровск"),
+        crasnoe: city("Красное"),
+        maiac: city("Маяк"),
+        pervomaisc: city("Первомайск")
       }
     }
   },
@@ -833,6 +888,11 @@ function renderFilters() {
   `, "filter-panel");
   document.querySelector("[name='country']").onchange = (event) => {
     db.filters = { ...filters, country: event.target.value, city: Object.keys(filterOptions.countries[event.target.value].cities)[0], district: "" };
+    document.querySelector("[data-modal]").classList.remove("open");
+    renderFilters();
+  };
+  document.querySelector("[name='city']").onchange = (event) => {
+    db.filters = { ...filters, city: event.target.value, district: "" };
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
   };
