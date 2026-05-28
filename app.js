@@ -690,6 +690,11 @@ function accountMenuButton(icon, label, attrs = "", extra = "") {
   return `<button class="account-row" ${attrs}>${navIcon(icon)}<span>${label}</span>${extra}</button>`;
 }
 
+function openRulesModal() {
+  document.querySelector("[data-account-pop]")?.classList.remove("open");
+  showModal(`${rulesText}<button class="primary" data-close-modal>${tr("close")}</button>`, "rules-modal");
+}
+
 const rulesText = `
   <h2>Правила CERBER</h2>
   <h3>1. Общие правила площадки</h3>
@@ -1425,7 +1430,7 @@ function renderSimplePage(kind) {
     wallet: "Баланс, пополнение и история операций будут здесь.",
     referrals: "Реферальные ссылки, начисления и приглашенные пользователи будут здесь.",
     exchange: "Заявки на обмен валют и статусы операций будут здесь.",
-    rules: "Правила сервиса будут оформлены здесь."
+    rules: "Нажмите кнопку Правила в меню аккаунта, чтобы открыть полное окно правил."
   };
   layout(`
     <section class="screen">
@@ -1563,10 +1568,7 @@ function bindGlobal() {
     };
   });
   document.querySelectorAll("[data-rules]").forEach((button) => {
-    button.onclick = () => {
-      document.querySelector("[data-account-pop]")?.classList.remove("open");
-      showModal(`${rulesText}<button class="primary" data-close-modal>${tr("close")}</button>`, "rules-modal");
-    };
+    button.onclick = openRulesModal;
   });
   document.querySelectorAll("[data-store-tab]").forEach((button) => {
     button.onclick = () => renderStore(button.dataset.storeId, button.dataset.storeTab);
@@ -1608,6 +1610,7 @@ function bindStoreCards() {
 
 function routeTo(next) {
   if (next === "filters") return renderFilters();
+  if (next === "rules") return openRulesModal();
   route = next;
   renderCurrent();
 }
@@ -1620,7 +1623,7 @@ function renderCurrent() {
   if (route === "messages") return renderMessages();
   if (route === "support") return renderSupport();
   if (route === "referrals") return renderReferrals(activeReferralTab);
-  if (["wallet", "exchange", "rules"].includes(route)) return renderSimplePage(route);
+  if (["wallet", "exchange"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
