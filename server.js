@@ -231,7 +231,13 @@ app.get("*", (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(error.status || 500).json({ error: error.message || "Server error" });
+  const message = String(error.message || "Server error");
+  if (message.includes("Could not find the table")) {
+    return res.status(500).json({
+      error: "В Supabase ещё не созданы таблицы. Выполни SQL из файла supabase-schema.sql."
+    });
+  }
+  res.status(error.status || 500).json({ error: message });
 });
 
 app.listen(port, () => {
