@@ -579,10 +579,16 @@ function showToast(message) {
 function navIcon(name) {
   const icons = {
     home: `<svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10.5V21h5v-6h4v6h5V10.5"/></svg>`,
+    wallet: `<svg viewBox="0 0 24 24"><path d="M4 7h16v12H4z"/><path d="M4 9h16"/><path d="M16 14h2"/></svg>`,
     stores: `<svg viewBox="0 0 24 24"><path d="M4 10h16l-1-5H5l-1 5Z"/><path d="M5 10v10h14V10"/><path d="M8 14h8"/></svg>`,
     orders: `<svg viewBox="0 0 24 24"><path d="M7 8V6a5 5 0 0 1 10 0v2"/><path d="M5 8h14l1 13H4L5 8Z"/></svg>`,
     messages: `<svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg>`,
     filters: `<svg viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><path d="M4 12h3"/><path d="M11 12h9"/><path d="M4 18h12"/><path d="M19 18h1"/><circle cx="16" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>`,
+    referrals: `<svg viewBox="0 0 24 24"><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M16 12a3 3 0 1 0 0-6"/><path d="M2 21a6 6 0 0 1 12 0"/><path d="M14 18a5 5 0 0 1 8 3"/></svg>`,
+    exchange: `<svg viewBox="0 0 24 24"><path d="M4 7h12"/><path d="m13 4 3 3-3 3"/><path d="M20 17H8"/><path d="m11 14-3 3 3 3"/></svg>`,
+    support: `<svg viewBox="0 0 24 24"><path d="M4 13a8 8 0 0 1 16 0"/><path d="M4 13v4a2 2 0 0 0 2 2h2v-8H6a2 2 0 0 0-2 2Z"/><path d="M20 13v4a2 2 0 0 1-2 2h-2v-8h2a2 2 0 0 1 2 2Z"/></svg>`,
+    rules: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.7 2.7 0 1 1 4.4 2.1c-1.1.8-1.9 1.3-1.9 2.9"/><path d="M12 17h.01"/></svg>`,
+    logout: `<svg viewBox="0 0 24 24"><path d="M14 4h-8v16h8"/><path d="M10 12h10"/><path d="m17 9 3 3-3 3"/></svg>`,
     close: `<svg viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></svg>`
   };
   return icons[name] || "";
@@ -591,6 +597,10 @@ function navIcon(name) {
 function navButton(name, label, attrs = "") {
   const active = route === name || (name === "stores" && route === "catalog");
   return `<button class="nav-icon ${active ? "active" : ""}" aria-label="${label}" title="${label}" ${attrs}>${navIcon(name)}</button>`;
+}
+
+function accountMenuButton(icon, label, attrs = "", extra = "") {
+  return `<button class="account-row" ${attrs}>${navIcon(icon)}<span>${label}</span>${extra}</button>`;
 }
 
 function layout(content) {
@@ -634,11 +644,19 @@ function layout(content) {
       <div class="account-card">
         <div class="account-row"><img class="avatar" src="assets/user-avatar.png" alt=""><strong>${esc(currentUser()?.name || currentUser()?.login)}</strong></div>
         <div class="divider"></div>
-        <button class="account-row" data-route="catalog">▿ <span>${tr("positions")}</span></button>
-        <button class="account-row" data-route="messages">✉ <span>${tr("messages")}</span></button>
+        ${accountMenuButton("wallet", "Кошелек", `data-route="wallet"`)}
+        ${accountMenuButton("filters", "Каталог", `data-filters`)}
+        ${accountMenuButton("stores", "Магазины", `data-route="catalog"`)}
+        ${accountMenuButton("orders", "Заказы", `data-route="orders"`)}
+        ${accountMenuButton("messages", tr("messages"), `data-route="messages"`)}
+        ${accountMenuButton("referrals", "Реферальная программа", `data-route="referrals"`, `<b>NEW</b>`)}
+        ${accountMenuButton("exchange", "Заявки на обмен", `data-route="exchange"`)}
+        <div class="divider"></div>
+        ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
+        ${accountMenuButton("rules", "Правила", `data-route="rules"`)}
         ${isAdmin() ? `<button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>` : ""}
         ${sellerStores().length ? `<button class="account-row" data-route="seller">▤ <span>${tr("seller")}</span></button>` : ""}
-        <button class="account-row" data-logout>↪ <span>${tr("logout")}</span></button>
+        ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
     </div>
     <div class="modal-backdrop" data-modal></div>
@@ -1066,6 +1084,31 @@ function renderMessages() {
   `);
 }
 
+function renderSimplePage(kind) {
+  const titles = {
+    wallet: "Кошелек",
+    referrals: "Реферальная программа",
+    exchange: "Заявки на обмен",
+    support: "Поддержка",
+    rules: "Правила"
+  };
+  const bodies = {
+    wallet: "Баланс, пополнение и история операций будут здесь.",
+    referrals: "Реферальные ссылки, начисления и приглашенные пользователи будут здесь.",
+    exchange: "Заявки на обмен валют и статусы операций будут здесь.",
+    support: "Раздел поддержки будет подключен следующим шагом.",
+    rules: "Правила сервиса будут оформлены здесь."
+  };
+  layout(`
+    <section class="screen">
+      <article class="panel simple-page">
+        <h2>${titles[kind] || "Раздел"}</h2>
+        <p>${bodies[kind] || "Раздел будет настроен позже."}</p>
+      </article>
+    </section>
+  `);
+}
+
 function renderAdmin() {
   if (!isAdmin()) return renderHome();
   route = "admin";
@@ -1240,6 +1283,7 @@ function renderCurrent() {
   if (route === "catalog") return renderCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
+  if (["wallet", "referrals", "exchange", "support", "rules"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);

@@ -774,6 +774,8 @@ body[data-theme="dark"] .logo {
   top: 82px;
   right: max(10px, calc((100vw - 640px) / 2 + 10px));
   width: min(500px, calc(100vw - 74px));
+  max-height: calc(100vh - 116px);
+  overflow: auto;
   padding: 20px 24px;
   border-radius: 28px;
   background: var(--paper);
@@ -782,15 +784,46 @@ body[data-theme="dark"] .logo {
 
 .account-row {
   display: grid;
-  grid-template-columns: 30px 1fr auto;
+  grid-template-columns: 32px 1fr auto;
   gap: 17px;
   align-items: center;
-  min-height: 48px;
+  width: 100%;
+  min-height: 58px;
   border: 0;
   background: transparent;
   color: var(--ink);
   text-align: left;
   font-size: 20px;
+}
+
+.account-row svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.account-row b {
+  justify-self: end;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #22c780;
+  color: #fff;
+  font-size: 11px;
+}
+
+.simple-page {
+  margin-top: 30px;
+  min-height: 260px;
+}
+
+.simple-page p {
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1.4;
 }
 
 .divider {
