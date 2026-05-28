@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { createClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -17,7 +18,10 @@ if (!supabaseUrl || !supabaseServiceKey) {
 }
 
 const supabase = supabaseUrl && supabaseServiceKey
-  ? createClient(supabaseUrl, supabaseServiceKey, { auth: { persistSession: false } })
+  ? createClient(supabaseUrl, supabaseServiceKey, {
+      auth: { persistSession: false },
+      realtime: { transport: WebSocket }
+    })
   : null;
 
 const defaultStore = {
