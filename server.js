@@ -12,6 +12,8 @@ const port = process.env.PORT || 3000;
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
+const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -73,6 +75,36 @@ function requireDb() {
   }
 }
 
+async function verifyCaptcha(token, req) {
+  if (!turnstileSecretKey) {
+    const error = new Error("Captcha is not configured");
+    error.status = 500;
+    throw error;
+  }
+  if (!token) {
+    const error = new Error("Подтвердите, что вы не робот");
+    error.status = 400;
+    throw error;
+  }
+
+  const form = new URLSearchParams();
+  form.set("secret", turnstileSecretKey);
+  form.set("response", token);
+  const remoteIp = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+  if (remoteIp) form.set("remoteip", String(remoteIp).split(",")[0].trim());
+
+  const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    body: form
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!result.success) {
+    const error = new Error("Капча не пройдена, попробуйте ещё раз");
+    error.status = 400;
+    throw error;
+  }
+}
+
 async function ensureSeed() {
   if (!supabase) return;
   const { count } = await supabase.from("profiles").select("login_key", { count: "exact", head: true });
@@ -127,6 +159,7 @@ async function userFromRequest(req) {
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
+    await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
@@ -158,6 +191,7 @@ app.post("/api/auth/register", async (req, res, next) => {
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     requireDb();
+    await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
@@ -171,6 +205,10 @@ app.post("/api/auth/login", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/config", (_req, res) => {
+  res.json({ turnstileSiteKey });
 });
 
 app.get("/api/session", async (req, res, next) => {

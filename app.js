@@ -4,6 +4,8 @@ const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const API_ENABLED = location.protocol !== "file:";
+let TURNSTILE_SITE_KEY = "";
+let turnstileWidgetId = null;
 
 const fallbackImage = "assets/soleniy-malchik.jpg";
 const NEW_STORE_STATS = {
@@ -371,6 +373,16 @@ async function loadRemoteSession() {
   }
 }
 
+async function loadRemoteConfig() {
+  if (!API_ENABLED) return;
+  try {
+    const config = await apiFetch("/api/config");
+    TURNSTILE_SITE_KEY = config.turnstileSiteKey || "";
+  } catch {
+    TURNSTILE_SITE_KEY = "";
+  }
+}
+
 async function persistRemoteState() {
   if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
   try {
@@ -498,6 +510,7 @@ function layout(content) {
 }
 
 function renderAuth(message = "") {
+  turnstileWidgetId = null;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -509,7 +522,11 @@ function renderAuth(message = "") {
           ${authMode === "register" ? `<label class="field">${tr("name")}<input name="name" required></label>` : ""}
           <label class="field">${tr("username")}<input name="login" required autocomplete="username"></label>
           <label class="field">${tr("password")}<input name="password" type="password" required autocomplete="current-password"></label>
-          <label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>
+          ${API_ENABLED ? `
+            <div class="captcha-box">
+              ${TURNSTILE_SITE_KEY ? `<div id="turnstile-widget"></div>` : `<p class="notice">Captcha is not configured</p>`}
+            </div>
+          ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit">${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
         <p><button class="link-button" data-auth-switch>${authMode === "login" ? tr("register") : tr("login")}</button></p>
@@ -521,6 +538,29 @@ function renderAuth(message = "") {
     renderAuth();
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
+  mountTurnstile();
+}
+
+function mountTurnstile() {
+  if (!API_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
+  if (!window.turnstile) {
+    setTimeout(mountTurnstile, 250);
+    return;
+  }
+  turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
+    sitekey: TURNSTILE_SITE_KEY,
+    theme: db.theme === "dark" ? "dark" : "light"
+  });
+}
+
+function captchaToken() {
+  if (!API_ENABLED) return "";
+  if (!window.turnstile || turnstileWidgetId === null) return "";
+  return window.turnstile.getResponse(turnstileWidgetId);
+}
+
+function resetCaptcha() {
+  if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
 }
 
 async function handleAuth(event) {
@@ -528,20 +568,22 @@ async function handleAuth(event) {
   const data = new FormData(event.currentTarget);
   const login = data.get("login").trim();
   const password = data.get("password");
-  if (!data.get("captcha")) return renderAuth(tr("needCaptcha"));
+  const captcha = API_ENABLED ? captchaToken() : data.get("captcha");
+  if (!captcha) return renderAuth(tr("needCaptcha"));
 
   if (authMode === "register") {
     if (API_ENABLED) {
       try {
         const payload = await apiFetch("/api/auth/register", {
           method: "POST",
-          body: JSON.stringify({ login, password, name: data.get("name").trim() || login })
+          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha })
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
         authMode = "login";
         return renderHome();
       } catch (error) {
+        resetCaptcha();
         return renderAuth(error.message);
       }
     }
@@ -557,12 +599,13 @@ async function handleAuth(event) {
     try {
       const payload = await apiFetch("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ login, password })
+        body: JSON.stringify({ login, password, captchaToken: captcha })
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);
       return renderHome();
     } catch (error) {
+      resetCaptcha();
       return renderAuth(error.message);
     }
   }
@@ -920,6 +963,7 @@ function renderCurrent() {
 }
 
 async function initApp() {
+  await loadRemoteConfig();
   await loadRemoteSession();
   renderCurrent();
 }

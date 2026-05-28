@@ -518,6 +518,12 @@ body[data-theme="dark"] .logo {
   color: var(--danger);
 }
 
+.captcha-box {
+  display: flex;
+  justify-content: center;
+  min-height: 72px;
+}
+
 .auth-wrap {
   display: grid;
   min-height: 100vh;
