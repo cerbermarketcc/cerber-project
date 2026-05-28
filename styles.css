@@ -826,6 +826,28 @@ body[data-theme="dark"] .logo {
   line-height: 1.4;
 }
 
+.rules-modal {
+  width: min(620px, calc(100vw - 24px));
+  max-height: calc(86vh - var(--safe-bottom));
+}
+
+.rules-modal h2 {
+  margin: 0 0 18px;
+  font-size: 30px;
+}
+
+.rules-modal h3 {
+  margin: 24px 0 10px;
+  font-size: 20px;
+}
+
+.rules-modal p {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
 .divider {
   height: 1px;
   margin: 12px 0;
