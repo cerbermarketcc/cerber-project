@@ -113,8 +113,8 @@ const defaults = {
   theme: "light",
   lang: "ru",
   users: [
-    { login: "admin", password: "admin", name: "Admin", role: "admin" },
-    { login: "skboy", password: "123", name: "SK BOY", role: "seller" }
+    { login: "admin", password: "admin", name: "Admin", role: "admin", createdAt: "2026-05-28" },
+    { login: "skboy", password: "123", name: "SK BOY", role: "seller", createdAt: "2026-05-28" }
   ],
   stores: [
     {
@@ -149,6 +149,7 @@ const defaults = {
   referralPayments: [],
   referralCodes: {},
   balances: {},
+  referralPeriod: {},
   filters: {
     country: "moldova",
     city: "chisinau",
@@ -394,8 +395,10 @@ function normalizeDb(next) {
   if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
   if (!next.referralCodes) next.referralCodes = {};
   if (!next.balances) next.balances = {};
+  if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
   (next.users || []).forEach((user) => {
+    if (!user.createdAt) user.createdAt = "2026-05-28";
     if (!next.balances[user.login]) next.balances[user.login] = 0;
   });
   normalizeOrders(next);
@@ -529,6 +532,7 @@ async function persistRemoteState() {
           referralPayments: db.referralPayments,
           referralCodes: db.referralCodes,
           balances: db.balances,
+          referralPeriod: db.referralPeriod,
           filters: db.filters
         }
       })
@@ -639,6 +643,43 @@ function addReferralDeposit(referralLogin, amount) {
     date: new Date().toLocaleString()
   });
   saveDb();
+}
+
+function isoDate(date) {
+  const value = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(value.getTime())) return isoDate(new Date());
+  return value.toISOString().slice(0, 10);
+}
+
+function parseAnyDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return new Date(text.slice(0, 10));
+  const match = text.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function userCreatedDate() {
+  const user = currentUser();
+  const userDate = parseAnyDate(user?.createdAt);
+  if (userDate) return userDate;
+  const dates = [
+    ...db.referrals.filter((item) => sameLogin(item.referrerLogin, db.currentUser)).map((item) => parseAnyDate(item.registeredAt)),
+    ...db.referralPayments.filter((item) => sameLogin(item.referrerLogin, db.currentUser)).map((item) => parseAnyDate(item.date))
+  ].filter(Boolean).sort((a, b) => a - b);
+  return dates[0] || new Date();
+}
+
+function currentReferralPeriod() {
+  if (!db.referralPeriod) db.referralPeriod = {};
+  const min = isoDate(userCreatedDate());
+  const today = isoDate(new Date());
+  const start = db.referralPeriod.start && db.referralPeriod.start >= min ? db.referralPeriod.start : min;
+  const end = db.referralPeriod.end && db.referralPeriod.end <= today ? db.referralPeriod.end : today;
+  return { min, today, start, end: end < start ? start : end };
 }
 
 function esc(value) {
@@ -886,7 +927,7 @@ async function handleAuth(event) {
       }
     }
     if (db.users.some((user) => sameLogin(user.login, login))) return renderAuth(tr("already"));
-    db.users.push({ login, password, name: data.get("name").trim() || login, role: "user" });
+    db.users.push({ login, password, name: data.get("name").trim() || login, role: "user", createdAt: isoDate(new Date()) });
     db.currentUser = login;
     registerReferral(login);
     saveDb();
@@ -1320,6 +1361,16 @@ function renderReferrals(tab = activeReferralTab) {
   document.querySelectorAll("[data-ref-tab]").forEach((button) => {
     button.onclick = () => renderReferrals(button.dataset.refTab);
   });
+  document.querySelector("[data-apply-period]")?.addEventListener("click", () => {
+    const start = document.querySelector("[data-period-start]").value;
+    const end = document.querySelector("[data-period-end]").value;
+    db.referralPeriod = {
+      start: start <= end ? start : end,
+      end: end >= start ? end : start
+    };
+    saveDb();
+    renderReferrals("analytics");
+  });
   document.querySelector("[data-create-ref]")?.addEventListener("click", () => {
     referralCodeFor();
     saveDb();
@@ -1363,9 +1414,24 @@ function referralCard(item) {
 }
 
 function referralAnalytics(payments, totalDeposits, totalEarned) {
-  const points = Array.from({ length: 31 }, (_, index) => `${20 + index}.05.26`);
+  const period = currentReferralPeriod();
+  const startTime = new Date(period.start).getTime();
+  const endTime = new Date(period.end).getTime() + 24 * 60 * 60 * 1000 - 1;
+  const visiblePayments = payments.filter((item) => {
+    const date = parseAnyDate(item.date);
+    const time = date ? date.getTime() : 0;
+    return time >= startTime && time <= endTime;
+  });
+  const periodDeposits = visiblePayments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const periodEarned = visiblePayments.reduce((sum, item) => sum + Number(item.reward || 0), 0);
+  const days = Math.max(1, Math.round((new Date(period.end) - new Date(period.start)) / (24 * 60 * 60 * 1000)) + 1);
+  const points = Array.from({ length: Math.min(31, days) }, (_, index) => index);
   return `
-    <label class="field period-field">Выберите период<input type="text" readonly placeholder="Май 2026"></label>
+    <div class="period-picker">
+      <label>С <input type="date" data-period-start min="${period.min}" max="${period.today}" value="${period.start}"></label>
+      <label>До <input type="date" data-period-end min="${period.min}" max="${period.today}" value="${period.end}"></label>
+      <button data-apply-period>Применить</button>
+    </div>
     <article class="analytics-card">
       <div class="chart">
         ${Array.from({ length: 11 }, (_, i) => `<span style="bottom:${i * 10}%"></span>`).join("")}
@@ -1375,12 +1441,12 @@ function referralAnalytics(payments, totalDeposits, totalEarned) {
         </svg>
       </div>
       <div class="analytics-summary">
-        <div><strong>${totalDeposits.toFixed(2)} $</strong><span>Пополнения</span></div>
-        <div><strong>${totalEarned.toFixed(2)} $</strong><span>Ваши 3%</span></div>
+        <div><strong>${periodDeposits.toFixed(2)} $</strong><span>Пополнения</span></div>
+        <div><strong>${periodEarned.toFixed(2)} $</strong><span>Ваши 3%</span></div>
       </div>
     </article>
     <h2 class="details-title">Детализация</h2>
-    ${payments.length ? payments.map((item) => `
+    ${visiblePayments.length ? visiblePayments.map((item) => `
       <article class="ref-item">
         <div><h3>${esc(item.referralLogin)}</h3><p>${esc(item.date)}</p></div>
         <div><strong>${Number(item.amount).toFixed(2)} $</strong><span>+${Number(item.reward).toFixed(2)} $</span></div>

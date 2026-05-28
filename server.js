@@ -128,6 +128,7 @@ async function ensureSeed() {
       referralPayments: [],
       referralCodes: {},
       balances: {},
+      referralPeriod: {},
       filters: {
         country: "moldova",
         city: "chisinau",
@@ -162,6 +163,7 @@ async function stateFor(user) {
       referralPayments: settings?.data?.referralPayments || [],
       referralCodes: settings?.data?.referralCodes || {},
       balances: settings?.data?.balances || {},
+      referralPeriod: settings?.data?.referralPeriod || {},
       filters: settings?.data?.filters || {}
     }
   };
@@ -258,6 +260,7 @@ app.put("/api/state", async (req, res, next) => {
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},
         balances: state.balances || {},
+        referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
       }
     }, { onConflict: "id" });

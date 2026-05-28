@@ -1060,8 +1060,36 @@ body[data-theme="dark"] .logo {
   color: var(--muted);
 }
 
-.period-field {
+.period-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
   margin: 28px 0 20px;
+}
+
+.period-picker label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.period-picker input {
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0 12px;
+}
+
+.period-picker button {
+  grid-column: 1 / -1;
+  min-height: 54px;
+  border: 0;
+  border-radius: 999px;
+  background: #050505;
+  color: #fff;
+  font-size: 18px;
 }
 
 .analytics-card {
