@@ -56,6 +56,24 @@ const defaultStore = {
   }]
 };
 
+const defaultExchangeCards = [{
+  id: "kent-ltc",
+  name: "KENT LTC",
+  ownerLogin: "skboy",
+  description: "По всей Молдове. Обмен и обнал по текущему курсу оператора.",
+  image: "assets/market-banner.png",
+  regions: ["moldova"],
+  exchangeRate: 19,
+  cashoutRate: 17,
+  ltcUsd: 54.2,
+  requisites: [
+    { method: "Мия", value: "60327998", active: true },
+    { method: "RunPay", value: "60327998", active: true },
+    { method: "BPay", value: "60327998", active: true }
+  ],
+  active: true
+}];
+
 app.use(express.json({ limit: "25mb" }));
 app.use(express.static(__dirname));
 
@@ -124,6 +142,8 @@ async function ensureSeed() {
       theme: "light",
       lang: "ru",
       orders: [],
+      exchangeCards: defaultExchangeCards,
+      exchangeRequests: [],
       referrals: [],
       referralPayments: [],
       referralCodes: {},
@@ -159,6 +179,8 @@ async function stateFor(user) {
       stores: (stores || []).map((row) => row.data),
       messages: (messages || []).map((row) => row.data),
       orders: settings?.data?.orders || [],
+      exchangeCards: settings?.data?.exchangeCards || defaultExchangeCards,
+      exchangeRequests: settings?.data?.exchangeRequests || [],
       referrals: settings?.data?.referrals || [],
       referralPayments: settings?.data?.referralPayments || [],
       referralCodes: settings?.data?.referralCodes || {},
@@ -256,6 +278,8 @@ app.put("/api/state", async (req, res, next) => {
         theme: state.theme || "light",
         lang: state.lang || "ru",
         orders: Array.isArray(state.orders) ? state.orders : [],
+        exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards : defaultExchangeCards,
+        exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
         referrals: Array.isArray(state.referrals) ? state.referrals : [],
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},
@@ -277,6 +301,24 @@ app.put("/api/state", async (req, res, next) => {
               login_key: ownerKey,
               password_hash: await bcrypt.hash("123", 12),
               name: store.ownerLogin,
+              role: "seller"
+            });
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(state.exchangeCards)) {
+      for (const card of state.exchangeCards) {
+        const ownerKey = loginKey(card.ownerLogin);
+        if (ownerKey) {
+          const { data: owner } = await supabase.from("profiles").select("login_key").eq("login_key", ownerKey).maybeSingle();
+          if (!owner) {
+            await supabase.from("profiles").insert({
+              login: card.ownerLogin,
+              login_key: ownerKey,
+              password_hash: await bcrypt.hash("123", 12),
+              name: card.ownerLogin,
               role: "seller"
             });
           }

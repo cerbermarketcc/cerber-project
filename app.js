@@ -13,6 +13,8 @@ const NEW_STORE_STATS = {
   reviews: 1,
   rating: 5
 };
+const exchangeMethods = ["Мия", "RunPay", "BPay"];
+const defaultExchangeRequisites = exchangeMethods.map((method) => ({ method, value: "60327998", active: true }));
 
 function city(label, districts = []) {
   const base = ["Центр", "Северная зона", "Южная зона", "Восточная зона", "Западная зона", "Автовокзал", "Промзона"];
@@ -145,6 +147,22 @@ const defaults = {
   ],
   messages: [],
   orders: [],
+  exchangeCards: [
+    {
+      id: "kent-ltc",
+      name: "KENT LTC",
+      ownerLogin: "skboy",
+      description: "По всей Молдове. Обмен и обнал по текущему курсу оператора.",
+      image: "assets/market-banner.png",
+      regions: ["moldova"],
+      exchangeRate: 19,
+      cashoutRate: 17,
+      ltcUsd: 54.2,
+      requisites: defaultExchangeRequisites,
+      active: true
+    }
+  ],
+  exchangeRequests: [],
   referrals: [],
   referralPayments: [],
   referralCodes: {},
@@ -166,6 +184,8 @@ let activeStoreTab = "positions";
 let authMode = "login";
 let activeOrdersTab = "all";
 let activeReferralTab = "referrals";
+let activeExchangeId = "kent-ltc";
+let activeExchangeTab = "calculator";
 
 const root = document.getElementById("app");
 
@@ -391,6 +411,8 @@ function merge(base, saved) {
 
 function normalizeDb(next) {
   if (!Array.isArray(next.orders)) next.orders = [];
+  if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
+  if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
   if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
   if (!next.referralCodes) next.referralCodes = {};
@@ -413,6 +435,27 @@ function normalizeDb(next) {
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
+  next.exchangeCards = next.exchangeCards.map(normalizeExchangeCard);
+  if (!next.exchangeCards.length) next.exchangeCards = structuredClone(defaults.exchangeCards).map(normalizeExchangeCard);
+}
+
+function normalizeExchangeCard(card) {
+  const seed = defaults.exchangeCards.find((item) => item.id === card.id) || defaults.exchangeCards[0];
+  const requisites = Array.isArray(card.requisites) && card.requisites.length ? card.requisites : seed.requisites;
+  return {
+    ...seed,
+    ...card,
+    regions: Array.isArray(card.regions) && card.regions.length ? card.regions : seed.regions,
+    exchangeRate: Number.isFinite(Number(card.exchangeRate)) ? Number(card.exchangeRate) : seed.exchangeRate,
+    cashoutRate: Number.isFinite(Number(card.cashoutRate)) ? Number(card.cashoutRate) : seed.cashoutRate,
+    ltcUsd: Number.isFinite(Number(card.ltcUsd)) ? Number(card.ltcUsd) : seed.ltcUsd,
+    requisites: requisites.map((item) => ({
+      method: item.method,
+      value: String(item.value || "").trim(),
+      active: item.active !== false
+    })).filter((item) => item.method),
+    active: card.active !== false
+  };
 }
 
 function normalizeOrders(next) {
@@ -528,6 +571,8 @@ async function persistRemoteState() {
           stores: db.stores,
           messages: db.messages,
           orders: db.orders,
+          exchangeCards: db.exchangeCards,
+          exchangeRequests: db.exchangeRequests,
           referrals: db.referrals,
           referralPayments: db.referralPayments,
           referralCodes: db.referralCodes,
@@ -575,6 +620,14 @@ function isAdmin() {
 
 function sellerStores() {
   return db.stores.filter((store) => sameLogin(store.ownerLogin, db.currentUser));
+}
+
+function operatorExchangeCards() {
+  return db.exchangeCards.filter((card) => sameLogin(card.ownerLogin, db.currentUser));
+}
+
+function exchangeCardById(id = activeExchangeId) {
+  return db.exchangeCards.find((card) => card.id === id) || db.exchangeCards[0];
 }
 
 function userBalance(login = db.currentUser) {
@@ -837,6 +890,7 @@ function layout(content) {
         ${accountMenuButton("rules", "Правила", `data-rules`)}
         ${isAdmin() ? `<button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>` : ""}
         ${sellerStores().length ? `<button class="account-row" data-route="seller">▤ <span>${tr("seller")}</span></button>` : ""}
+        ${(operatorExchangeCards().length || isAdmin()) ? accountMenuButton("exchange", "Панель обменника", `data-route="exchange-admin"`) : ""}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
     </div>
@@ -1485,6 +1539,268 @@ function showReferralQr(qrUrl, code, link) {
   };
 }
 
+function renderExchangeCatalog() {
+  route = "exchange";
+  const cards = db.exchangeCards.filter((card) => card.active !== false);
+  layout(`
+    <section class="screen exchange-screen">
+      <h1>Заявки на обмен</h1>
+      <label class="search"><b>⌕</b><input data-exchange-search placeholder="${tr("search")}"></label>
+      <section class="exchange-grid" data-exchange-list>
+        ${cards.map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Обменники появятся позже</p></article>`}
+      </section>
+    </section>
+  `);
+  document.querySelectorAll("[data-exchange-card]").forEach((button) => {
+    button.onclick = () => renderExchangeProfile(button.dataset.exchangeCard, "calculator");
+  });
+  document.querySelector("[data-exchange-search]")?.addEventListener("input", (event) => {
+    const q = event.target.value.toLowerCase();
+    document.querySelector("[data-exchange-list]").innerHTML = cards
+      .filter((card) => `${card.name} ${card.description}`.toLowerCase().includes(q))
+      .map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
+    document.querySelectorAll("[data-exchange-card]").forEach((button) => {
+      button.onclick = () => renderExchangeProfile(button.dataset.exchangeCard, "calculator");
+    });
+  });
+}
+
+function exchangeCardView(card) {
+  const regions = regionText(card.regions);
+  return `
+    <article class="shop-card exchange-card">
+      <button class="shop-click" data-exchange-card="${esc(card.id)}">
+        <div class="shop-inner">
+          <div class="shop-head">
+            <div>
+              <div class="shop-title"><h2>${esc(card.name)}</h2><span class="verify">✓</span></div>
+              <p class="desc">${esc(card.description)}</p>
+            </div>
+            <span>${navIcon("exchange")}</span>
+          </div>
+          <img class="shop-image" src="${esc(card.image || fallbackImage)}" alt="${esc(card.name)}">
+          <div class="rate-row">
+            <span>${esc(regions)}</span>
+            <strong>Обмен ${Number(card.exchangeRate).toFixed(2)} MDL / $</strong>
+          </div>
+          <div class="rate-row">
+            <span>Обнал</span>
+            <strong>${Number(card.cashoutRate).toFixed(2)} MDL / $</strong>
+          </div>
+        </div>
+      </button>
+    </article>
+  `;
+}
+
+function regionText(regions = []) {
+  if (regions.includes("both")) return "Молдова и Приднестровье";
+  const labels = [];
+  if (regions.includes("moldova")) labels.push("Молдова");
+  if (regions.includes("transnistria")) labels.push("Приднестровье");
+  return labels.join(", ") || "Регион не указан";
+}
+
+function renderExchangeProfile(cardId = activeExchangeId, tab = activeExchangeTab) {
+  route = "exchange-profile";
+  activeExchangeId = cardId;
+  activeExchangeTab = tab;
+  const card = exchangeCardById(cardId);
+  if (!card) return renderExchangeCatalog();
+  const body = tab === "exchange" ? exchangeRequestForm(card, "exchange")
+    : tab === "cashout" ? exchangeRequestForm(card, "cashout")
+    : exchangeCalculator(card);
+  layout(`
+    <section class="screen exchange-profile">
+      <article class="panel">
+        <img class="profile-cover" src="${esc(card.image || fallbackImage)}" alt="">
+        <div class="profile-body">
+          <p class="breadcrumbs">Обменники > ${esc(card.name)}</p>
+          <div class="shop-title"><h1 class="profile-title">${esc(card.name)}</h1><span class="verify">✓</span></div>
+          <p>${esc(regionText(card.regions))}</p>
+          <p class="desc">${esc(card.description)}</p>
+          <div class="stats exchange-stats">
+            <div class="stat"><strong>${Number(card.exchangeRate).toFixed(2)}</strong><span>MDL за 1$ обмен</span></div>
+            <div class="stat"><strong>${Number(card.cashoutRate).toFixed(2)}</strong><span>MDL за 1$ обнал</span></div>
+          </div>
+          <button class="primary" data-exchange-chat="${esc(card.id)}">Написать обменнику <span class="green-dot"></span></button>
+          <div class="pill-tabs">
+            <button class="${tab === "calculator" ? "" : "muted"}" data-exchange-tab="calculator">Калькулятор</button>
+            <button class="${tab === "exchange" ? "" : "muted"}" data-exchange-tab="exchange">Обмен</button>
+            <button class="${tab === "cashout" ? "" : "muted"}" data-exchange-tab="cashout">Обнал</button>
+          </div>
+        </div>
+      </article>
+      ${body}
+    </section>
+  `);
+  bindExchangeProfile(card);
+}
+
+function exchangeCalculator(card) {
+  return `
+    <article class="panel exchange-tool">
+      <h2>Калькулятор</h2>
+      <div class="row">
+        <label class="field">Сумма в $<input data-calc-usd type="number" min="0" step="0.01" value="100"></label>
+        <label class="field">Тип
+          <select data-calc-type>
+            <option value="exchange">Обмен</option>
+            <option value="cashout">Обнал</option>
+          </select>
+        </label>
+      </div>
+      <div class="calc-result">
+        <span>Итого по курсу</span>
+        <strong data-calc-result>0 MDL</strong>
+      </div>
+      <div class="exchange-actions">
+        <button class="primary" data-exchange-tab="exchange">Поменять автоматически</button>
+        <button class="ghost-button" data-exchange-chat="${esc(card.id)}">Написать обменнику</button>
+      </div>
+      <div class="requisites-list">
+        ${card.requisites.filter((item) => item.active !== false).map((item) => `<p><strong>${esc(item.method)}</strong><span>${esc(item.value)}</span></p>`).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function exchangeRequestForm(card, type) {
+  const isExchange = type === "exchange";
+  const title = isExchange ? "Новая заявка на обмен" : "Новая заявка на обнал";
+  const rate = isExchange ? card.exchangeRate : card.cashoutRate;
+  return `
+    <article class="panel exchange-tool">
+      <h2>${title}</h2>
+      <form class="form" data-exchange-request="${esc(type)}">
+        ${isExchange ? `
+          <label class="field">Способ оплаты
+            <select name="method" required>
+              ${card.requisites.filter((item) => item.active !== false).map((item) => `<option value="${esc(item.method)}">${esc(item.method)} - ${esc(item.value)}</option>`).join("")}
+            </select>
+          </label>
+        ` : `
+          <label class="field">Карта / кошелек для получения<input name="payout" placeholder="Номер или реквизит" required></label>
+        `}
+        <label class="field">Сумма в $<input name="amount" type="number" min="1" step="0.01" value="100" required></label>
+        <label class="field">Комментарий<textarea name="comment" placeholder="Можно оставить пустым"></textarea></label>
+        <div class="calc-result">
+          <span>Курс ${Number(rate).toFixed(2)} MDL за 1$</span>
+          <strong data-form-result>${(100 * rate).toFixed(2)} MDL</strong>
+        </div>
+        <div class="exchange-actions">
+          <button class="primary" type="submit">Отправить заявку</button>
+          <button class="ghost-button" type="button" data-exchange-chat="${esc(card.id)}">Написать обменнику</button>
+        </div>
+      </form>
+    </article>
+  `;
+}
+
+function bindExchangeProfile(card) {
+  document.querySelectorAll("[data-exchange-tab]").forEach((button) => {
+    button.onclick = () => renderExchangeProfile(card.id, button.dataset.exchangeTab);
+  });
+  document.querySelectorAll("[data-exchange-chat]").forEach((button) => {
+    button.onclick = () => renderExchangeChat(button.dataset.exchangeChat);
+  });
+  const calcUsd = document.querySelector("[data-calc-usd]");
+  const calcType = document.querySelector("[data-calc-type]");
+  const calcResult = document.querySelector("[data-calc-result]");
+  const updateCalc = () => {
+    if (!calcResult) return;
+    const amount = Number(calcUsd?.value || 0);
+    const rate = calcType?.value === "cashout" ? card.cashoutRate : card.exchangeRate;
+    calcResult.textContent = `${(amount * rate).toFixed(2)} MDL`;
+  };
+  calcUsd?.addEventListener("input", updateCalc);
+  calcType?.addEventListener("change", updateCalc);
+  updateCalc();
+  document.querySelectorAll("[data-exchange-request]").forEach((form) => {
+    const amountInput = form.querySelector("input[name='amount']");
+    const result = form.querySelector("[data-form-result]");
+    const type = form.dataset.exchangeRequest;
+    const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
+    amountInput?.addEventListener("input", () => {
+      result.textContent = `${(Number(amountInput.value || 0) * rate).toFixed(2)} MDL`;
+    });
+    form.onsubmit = (event) => handleExchangeRequest(event, card, type);
+  });
+}
+
+function handleExchangeRequest(event, card, type) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const amount = Number(data.get("amount") || 0);
+  const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
+  const request = {
+    id: `exchange-${Date.now()}`,
+    cardId: card.id,
+    cardName: card.name,
+    type,
+    fromLogin: db.currentUser,
+    toLogin: card.ownerLogin,
+    method: data.get("method") || data.get("payout") || "",
+    amountUsd: amount,
+    totalMdl: amount * rate,
+    comment: data.get("comment") || "",
+    status: "new",
+    date: new Date().toLocaleString()
+  };
+  db.exchangeRequests.unshift(request);
+  db.messages.unshift({
+    id: `msg-${request.id}`,
+    storeId: card.id,
+    storeTag: card.name,
+    toLogin: card.ownerLogin,
+    fromLogin: db.currentUser,
+    subject: type === "cashout" ? `Заявка на обнал ${card.name}` : `Заявка на обмен ${card.name}`,
+    body: `Сумма: ${amount.toFixed(2)} $. К оплате/получению: ${request.totalMdl.toFixed(2)} MDL. Способ: ${request.method || "не указан"}. ${request.comment}`,
+    date: request.date,
+    system: "exchange"
+  });
+  saveDb();
+  showToast("Заявка отправлена обменнику");
+  renderMessages();
+}
+
+function renderExchangeChat(cardId) {
+  route = "exchange-chat";
+  activeExchangeId = cardId;
+  const card = exchangeCardById(cardId);
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>${tr("newMessage")}</h2>
+        <form class="form" data-exchange-chat-form>
+          <label class="field">${tr("recipient")}<input name="to" value="${esc(card.name)}" readonly></label>
+          <label class="field">${tr("subject")}<input name="subject" value="Вопрос по обмену"></label>
+          <label class="field">${tr("message")}<textarea name="body" required></textarea></label>
+          <button class="primary">${tr("send")}</button>
+        </form>
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-exchange-chat-form]").onsubmit = (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    db.messages.unshift({
+      id: `exchange-chat-${Date.now()}`,
+      storeId: card.id,
+      storeTag: card.name,
+      toLogin: card.ownerLogin,
+      fromLogin: db.currentUser,
+      subject: data.get("subject") || card.name,
+      body: data.get("body"),
+      date: new Date().toLocaleString(),
+      system: "exchange"
+    });
+    saveDb();
+    showToast(tr("sent"));
+    renderMessages();
+  };
+}
+
 function renderSimplePage(kind) {
   const titles = {
     wallet: "Кошелек",
@@ -1528,10 +1844,38 @@ function renderAdmin() {
           <button class="primary">${tr("addStore")}</button>
         </form>
       </article>
+      <article class="panel">
+        <h2>Добавить обменник</h2>
+        <form class="form" data-exchange-admin-form>
+          <div class="row">
+            <label class="field">ID<input name="id" required placeholder="kent-ltc"></label>
+            <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="operator login"></label>
+          </div>
+          <label class="field">${tr("name")}<input name="name" required placeholder="KENT LTC"></label>
+          <label class="field">${tr("full")}<textarea name="description" required></textarea></label>
+          <div class="row">
+            <label class="field">Курс обмена MDL/$<input name="exchangeRate" type="number" step="0.01" value="19" required></label>
+            <label class="field">Курс обнала MDL/$<input name="cashoutRate" type="number" step="0.01" value="17" required></label>
+          </div>
+          <label class="field">Регион
+            <select name="regions">
+              <option value="moldova">Молдова</option>
+              <option value="transnistria">Приднестровье</option>
+              <option value="both">Молдова и Приднестровье</option>
+            </select>
+          </label>
+          <div class="row">
+            ${exchangeMethods.map((method) => `<label class="field">${method}<input name="req_${method}" value="60327998"></label>`).join("")}
+          </div>
+          <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*"></label>
+          <button class="primary">Добавить обменник</button>
+        </form>
+      </article>
       ${db.stores.map((store) => `<article class="panel"><h2>${esc(store.name)}</h2><p>${esc(store.tag)} · ${esc(store.ownerLogin)}</p><p>${esc(store.orders)} ${tr("orders")} · ${esc(store.reviews)} ${tr("reviews")} · ${Number(store.rating).toFixed(2)} ${tr("rating")}</p></article>`).join("")}
     </section>
   `);
   document.querySelector("[data-store-form]").onsubmit = handleStoreCreate;
+  document.querySelector("[data-exchange-admin-form]").onsubmit = handleExchangeCardCreate;
 }
 
 async function handleStoreCreate(event) {
@@ -1558,6 +1902,39 @@ async function handleStoreCreate(event) {
     products: [],
     reviewsList: [defaultReview(`${data.get("id").trim()}-review-1`)]
   });
+  saveDb();
+  renderAdmin();
+}
+
+async function handleExchangeCardCreate(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const id = data.get("id").trim();
+  if (db.exchangeCards.some((card) => card.id === id)) {
+    showToast("Такой обменник уже есть");
+    return;
+  }
+  const ownerLogin = data.get("ownerLogin").trim();
+  const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
+  const finalOwnerLogin = existingOwner?.login || ownerLogin;
+  if (!existingOwner) {
+    db.users.push({ login: ownerLogin, password: "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
+  }
+  const file = data.get("image");
+  const image = file && file.size ? await fileToDataUrl(file) : "assets/market-banner.png";
+  db.exchangeCards.push(normalizeExchangeCard({
+    id,
+    name: data.get("name").trim(),
+    ownerLogin: finalOwnerLogin,
+    description: data.get("description").trim(),
+    image,
+    regions: [data.get("regions")],
+    exchangeRate: Number(data.get("exchangeRate")),
+    cashoutRate: Number(data.get("cashoutRate")),
+    ltcUsd: 54.2,
+    requisites: exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: true })),
+    active: true
+  }));
   saveDb();
   renderAdmin();
 }
@@ -1598,6 +1975,66 @@ function renderSeller() {
     });
     saveDb();
     renderSeller();
+  };
+}
+
+function renderExchangeOperator() {
+  const cards = isAdmin() ? db.exchangeCards : operatorExchangeCards();
+  if (!cards.length) return renderHome();
+  route = "exchange-admin";
+  const card = cards[0];
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>Панель обменника: ${esc(card.name)}</h2>
+        <form class="form" data-exchange-operator-form>
+          <label class="field">${tr("name")}<input name="name" value="${esc(card.name)}" required></label>
+          <label class="field">${tr("full")}<textarea name="description" required>${esc(card.description)}</textarea></label>
+          <div class="row">
+            <label class="field">Курс обмена MDL/$<input name="exchangeRate" type="number" step="0.01" value="${esc(card.exchangeRate)}" required></label>
+            <label class="field">Курс обнала MDL/$<input name="cashoutRate" type="number" step="0.01" value="${esc(card.cashoutRate)}" required></label>
+          </div>
+          <label class="field">Регион
+            <select name="regions">
+              <option value="moldova" ${card.regions.includes("moldova") ? "selected" : ""}>Молдова</option>
+              <option value="transnistria" ${card.regions.includes("transnistria") ? "selected" : ""}>Приднестровье</option>
+              <option value="both" ${card.regions.includes("both") ? "selected" : ""}>Молдова и Приднестровье</option>
+            </select>
+          </label>
+          <div class="row">
+            ${exchangeMethods.map((method) => {
+              const req = card.requisites.find((item) => item.method === method);
+              return `<label class="field">${method}<input name="req_${method}" value="${esc(req?.value || "")}"></label>`;
+            }).join("")}
+          </div>
+          <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*"></label>
+          <button class="primary">${tr("save")}</button>
+        </form>
+      </article>
+      <article class="panel">
+        <h2>Заявки</h2>
+        ${(db.exchangeRequests || []).filter((item) => item.cardId === card.id).map((request) => `
+          <article class="ref-item">
+            <div><h3>${esc(request.fromLogin)}</h3><p>${esc(request.date)} · ${esc(request.type)}</p></div>
+            <div><strong>${Number(request.amountUsd || 0).toFixed(2)} $</strong><span>${Number(request.totalMdl || 0).toFixed(2)} MDL</span></div>
+          </article>
+        `).join("") || `<p>Заявок пока нет</p>`}
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-exchange-operator-form]").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const file = data.get("image");
+    card.name = data.get("name").trim();
+    card.description = data.get("description").trim();
+    card.exchangeRate = Number(data.get("exchangeRate"));
+    card.cashoutRate = Number(data.get("cashoutRate"));
+    card.regions = [data.get("regions")];
+    card.requisites = exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: Boolean(data.get(`req_${method}`)) }));
+    if (file && file.size) card.image = await fileToDataUrl(file);
+    saveDb();
+    renderExchangeOperator();
   };
 }
 
@@ -1689,7 +2126,11 @@ function renderCurrent() {
   if (route === "messages") return renderMessages();
   if (route === "support") return renderSupport();
   if (route === "referrals") return renderReferrals(activeReferralTab);
-  if (["wallet", "exchange"].includes(route)) return renderSimplePage(route);
+  if (route === "exchange") return renderExchangeCatalog();
+  if (route === "exchange-profile") return renderExchangeProfile(activeExchangeId, activeExchangeTab);
+  if (route === "exchange-chat") return renderExchangeChat(activeExchangeId);
+  if (route === "exchange-admin") return renderExchangeOperator();
+  if (["wallet"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
