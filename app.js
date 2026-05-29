@@ -15,6 +15,8 @@ const NEW_STORE_STATS = {
 };
 const exchangeMethods = ["Мия", "RunPay", "BPay"];
 const defaultExchangeRequisites = exchangeMethods.map((method) => ({ method, value: "60327998", active: true }));
+const KENT_IMAGE = "assets/kent-ltc-card.png";
+let ltcUsdCache = 54.2;
 
 function city(label, districts = []) {
   const base = ["Центр", "Северная зона", "Южная зона", "Восточная зона", "Западная зона", "Автовокзал", "Промзона"];
@@ -152,8 +154,8 @@ const defaults = {
       id: "kent-ltc",
       name: "KENT LTC",
       ownerLogin: "skboy",
-      description: "По всей Молдове. Обмен и обнал по текущему курсу оператора.",
-      image: "assets/market-banner.png",
+      description: "По всей Молдове. Выберите обмен или обнал, укажите сумму в долларах или LTC, реквизиты и отправьте заявку оператору.",
+      image: KENT_IMAGE,
       regions: ["moldova"],
       exchangeRate: 19,
       cashoutRate: 17,
@@ -442,9 +444,11 @@ function normalizeDb(next) {
 function normalizeExchangeCard(card) {
   const seed = defaults.exchangeCards.find((item) => item.id === card.id) || defaults.exchangeCards[0];
   const requisites = Array.isArray(card.requisites) && card.requisites.length ? card.requisites : seed.requisites;
+  const image = card.id === "kent-ltc" && (!card.image || card.image === "assets/market-banner.png") ? KENT_IMAGE : (card.image || seed.image);
   return {
     ...seed,
     ...card,
+    image,
     regions: Array.isArray(card.regions) && card.regions.length ? card.regions : seed.regions,
     exchangeRate: Number.isFinite(Number(card.exchangeRate)) ? Number(card.exchangeRate) : seed.exchangeRate,
     cashoutRate: Number.isFinite(Number(card.cashoutRate)) ? Number(card.cashoutRate) : seed.cashoutRate,
@@ -463,10 +467,19 @@ function normalizeOrders(next) {
   next.orders = (next.orders || []).map((order) => {
     const createdAt = order.createdAt || now;
     const age = now - Number(createdAt);
+    if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
+      return { ...order, status: "closed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
+    }
     if (order.status === "active" && !order.disputeOpen && age >= 12 * 60 * 60 * 1000) {
       return { ...order, status: "closed", closedAt: now, closeReason: "Автоматически закрыт как успешный" };
     }
     return { ...order, createdAt };
+  });
+  next.exchangeRequests = (next.exchangeRequests || []).map((request) => {
+    if (request.disputeOpen && request.disputeUntil && now >= Number(request.disputeUntil)) {
+      return { ...request, status: "closed", disputeOpen: false, closedAt: now };
+    }
+    return request;
   });
 }
 
@@ -713,6 +726,24 @@ function parseAnyDate(value) {
   if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+async function fetchLitecoinUsdRate() {
+  try {
+    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd", { cache: "no-store" });
+    const data = await response.json();
+    const value = Number(data?.litecoin?.usd);
+    if (value > 0) {
+      ltcUsdCache = value;
+      db.exchangeCards.forEach((card) => {
+        if (card.id === "kent-ltc" || Number(card.ltcUsd || 0) <= 0) card.ltcUsd = value;
+      });
+      return value;
+    }
+  } catch {
+    // Public rate API can be unavailable; each card keeps its saved fallback rate.
+  }
+  return ltcUsdCache;
 }
 
 function userCreatedDate() {
@@ -1087,6 +1118,12 @@ function renderOrders(tab = activeOrdersTab) {
   document.querySelectorAll("[data-order-tab]").forEach((button) => {
     button.onclick = () => renderOrders(button.dataset.orderTab);
   });
+  document.querySelectorAll("[data-order-dispute]").forEach((button) => {
+    button.onclick = () => openExchangeDispute(button.dataset.orderDispute);
+  });
+  document.querySelectorAll("[data-order-close]").forEach((button) => {
+    button.onclick = () => closeExchangeOrder(button.dataset.orderClose, "closed");
+  });
 }
 
 function orderCard(order) {
@@ -1094,10 +1131,14 @@ function orderCard(order) {
   return `
     <article class="order-card">
       <div>
-        <h3>${esc(order.product || "Заказ")}</h3>
+        <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
+        ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
-      <span>${status}</span>
+      <div class="order-side">
+        <span>${status}</span>
+        ${order.status === "active" ? `<button data-order-close="${esc(order.id)}">Закрыть заказ</button><button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+      </div>
     </article>
   `;
 }
@@ -1311,15 +1352,36 @@ function renderMessages() {
       <article class="panel">
         <h2>${tr("messages")}</h2>
         ${messages.length ? messages.map((msg) => `
-          <article class="product-card product-body">
+          <article class="product-card product-body message-card">
             <h3>${esc(msg.subject)}</h3>
-            <p>${esc(msg.body)}</p>
+            <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
             <p>${esc(msg.fromLogin)} → ${esc(msg.storeTag)} · ${esc(msg.date)}</p>
+            ${messageActions(msg)}
           </article>
         `).join("") : `<p>${tr("noMessages")}</p>`}
       </article>
     </section>
   `);
+  document.querySelectorAll("[data-close-exchange]").forEach((button) => {
+    button.onclick = () => closeExchangeOrder(button.dataset.closeExchange, "closed");
+  });
+  document.querySelectorAll("[data-dispute-exchange]").forEach((button) => {
+    button.onclick = () => openExchangeDispute(button.dataset.disputeExchange);
+  });
+}
+
+function messageActions(msg) {
+  if (!msg.exchangeRequestId) return "";
+  const request = exchangeRequestById(msg.exchangeRequestId);
+  if (!request || request.status === "closed") return "";
+  const canManage = isAdmin() || sameLogin(request.toLogin, db.currentUser) || sameLogin(request.fromLogin, db.currentUser);
+  if (!canManage) return "";
+  return `
+    <div class="message-actions">
+      <button data-close-exchange="${esc(request.id)}">Закрыть заказ</button>
+      <button data-dispute-exchange="${esc(request.id)}">${request.disputeOpen ? "Закрыть/обновить спор" : "Открыть спор"}</button>
+    </div>
+  `;
 }
 
 function renderSupport() {
@@ -1642,7 +1704,13 @@ function exchangeCalculator(card) {
     <article class="panel exchange-tool">
       <h2>Калькулятор</h2>
       <div class="row">
-        <label class="field">Сумма в $<input data-calc-usd type="number" min="0" step="0.01" value="100"></label>
+        <label class="field">Сумма<input data-calc-amount type="number" min="0" step="0.01" value="100"></label>
+        <label class="field">Валюта
+          <select data-calc-currency>
+            <option value="usd">$</option>
+            <option value="ltc">LTC</option>
+          </select>
+        </label>
         <label class="field">Тип
           <select data-calc-type>
             <option value="exchange">Обмен</option>
@@ -1651,7 +1719,7 @@ function exchangeCalculator(card) {
         </label>
       </div>
       <div class="calc-result">
-        <span>Итого по курсу</span>
+        <span data-calc-rate>Курс LTC загружается...</span>
         <strong data-calc-result>0 MDL</strong>
       </div>
       <div class="exchange-actions">
@@ -1682,14 +1750,24 @@ function exchangeRequestForm(card, type) {
         ` : `
           <label class="field">Карта / кошелек для получения<input name="payout" placeholder="Номер или реквизит" required></label>
         `}
-        <label class="field">Сумма в $<input name="amount" type="number" min="1" step="0.01" value="100" required></label>
+        <div class="row">
+          <label class="field">Сумма<input name="amount" type="number" min="0.0001" step="0.0001" value="100" required></label>
+          <label class="field">Валюта
+            <select name="currency">
+              <option value="usd">$</option>
+              <option value="ltc">LTC</option>
+            </select>
+          </label>
+        </div>
+        ${isExchange ? `<label class="field">Ваш LTC счет<input name="ltcAddress" placeholder="ltc1..." required></label>` : ""}
+        ${isExchange ? `<label class="field">Фото оплаты<input name="proof" type="file" accept="image/*"></label>` : ""}
         <label class="field">Комментарий<textarea name="comment" placeholder="Можно оставить пустым"></textarea></label>
         <div class="calc-result">
-          <span>Курс ${Number(rate).toFixed(2)} MDL за 1$</span>
+          <span data-form-rate>Курс ${Number(rate).toFixed(2)} MDL за 1$</span>
           <strong data-form-result>${(100 * rate).toFixed(2)} MDL</strong>
         </div>
         <div class="exchange-actions">
-          <button class="primary" type="submit">Отправить заявку</button>
+          <button class="primary" type="submit">Оплатил</button>
           <button class="ghost-button" type="button" data-exchange-chat="${esc(card.id)}">Написать обменнику</button>
         </div>
       </form>
@@ -1704,35 +1782,63 @@ function bindExchangeProfile(card) {
   document.querySelectorAll("[data-exchange-chat]").forEach((button) => {
     button.onclick = () => renderExchangeChat(button.dataset.exchangeChat);
   });
-  const calcUsd = document.querySelector("[data-calc-usd]");
+  const calcAmount = document.querySelector("[data-calc-amount]");
+  const calcCurrency = document.querySelector("[data-calc-currency]");
   const calcType = document.querySelector("[data-calc-type]");
   const calcResult = document.querySelector("[data-calc-result]");
+  const calcRate = document.querySelector("[data-calc-rate]");
+  const amountToUsd = (amount, currency) => currency === "ltc" ? amount * Number(card.ltcUsd || ltcUsdCache) : amount;
   const updateCalc = () => {
     if (!calcResult) return;
-    const amount = Number(calcUsd?.value || 0);
+    const amount = Number(calcAmount?.value || 0);
+    const usd = amountToUsd(amount, calcCurrency?.value || "usd");
     const rate = calcType?.value === "cashout" ? card.cashoutRate : card.exchangeRate;
-    calcResult.textContent = `${(amount * rate).toFixed(2)} MDL`;
+    calcResult.textContent = `${(usd * rate).toFixed(2)} MDL`;
+    if (calcRate) calcRate.textContent = `1 LTC ≈ ${Number(card.ltcUsd || ltcUsdCache).toFixed(2)} $, курс ${Number(rate).toFixed(2)} MDL за 1$`;
   };
-  calcUsd?.addEventListener("input", updateCalc);
+  calcAmount?.addEventListener("input", updateCalc);
+  calcCurrency?.addEventListener("change", updateCalc);
   calcType?.addEventListener("change", updateCalc);
   updateCalc();
+  fetchLitecoinUsdRate().then((value) => {
+    card.ltcUsd = value;
+    updateCalc();
+  });
   document.querySelectorAll("[data-exchange-request]").forEach((form) => {
     const amountInput = form.querySelector("input[name='amount']");
+    const currencyInput = form.querySelector("select[name='currency']");
     const result = form.querySelector("[data-form-result]");
+    const rateLabel = form.querySelector("[data-form-rate]");
     const type = form.dataset.exchangeRequest;
     const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
-    amountInput?.addEventListener("input", () => {
-      result.textContent = `${(Number(amountInput.value || 0) * rate).toFixed(2)} MDL`;
-    });
+    const updateFormCalc = () => {
+      const usd = amountToUsd(Number(amountInput.value || 0), currencyInput?.value || "usd");
+      result.textContent = `${(usd * rate).toFixed(2)} MDL`;
+      if (rateLabel) rateLabel.textContent = `1 LTC ≈ ${Number(card.ltcUsd || ltcUsdCache).toFixed(2)} $, курс ${Number(rate).toFixed(2)} MDL за 1$`;
+    };
+    amountInput?.addEventListener("input", updateFormCalc);
+    currencyInput?.addEventListener("change", updateFormCalc);
+    updateFormCalc();
     form.onsubmit = (event) => handleExchangeRequest(event, card, type);
   });
 }
 
-function handleExchangeRequest(event, card, type) {
+async function handleExchangeRequest(event, card, type) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   const amount = Number(data.get("amount") || 0);
+  const currency = data.get("currency") || "usd";
+  const ltcUsd = Number(card.ltcUsd || ltcUsdCache);
+  const amountUsd = currency === "ltc" ? amount * ltcUsd : amount;
   const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
+  const totalMdl = amountUsd * rate;
+  const confirmText = type === "cashout"
+    ? `Подтверждая, вы указываете, что отправили ${amount} ${currency.toUpperCase()} и правильно оставили реквизиты для получения ${totalMdl.toFixed(2)} MDL.`
+    : `Подтверждая, вы указываете, что отправили ${totalMdl.toFixed(2)} MDL и правильно оставили LTC счет.`;
+  const ok = await confirmExchangePayment(confirmText);
+  if (!ok) return;
+  const proofFile = data.get("proof");
+  const proof = proofFile && proofFile.size ? await fileToDataUrl(proofFile) : "";
   const request = {
     id: `exchange-${Date.now()}`,
     cardId: card.id,
@@ -1741,26 +1847,133 @@ function handleExchangeRequest(event, card, type) {
     fromLogin: db.currentUser,
     toLogin: card.ownerLogin,
     method: data.get("method") || data.get("payout") || "",
-    amountUsd: amount,
-    totalMdl: amount * rate,
+    amount,
+    currency,
+    amountUsd,
+    totalMdl,
+    ltcAddress: data.get("ltcAddress") || "",
+    proof,
+    proofName: proofFile?.name || "",
     comment: data.get("comment") || "",
-    status: "new",
+    status: "active",
+    createdAt: Date.now(),
     date: new Date().toLocaleString()
   };
+  const order = {
+    id: request.id,
+    login: db.currentUser,
+    storeName: card.name,
+    product: type === "cashout" ? "Заявка на обнал" : "Заявка на обмен",
+    status: "active",
+    createdAt: request.createdAt,
+    exchangeRequestId: request.id,
+    amountUsd,
+    totalMdl,
+    method: request.method
+  };
   db.exchangeRequests.unshift(request);
+  db.orders.unshift(order);
   db.messages.unshift({
     id: `msg-${request.id}`,
     storeId: card.id,
     storeTag: card.name,
     toLogin: card.ownerLogin,
     fromLogin: db.currentUser,
-    subject: type === "cashout" ? `Заявка на обнал ${card.name}` : `Заявка на обмен ${card.name}`,
-    body: `Сумма: ${amount.toFixed(2)} $. К оплате/получению: ${request.totalMdl.toFixed(2)} MDL. Способ: ${request.method || "не указан"}. ${request.comment}`,
+    subject: type === "cashout" ? `Новая оплата: обнал ${card.name}` : `Новая оплата: обмен ${card.name}`,
+    body: exchangeRequestMessage(request),
     date: request.date,
-    system: "exchange"
+    system: "exchange",
+    exchangeRequestId: request.id
   });
   saveDb();
-  showToast("Заявка отправлена обменнику");
+  showToast("Заявка активна и отправлена обменнику");
+  renderOrders("active");
+}
+
+function exchangeRequestMessage(request) {
+  return [
+    `Тип: ${request.type === "cashout" ? "обнал" : "обмен"}`,
+    `Сумма клиента: ${Number(request.amount || 0).toFixed(4)} ${String(request.currency || "usd").toUpperCase()}`,
+    `В долларах: ${Number(request.amountUsd || 0).toFixed(2)} $`,
+    `По расчету: ${Number(request.totalMdl || 0).toFixed(2)} MDL`,
+    `Способ/реквизит: ${request.method || "не указан"}`,
+    request.ltcAddress ? `LTC счет клиента: ${request.ltcAddress}` : "",
+    request.proofName ? `Фото оплаты: ${request.proofName}` : "Фото оплаты: не прикреплено",
+    request.comment ? `Описание клиента: ${request.comment}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function confirmExchangePayment(text) {
+  return new Promise((resolve) => {
+    showModal(`
+      <h2>Подтвердите оплату</h2>
+      <p>${esc(text)}</p>
+      <div class="exchange-actions">
+        <button class="primary" data-confirm-pay>Подтвердить</button>
+        <button class="ghost-button" data-cancel-pay>Отменить</button>
+      </div>
+    `);
+    document.querySelector("[data-confirm-pay]").onclick = () => {
+      document.querySelector("[data-modal]").classList.remove("open");
+      resolve(true);
+    };
+    document.querySelector("[data-cancel-pay]").onclick = () => {
+      document.querySelector("[data-modal]").classList.remove("open");
+      resolve(false);
+    };
+  });
+}
+
+function exchangeRequestById(id) {
+  return db.exchangeRequests.find((request) => request.id === id);
+}
+
+function closeExchangeOrder(id, status = "closed") {
+  const order = db.orders.find((item) => item.id === id || item.exchangeRequestId === id);
+  const request = exchangeRequestById(order?.exchangeRequestId || id);
+  if (order) {
+    order.status = "closed";
+    order.closedAt = Date.now();
+    order.disputeOpen = false;
+  }
+  if (request) {
+    request.status = status;
+    request.closedAt = Date.now();
+    request.disputeOpen = false;
+  }
+  saveDb();
+  showToast("Заявка закрыта");
+  renderCurrent();
+}
+
+function openExchangeDispute(id) {
+  const order = db.orders.find((item) => item.id === id || item.exchangeRequestId === id);
+  const request = exchangeRequestById(order?.exchangeRequestId || id);
+  const disputeUntil = Date.now() + 12 * 60 * 60 * 1000;
+  if (order) {
+    order.status = "dispute";
+    order.disputeOpen = true;
+    order.disputeUntil = disputeUntil;
+  }
+  if (request) {
+    request.status = "dispute";
+    request.disputeOpen = true;
+    request.disputeUntil = disputeUntil;
+  }
+  db.messages.unshift({
+    id: `dispute-${Date.now()}`,
+    storeId: request?.cardId || "exchange",
+    storeTag: request?.cardName || "Обменник",
+    toLogin: request?.toLogin || "admin",
+    fromLogin: db.currentUser,
+    subject: "Открыт спор по заявке",
+    body: "По заявке открыт спор. У клиента и обменника есть 12 часов на решение вопроса в личных сообщениях сайта.",
+    date: new Date().toLocaleString(),
+    system: "exchange",
+    exchangeRequestId: request?.id || id
+  });
+  saveDb();
+  showToast("Спор открыт на 12 часов");
   renderMessages();
 }
 
@@ -1921,7 +2134,7 @@ async function handleExchangeCardCreate(event) {
     db.users.push({ login: ownerLogin, password: "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
   }
   const file = data.get("image");
-  const image = file && file.size ? await fileToDataUrl(file) : "assets/market-banner.png";
+  const image = file && file.size ? await fileToDataUrl(file) : KENT_IMAGE;
   db.exchangeCards.push(normalizeExchangeCard({
     id,
     name: data.get("name").trim(),

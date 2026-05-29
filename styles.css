@@ -1360,6 +1360,36 @@ body[data-theme="dark"] .logo {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
 }
 
+.order-card p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.order-side,
+.message-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.order-side button,
+.message-actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.message-card p {
+  white-space: normal;
+  line-height: 1.45;
+}
+
 .modal h2 {
   margin-top: 0;
 }
