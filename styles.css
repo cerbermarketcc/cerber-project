@@ -1390,6 +1390,75 @@ body[data-theme="dark"] .logo {
   line-height: 1.45;
 }
 
+.detail-head {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.detail-head img {
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+  object-fit: cover;
+}
+
+.detail-head h1 {
+  margin: 4px 0 10px;
+  font-size: 30px;
+}
+
+.status-pill {
+  display: inline-flex;
+  width: fit-content;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: var(--soft);
+  font-weight: 800;
+}
+
+.exchange-detail {
+  display: grid;
+  gap: 18px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quote-breakdown {
+  display: grid;
+  gap: 8px;
+}
+
+.quote-breakdown p {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--soft);
+}
+
+.quote-breakdown span {
+  color: var(--muted);
+}
+
+.proof-link {
+  color: var(--accent);
+  font-weight: 900;
+}
+
+.exchange-note {
+  margin: -6px 0 4px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .modal h2 {
   margin-top: 0;
 }

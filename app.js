@@ -160,6 +160,7 @@ const defaults = {
       exchangeRate: 19,
       cashoutRate: 17,
       ltcUsd: 54.2,
+      ltcWallet: "ltc1qrj4ca4m2r0njnf97xtsvmtl9472z9zquc5aszh",
       requisites: defaultExchangeRequisites,
       active: true
     }
@@ -188,6 +189,7 @@ let activeOrdersTab = "all";
 let activeReferralTab = "referrals";
 let activeExchangeId = "kent-ltc";
 let activeExchangeTab = "calculator";
+let activeExchangeOrderId = "";
 
 const root = document.getElementById("app");
 
@@ -453,6 +455,7 @@ function normalizeExchangeCard(card) {
     exchangeRate: Number.isFinite(Number(card.exchangeRate)) ? Number(card.exchangeRate) : seed.exchangeRate,
     cashoutRate: Number.isFinite(Number(card.cashoutRate)) ? Number(card.cashoutRate) : seed.cashoutRate,
     ltcUsd: Number.isFinite(Number(card.ltcUsd)) ? Number(card.ltcUsd) : seed.ltcUsd,
+    ltcWallet: String(card.ltcWallet || seed.ltcWallet || "").trim(),
     requisites: requisites.map((item) => ({
       method: item.method,
       value: String(item.value || "").trim(),
@@ -481,6 +484,50 @@ function normalizeOrders(next) {
     }
     return request;
   });
+}
+
+function exchangeStatusLabel(status) {
+  const labels = {
+    new: "Новая",
+    active: "Ожидает оператора",
+    processing: "В работе",
+    dispute: "Спор",
+    closed: "Закрыта",
+    canceled: "Отменена"
+  };
+  return labels[status] || "Активная";
+}
+
+function exchangeTypeLabel(type) {
+  return type === "cashout" ? "Сдать LTC" : "Купить LTC";
+}
+
+function exchangeOrderById(id) {
+  return db.orders.find((order) => order.id === id || order.exchangeRequestId === id);
+}
+
+function syncExchangeOrder(request) {
+  const order = exchangeOrderById(request.id);
+  if (!order) return;
+  order.status = request.status === "dispute" ? "dispute" : request.status === "closed" ? "closed" : "active";
+  order.disputeOpen = request.disputeOpen || request.status === "dispute";
+  order.disputeUntil = request.disputeUntil;
+  order.closedAt = request.closedAt;
+}
+
+function calculateExchangeQuote(card, type, amount, currency) {
+  const ltcUsd = Number(card.ltcUsd || ltcUsdCache || 0);
+  const amountValue = Math.max(0, Number(amount) || 0);
+  const amountUsd = currency === "ltc" ? amountValue * ltcUsd : amountValue;
+  const ltcAmount = ltcUsd > 0 ? amountUsd / ltcUsd : 0;
+  const rate = type === "cashout" ? Number(card.cashoutRate) : Number(card.exchangeRate);
+  return {
+    amountUsd,
+    ltcAmount,
+    totalMdl: amountUsd * rate,
+    rate,
+    ltcUsd
+  };
 }
 
 function restoreAuth(next) {
@@ -1118,6 +1165,9 @@ function renderOrders(tab = activeOrdersTab) {
   document.querySelectorAll("[data-order-tab]").forEach((button) => {
     button.onclick = () => renderOrders(button.dataset.orderTab);
   });
+  document.querySelectorAll("[data-order-open]").forEach((button) => {
+    button.onclick = () => renderExchangeOrderDetail(button.dataset.orderOpen);
+  });
   document.querySelectorAll("[data-order-dispute]").forEach((button) => {
     button.onclick = () => openExchangeDispute(button.dataset.orderDispute);
   });
@@ -1127,17 +1177,19 @@ function renderOrders(tab = activeOrdersTab) {
 }
 
 function orderCard(order) {
-  const status = order.disputeOpen ? "Спор" : order.status === "closed" ? "Закрыт" : "Активный";
+  const request = order.exchangeRequestId ? exchangeRequestById(order.exchangeRequestId) : null;
+  const status = request ? exchangeStatusLabel(request.status) : order.disputeOpen ? "Спор" : order.status === "closed" ? "Закрыт" : "Активный";
   return `
     <article class="order-card">
       <div>
         <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
-        ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
+        ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
         <span>${status}</span>
-        ${order.status === "active" ? `<button data-order-close="${esc(order.id)}">Закрыть заказ</button><button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+        <button data-order-open="${esc(order.exchangeRequestId || order.id)}">Детали</button>
+        ${order.status === "active" ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
   `;
@@ -1735,11 +1787,12 @@ function exchangeCalculator(card) {
 
 function exchangeRequestForm(card, type) {
   const isExchange = type === "exchange";
-  const title = isExchange ? "Новая заявка на обмен" : "Новая заявка на обнал";
+  const title = isExchange ? "Купить LTC" : "Сдать LTC";
   const rate = isExchange ? card.exchangeRate : card.cashoutRate;
   return `
     <article class="panel exchange-tool">
       <h2>${title}</h2>
+      <p class="exchange-note">${isExchange ? "Вы переводите MDL на выбранный способ оплаты, оператор отправляет LTC на ваш кошелек." : "Вы отправляете LTC на кошелек обменника, оператор переводит MDL на ваши реквизиты."}</p>
       <form class="form" data-exchange-request="${esc(type)}">
         ${isExchange ? `
           <label class="field">Способ оплаты
@@ -1749,6 +1802,7 @@ function exchangeRequestForm(card, type) {
           </label>
         ` : `
           <label class="field">Карта / кошелек для получения<input name="payout" placeholder="Номер или реквизит" required></label>
+          <label class="field">Кошелек обменника LTC<input value="${esc(card.ltcWallet || "Будет выдан оператором")}" readonly></label>
         `}
         <div class="row">
           <label class="field">Сумма<input name="amount" type="number" min="0.0001" step="0.0001" value="100" required></label>
@@ -1766,8 +1820,9 @@ function exchangeRequestForm(card, type) {
           <span data-form-rate>Курс ${Number(rate).toFixed(2)} MDL за 1$</span>
           <strong data-form-result>${(100 * rate).toFixed(2)} MDL</strong>
         </div>
+        <div class="quote-breakdown" data-form-breakdown></div>
         <div class="exchange-actions">
-          <button class="primary" type="submit">Оплатил</button>
+          <button class="primary" type="submit">Создать заявку</button>
           <button class="ghost-button" type="button" data-exchange-chat="${esc(card.id)}">Написать обменнику</button>
         </div>
       </form>
@@ -1787,14 +1842,13 @@ function bindExchangeProfile(card) {
   const calcType = document.querySelector("[data-calc-type]");
   const calcResult = document.querySelector("[data-calc-result]");
   const calcRate = document.querySelector("[data-calc-rate]");
-  const amountToUsd = (amount, currency) => currency === "ltc" ? amount * Number(card.ltcUsd || ltcUsdCache) : amount;
   const updateCalc = () => {
     if (!calcResult) return;
     const amount = Number(calcAmount?.value || 0);
-    const usd = amountToUsd(amount, calcCurrency?.value || "usd");
-    const rate = calcType?.value === "cashout" ? card.cashoutRate : card.exchangeRate;
-    calcResult.textContent = `${(usd * rate).toFixed(2)} MDL`;
-    if (calcRate) calcRate.textContent = `1 LTC ≈ ${Number(card.ltcUsd || ltcUsdCache).toFixed(2)} $, курс ${Number(rate).toFixed(2)} MDL за 1$`;
+    const type = calcType?.value || "exchange";
+    const quote = calculateExchangeQuote(card, type, amount, calcCurrency?.value || "usd");
+    calcResult.textContent = `${quote.totalMdl.toFixed(2)} MDL`;
+    if (calcRate) calcRate.textContent = `1 LTC ≈ ${quote.ltcUsd.toFixed(2)} $, ${quote.ltcAmount.toFixed(6)} LTC, курс ${quote.rate.toFixed(2)} MDL за 1$`;
   };
   calcAmount?.addEventListener("input", updateCalc);
   calcCurrency?.addEventListener("change", updateCalc);
@@ -1809,12 +1863,19 @@ function bindExchangeProfile(card) {
     const currencyInput = form.querySelector("select[name='currency']");
     const result = form.querySelector("[data-form-result]");
     const rateLabel = form.querySelector("[data-form-rate]");
+    const breakdown = form.querySelector("[data-form-breakdown]");
     const type = form.dataset.exchangeRequest;
-    const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
     const updateFormCalc = () => {
-      const usd = amountToUsd(Number(amountInput.value || 0), currencyInput?.value || "usd");
-      result.textContent = `${(usd * rate).toFixed(2)} MDL`;
-      if (rateLabel) rateLabel.textContent = `1 LTC ≈ ${Number(card.ltcUsd || ltcUsdCache).toFixed(2)} $, курс ${Number(rate).toFixed(2)} MDL за 1$`;
+      const quote = calculateExchangeQuote(card, type, Number(amountInput.value || 0), currencyInput?.value || "usd");
+      result.textContent = `${quote.totalMdl.toFixed(2)} MDL`;
+      if (rateLabel) rateLabel.textContent = `1 LTC ≈ ${quote.ltcUsd.toFixed(2)} $, курс ${quote.rate.toFixed(2)} MDL за 1$`;
+      if (breakdown) {
+        breakdown.innerHTML = `
+          <p><span>В долларах</span><strong>${quote.amountUsd.toFixed(2)} $</strong></p>
+          <p><span>LTC</span><strong>${quote.ltcAmount.toFixed(6)}</strong></p>
+          <p><span>${type === "cashout" ? "К получению" : "К оплате"}</span><strong>${quote.totalMdl.toFixed(2)} MDL</strong></p>
+        `;
+      }
     };
     amountInput?.addEventListener("input", updateFormCalc);
     currencyInput?.addEventListener("change", updateFormCalc);
@@ -1828,13 +1889,14 @@ async function handleExchangeRequest(event, card, type) {
   const data = new FormData(event.currentTarget);
   const amount = Number(data.get("amount") || 0);
   const currency = data.get("currency") || "usd";
-  const ltcUsd = Number(card.ltcUsd || ltcUsdCache);
-  const amountUsd = currency === "ltc" ? amount * ltcUsd : amount;
-  const rate = type === "cashout" ? card.cashoutRate : card.exchangeRate;
-  const totalMdl = amountUsd * rate;
+  const quote = calculateExchangeQuote(card, type, amount, currency);
+  if (!quote.amountUsd || !quote.totalMdl) {
+    showToast("Введите корректную сумму");
+    return;
+  }
   const confirmText = type === "cashout"
-    ? `Подтверждая, вы указываете, что отправили ${amount} ${currency.toUpperCase()} и правильно оставили реквизиты для получения ${totalMdl.toFixed(2)} MDL.`
-    : `Подтверждая, вы указываете, что отправили ${totalMdl.toFixed(2)} MDL и правильно оставили LTC счет.`;
+    ? `Вы создаете заявку на сдачу ${quote.ltcAmount.toFixed(6)} LTC. К получению: ${quote.totalMdl.toFixed(2)} MDL. Проверьте реквизиты перед подтверждением.`
+    : `Вы создаете заявку на покупку ${quote.ltcAmount.toFixed(6)} LTC. К оплате: ${quote.totalMdl.toFixed(2)} MDL. Проверьте LTC счет перед подтверждением.`;
   const ok = await confirmExchangePayment(confirmText);
   if (!ok) return;
   const proofFile = data.get("proof");
@@ -1849,13 +1911,17 @@ async function handleExchangeRequest(event, card, type) {
     method: data.get("method") || data.get("payout") || "",
     amount,
     currency,
-    amountUsd,
-    totalMdl,
+    amountUsd: quote.amountUsd,
+    ltcAmount: quote.ltcAmount,
+    ltcUsd: quote.ltcUsd,
+    rate: quote.rate,
+    totalMdl: quote.totalMdl,
     ltcAddress: data.get("ltcAddress") || "",
     proof,
     proofName: proofFile?.name || "",
     comment: data.get("comment") || "",
     status: "active",
+    history: [{ at: new Date().toLocaleString(), by: db.currentUser, text: "Заявка создана клиентом" }],
     createdAt: Date.now(),
     date: new Date().toLocaleString()
   };
@@ -1867,8 +1933,9 @@ async function handleExchangeRequest(event, card, type) {
     status: "active",
     createdAt: request.createdAt,
     exchangeRequestId: request.id,
-    amountUsd,
-    totalMdl,
+    amountUsd: request.amountUsd,
+    ltcAmount: request.ltcAmount,
+    totalMdl: request.totalMdl,
     method: request.method
   };
   db.exchangeRequests.unshift(request);
@@ -1892,10 +1959,13 @@ async function handleExchangeRequest(event, card, type) {
 
 function exchangeRequestMessage(request) {
   return [
-    `Тип: ${request.type === "cashout" ? "обнал" : "обмен"}`,
+    `Тип: ${exchangeTypeLabel(request.type)}`,
+    `Статус: ${exchangeStatusLabel(request.status)}`,
     `Сумма клиента: ${Number(request.amount || 0).toFixed(4)} ${String(request.currency || "usd").toUpperCase()}`,
     `В долларах: ${Number(request.amountUsd || 0).toFixed(2)} $`,
-    `По расчету: ${Number(request.totalMdl || 0).toFixed(2)} MDL`,
+    `LTC: ${Number(request.ltcAmount || 0).toFixed(6)}`,
+    `Курс LTC: ${Number(request.ltcUsd || 0).toFixed(2)} $`,
+    `MDL: ${Number(request.totalMdl || 0).toFixed(2)}`,
     `Способ/реквизит: ${request.method || "не указан"}`,
     request.ltcAddress ? `LTC счет клиента: ${request.ltcAddress}` : "",
     request.proofName ? `Фото оплаты: ${request.proofName}` : "Фото оплаты: не прикреплено",
@@ -1928,9 +1998,32 @@ function exchangeRequestById(id) {
   return db.exchangeRequests.find((request) => request.id === id);
 }
 
+function addExchangeHistory(request, text) {
+  if (!request) return;
+  if (!Array.isArray(request.history)) request.history = [];
+  request.history.unshift({ at: new Date().toLocaleString(), by: db.currentUser || "system", text });
+}
+
+function notifyExchange(request, subject, body, toLogin = request?.toLogin) {
+  if (!request) return;
+  db.messages.unshift({
+    id: `exchange-note-${Date.now()}`,
+    storeId: request.cardId,
+    storeTag: request.cardName,
+    toLogin,
+    fromLogin: db.currentUser || "system",
+    subject,
+    body,
+    date: new Date().toLocaleString(),
+    system: "exchange",
+    exchangeRequestId: request.id
+  });
+}
+
 function closeExchangeOrder(id, status = "closed") {
   const order = db.orders.find((item) => item.id === id || item.exchangeRequestId === id);
   const request = exchangeRequestById(order?.exchangeRequestId || id);
+  const previousRoute = route;
   if (order) {
     order.status = "closed";
     order.closedAt = Date.now();
@@ -1940,15 +2033,19 @@ function closeExchangeOrder(id, status = "closed") {
     request.status = status;
     request.closedAt = Date.now();
     request.disputeOpen = false;
+    addExchangeHistory(request, "Заявка закрыта");
+    notifyExchange(request, "Заявка закрыта", `Заявка ${request.cardName} закрыта. Итог: ${Number(request.totalMdl || 0).toFixed(2)} MDL / ${Number(request.ltcAmount || 0).toFixed(6)} LTC.`, request.fromLogin);
   }
   saveDb();
   showToast("Заявка закрыта");
-  renderCurrent();
+  if (previousRoute === "exchange-order") renderExchangeOrderDetail(request?.id || id);
+  else renderCurrent();
 }
 
 function openExchangeDispute(id) {
   const order = db.orders.find((item) => item.id === id || item.exchangeRequestId === id);
   const request = exchangeRequestById(order?.exchangeRequestId || id);
+  const previousRoute = route;
   const disputeUntil = Date.now() + 12 * 60 * 60 * 1000;
   if (order) {
     order.status = "dispute";
@@ -1959,22 +2056,97 @@ function openExchangeDispute(id) {
     request.status = "dispute";
     request.disputeOpen = true;
     request.disputeUntil = disputeUntil;
+    addExchangeHistory(request, "Открыт спор на 12 часов");
   }
-  db.messages.unshift({
-    id: `dispute-${Date.now()}`,
-    storeId: request?.cardId || "exchange",
-    storeTag: request?.cardName || "Обменник",
-    toLogin: request?.toLogin || "admin",
-    fromLogin: db.currentUser,
-    subject: "Открыт спор по заявке",
-    body: "По заявке открыт спор. У клиента и обменника есть 12 часов на решение вопроса в личных сообщениях сайта.",
-    date: new Date().toLocaleString(),
-    system: "exchange",
-    exchangeRequestId: request?.id || id
-  });
+  notifyExchange(request, "Открыт спор по заявке", "По заявке открыт спор. У клиента и обменника есть 12 часов на решение вопроса в личных сообщениях сайта.", request?.toLogin || "admin");
   saveDb();
   showToast("Спор открыт на 12 часов");
-  renderMessages();
+  if (previousRoute === "exchange-order") renderExchangeOrderDetail(request?.id || id);
+  else renderMessages();
+}
+
+function acceptExchangeOrder(id) {
+  const request = exchangeRequestById(id);
+  const order = exchangeOrderById(id);
+  if (!request) return;
+  request.status = "processing";
+  request.disputeOpen = false;
+  addExchangeHistory(request, "Оператор принял заявку в работу");
+  if (order) {
+    order.status = "active";
+    order.disputeOpen = false;
+  }
+  notifyExchange(request, "Заявка принята в работу", `Оператор ${request.cardName} принял заявку в работу.`, request.fromLogin);
+  saveDb();
+  renderExchangeOrderDetail(id);
+}
+
+function cancelExchangeOrder(id) {
+  const request = exchangeRequestById(id);
+  const order = exchangeOrderById(id);
+  if (!request) return;
+  request.status = "canceled";
+  addExchangeHistory(request, "Заявка отменена");
+  if (order) order.status = "closed";
+  notifyExchange(request, "Заявка отменена", `Заявка ${request.cardName} отменена.`, request.fromLogin);
+  saveDb();
+  renderExchangeOrderDetail(id);
+}
+
+function renderExchangeOrderDetail(id = activeExchangeOrderId) {
+  route = "exchange-order";
+  activeExchangeOrderId = id;
+  const request = exchangeRequestById(id);
+  if (!request) return renderOrders(activeOrdersTab);
+  const card = exchangeCardById(request.cardId);
+  const isOwner = sameLogin(request.toLogin, db.currentUser) || isAdmin();
+  const isClient = sameLogin(request.fromLogin, db.currentUser);
+  const canAct = isOwner || isClient || isAdmin();
+  const status = exchangeStatusLabel(request.status);
+  layout(`
+    <section class="screen exchange-profile">
+      <article class="panel exchange-detail">
+        <div class="detail-head">
+          <img src="${esc(card?.image || KENT_IMAGE)}" alt="">
+          <div>
+            <p class="breadcrumbs">Заявка > ${esc(request.cardName)}</p>
+            <h1>${exchangeTypeLabel(request.type)}</h1>
+            <span class="status-pill">${status}</span>
+          </div>
+        </div>
+        <div class="quote-breakdown detail-grid">
+          <p><span>Сумма</span><strong>${Number(request.amount || 0).toFixed(4)} ${String(request.currency || "usd").toUpperCase()}</strong></p>
+          <p><span>В долларах</span><strong>${Number(request.amountUsd || 0).toFixed(2)} $</strong></p>
+          <p><span>LTC</span><strong>${Number(request.ltcAmount || 0).toFixed(6)}</strong></p>
+          <p><span>MDL</span><strong>${Number(request.totalMdl || 0).toFixed(2)}</strong></p>
+          <p><span>Реквизит</span><strong>${esc(request.method || "не указан")}</strong></p>
+          <p><span>LTC счет</span><strong>${esc(request.ltcAddress || card?.ltcWallet || "не указан")}</strong></p>
+        </div>
+        ${request.comment ? `<p class="desc">${esc(request.comment)}</p>` : ""}
+        ${request.proof ? `<a class="proof-link" href="${esc(request.proof)}" target="_blank" rel="noreferrer">Открыть фото оплаты</a>` : ""}
+        <div class="exchange-actions">
+          <button class="ghost-button" data-exchange-chat="${esc(request.cardId)}">Написать</button>
+          ${canAct && request.status !== "closed" && request.status !== "canceled" ? `
+            ${isOwner && request.status === "active" ? `<button class="primary" data-accept-exchange="${esc(request.id)}">Принять в работу</button>` : ""}
+            ${isOwner && request.status !== "closed" ? `<button class="primary" data-close-exchange="${esc(request.id)}">Завершить</button>` : ""}
+            ${isClient && request.status !== "dispute" ? `<button class="ghost-button" data-dispute-exchange="${esc(request.id)}">Открыть спор</button>` : ""}
+            ${isClient && request.status === "active" ? `<button class="ghost-button" data-cancel-exchange="${esc(request.id)}">Отменить</button>` : ""}
+          ` : ""}
+        </div>
+      </article>
+      <article class="panel">
+        <h2>История</h2>
+        ${(request.history || []).map((item) => `<article class="ref-item"><div><h3>${esc(item.text)}</h3><p>${esc(item.by)} · ${esc(item.at)}</p></div></article>`).join("") || `<p>Истории пока нет</p>`}
+      </article>
+    </section>
+  `);
+  document.querySelectorAll("[data-exchange-chat]").forEach((button) => {
+    button.onclick = () => renderExchangeChat(button.dataset.exchangeChat);
+  });
+  document.querySelector("[data-accept-exchange]")?.addEventListener("click", (event) => acceptExchangeOrder(event.currentTarget.dataset.acceptExchange));
+  document.querySelector("[data-close-exchange]")?.addEventListener("click", (event) => closeExchangeOrder(event.currentTarget.dataset.closeExchange));
+  document.querySelector("[data-dispute-exchange]")?.addEventListener("click", (event) => openExchangeDispute(event.currentTarget.dataset.disputeExchange));
+  document.querySelector("[data-cancel-exchange]")?.addEventListener("click", (event) => cancelExchangeOrder(event.currentTarget.dataset.cancelExchange));
 }
 
 function renderExchangeChat(cardId) {
@@ -2070,6 +2242,7 @@ function renderAdmin() {
             <label class="field">Курс обмена MDL/$<input name="exchangeRate" type="number" step="0.01" value="19" required></label>
             <label class="field">Курс обнала MDL/$<input name="cashoutRate" type="number" step="0.01" value="17" required></label>
           </div>
+          <label class="field">LTC кошелек обменника<input name="ltcWallet" placeholder="ltc1..."></label>
           <label class="field">Регион
             <select name="regions">
               <option value="moldova">Молдова</option>
@@ -2145,6 +2318,7 @@ async function handleExchangeCardCreate(event) {
     exchangeRate: Number(data.get("exchangeRate")),
     cashoutRate: Number(data.get("cashoutRate")),
     ltcUsd: 54.2,
+    ltcWallet: data.get("ltcWallet"),
     requisites: exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: true })),
     active: true
   }));
@@ -2207,6 +2381,7 @@ function renderExchangeOperator() {
             <label class="field">Курс обмена MDL/$<input name="exchangeRate" type="number" step="0.01" value="${esc(card.exchangeRate)}" required></label>
             <label class="field">Курс обнала MDL/$<input name="cashoutRate" type="number" step="0.01" value="${esc(card.cashoutRate)}" required></label>
           </div>
+          <label class="field">LTC кошелек обменника<input name="ltcWallet" value="${esc(card.ltcWallet || "")}" placeholder="ltc1..."></label>
           <label class="field">Регион
             <select name="regions">
               <option value="moldova" ${card.regions.includes("moldova") ? "selected" : ""}>Молдова</option>
@@ -2228,8 +2403,9 @@ function renderExchangeOperator() {
         <h2>Заявки</h2>
         ${(db.exchangeRequests || []).filter((item) => item.cardId === card.id).map((request) => `
           <article class="ref-item">
-            <div><h3>${esc(request.fromLogin)}</h3><p>${esc(request.date)} · ${esc(request.type)}</p></div>
+            <div><h3>${esc(request.fromLogin)}</h3><p>${esc(request.date)} · ${exchangeTypeLabel(request.type)} · ${exchangeStatusLabel(request.status)}</p></div>
             <div><strong>${Number(request.amountUsd || 0).toFixed(2)} $</strong><span>${Number(request.totalMdl || 0).toFixed(2)} MDL</span></div>
+            <button class="ghost-button" data-exchange-order="${esc(request.id)}">Детали</button>
           </article>
         `).join("") || `<p>Заявок пока нет</p>`}
       </article>
@@ -2243,12 +2419,16 @@ function renderExchangeOperator() {
     card.description = data.get("description").trim();
     card.exchangeRate = Number(data.get("exchangeRate"));
     card.cashoutRate = Number(data.get("cashoutRate"));
+    card.ltcWallet = data.get("ltcWallet");
     card.regions = [data.get("regions")];
     card.requisites = exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: Boolean(data.get(`req_${method}`)) }));
     if (file && file.size) card.image = await fileToDataUrl(file);
     saveDb();
     renderExchangeOperator();
   };
+  document.querySelectorAll("[data-exchange-order]").forEach((button) => {
+    button.onclick = () => renderExchangeOrderDetail(button.dataset.exchangeOrder);
+  });
 }
 
 function fileToDataUrl(file) {
@@ -2342,6 +2522,7 @@ function renderCurrent() {
   if (route === "exchange") return renderExchangeCatalog();
   if (route === "exchange-profile") return renderExchangeProfile(activeExchangeId, activeExchangeTab);
   if (route === "exchange-chat") return renderExchangeChat(activeExchangeId);
+  if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
   if (route === "exchange-admin") return renderExchangeOperator();
   if (["wallet"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();

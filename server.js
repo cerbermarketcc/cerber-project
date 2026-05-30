@@ -66,6 +66,7 @@ const defaultExchangeCards = [{
   exchangeRate: 19,
   cashoutRate: 17,
   ltcUsd: 54.2,
+  ltcWallet: "ltc1qrj4ca4m2r0njnf97xtsvmtl9472z9zquc5aszh",
   requisites: [
     { method: "Мия", value: "60327998", active: true },
     { method: "RunPay", value: "60327998", active: true },
