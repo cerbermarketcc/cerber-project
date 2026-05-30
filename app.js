@@ -490,6 +490,35 @@ function normalizeDb(next) {
   });
   next.exchangeCards = next.exchangeCards.map(normalizeExchangeCard);
   if (!next.exchangeCards.length) next.exchangeCards = structuredClone(defaults.exchangeCards).map(normalizeExchangeCard);
+  ensureCerberPaidPreviewOrder(next);
+}
+
+function ensureCerberPaidPreviewOrder(next) {
+  if ((next.orders || []).some((order) => order.id === "order-cerber-paid-preview")) return;
+  const paidAt = Date.now() - 5 * 60 * 1000;
+  next.orders.unshift({
+    id: "order-cerber-paid-preview",
+    type: "product",
+    login: "cerber",
+    storeId: "skboy",
+    productId: "courier-work",
+    positionId: "courier-checany",
+    product: "Подработка",
+    storeName: "Солёный Мальчик",
+    status: "completed",
+    paymentStatus: "paid",
+    createdAt: paidAt,
+    paidAt,
+    completedAt: paidAt,
+    amountUsd: 50,
+    ltcAmount: usdToLtc(50),
+    location: "Кишинёв",
+    productDescription: "",
+    reservedDescription: "Тестовая выдача после оплаты: заявка успешно оплачена. Здесь будет описание, которое магазин добавит в админке для конкретного товара.",
+    reservedStock: false,
+    sellerLtcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
+    paymentProvider: "preview"
+  });
 }
 
 function normalizeProduct(product, store = {}) {
