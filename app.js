@@ -1,4 +1,5 @@
-const STORE_KEY = "cerber_demo_state_v1";
+const STORE_KEY = "cerber_state_v1";
+const LEGACY_STORE_KEY = "cerber_demo_state_v1";
 const SESSION_KEY = "cerber_current_user_v1";
 const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
@@ -127,7 +128,7 @@ const defaults = {
       ownerLogin: "skboy",
       name: "Солёный Мальчик",
       short: "SK BOY это семья",
-      description: "Мы работаем как локальная демо-витрина. Здесь будет полное описание магазина, правила, новости и важная информация для клиентов.",
+      description: "",
       image: "assets/soleniy-malchik.jpg",
       cover: "assets/soleniy-malchik.jpg",
       orders: 0,
@@ -136,11 +137,11 @@ const defaults = {
       products: [
         {
           id: "courier-work",
-          title: "Курьер - Подработка 💰",
+          title: "Подработка",
           category: "Работа / Курьер",
-          description: "Подработка курьером по Кишиневу. Выберите доступную позицию по району, посмотрите условия и оформите заявку через внутренний LTC баланс.",
-          price: "от 10$",
-          priceUsd: 10,
+          description: "",
+          price: "50$",
+          priceUsd: 50,
           image: "assets/soleniy-malchik.jpg",
           images: ["assets/soleniy-malchik.jpg"],
           rating: 5,
@@ -149,33 +150,21 @@ const defaults = {
           positions: [
             {
               id: "courier-checany",
-              title: "Чеканы",
-              description: "Курьерская подработка по району Чеканы.",
-              priceUsd: 10,
+              title: "Подработка",
+              description: "",
+              priceUsd: 50,
               country: "moldova",
               city: "chisinau",
-              district: "Чеканы",
-              deliveryType: "Городская доставка",
-              stock: 12,
-              status: "ready"
-            },
-            {
-              id: "courier-botanica",
-              title: "Ботаника",
-              description: "Курьерская подработка по району Ботаника.",
-              priceUsd: 10,
-              country: "moldova",
-              city: "chisinau",
-              district: "Ботаника",
-              deliveryType: "Городская доставка",
-              stock: 8,
+              district: "",
+              deliveryType: "Курьер",
+              stock: 1,
               status: "ready"
             }
           ],
-          reviewsList: [defaultReview("courier-work-review-1")]
+          reviewsList: []
         }
       ],
-      reviewsList: [defaultReview("review-demo-1")]
+      reviewsList: []
     }
   ],
   messages: [],
@@ -416,7 +405,7 @@ function sameLogin(a, b) {
 
 function loadDb() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY));
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || localStorage.getItem(LEGACY_STORE_KEY));
     const next = saved ? merge(defaults, saved) : structuredClone(defaults);
     restoreAuth(next);
     const rememberedLogin = localStorage.getItem(SESSION_KEY);
@@ -466,6 +455,7 @@ function normalizeDb(next) {
   normalizeOrders(next);
   next.stores = (next.stores || []).map((store) => {
     const seed = defaults.stores.find((item) => item.id === store.id);
+    if (store.id === "skboy" && /демо|demo/i.test(String(store.description || ""))) store.description = "";
     return {
       ...store,
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
@@ -484,54 +474,37 @@ function normalizeProduct(product, store = {}) {
   if (product.id === "courier-work" || /courier/i.test(String(product.id || ""))) {
     product = {
       ...product,
-      title: "Курьер - Подработка 💰",
+      title: "Подработка",
       category: "Работа / Курьер",
-      description: "Подработка в курьерском формате по Кишиневу. Выберите доступную позицию по району, проверьте условия и оформите заявку через внутренний LTC баланс.",
-      price: "от 10$",
-      priceUsd: 10,
+      description: "",
+      price: "50$",
+      priceUsd: 50,
       image: product.image || "assets/soleniy-malchik.jpg",
       images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : ["assets/soleniy-malchik.jpg"],
-      positions: Array.isArray(product.positions) && product.positions.length ? product.positions : [
+      reviewsList: [],
+      positions: [
         {
-          id: "courier-checany",
-          title: "Курьер - Подработка 💰",
-          description: "Подработка по району Чеканы. Детали и график уточняются после оформления заявки.",
-          priceUsd: 10,
+          id: "courier-chisinau",
+          title: "Подработка",
+          description: "",
+          priceUsd: 50,
           country: "moldova",
           city: "chisinau",
-          district: "Чеканы",
-          deliveryType: "Городская доставка",
-          stock: 12,
-          status: "ready"
-        },
-        {
-          id: "courier-centru",
-          title: "Курьер - Подработка 💰",
-          description: "Подработка по центральному району Кишинева. Детали и график уточняются после оформления заявки.",
-          priceUsd: 10,
-          country: "moldova",
-          city: "chisinau",
-          district: "Центр",
-          deliveryType: "Городская доставка",
-          stock: 8,
+          district: "",
+          deliveryType: "Курьер",
+          stock: 1,
           status: "ready"
         }
       ]
     };
-    product.positions = product.positions.map((position) => {
-      if (position.id === "courier-checany") return { ...position, title: "Курьер - Подработка 💰", district: "Чеканы", deliveryType: "Городская доставка", priceUsd: 10 };
-      if (position.id === "courier-botanica") return { ...position, title: "Курьер - Подработка 💰", district: "Ботаника", deliveryType: "Городская доставка", priceUsd: 10 };
-      if (position.id === "courier-centru") return { ...position, title: "Курьер - Подработка 💰", district: "Центр", deliveryType: "Городская доставка", priceUsd: 10 };
-      return position;
-    });
-    priceUsd = 10;
+    priceUsd = 50;
   }
   return {
     ...product,
     id: product.id || `product-${Date.now()}`,
     title: product.title || "Товар",
     category: product.category || "Разное",
-    description: product.description || product.category || "",
+    description: product.description || "",
     priceUsd,
     price: product.price || (priceUsd ? `от ${priceUsd}$` : "0 $"),
     image: product.image || store.image || fallbackImage,
@@ -547,7 +520,7 @@ function normalizeProduct(product, store = {}) {
       country: position.country || "moldova",
       city: position.city || "chisinau",
       district: position.district || "",
-      deliveryType: position.deliveryType || "Городская доставка",
+      deliveryType: position.deliveryType || "Курьер",
       stock: Number(position.stock || 0),
       status: position.status || "ready"
     })) : [],
@@ -834,9 +807,8 @@ function usdToLtc(amountUsd) {
 }
 
 function locationLabel(position = {}) {
-  const country = filterOptions.countries[position.country]?.label || position.country || "";
   const city = filterOptions.countries[position.country]?.cities?.[position.city]?.label || position.city || "";
-  return [country, city, position.district].filter(Boolean).join(", ");
+  return [city, position.district].filter(Boolean).join(", ");
 }
 
 function referralCodeFor(login = db.currentUser) {
@@ -1519,7 +1491,7 @@ function productCardView(product, store) {
           <h3>${esc(product.title)}</h3>
           <p class="desc">${esc(product.category)}</p>
           <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
-          <p class="price">от ${minPrice.toFixed(0)}$</p>
+          <p class="price">${minPrice.toFixed(0)}$</p>
           <p class="rating-line"><span class="ok-dot">✓</span><span class="time-dot">◔</span><span class="star-dot">★</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
         </div>
       </button>
@@ -1552,7 +1524,6 @@ function renderProductView(storeId, productId) {
   const product = productById(store, productId);
   if (!product) return renderStore(store.id, "positions");
   const positions = productPositions(product);
-  const ltc = usdToLtc(product.priceUsd || 0);
   const images = (product.images || [product.image || store.image]).slice(0, 5);
   layout(`
     <section class="screen product-screen mega-product-screen">
@@ -1566,10 +1537,9 @@ function renderProductView(storeId, productId) {
         </div>
       </div>
       <article class="product-copy">
-        <p>${esc(product.description || "")}</p>
-        <button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>
+        ${product.description ? `<p>${esc(product.description)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
         <p class="shop-line"><span>Магазин:</span> <strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
-        <p class="price">от ${Number(product.priceUsd || 0).toFixed(0)}$ <span class="ltc-inline">≈ ${ltc.toFixed(6)} LTC</span></p>
+        <p class="price">${Number(product.priceUsd || 0).toFixed(0)}$</p>
         <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
       </article>
       <button class="location-select" data-filters>${esc(currentLocationFilterLabel())}<span>⌄</span></button>
@@ -1580,7 +1550,7 @@ function renderProductView(storeId, productId) {
       <div class="product-mode-tabs"><button class="active">Любой</button><button>Готовый</button><button>Предзаказ</button></div>
       ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
         <article class="panel empty-state">
-          <p>По выбранным фильтрам позиций нет. Измените город или район в фильтрах.</p>
+          <p>По выбранным фильтрам товаров нет.</p>
           <button class="primary" data-filters>Открыть фильтры</button>
         </article>
       `}
@@ -1588,13 +1558,6 @@ function renderProductView(storeId, productId) {
   `);
   document.querySelector("[data-read-product]")?.addEventListener("click", () => {
     showModal(`<h2>${esc(product.title)}</h2><p>${esc(product.description || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
-  });
-  fetchLitecoinUsdRate().then(() => {
-    if (route === "product" && activeProductId === productId) {
-      document.querySelectorAll("[data-ltc-price]").forEach((node) => {
-        node.textContent = `${usdToLtc(Number(node.dataset.usd || 0)).toFixed(6)} LTC`;
-      });
-    }
   });
 }
 
@@ -1604,12 +1567,12 @@ function positionCardView(position, product, store) {
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
         <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
-        <p><span>Тип локации</span><strong>${esc(position.deliveryType || "Городская доставка")}</strong></p>
+        <p><span>Тип</span><strong>${esc(position.deliveryType || "Курьер")}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
-        <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${usdToLtc(priceUsd).toFixed(6)} LTC</strong></p>
+        <p><span>Оплата</span><strong>позже</strong></p>
         <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
       </div>
-      <p class="desc">${esc(position.description || "")}</p>
+      ${position.description ? `<p class="desc">${esc(position.description)}</p>` : ""}
       <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>Купить</button>
     </article>
   `;
@@ -1675,7 +1638,7 @@ function positionCard(position, product, store) {
       </div>
       <div class="position-grid">
         <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
-        <p><span>Тип доставки</span><strong>${esc(position.deliveryType || "Городская доставка")}</strong></p>
+        <p><span>Тип</span><strong>${esc(position.deliveryType || "Курьер")}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(2)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${usdToLtc(priceUsd).toFixed(6)} LTC</strong></p>
         <p><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
@@ -1791,9 +1754,6 @@ function handleProductPurchase(storeId, productId, positionId) {
   const ltcAmount = usdToLtc(priceUsd);
   if (userLtcBalance() < ltcAmount) return;
   db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
-  position.stock = Math.max(0, Number(position.stock || 0) - 1);
-  product.purchases = Number(product.purchases || 0) + 1;
-  store.orders = Number(store.orders || 0) + 1;
   db.orders.unshift({
     id: `order-${Date.now()}`,
     type: "product",
@@ -1810,6 +1770,36 @@ function handleProductPurchase(storeId, productId, positionId) {
     location: locationLabel(position)
   });
   saveDb();
+  renderOrders("active");
+}
+
+function handleProductReservation(storeId, productId, positionId) {
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  const position = positionById(product, positionId);
+  if (!product || !position) return;
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
+  position.stock = Math.max(0, Number(position.stock || 0) - 1);
+  product.purchases = Number(product.purchases || 0) + 1;
+  store.orders = Number(store.orders || 0) + 1;
+  db.orders.unshift({
+    id: `order-${Date.now()}`,
+    type: "product",
+    login: db.currentUser,
+    storeId,
+    productId,
+    positionId,
+    product: product.title,
+    storeName: store.name,
+    status: "active",
+    createdAt: Date.now(),
+    amountUsd: priceUsd,
+    location: locationLabel(position),
+    paymentStatus: "later"
+  });
+  saveDb();
+  showToast("Заявка создана. Оплату добавим позже");
   renderOrders("active");
 }
 
@@ -2732,12 +2722,12 @@ function renderAdmin() {
           <div class="row">
             ${exchangeMethods.map((method) => `<label class="field">${method}<input name="req_${method}" value="60327998"></label>`).join("")}
           </div>
-          <label class="field">Описание<textarea name="description" required></textarea></label>
+          <label class="field">Описание<textarea name="description"></textarea></label>
           <div class="row">
-            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
+            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="50" required></label>
             <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
           </div>
-          <label class="field">Тип доставки<input name="deliveryType" value="Городская доставка"></label>
+          <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
           <div class="row">
             <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
             <label class="field">Город<input name="city" value="chisinau"></label>
@@ -2828,12 +2818,12 @@ function renderSeller() {
         <form class="form" data-product-form>
           <label class="field">${tr("name")}<input name="title" required></label>
           <label class="field">${tr("short")}<input name="category" required></label>
-          <label class="field">Описание<textarea name="description" required></textarea></label>
+          <label class="field">Описание<textarea name="description"></textarea></label>
           <div class="row">
-            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
+            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="50" required></label>
             <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
           </div>
-          <label class="field">Тип доставки<input name="deliveryType" value="Городская доставка"></label>
+          <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
           <div class="row">
             <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
             <label class="field">Город<input name="city" value="chisinau"></label>
@@ -2873,7 +2863,7 @@ function renderSeller() {
         country: data.get("country"),
         city: data.get("city").trim(),
         district: data.get("district").trim(),
-        deliveryType: data.get("deliveryType").trim(),
+        deliveryType: data.get("deliveryType").trim() || "Курьер",
         stock: Number(data.get("stock") || 0),
         status: "ready"
       }],
@@ -2995,7 +2985,7 @@ function bindGlobal() {
   document.querySelectorAll("[data-buy-position]").forEach((button) => {
     button.onclick = (event) => {
       event.stopPropagation();
-      renderProductPaymentView(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
+      handleProductReservation(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
     };
   });
   document.querySelector("[data-menu]").onclick = () => document.querySelector("[data-nav-pop]").classList.add("open");
@@ -3057,7 +3047,6 @@ function renderCurrent() {
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "product") return renderProductView(activeStoreId || db.stores[0].id, activeProductId);
-  if (route === "product-payment") return renderProductPaymentView(activeStoreId || db.stores[0].id, activeProductId, activePositionId);
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
   if (route === "chat") return renderChat(activeStoreId || db.stores[0].id);
   renderHome();
