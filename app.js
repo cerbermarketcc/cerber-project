@@ -3,6 +3,8 @@ const LEGACY_STORE_KEY = "cerber_demo_state_v1";
 const SESSION_KEY = "cerber_current_user_v1";
 const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
+const SELLER_ADMIN_KEY = "cerber_seller_admin_v1";
+const SELLER_ADMIN_API_TOKEN_KEY = "cerber_seller_admin_token_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
 let TURNSTILE_SITE_KEY = "";
@@ -126,6 +128,7 @@ const defaults = {
       id: "skboy",
       tag: "@skboy",
       ownerLogin: "skboy",
+      adminPassword: "skboy",
       name: "Солёный Мальчик",
       short: "SK BOY это семья",
       description: "",
@@ -222,6 +225,7 @@ let activeReferralTab = "referrals";
 let activeExchangeId = "kent-ltc";
 let activeExchangeTab = "calculator";
 let activeExchangeOrderId = "";
+let sellerAdminStoreId = "";
 
 const root = document.getElementById("app");
 
@@ -479,6 +483,7 @@ function normalizeDb(next) {
       reviews: Number.isFinite(Number(store.reviews)) ? Number(store.reviews) : NEW_STORE_STATS.reviews,
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
       ltcWallet: store.ltcWallet || seed?.ltcWallet || "",
+      adminPassword: store.adminPassword || seed?.adminPassword || (store.id === "skboy" ? "skboy" : ""),
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
@@ -784,6 +789,26 @@ async function persistRemoteState() {
   }
 }
 
+async function persistSellerAdminStore() {
+  if (!API_ENABLED) return;
+  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const store = sellerAdminStore();
+  if (!token || !store) return;
+  try {
+    const response = await fetch("/api/store-admin/store", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ store })
+    });
+    if (!response.ok) throw new Error("Store admin save failed");
+  } catch {
+    showToast("Админка магазина временно не сохранила изменения в базе");
+  }
+}
+
 function saveDb() {
   normalizeOrders(db);
   saveAuth();
@@ -793,6 +818,7 @@ function saveDb() {
     showToast("LocalStorage недоступен");
   }
   persistRemoteState();
+  persistSellerAdminStore();
 }
 
 function clearSession() {
@@ -815,7 +841,36 @@ function isAdmin() {
   return currentUser()?.role === "admin";
 }
 
+function sellerAdminHashId() {
+  const match = decodeURIComponent(location.hash || "").match(/^#(?:seller|shop-admin)-([a-z0-9_-]+)$/i);
+  return match?.[1] || "";
+}
+
+function sellerAdminSessionId() {
+  try {
+    return localStorage.getItem(SELLER_ADMIN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function sellerAdminStore() {
+  const id = sellerAdminStoreId || sellerAdminHashId() || sellerAdminSessionId();
+  return db.stores.find((store) => store.id === id) || null;
+}
+
+function storeAdminPassword(store) {
+  return store?.adminPassword || (store?.id === "skboy" ? "skboy" : "");
+}
+
+function sellerAdminLink(store) {
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  return `${base}/#seller-${store.id}`;
+}
+
 function sellerStores() {
+  const standaloneStore = sellerAdminStore();
+  if (standaloneStore) return [standaloneStore];
   if (isAdmin()) return db.stores;
   return db.stores.filter((store) => sameLogin(store.ownerLogin, db.currentUser));
 }
@@ -1147,7 +1202,6 @@ function layout(content) {
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
         ${isAdmin() ? `<button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>` : ""}
-        ${sellerStores().length ? `<button class="account-row" data-route="seller">▤ <span>${tr("seller")}</span></button>` : ""}
         ${(operatorExchangeCards().length || isAdmin()) ? accountMenuButton("exchange", "Панель обменника", `data-route="exchange-admin"`) : ""}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
@@ -1188,6 +1242,58 @@ function renderAuth(message = "") {
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
   mountTurnstile();
+}
+
+function renderSellerAdminLogin(storeId = "skboy", message = "") {
+  const store = db.stores.find((item) => item.id === storeId) || db.stores.find((item) => item.id === "skboy") || db.stores[0];
+  sellerAdminStoreId = store?.id || storeId;
+  document.body.dataset.theme = db.theme;
+  root.innerHTML = `
+    <main class="auth-wrap">
+      <section class="auth-card">
+        <img src="assets/logo1-white.png" alt="CERBER">
+        <h1>Админка магазина</h1>
+        <p>${esc(store?.name || "Магазин")}</p>
+        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        <form class="form" data-seller-admin-login>
+          <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
+          <button class="primary" type="submit">Войти</button>
+        </form>
+      </section>
+    </main>
+    <div class="toast"></div>
+  `;
+  document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
+    event.preventDefault();
+    const password = new FormData(event.currentTarget).get("password");
+    if (API_ENABLED) {
+      try {
+        const response = await fetch("/api/store-admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ storeId: store.id, password })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Неверный пароль");
+        localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
+        applyRemoteState(payload);
+      } catch (error) {
+        renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
+        return;
+      }
+    }
+    if (password !== storeAdminPassword(store)) {
+      renderSellerAdminLogin(store.id, "Неверный пароль");
+      return;
+    }
+    try {
+      localStorage.setItem(SELLER_ADMIN_KEY, store.id);
+    } catch {}
+    sellerAdminStoreId = store.id;
+    route = "seller";
+    location.hash = `seller-${store.id}`;
+    renderSeller();
+  };
 }
 
 function mountTurnstile() {
@@ -2950,6 +3056,8 @@ function adminStoreEditor(store) {
       <h2>${esc(store.name)}</h2>
       <p>${esc(store.tag)} · ${esc(store.ownerLogin)}</p>
       <form class="form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
+        <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
+        <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
         <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
@@ -3004,6 +3112,7 @@ function bindAdminProductForms() {
       }
       const priceUsd = Number(data.get("priceUsd") || 0);
       store.ltcWallet = data.get("ltcWallet").trim();
+      store.adminPassword = data.get("adminPassword").trim() || storeAdminPassword(store);
       product.title = data.get("title").trim();
       product.category = data.get("category").trim();
       product.description = data.get("description").trim();
@@ -3051,6 +3160,7 @@ async function handleStoreCreate(event) {
     id: data.get("id").trim(),
     tag: data.get("tag").trim(),
     ownerLogin: finalOwnerLogin,
+    adminPassword: data.get("id").trim() === "skboy" ? "skboy" : "123",
     name: data.get("name").trim(),
     short: data.get("short").trim(),
     description: data.get("description").trim(),
@@ -3100,13 +3210,15 @@ async function handleExchangeCardCreate(event) {
 
 function renderSeller() {
   const stores = sellerStores();
-  if (!stores.length) return renderHome();
+  if (!stores.length) return renderSellerAdminLogin(sellerAdminStoreId || "skboy");
   route = "seller";
   const store = stores[0];
+  const standalone = Boolean(sellerAdminStore());
   layout(`
     <section class="screen">
       <article class="panel">
-        <h2>${tr("seller")}: ${esc(store.name)}</h2>
+        <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
+        ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
         <form class="form" data-seller-profile-form>
           <label class="field">Имя магазина<input name="name" value="${esc(store.name || "")}" required></label>
           <label class="field">Короткое описание<input name="short" value="${esc(store.short || "")}"></label>
@@ -3141,6 +3253,15 @@ function renderSeller() {
       ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);
+  document.querySelector("[data-seller-admin-logout]")?.addEventListener("click", () => {
+    try {
+      localStorage.removeItem(SELLER_ADMIN_KEY);
+      localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
+    } catch {}
+    const storeId = store.id;
+    sellerAdminStoreId = storeId;
+    renderSellerAdminLogin(storeId);
+  });
   document.querySelector("[data-seller-profile-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -3359,6 +3480,12 @@ function routeTo(next) {
 }
 
 function renderCurrent() {
+  const hashStoreId = sellerAdminHashId();
+  if (hashStoreId) {
+    sellerAdminStoreId = hashStoreId;
+    if (sellerAdminSessionId() === hashStoreId) return renderSeller();
+    return renderSellerAdminLogin(hashStoreId);
+  }
   if (!db.currentUser || !currentUser()) return renderAuth();
   if (route === "home") return renderHome();
   if (route === "catalog") return renderCatalog();
@@ -3386,5 +3513,7 @@ async function initApp() {
   await fetchLitecoinUsdRate();
   renderCurrent();
 }
+
+window.addEventListener("hashchange", renderCurrent);
 
 initApp();

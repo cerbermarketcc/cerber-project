@@ -34,6 +34,7 @@ const defaultStore = {
   id: "skboy",
   tag: "@skboy",
   ownerLogin: "skboy",
+  adminPassword: "skboy",
   name: "Солёный Мальчик",
   short: "SK BOY это семья",
   description: "",
@@ -229,6 +230,31 @@ async function userFromRequest(req) {
   return user || null;
 }
 
+function sellerAdminSecret() {
+  return supabaseServiceKey || process.env.SELLER_ADMIN_SECRET || "cerber-local-seller-admin";
+}
+
+function signSellerAdminToken(storeId) {
+  const payload = Buffer.from(JSON.stringify({ storeId, createdAt: Date.now() })).toString("base64url");
+  const signature = crypto.createHmac("sha256", sellerAdminSecret()).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifySellerAdminToken(req) {
+  const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return null;
+  const expected = crypto.createHmac("sha256", sellerAdminSecret()).update(payload).digest("base64url");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+  try {
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
@@ -282,6 +308,38 @@ app.post("/api/auth/login", async (req, res, next) => {
 
 app.get("/api/config", (_req, res) => {
   res.json({ turnstileSiteKey });
+});
+
+app.post("/api/store-admin/login", async (req, res, next) => {
+  try {
+    requireDb();
+    await ensureSeed();
+    const storeId = String(req.body.storeId || "").trim();
+    const password = String(req.body.password || "");
+    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+    const store = row?.data || (storeId === defaultStore.id ? defaultStore : null);
+    if (!store || password !== (store.adminPassword || (store.id === "skboy" ? "skboy" : ""))) {
+      return res.status(401).json({ error: "Неверный пароль" });
+    }
+    res.json({ token: signSellerAdminToken(store.id), ...(await stateFor(null)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/store-admin/store", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    const store = req.body.store || {};
+    if (!token || !token.storeId || store.id !== token.storeId) {
+      return res.status(401).json({ error: "Нет доступа к этой админке" });
+    }
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    res.json(await stateFor(null));
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/session", async (req, res, next) => {
