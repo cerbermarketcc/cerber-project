@@ -129,6 +129,7 @@ const defaults = {
       name: "Солёный Мальчик",
       short: "SK BOY это семья",
       description: "",
+      ltcWallet: "ltc1q-store-wallet",
       image: "assets/soleniy-malchik.jpg",
       cover: "assets/soleniy-malchik.jpg",
       orders: 0,
@@ -191,6 +192,12 @@ const defaults = {
   referralCodes: {},
   balances: {},
   ltcBalances: {},
+  paymentSettings: {
+    provider: "owpayments",
+    payBaseUrl: "https://owpayments.com/pay",
+    platformCommissionPercent: 5,
+    platformLtcWallet: "ltc1q-platform-wallet"
+  },
   referralPeriod: {},
   filters: {
     country: "moldova",
@@ -445,6 +452,7 @@ function normalizeDb(next) {
   if (!next.referralCodes) next.referralCodes = {};
   if (!next.balances) next.balances = {};
   if (!next.ltcBalances) next.ltcBalances = {};
+  if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
   if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
   (next.users || []).forEach((user) => {
@@ -461,6 +469,7 @@ function normalizeDb(next) {
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
       reviews: Number.isFinite(Number(store.reviews)) ? Number(store.reviews) : NEW_STORE_STATS.reviews,
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
+      ltcWallet: store.ltcWallet || seed?.ltcWallet || "",
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
@@ -555,6 +564,20 @@ function normalizeOrders(next) {
   next.orders = (next.orders || []).map((order) => {
     const createdAt = order.createdAt || now;
     const age = now - Number(createdAt);
+    if (order.type === "product") {
+      if (order.status === "pending_payment" && order.paymentExpiresAt && now >= Number(order.paymentExpiresAt)) {
+        return { ...order, status: "canceled", paymentStatus: "expired", canceledAt: now, cancelReason: "Бронь 40 минут истекла" };
+      }
+      if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
+        return { ...order, status: "completed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
+      }
+      return {
+        ...order,
+        createdAt,
+        paymentStatus: order.paymentStatus || (order.status === "completed" ? "paid" : "waiting"),
+        paymentExpiresAt: order.paymentExpiresAt || (order.status === "pending_payment" ? Number(createdAt) + 40 * 60 * 1000 : null)
+      };
+    }
     if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
       return { ...order, status: "closed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
     }
@@ -723,6 +746,7 @@ async function persistRemoteState() {
           referralCodes: db.referralCodes,
           balances: db.balances,
           ltcBalances: db.ltcBalances,
+          paymentSettings: db.paymentSettings,
           referralPeriod: db.referralPeriod,
           filters: db.filters
         }
@@ -809,6 +833,26 @@ function usdToLtc(amountUsd) {
 function locationLabel(position = {}) {
   const city = filterOptions.countries[position.country]?.cities?.[position.city]?.label || position.city || "";
   return [city, position.district].filter(Boolean).join(", ");
+}
+
+function orderCanDispute(order) {
+  if (!order || order.type !== "product" || order.status !== "completed") return false;
+  const paidAt = Number(order.paidAt || order.completedAt || 0);
+  return paidAt > 0 && Date.now() - paidAt <= 12 * 60 * 60 * 1000;
+}
+
+function productPaymentUrl(order) {
+  const settings = db.paymentSettings || defaults.paymentSettings;
+  const base = settings.payBaseUrl || "https://owpayments.com/pay";
+  const params = new URLSearchParams({
+    order: order.id,
+    amount: Number(order.amountUsd || 0).toFixed(2),
+    currency: "USD",
+    crypto: "LTC",
+    wallet: order.sellerLtcWallet || "",
+    callback: location.protocol === "file:" ? "https://cerber.vip/api/payments/owpayments" : `${location.origin}/api/payments/owpayments`
+  });
+  return `${base}?${params.toString()}`;
 }
 
 function referralCodeFor(login = db.currentUser) {
@@ -1261,15 +1305,17 @@ function renderOrders(tab = activeOrdersTab) {
   route = "orders";
   activeOrdersTab = tab;
   const orders = userOrders();
-  const active = orders.filter((order) => order.status === "active" && !order.disputeOpen);
+  const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status) && !order.disputeOpen);
+  const completed = orders.filter((order) => ["completed", "closed"].includes(order.status) && !order.disputeOpen);
   const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
-  const list = tab === "active" ? active : tab === "disputes" ? disputes : orders;
+  const list = tab === "active" ? active : tab === "completed" ? completed : tab === "disputes" ? disputes : orders;
   layout(`
     <section class="screen orders-screen">
       <h1 class="big-title">Заказы</h1>
       <div class="order-tabs">
         <button class="${tab === "all" ? "active" : ""}" data-order-tab="all">Все <span>${orders.length}</span></button>
         <button class="${tab === "active" ? "active" : ""}" data-order-tab="active">Активные <span>${active.length}</span></button>
+        <button class="${tab === "completed" ? "active" : ""}" data-order-tab="completed">Завершённые <span>${completed.length}</span></button>
         <button class="${tab === "disputes" ? "active" : ""}" data-order-tab="disputes">Споры <span>${disputes.length}</span></button>
       </div>
       ${list.length ? list.map(orderCard).join("") : `
@@ -1292,30 +1338,49 @@ function renderOrders(tab = activeOrdersTab) {
     };
   });
   document.querySelectorAll("[data-order-dispute]").forEach((button) => {
-    button.onclick = () => openExchangeDispute(button.dataset.orderDispute);
+    button.onclick = () => openProductDispute(button.dataset.orderDispute);
   });
   document.querySelectorAll("[data-order-close]").forEach((button) => {
     button.onclick = () => closeExchangeOrder(button.dataset.orderClose, "closed");
+  });
+  document.querySelectorAll("[data-order-pay]").forEach((button) => {
+    button.onclick = () => renderProductPaymentOrder(button.dataset.orderPay);
+  });
+  document.querySelectorAll("[data-order-cancel]").forEach((button) => {
+    button.onclick = () => cancelProductOrder(button.dataset.orderCancel);
   });
 }
 
 function orderCard(order) {
   const request = order.exchangeRequestId ? exchangeRequestById(order.exchangeRequestId) : null;
-  const status = request ? exchangeStatusLabel(request.status) : order.disputeOpen ? "Спор" : order.status === "closed" ? "Закрыт" : "Активный";
+  const status = request ? exchangeStatusLabel(request.status) : productOrderStatus(order);
   return `
     <article class="order-card">
       <div>
         <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
+        <p>${Number(order.amountUsd || 0).toFixed(2)} $${order.location ? ` · ${esc(order.location)}` : ""}</p>
+        ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
+        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.productDescription || "Описание будет доступно в деталях заказа.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
         <span>${status}</span>
         <button data-order-open="${esc(order.exchangeRequestId || order.id)}">Детали</button>
-        ${order.status === "active" ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+        ${order.status === "pending_payment" ? `<button data-order-pay="${esc(order.id)}">Оплатить</button><button data-order-cancel="${esc(order.id)}">Отменить</button>` : ""}
+        ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
   `;
+}
+
+function productOrderStatus(order) {
+  if (order.disputeOpen || order.status === "dispute") return "Спор";
+  if (order.status === "pending_payment") return "Ожидает оплату";
+  if (order.status === "completed") return "Завершён";
+  if (order.status === "canceled") return "Отменён";
+  if (order.status === "closed") return "Закрыт";
+  return "Активный";
 }
 
 function showProductOrder(orderId) {
@@ -1325,10 +1390,15 @@ function showProductOrder(orderId) {
     <h2>${esc(order.product)}</h2>
     <p>${esc(order.storeName || "")}</p>
     <p>${esc(order.location || "")}</p>
-    <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || 0).toFixed(6)} LTC</p>
-    <p>Статус: ${esc(order.status || "active")}</p>
+    <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+    <p>Статус: ${productOrderStatus(order)}</p>
+    ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.productDescription || "")}</p>` : ""}
+    ${order.status === "pending_payment" ? `<p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p><button class="primary" data-order-pay="${esc(order.id)}">Оплатить</button>` : ""}
+    ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
+  document.querySelector("[data-order-pay]")?.addEventListener("click", (event) => renderProductPaymentOrder(event.currentTarget.dataset.orderPay));
+  document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
 }
 
 function renderFilters() {
@@ -1780,10 +1850,9 @@ function handleProductReservation(storeId, productId, positionId) {
   if (!product || !position) return;
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
-  position.stock = Math.max(0, Number(position.stock || 0) - 1);
-  product.purchases = Number(product.purchases || 0) + 1;
-  store.orders = Number(store.orders || 0) + 1;
-  db.orders.unshift({
+  const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
+  const commissionUsd = priceUsd * commissionPercent / 100;
+  const order = {
     id: `order-${Date.now()}`,
     type: "product",
     login: db.currentUser,
@@ -1792,15 +1861,105 @@ function handleProductReservation(storeId, productId, positionId) {
     positionId,
     product: product.title,
     storeName: store.name,
-    status: "active",
+    status: "pending_payment",
+    paymentStatus: "waiting",
     createdAt: Date.now(),
+    paymentExpiresAt: Date.now() + 40 * 60 * 1000,
     amountUsd: priceUsd,
     location: locationLabel(position),
-    paymentStatus: "later"
-  });
+    productDescription: product.description || "",
+    sellerLtcWallet: store.ltcWallet || "",
+    platformLtcWallet: db.paymentSettings?.platformLtcWallet || "",
+    platformCommissionPercent: commissionPercent,
+    platformCommissionUsd: commissionUsd,
+    sellerAmountUsd: priceUsd - commissionUsd,
+    paymentProvider: "owpayments"
+  };
+  db.orders.unshift(order);
   saveDb();
-  showToast("Заявка создана. Оплату добавим позже");
+  renderProductPaymentOrder(order.id);
+}
+
+function renderProductPaymentOrder(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order) return renderOrders("active");
+  route = "orders";
+  const payUrl = productPaymentUrl(order);
+  layout(`
+    <section class="screen product-payment-screen mega-payment-screen">
+      <p class="breadcrumbs">Заказы &gt; ${esc(order.product)} &gt; Оплата</p>
+      <article class="payment-summary-card">
+        <div>
+          <h2>${esc(order.product)}</h2>
+          <p>${esc(order.storeName || "")}</p>
+          <p><span>Город:</span> ${esc(order.location || "")}</p>
+          <p><span>Стоимость:</span> ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+          <p><span>Бронь:</span> до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+        </div>
+        <img src="${esc(storeById(order.storeId)?.image || fallbackImage)}" alt="">
+      </article>
+      <article class="panel">
+        <h2>Оплата через OWPayments</h2>
+        <p>Деньги поступят магазину на LTC-счёт. Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}% (${Number(order.platformCommissionUsd || 0).toFixed(2)} $).</p>
+        <p>Магазину: ${Number(order.sellerAmountUsd || order.amountUsd || 0).toFixed(2)} $. Площадке: ${Number(order.platformCommissionUsd || 0).toFixed(2)} $.</p>
+        <p class="desc">После реального callback от OWPayments заказ будет закрываться автоматически. В тестовом режиме кнопка ниже отмечает оплату вручную.</p>
+        <a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>
+        <button class="ghost-button" data-mark-product-paid="${esc(order.id)}">Я оплатил / тест успешной оплаты</button>
+        <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-mark-product-paid]")?.addEventListener("click", (event) => markProductOrderPaid(event.currentTarget.dataset.markProductPaid));
+  document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
+}
+
+function markProductOrderPaid(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || order.status !== "pending_payment") return;
+  const store = storeById(order.storeId);
+  const product = productById(store, order.productId);
+  const position = positionById(product, order.positionId);
+  order.status = "completed";
+  order.paymentStatus = "paid";
+  order.paidAt = Date.now();
+  order.completedAt = Date.now();
+  if (position) position.stock = Math.max(0, Number(position.stock || 0) - 1);
+  if (product) product.purchases = Number(product.purchases || 0) + 1;
+  if (store) store.orders = Number(store.orders || 0) + 1;
+  saveDb();
+  showModal(`
+    <h2>Оплата успешна</h2>
+    <p>Вы оплатили заказ: ${esc(order.product)}</p>
+    <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+    <p>Город: ${esc(order.location || "")}</p>
+    <p>${esc(order.productDescription || "")}</p>
+    <button class="primary" data-close-modal>${tr("close")}</button>
+  `);
+}
+
+function cancelProductOrder(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || order.paymentStatus === "paid") return;
+  order.status = "canceled";
+  order.paymentStatus = "canceled";
+  order.canceledAt = Date.now();
+  saveDb();
   renderOrders("active");
+}
+
+function openProductDispute(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  if (!orderCanDispute(order)) {
+    showToast("Спор можно открыть только в течение 12 часов после оплаты");
+    return;
+  }
+  order.status = "dispute";
+  order.disputeOpen = true;
+  order.disputeUntil = Date.now() + 12 * 60 * 60 * 1000;
+  saveDb();
+  showToast("Спор открыт на 12 часов");
+  renderOrders("disputes");
 }
 
 function reviewCard(review) {
@@ -2722,26 +2881,105 @@ function renderAdmin() {
           <div class="row">
             ${exchangeMethods.map((method) => `<label class="field">${method}<input name="req_${method}" value="60327998"></label>`).join("")}
           </div>
-          <label class="field">Описание<textarea name="description"></textarea></label>
-          <div class="row">
-            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="50" required></label>
-            <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
-          </div>
-          <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
-          <div class="row">
-            <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
-            <label class="field">Город<input name="city" value="chisinau"></label>
-            <label class="field">Район<input name="district" placeholder="Чеканы"></label>
-          </div>
-          <label class="field">${tr("upload")}<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">Добавить обменник</button>
         </form>
       </article>
-      ${db.stores.map((store) => `<article class="panel"><h2>${esc(store.name)}</h2><p>${esc(store.tag)} · ${esc(store.ownerLogin)}</p><p>${esc(store.orders)} ${tr("orders")} · ${esc(store.reviews)} ${tr("reviews")} · ${Number(store.rating).toFixed(2)} ${tr("rating")}</p></article>`).join("")}
+      <article class="panel">
+        <h2>Настройки оплат</h2>
+        <form class="form" data-payment-settings-form>
+          <label class="field">OWPayments URL<input name="payBaseUrl" value="${esc(db.paymentSettings?.payBaseUrl || "https://owpayments.com/pay")}"></label>
+          <div class="row">
+            <label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.01" value="${esc(db.paymentSettings?.platformCommissionPercent ?? 5)}"></label>
+            <label class="field">LTC счет площадки<input name="platformLtcWallet" value="${esc(db.paymentSettings?.platformLtcWallet || "")}"></label>
+          </div>
+          <button class="primary">Сохранить оплаты</button>
+        </form>
+      </article>
+      ${db.stores.map(adminStoreEditor).join("")}
     </section>
   `);
   document.querySelector("[data-store-form]").onsubmit = handleStoreCreate;
   document.querySelector("[data-exchange-admin-form]").onsubmit = handleExchangeCardCreate;
+  document.querySelector("[data-payment-settings-form]").onsubmit = handlePaymentSettingsSave;
+  bindAdminProductForms();
+}
+
+function adminStoreEditor(store) {
+  const product = store.products?.[0] || {};
+  const position = product.positions?.[0] || {};
+  return `
+    <article class="panel">
+      <h2>${esc(store.name)}</h2>
+      <p>${esc(store.tag)} · ${esc(store.ownerLogin)}</p>
+      <form class="form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
+        <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
+        <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
+        <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
+        <div class="row">
+          <label class="field">Категория<input name="category" value="${esc(product.category || "Работа / Курьер")}"></label>
+          <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || position.priceUsd || 50)}"></label>
+        </div>
+        <div class="row">
+          <label class="field">Город<input name="city" value="${esc(position.city || "chisinau")}"></label>
+          <label class="field">Район<input name="district" value="${esc(position.district || "")}"></label>
+          <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Курьер")}"></label>
+          <label class="field">Кол-во<input name="stock" type="number" min="0" value="${esc(position.stock || 1)}"></label>
+        </div>
+        <button class="primary">Сохранить товар</button>
+      </form>
+    </article>
+  `;
+}
+
+function handlePaymentSettingsSave(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  db.paymentSettings = {
+    provider: "owpayments",
+    payBaseUrl: data.get("payBaseUrl").trim() || "https://owpayments.com/pay",
+    platformCommissionPercent: Number(data.get("platformCommissionPercent") || 0),
+    platformLtcWallet: data.get("platformLtcWallet").trim()
+  };
+  saveDb();
+  showToast("Настройки оплат сохранены");
+  renderAdmin();
+}
+
+function bindAdminProductForms() {
+  document.querySelectorAll("[data-admin-product-form]").forEach((form) => {
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const store = storeById(form.dataset.storeId);
+      let product = productById(store, form.dataset.productId);
+      if (!product) {
+        product = normalizeProduct({ id: `product-${Date.now()}`, positions: [] }, store);
+        store.products.unshift(product);
+      }
+      let position = positionById(product, form.dataset.positionId);
+      if (!position) {
+        position = { id: `position-${Date.now()}` };
+        product.positions = [position];
+      }
+      const priceUsd = Number(data.get("priceUsd") || 0);
+      store.ltcWallet = data.get("ltcWallet").trim();
+      product.title = data.get("title").trim();
+      product.category = data.get("category").trim();
+      product.description = data.get("description").trim();
+      product.priceUsd = priceUsd;
+      product.price = `${priceUsd}$`;
+      position.title = product.title;
+      position.description = product.description;
+      position.priceUsd = priceUsd;
+      position.city = data.get("city").trim() || "chisinau";
+      position.district = data.get("district").trim();
+      position.deliveryType = data.get("deliveryType").trim() || "Курьер";
+      position.stock = Number(data.get("stock") || 0);
+      saveDb();
+      showToast("Товар сохранён");
+      renderAdmin();
+    };
+  });
 }
 
 async function handleStoreCreate(event) {
@@ -2833,6 +3071,7 @@ function renderSeller() {
           <button class="primary">${tr("addProduct")}</button>
         </form>
       </article>
+      ${adminStoreEditor(store)}
       ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);
@@ -2872,6 +3111,7 @@ function renderSeller() {
     saveDb();
     renderSeller();
   };
+  bindAdminProductForms();
 }
 
 function renderExchangeOperator() {

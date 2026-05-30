@@ -32,28 +32,40 @@ const defaultStore = {
   ownerLogin: "skboy",
   name: "Солёный Мальчик",
   short: "SK BOY это семья",
-  description: "Мы работаем как локальная демо-витрина. Здесь будет полное описание магазина, правила, новости и важная информация для клиентов.",
+  description: "",
+  ltcWallet: "ltc1q-store-wallet",
   image: "assets/soleniy-malchik.jpg",
   cover: "assets/soleniy-malchik.jpg",
   orders: 0,
   reviews: 1,
   rating: 5,
   products: [{
-    id: "demo-product",
-    title: "Доступная позиция будет добавлена позже",
-    category: "Демо / Позиция",
-    price: "0 $",
+    id: "courier-work",
+    title: "Подработка",
+    category: "Работа / Курьер",
+    description: "",
+    price: "50$",
+    priceUsd: 50,
     image: "assets/soleniy-malchik.jpg",
+    images: ["assets/soleniy-malchik.jpg"],
     rating: 5,
-    reviews: 0
+    reviews: 1,
+    purchases: 0,
+    positions: [{
+      id: "courier-chisinau",
+      title: "Подработка",
+      description: "",
+      priceUsd: 50,
+      country: "moldova",
+      city: "chisinau",
+      district: "",
+      deliveryType: "Курьер",
+      stock: 1,
+      status: "ready"
+    }],
+    reviewsList: []
   }],
-  reviewsList: [{
-    id: "review-demo-1",
-    serviceDate: "28.05.2026",
-    rating: 5,
-    product: "шоколад 1 грамм",
-    text: "касаний 5 из 5 звезд"
-  }]
+  reviewsList: []
 };
 
 const defaultExchangeCards = [{
@@ -150,6 +162,12 @@ async function ensureSeed() {
       referralCodes: {},
       balances: {},
       ltcBalances: {},
+      paymentSettings: {
+        provider: "owpayments",
+        payBaseUrl: "https://owpayments.com/pay",
+        platformCommissionPercent: 5,
+        platformLtcWallet: ""
+      },
       referralPeriod: {},
       filters: {
         country: "moldova",
@@ -188,6 +206,7 @@ async function stateFor(user) {
       referralCodes: settings?.data?.referralCodes || {},
       balances: settings?.data?.balances || {},
       ltcBalances: settings?.data?.ltcBalances || {},
+      paymentSettings: settings?.data?.paymentSettings || {},
       referralPeriod: settings?.data?.referralPeriod || {},
       filters: settings?.data?.filters || {}
     }
@@ -288,6 +307,7 @@ app.put("/api/state", async (req, res, next) => {
         referralCodes: state.referralCodes || {},
         balances: state.balances || {},
         ltcBalances: state.ltcBalances || {},
+        paymentSettings: state.paymentSettings || {},
         referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
       }
@@ -337,6 +357,37 @@ app.put("/api/state", async (req, res, next) => {
     }
 
     res.json(await stateFor(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/payments/owpayments", async (req, res, next) => {
+  try {
+    requireDb();
+    const orderId = String(req.body.order || req.body.orderId || req.body.invoice_id || "");
+    const status = String(req.body.status || req.body.payment_status || "").toLowerCase();
+    const paid = ["paid", "success", "confirmed", "complete", "completed"].includes(status);
+    if (!orderId || !paid) return res.status(400).json({ error: "Unsupported payment callback" });
+
+    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settings?.data || {};
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === orderId);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    order.status = "completed";
+    order.paymentStatus = "paid";
+    order.paidAt = Date.now();
+    order.completedAt = Date.now();
+    order.paymentProviderPayload = req.body;
+
+    await supabase.from("app_settings").upsert({
+      id: "main",
+      data: { ...state, orders }
+    }, { onConflict: "id" });
+
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }

@@ -801,6 +801,12 @@ body[data-theme="dark"] .logo {
   font: inherit;
 }
 
+.link-button {
+  display: grid;
+  place-items: center;
+  text-decoration: none;
+}
+
 .review-card {
   display: grid;
   gap: 10px;
