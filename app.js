@@ -129,7 +129,7 @@ const defaults = {
       name: "Солёный Мальчик",
       short: "SK BOY это семья",
       description: "",
-      ltcWallet: "ltc1q-store-wallet",
+      ltcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
       image: "assets/soleniy-malchik.jpg",
       cover: "assets/soleniy-malchik.jpg",
       orders: 0,
@@ -193,10 +193,10 @@ const defaults = {
   balances: {},
   ltcBalances: {},
   paymentSettings: {
-    provider: "owpayments",
-    payBaseUrl: "https://owpayments.com/pay",
-    platformCommissionPercent: 5,
-    platformLtcWallet: "ltc1q-platform-wallet"
+    provider: "nowpayments",
+    payBaseUrl: "",
+    platformCommissionPercent: 0,
+    platformLtcWallet: ""
   },
   referralPeriod: {},
   filters: {
@@ -453,6 +453,10 @@ function normalizeDb(next) {
   if (!next.balances) next.balances = {};
   if (!next.ltcBalances) next.ltcBalances = {};
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
+  const previousPaymentProvider = next.paymentSettings.provider;
+  next.paymentSettings.provider = "nowpayments";
+  if (previousPaymentProvider !== "nowpayments") next.paymentSettings.platformCommissionPercent = 0;
+  next.paymentSettings.platformCommissionPercent = Number(next.paymentSettings.platformCommissionPercent || 0);
   if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
   (next.users || []).forEach((user) => {
@@ -464,6 +468,9 @@ function normalizeDb(next) {
   next.stores = (next.stores || []).map((store) => {
     const seed = defaults.stores.find((item) => item.id === store.id);
     if (store.id === "skboy" && /демо|demo/i.test(String(store.description || ""))) store.description = "";
+    if (store.id === "skboy" && (!store.ltcWallet || store.ltcWallet === "ltc1q-store-wallet")) {
+      store.ltcWallet = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+    }
     return {
       ...store,
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
@@ -842,17 +849,7 @@ function orderCanDispute(order) {
 }
 
 function productPaymentUrl(order) {
-  const settings = db.paymentSettings || defaults.paymentSettings;
-  const base = settings.payBaseUrl || "https://owpayments.com/pay";
-  const params = new URLSearchParams({
-    order: order.id,
-    amount: Number(order.amountUsd || 0).toFixed(2),
-    currency: "USD",
-    crypto: "LTC",
-    wallet: order.sellerLtcWallet || "",
-    callback: location.protocol === "file:" ? "https://cerber.vip/api/payments/owpayments" : `${location.origin}/api/payments/owpayments`
-  });
-  return `${base}?${params.toString()}`;
+  return order.paymentUrl || "";
 }
 
 function referralCodeFor(login = db.currentUser) {
@@ -1873,7 +1870,7 @@ function handleProductReservation(storeId, productId, positionId) {
     platformCommissionPercent: commissionPercent,
     platformCommissionUsd: commissionUsd,
     sellerAmountUsd: priceUsd - commissionUsd,
-    paymentProvider: "owpayments"
+    paymentProvider: "nowpayments"
   };
   db.orders.unshift(order);
   saveDb();
@@ -1899,18 +1896,33 @@ function renderProductPaymentOrder(orderId) {
         <img src="${esc(storeById(order.storeId)?.image || fallbackImage)}" alt="">
       </article>
       <article class="panel">
-        <h2>Оплата через OWPayments</h2>
-        <p>Деньги поступят магазину на LTC-счёт. Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}% (${Number(order.platformCommissionUsd || 0).toFixed(2)} $).</p>
-        <p>Магазину: ${Number(order.sellerAmountUsd || order.amountUsd || 0).toFixed(2)} $. Площадке: ${Number(order.platformCommissionUsd || 0).toFixed(2)} $.</p>
-        <p class="desc">После реального callback от OWPayments заказ будет закрываться автоматически. В тестовом режиме кнопка ниже отмечает оплату вручную.</p>
-        <a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>
-        <button class="ghost-button" data-mark-product-paid="${esc(order.id)}">Я оплатил / тест успешной оплаты</button>
+        <h2>Оплата через NOWPayments</h2>
+        <p>Оплата принимается в LTC. Средства идут на LTC-счёт магазина.</p>
+        <p>Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}%.</p>
+        <p class="desc">После подтверждения NOWPayments заказ автоматически станет завершённым.</p>
+        ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-now-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </article>
     </section>
   `);
-  document.querySelector("[data-mark-product-paid]")?.addEventListener("click", (event) => markProductOrderPaid(event.currentTarget.dataset.markProductPaid));
+  document.querySelector("[data-create-now-payment]")?.addEventListener("click", (event) => createNowPaymentsInvoice(event.currentTarget.dataset.createNowPayment));
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
+}
+
+async function createNowPaymentsInvoice(orderId) {
+  try {
+    const payload = await apiFetch("/api/payments/nowpayments/create", {
+      method: "POST",
+      body: JSON.stringify({ orderId })
+    });
+    applyRemoteState(payload);
+    const order = db.orders.find((item) => item.id === orderId);
+    if (payload.paymentUrl && order) order.paymentUrl = payload.paymentUrl;
+    saveDb();
+    renderProductPaymentOrder(orderId);
+  } catch (error) {
+    showToast(error.message || "Не удалось создать оплату");
+  }
 }
 
 function markProductOrderPaid(orderId) {
@@ -2887,9 +2899,9 @@ function renderAdmin() {
       <article class="panel">
         <h2>Настройки оплат</h2>
         <form class="form" data-payment-settings-form>
-          <label class="field">OWPayments URL<input name="payBaseUrl" value="${esc(db.paymentSettings?.payBaseUrl || "https://owpayments.com/pay")}"></label>
+          <label class="field">Провайдер<input value="NOWPayments" readonly></label>
           <div class="row">
-            <label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.01" value="${esc(db.paymentSettings?.platformCommissionPercent ?? 5)}"></label>
+            <label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.01" value="${esc(db.paymentSettings?.platformCommissionPercent ?? 0)}"></label>
             <label class="field">LTC счет площадки<input name="platformLtcWallet" value="${esc(db.paymentSettings?.platformLtcWallet || "")}"></label>
           </div>
           <button class="primary">Сохранить оплаты</button>
@@ -2935,8 +2947,8 @@ function handlePaymentSettingsSave(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   db.paymentSettings = {
-    provider: "owpayments",
-    payBaseUrl: data.get("payBaseUrl").trim() || "https://owpayments.com/pay",
+    provider: "nowpayments",
+    payBaseUrl: "",
     platformCommissionPercent: Number(data.get("platformCommissionPercent") || 0),
     platformLtcWallet: data.get("platformLtcWallet").trim()
   };

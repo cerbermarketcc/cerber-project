@@ -14,6 +14,10 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
+const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
+const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
+const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
+const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -33,7 +37,7 @@ const defaultStore = {
   name: "Солёный Мальчик",
   short: "SK BOY это семья",
   description: "",
-  ltcWallet: "ltc1q-store-wallet",
+  ltcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
   image: "assets/soleniy-malchik.jpg",
   cover: "assets/soleniy-malchik.jpg",
   orders: 0,
@@ -163,9 +167,9 @@ async function ensureSeed() {
       balances: {},
       ltcBalances: {},
       paymentSettings: {
-        provider: "owpayments",
-        payBaseUrl: "https://owpayments.com/pay",
-        platformCommissionPercent: 5,
+        provider: "nowpayments",
+        payBaseUrl: "",
+        platformCommissionPercent: 0,
         platformLtcWallet: ""
       },
       referralPeriod: {},
@@ -362,12 +366,116 @@ app.put("/api/state", async (req, res, next) => {
   }
 });
 
-app.post("/api/payments/owpayments", async (req, res, next) => {
+function sortedObject(value) {
+  if (Array.isArray(value)) return value.map(sortedObject);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = sortedObject(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function verifyNowpaymentsSignature(req) {
+  if (!nowpaymentsIpnSecret) return true;
+  const signature = String(req.headers["x-nowpayments-sig"] || "");
+  if (!signature) return false;
+  const body = JSON.stringify(sortedObject(req.body));
+  const expected = crypto.createHmac("sha512", nowpaymentsIpnSecret).update(body).digest("hex");
+  if (signature.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+async function saveSettingsState(state) {
+  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
+async function completeProductOrder(order, state, providerPayload = {}) {
+  order.status = "completed";
+  order.paymentStatus = "paid";
+  order.paidAt = Date.now();
+  order.completedAt = Date.now();
+  order.paymentProviderPayload = providerPayload;
+
+  await saveSettingsState(state);
+
+  if (order.storeId) {
+    const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
+    const store = row?.data;
+    if (store) {
+      store.orders = Number(store.orders || 0) + 1;
+      const product = (store.products || []).find((item) => item.id === order.productId);
+      if (product) {
+        product.purchases = Number(product.purchases || 0) + 1;
+        const position = (product.positions || []).find((item) => item.id === order.positionId);
+        if (position) position.stock = Math.max(0, Number(position.stock || 0) - 1);
+      }
+      await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    }
+  }
+}
+
+app.post("/api/payments/nowpayments/create", async (req, res, next) => {
   try {
     requireDb();
-    const orderId = String(req.body.order || req.body.orderId || req.body.invoice_id || "");
-    const status = String(req.body.status || req.body.payment_status || "").toLowerCase();
-    const paid = ["paid", "success", "confirmed", "complete", "completed"].includes(status);
+    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    const orderId = String(req.body.orderId || "");
+    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settings?.data || {};
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === orderId && item.type === "product");
+    if (!order) return res.status(404).json({ error: "Заказ не найден" });
+    if (loginKey(order.login) !== loginKey(user.login)) return res.status(403).json({ error: "Нет доступа к заказу" });
+    if (order.status !== "pending_payment") return res.status(400).json({ error: "Заказ не ожидает оплату" });
+    if (order.paymentExpiresAt && Date.now() > Number(order.paymentExpiresAt)) return res.status(400).json({ error: "Бронь на оплату истекла" });
+
+    if (order.paymentUrl) return res.json({ paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
+
+    const invoicePayload = {
+      price_amount: Number(order.amountUsd || 0),
+      price_currency: "usd",
+      pay_currency: "ltc",
+      order_id: order.id,
+      order_description: `${order.product || "CERBER order"} / ${order.storeName || ""}`,
+      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
+      success_url: `${publicBaseUrl}/`,
+      cancel_url: `${publicBaseUrl}/`
+    };
+
+    const response = await fetch("https://api.nowpayments.io/v1/invoice", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": nowpaymentsApiKey
+      },
+      body: JSON.stringify(invoicePayload)
+    });
+    const invoice = await response.json().catch(() => ({}));
+    if (!response.ok) return res.status(502).json({ error: invoice.message || "NOWPayments invoice error" });
+
+    order.paymentInvoiceId = invoice.id || invoice.invoice_id || "";
+    order.paymentUrl = invoice.invoice_url || invoice.payment_url || "";
+    order.nowpaymentsPublicKey = nowpaymentsPublicKey ? "configured" : "";
+    order.paymentProviderPayload = { invoiceId: order.paymentInvoiceId };
+    await saveSettingsState({ ...state, orders });
+
+    res.json({ paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
+    const orderId = String(req.body.order_id || req.body.order || req.body.orderId || "");
+    const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
+    const paid = ["finished", "confirmed", "sending", "partially_paid"].includes(status);
     if (!orderId || !paid) return res.status(400).json({ error: "Unsupported payment callback" });
 
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
@@ -376,16 +484,7 @@ app.post("/api/payments/owpayments", async (req, res, next) => {
     const order = orders.find((item) => item.id === orderId);
     if (!order) return res.status(404).json({ error: "Order not found" });
 
-    order.status = "completed";
-    order.paymentStatus = "paid";
-    order.paidAt = Date.now();
-    order.completedAt = Date.now();
-    order.paymentProviderPayload = req.body;
-
-    await supabase.from("app_settings").upsert({
-      id: "main",
-      data: { ...state, orders }
-    }, { onConflict: "id" });
+    await completeProductOrder(order, { ...state, orders }, req.body);
 
     res.json({ ok: true });
   } catch (error) {
