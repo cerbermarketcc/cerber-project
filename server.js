@@ -195,27 +195,55 @@ async function stateFor(user) {
     supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
     supabase.from("profiles").select("login,name,role")
   ]);
+  const settingsData = settings?.data || {};
+  const orders = Array.isArray(settingsData.orders) ? [...settingsData.orders] : [];
+  if (loginKey(user?.login) === "cerber" && !orders.some((order) => order.id === "order-cerber-paid-preview")) {
+    const paidAt = Date.now() - 5 * 60 * 1000;
+    orders.unshift({
+      id: "order-cerber-paid-preview",
+      type: "product",
+      login: user.login,
+      storeId: "skboy",
+      productId: "courier-work",
+      positionId: "courier-checany",
+      product: "Подработка",
+      storeName: "Солёный Мальчик",
+      status: "completed",
+      paymentStatus: "paid",
+      createdAt: paidAt,
+      paidAt,
+      completedAt: paidAt,
+      amountUsd: 50,
+      ltcAmount: 0.5,
+      location: "Кишинёв",
+      productDescription: "",
+      reservedDescription: "Тестовая выдача после оплаты: заявка успешно оплачена. Здесь будет описание, которое магазин добавит в админке для конкретного товара.",
+      reservedStock: false,
+      sellerLtcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
+      paymentProvider: "preview"
+    });
+  }
 
   return {
     user: publicUser(user),
     state: {
       currentUser: user?.login || "",
-      theme: settings?.data?.theme || "light",
-      lang: settings?.data?.lang || "ru",
+      theme: settingsData.theme || "light",
+      lang: settingsData.lang || "ru",
       users: profiles || [],
       stores: (stores || []).map((row) => row.data),
       messages: (messages || []).map((row) => row.data),
-      orders: settings?.data?.orders || [],
-      exchangeCards: settings?.data?.exchangeCards || defaultExchangeCards,
-      exchangeRequests: settings?.data?.exchangeRequests || [],
-      referrals: settings?.data?.referrals || [],
-      referralPayments: settings?.data?.referralPayments || [],
-      referralCodes: settings?.data?.referralCodes || {},
-      balances: settings?.data?.balances || {},
-      ltcBalances: settings?.data?.ltcBalances || {},
-      paymentSettings: settings?.data?.paymentSettings || {},
-      referralPeriod: settings?.data?.referralPeriod || {},
-      filters: settings?.data?.filters || {}
+      orders,
+      exchangeCards: settingsData.exchangeCards || defaultExchangeCards,
+      exchangeRequests: settingsData.exchangeRequests || [],
+      referrals: settingsData.referrals || [],
+      referralPayments: settingsData.referralPayments || [],
+      referralCodes: settingsData.referralCodes || {},
+      balances: settingsData.balances || {},
+      ltcBalances: settingsData.ltcBalances || {},
+      paymentSettings: settingsData.paymentSettings || {},
+      referralPeriod: settingsData.referralPeriod || {},
+      filters: settingsData.filters || {}
     }
   };
 }
