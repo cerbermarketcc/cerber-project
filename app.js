@@ -1430,8 +1430,9 @@ function renderOrders(tab = activeOrdersTab) {
   const orders = userOrders();
   const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status) && !order.disputeOpen);
   const completed = orders.filter((order) => ["completed", "closed"].includes(order.status) && !order.disputeOpen);
+  const canceled = orders.filter((order) => order.status === "canceled");
   const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
-  const list = tab === "active" ? active : tab === "completed" ? completed : tab === "disputes" ? disputes : orders;
+  const list = tab === "active" ? active : tab === "completed" ? completed : tab === "canceled" ? canceled : tab === "disputes" ? disputes : orders;
   layout(`
     <section class="screen orders-screen">
       <h1 class="big-title">Заказы</h1>
@@ -1439,6 +1440,7 @@ function renderOrders(tab = activeOrdersTab) {
         <button class="${tab === "all" ? "active" : ""}" data-order-tab="all">Все <span>${orders.length}</span></button>
         <button class="${tab === "active" ? "active" : ""}" data-order-tab="active">Активные <span>${active.length}</span></button>
         <button class="${tab === "completed" ? "active" : ""}" data-order-tab="completed">Завершённые <span>${completed.length}</span></button>
+        <button class="${tab === "canceled" ? "active" : ""}" data-order-tab="canceled">Отменённые <span>${canceled.length}</span></button>
         <button class="${tab === "disputes" ? "active" : ""}" data-order-tab="disputes">Споры <span>${disputes.length}</span></button>
       </div>
       ${list.length ? list.map(orderCard).join("") : `
@@ -1482,15 +1484,16 @@ function orderCard(order) {
       <div>
         <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
-        <p>${Number(order.amountUsd || 0).toFixed(2)} $${order.location ? ` · ${esc(order.location)}` : ""}</p>
+        <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
+        ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
         ${order.status === "completed" ? `<p>Оплачено. ${esc(order.productDescription || "Описание будет доступно в деталях заказа.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
         <span>${status}</span>
         <button data-order-open="${esc(order.exchangeRequestId || order.id)}">Детали</button>
-        ${order.status === "pending_payment" ? `<button data-order-pay="${esc(order.id)}">Оплатить</button><button data-order-cancel="${esc(order.id)}">Отменить</button>` : ""}
+        ${order.status === "pending_payment" ? `<button data-order-cancel="${esc(order.id)}">Отменить</button>` : ""}
         ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
@@ -1509,18 +1512,44 @@ function productOrderStatus(order) {
 function showProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
+  const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
   showModal(`
     <h2>${esc(order.product)}</h2>
     <p>${esc(order.storeName || "")}</p>
     <p>${esc(order.location || "")}</p>
-    <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+    <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
     <p>Статус: ${productOrderStatus(order)}</p>
     ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
-    ${order.status === "pending_payment" ? `<p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p><button class="primary" data-order-pay="${esc(order.id)}">Оплатить</button>` : ""}
+    ${order.status === "pending_payment" ? `
+      <div class="payment-instructions">
+        <h3>Оплата LTC</h3>
+        <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
+        <p><span>Сумма:</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+        <p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet || "Кошелек не указан")}</strong></p>
+        <p><span>Комментарий:</span><strong>${esc(order.id)}</strong></p>
+        <div class="row">
+          <button class="ghost-button" data-copy="${esc(order.sellerLtcWallet || "")}">Скопировать кошелек</button>
+          <button class="ghost-button" data-copy="${ltcAmount.toFixed(6)}">Скопировать сумму</button>
+        </div>
+        ${order.sellerLtcWallet ? `<a class="primary link-button" href="litecoin:${esc(order.sellerLtcWallet)}?amount=${ltcAmount.toFixed(6)}">Открыть LTC-ссылку</a>` : ""}
+        <p class="desc">После подтверждения оплаты заказ станет завершенным, и здесь появится описание товара.</p>
+        <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
+      </div>
+    ` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
-  document.querySelector("[data-order-pay]")?.addEventListener("click", (event) => renderProductPaymentOrder(event.currentTarget.dataset.orderPay));
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy || "");
+        showToast("Скопировано");
+      } catch {
+        showToast("Не удалось скопировать");
+      }
+    };
+  });
+  document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
   document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
 }
 
@@ -1672,6 +1701,7 @@ function productCard(product, store) {
 
 function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
+  const ltcAmount = usdToLtc(minPrice);
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
@@ -1684,7 +1714,7 @@ function productCardView(product, store) {
           <h3>${esc(product.title)}</h3>
           <p class="desc">${esc(product.category)}</p>
           <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
-          <p class="price">${minPrice.toFixed(0)}$</p>
+          <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
           <p class="rating-line"><span class="ok-dot">✓</span><span class="time-dot">◔</span><span class="star-dot">★</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
         </div>
       </button>
@@ -1752,17 +1782,25 @@ function renderProductView(storeId, productId) {
   document.querySelector("[data-read-product]")?.addEventListener("click", () => {
     showModal(`<h2>${esc(product.title)}</h2><p>${esc(product.description || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
   });
+  fetchLitecoinUsdRate().then(() => {
+    if (route === "product" && activeProductId === productId) {
+      document.querySelectorAll("[data-ltc-price]").forEach((node) => {
+        node.textContent = `${usdToLtc(Number(node.dataset.usd || 0)).toFixed(6)} LTC`;
+      });
+    }
+  });
 }
 
 function positionCardView(position, product, store) {
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
   return `
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
         <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
         <p><span>Тип</span><strong>${esc(position.deliveryType || "Курьер")}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
-        <p><span>Оплата</span><strong>позже</strong></p>
+        <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
         <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
       </div>
       ${position.description ? `<p class="desc">${esc(position.description)}</p>` : ""}
@@ -1979,6 +2017,7 @@ function handleProductReservation(storeId, productId, positionId) {
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
   const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
   const commissionUsd = priceUsd * commissionPercent / 100;
+  const ltcAmount = usdToLtc(priceUsd);
   const order = {
     id: `order-${Date.now()}`,
     type: "product",
@@ -1993,6 +2032,7 @@ function handleProductReservation(storeId, productId, positionId) {
     createdAt: Date.now(),
     paymentExpiresAt: Date.now() + 40 * 60 * 1000,
     amountUsd: priceUsd,
+    ltcAmount,
     location: locationLabel(position),
     productDescription: product.description || "",
     reservedDescription,
@@ -2006,7 +2046,8 @@ function handleProductReservation(storeId, productId, positionId) {
   };
   db.orders.unshift(order);
   saveDb();
-  renderProductPaymentOrder(order.id);
+  showToast("Бронь создана. Заказ в разделе Активные.");
+  renderOrders("active");
 }
 
 function renderProductPaymentOrder(orderId) {
@@ -2088,7 +2129,7 @@ function cancelProductOrder(orderId) {
   order.paymentStatus = "canceled";
   order.canceledAt = Date.now();
   saveDb();
-  renderOrders("active");
+  renderOrders("canceled");
 }
 
 function openProductDispute(orderId) {
