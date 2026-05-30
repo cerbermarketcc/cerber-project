@@ -1459,7 +1459,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const reviewsList = store.reviewsList || [];
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
-    : (store.products.length ? store.products.map((product) => productCard(product, store)).join("") : `<article class="panel empty-state"><p>${tr("positions")} появятся позже</p></article>`);
+    : (store.products.length ? store.products.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("positions")} появятся позже</p></article>`);
   layout(`
     <section class="screen">
       <article class="panel">
@@ -1505,6 +1505,28 @@ function productCard(product, store) {
   `;
 }
 
+function productCardView(product, store) {
+  const minPrice = Number(product.priceUsd || 0);
+  return `
+    <article class="product-card mega-product-card">
+      <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
+        <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <div class="product-body mega-product-body">
+          <div class="product-icon-row">
+            <span>▦</span><span>⌂</span><span>●</span><span>◌</span><span>⌁</span>
+            <i></i><span>☻</span><span>❄</span><span>◎</span>
+          </div>
+          <h3>${esc(product.title)}</h3>
+          <p class="desc">${esc(product.category)}</p>
+          <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
+          <p class="price">от ${minPrice.toFixed(0)}$</p>
+          <p class="rating-line"><span class="ok-dot">✓</span><span class="time-dot">◔</span><span class="star-dot">★</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
+        </div>
+      </button>
+    </article>
+  `;
+}
+
 function productPositions(product) {
   const filters = db.filters || {};
   return (product.positions || []).filter((position) => {
@@ -1513,6 +1535,84 @@ function productPositions(product) {
     if (filters.district && position.district && filters.district !== position.district) return false;
     return true;
   });
+}
+
+function currentLocationFilterLabel() {
+  const filters = db.filters || {};
+  const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
+  const city = country.cities?.[filters.city];
+  return filters.district || city?.label || "Любой город";
+}
+
+function renderProductView(storeId, productId) {
+  route = "product";
+  activeStoreId = storeId;
+  activeProductId = productId;
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  if (!product) return renderStore(store.id, "positions");
+  const positions = productPositions(product);
+  const ltc = usdToLtc(product.priceUsd || 0);
+  const images = (product.images || [product.image || store.image]).slice(0, 5);
+  layout(`
+    <section class="screen product-screen mega-product-screen">
+      <p class="breadcrumbs">Магазины &gt; ${esc(store.name)} &gt; ${esc(product.title)}</p>
+      <h1 class="product-page-title">${esc(product.title)}</h1>
+      <p class="product-page-category">${esc(product.category)}</p>
+      <div class="mega-gallery">
+        <img class="mega-gallery-main" src="${esc(images[0] || store.image || fallbackImage)}" alt="${esc(product.title)}">
+        <div class="mega-gallery-side">
+          ${images.slice(1).map((image) => `<img src="${esc(image)}" alt="">`).join("")}
+        </div>
+      </div>
+      <article class="product-copy">
+        <p>${esc(product.description || "")}</p>
+        <button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>
+        <p class="shop-line"><span>Магазин:</span> <strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
+        <p class="price">от ${Number(product.priceUsd || 0).toFixed(0)}$ <span class="ltc-inline">≈ ${ltc.toFixed(6)} LTC</span></p>
+        <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
+      </article>
+      <button class="location-select" data-filters>${esc(currentLocationFilterLabel())}<span>⌄</span></button>
+      <div class="pill-tabs">
+        <button>Доступные позиции <span>${positions.length}</span></button>
+        <button class="muted">Отзывы <span>${esc(product.reviews || 0)}</span></button>
+      </div>
+      <div class="product-mode-tabs"><button class="active">Любой</button><button>Готовый</button><button>Предзаказ</button></div>
+      ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
+        <article class="panel empty-state">
+          <p>По выбранным фильтрам позиций нет. Измените город или район в фильтрах.</p>
+          <button class="primary" data-filters>Открыть фильтры</button>
+        </article>
+      `}
+    </section>
+  `);
+  document.querySelector("[data-read-product]")?.addEventListener("click", () => {
+    showModal(`<h2>${esc(product.title)}</h2><p>${esc(product.description || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+  });
+  fetchLitecoinUsdRate().then(() => {
+    if (route === "product" && activeProductId === productId) {
+      document.querySelectorAll("[data-ltc-price]").forEach((node) => {
+        node.textContent = `${usdToLtc(Number(node.dataset.usd || 0)).toFixed(6)} LTC`;
+      });
+    }
+  });
+}
+
+function positionCardView(position, product, store) {
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  return `
+    <article class="position-card mega-position-card">
+      <div class="position-grid mega-position-grid">
+        <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
+        <p><span>Тип локации</span><strong>${esc(position.deliveryType || "Городская доставка")}</strong></p>
+        <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
+        <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${usdToLtc(priceUsd).toFixed(6)} LTC</strong></p>
+        <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
+      </div>
+      <p class="desc">${esc(position.description || "")}</p>
+      <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>Купить</button>
+    </article>
+  `;
 }
 
 function renderProduct(storeId, productId) {
@@ -1622,6 +1722,60 @@ function renderProductPayment(storeId, productId, positionId) {
       ${enough ? "" : `<article class="alert">Недостаточно средств на LTC балансе для оплаты этим способом</article>`}
       <button class="primary" data-confirm-product-pay ${enough ? "" : "disabled"}>Оплатить</button>
       <p class="desc center">Нажимая на кнопку оплаты, вы соглашаетесь с правилами площадки.</p>
+    </section>
+  `);
+  fetchLitecoinUsdRate();
+  document.querySelector("[data-confirm-product-pay]")?.addEventListener("click", () => handleProductPurchase(store.id, product.id, position.id));
+}
+
+function renderProductPaymentView(storeId, productId, positionId) {
+  route = "product-payment";
+  activeStoreId = storeId;
+  activeProductId = productId;
+  activePositionId = positionId;
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  const position = positionById(product, positionId);
+  if (!product || !position) return renderStore(store.id, "positions");
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
+  const balance = userLtcBalance();
+  const enough = balance >= ltcAmount && ltcAmount > 0;
+  layout(`
+    <section class="screen product-payment-screen mega-payment-screen">
+      <p class="breadcrumbs">Магазины &gt; ${esc(store.name)} &gt; Оплата</p>
+      <article class="payment-summary-card">
+        <div>
+          <h2>${esc(product.title)}</h2>
+          <p>Готовая позиция (${esc(position.stock || 0)} шт)</p>
+          <p>${esc(product.category)}</p>
+          <p><span>Магазин:</span> <strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
+          <p><span>Локация:</span> ${esc(locationLabel(position))}</p>
+          <p><span>Стоимость:</span> ${priceUsd.toFixed(0)} $</p>
+        </div>
+        <img src="${esc(product.image || store.image || fallbackImage)}" alt="">
+      </article>
+      <div class="payment-head-row">
+        <h1>Оплата</h1>
+        <button class="ghost-button" data-route="wallet">Изменить способ оплаты</button>
+      </div>
+      <article class="wallet-card-ltc">
+        <div>
+          <h3>Внутренний кошелек LTC</h3>
+          <p>Баланс: ${balance.toFixed(6)} LTC</p>
+          <strong>${ltcAmount.toFixed(6)} LTC</strong>
+        </div>
+        <div class="ltc-coin">Ł</div>
+      </article>
+      <article class="payment-lines">
+        <p><span>Товары</span><strong>1</strong></p>
+        <p><span>Стоимость товара</span><strong>${priceUsd.toFixed(0)} $</strong></p>
+        <p><span>Курс LTC</span><strong>1 LTC ≈ ${Number(ltcUsdCache || 0).toFixed(2)} $</strong></p>
+        <p><span>Сумма к оплате</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+      </article>
+      ${enough ? "" : `<article class="alert">Недостаточно средств на балансе для оплаты данным способом</article>`}
+      <button class="primary pay-submit" data-confirm-product-pay ${enough ? "" : "disabled"}>Оплатить</button>
+      <p class="desc center">Нажимая на кнопку оплатить, вы соглашаетесь с <button class="inline-link" data-rules>Правилами площадки</button></p>
     </section>
   `);
   fetchLitecoinUsdRate();
@@ -2689,7 +2843,7 @@ function renderSeller() {
           <button class="primary">${tr("addProduct")}</button>
         </form>
       </article>
-      ${store.products.map((product) => productCard(product, store)).join("")}
+      ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
@@ -2836,12 +2990,12 @@ function bindGlobal() {
   });
   document.querySelectorAll("[data-product]").forEach((button) => {
     if (button.dataset.buyPosition) return;
-    button.onclick = () => renderProduct(button.dataset.productStore, button.dataset.product);
+    button.onclick = () => renderProductView(button.dataset.productStore, button.dataset.product);
   });
   document.querySelectorAll("[data-buy-position]").forEach((button) => {
     button.onclick = (event) => {
       event.stopPropagation();
-      renderProductPayment(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
+      renderProductPaymentView(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
     };
   });
   document.querySelector("[data-menu]").onclick = () => document.querySelector("[data-nav-pop]").classList.add("open");
@@ -2902,8 +3056,8 @@ function renderCurrent() {
   if (["wallet"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
-  if (route === "product") return renderProduct(activeStoreId || db.stores[0].id, activeProductId);
-  if (route === "product-payment") return renderProductPayment(activeStoreId || db.stores[0].id, activeProductId, activePositionId);
+  if (route === "product") return renderProductView(activeStoreId || db.stores[0].id, activeProductId);
+  if (route === "product-payment") return renderProductPaymentView(activeStoreId || db.stores[0].id, activeProductId, activePositionId);
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
   if (route === "chat") return renderChat(activeStoreId || db.stores[0].id);
   renderHome();
