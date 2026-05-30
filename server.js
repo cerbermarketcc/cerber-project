@@ -55,6 +55,8 @@ const defaultStore = {
     rating: 5,
     reviews: 1,
     purchases: 0,
+    sellerManaged: true,
+    deliveryItems: [],
     positions: [{
       id: "courier-chisinau",
       title: "Подработка",
@@ -408,8 +410,6 @@ async function completeProductOrder(order, state, providerPayload = {}) {
       const product = (store.products || []).find((item) => item.id === order.productId);
       if (product) {
         product.purchases = Number(product.purchases || 0) + 1;
-        const position = (product.positions || []).find((item) => item.id === order.positionId);
-        if (position) position.stock = Math.max(0, Number(position.stock || 0) - 1);
       }
       await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     }

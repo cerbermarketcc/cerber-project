@@ -145,6 +145,8 @@ const defaults = {
           priceUsd: 50,
           image: "assets/soleniy-malchik.jpg",
           images: ["assets/soleniy-malchik.jpg"],
+          sellerManaged: true,
+          deliveryItems: [],
           rating: 5,
           reviews: 1,
           purchases: 0,
@@ -487,7 +489,7 @@ function normalizeDb(next) {
 
 function normalizeProduct(product, store = {}) {
   let priceUsd = Number(product.priceUsd || String(product.price || "").replace(/[^0-9.]/g, "")) || 0;
-  if (product.id === "courier-work" || /courier/i.test(String(product.id || ""))) {
+  if ((product.id === "courier-work" || /courier/i.test(String(product.id || ""))) && !product.sellerManaged) {
     product = {
       ...product,
       title: "Подработка",
@@ -515,6 +517,9 @@ function normalizeProduct(product, store = {}) {
     };
     priceUsd = 50;
   }
+  const deliveryItems = Array.isArray(product.deliveryItems)
+    ? product.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean)
+    : String(product.deliveryItemsText || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
   return {
     ...product,
     id: product.id || `product-${Date.now()}`,
@@ -528,6 +533,8 @@ function normalizeProduct(product, store = {}) {
     rating: Number(product.rating || 5),
     reviews: Number(product.reviews || 0),
     purchases: Number(product.purchases || 0),
+    sellerManaged: Boolean(product.sellerManaged),
+    deliveryItems,
     positions: Array.isArray(product.positions) ? product.positions.map((position) => ({
       id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       title: position.title || position.district || "Позиция",
@@ -537,7 +544,7 @@ function normalizeProduct(product, store = {}) {
       city: position.city || "chisinau",
       district: position.district || "",
       deliveryType: position.deliveryType || "Курьер",
-      stock: Number(position.stock || 0),
+      stock: deliveryItems.length || Number(position.stock || 0),
       status: position.status || "ready"
     })) : [],
     reviewsList: Array.isArray(product.reviewsList) ? product.reviewsList : []
@@ -566,6 +573,18 @@ function normalizeExchangeCard(card) {
   };
 }
 
+function restoreReservedProductItem(order, next = db) {
+  if ((!order?.reservedDescription && !order?.reservedStock) || order.reservationRestored) return;
+  const store = (next.stores || []).find((item) => item.id === order.storeId);
+  const product = (store?.products || []).find((item) => item.id === order.productId);
+  const position = (product?.positions || []).find((item) => item.id === order.positionId);
+  if (product && order.reservedDescription) {
+    product.deliveryItems = [order.reservedDescription, ...(product.deliveryItems || [])];
+  }
+  if (position) position.stock = Number(position.stock || 0) + 1;
+  order.reservationRestored = true;
+}
+
 function normalizeOrders(next) {
   const now = Date.now();
   next.orders = (next.orders || []).map((order) => {
@@ -573,6 +592,7 @@ function normalizeOrders(next) {
     const age = now - Number(createdAt);
     if (order.type === "product") {
       if (order.status === "pending_payment" && order.paymentExpiresAt && now >= Number(order.paymentExpiresAt)) {
+        restoreReservedProductItem(order, next);
         return { ...order, status: "canceled", paymentStatus: "expired", canceledAt: now, cancelReason: "Бронь 40 минут истекла" };
       }
       if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
@@ -1389,7 +1409,7 @@ function showProductOrder(orderId) {
     <p>${esc(order.location || "")}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
     <p>Статус: ${productOrderStatus(order)}</p>
-    ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.productDescription || "")}</p>` : ""}
+    ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
     ${order.status === "pending_payment" ? `<p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p><button class="primary" data-order-pay="${esc(order.id)}">Оплатить</button>` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
@@ -1847,6 +1867,10 @@ function handleProductReservation(storeId, productId, positionId) {
   if (!product || !position) return;
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
+  const requiresIssuedDescription = Array.isArray(product.deliveryItems) && product.deliveryItems.length > 0;
+  const reservedDescription = (product.deliveryItems || []).shift() || "";
+  if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
+  position.stock = Math.max(0, Number(position.stock || 0) - 1);
   const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
   const commissionUsd = priceUsd * commissionPercent / 100;
   const order = {
@@ -1865,6 +1889,8 @@ function handleProductReservation(storeId, productId, positionId) {
     amountUsd: priceUsd,
     location: locationLabel(position),
     productDescription: product.description || "",
+    reservedDescription,
+    reservedStock: true,
     sellerLtcWallet: store.ltcWallet || "",
     platformLtcWallet: db.paymentSettings?.platformLtcWallet || "",
     platformCommissionPercent: commissionPercent,
@@ -1899,7 +1925,7 @@ function renderProductPaymentOrder(orderId) {
         <h2>Оплата через NOWPayments</h2>
         <p>Оплата принимается в LTC. Средства идут на LTC-счёт магазина.</p>
         <p>Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}%.</p>
-        <p class="desc">После подтверждения NOWPayments заказ автоматически станет завершённым.</p>
+        <p class="desc">После подтверждения NOWPayments заказ автоматически станет завершённым, а описание из строки выдачи появится в деталях заказа.</p>
         ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-now-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </article>
@@ -1935,7 +1961,6 @@ function markProductOrderPaid(orderId) {
   order.paymentStatus = "paid";
   order.paidAt = Date.now();
   order.completedAt = Date.now();
-  if (position) position.stock = Math.max(0, Number(position.stock || 0) - 1);
   if (product) product.purchases = Number(product.purchases || 0) + 1;
   if (store) store.orders = Number(store.orders || 0) + 1;
   saveDb();
@@ -1944,7 +1969,7 @@ function markProductOrderPaid(orderId) {
     <p>Вы оплатили заказ: ${esc(order.product)}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
     <p>Город: ${esc(order.location || "")}</p>
-    <p>${esc(order.productDescription || "")}</p>
+    <p>${esc(order.reservedDescription || order.productDescription || "")}</p>
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
 }
@@ -1952,6 +1977,7 @@ function markProductOrderPaid(orderId) {
 function cancelProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.paymentStatus === "paid") return;
+  restoreReservedProductItem(order, db);
   order.status = "canceled";
   order.paymentStatus = "canceled";
   order.canceledAt = Date.now();
@@ -2927,6 +2953,7 @@ function adminStoreEditor(store) {
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
         <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
+        <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ">${esc((product.deliveryItems || []).join("\n"))}</textarea></label>
         <div class="row">
           <label class="field">Категория<input name="category" value="${esc(product.category || "Работа / Курьер")}"></label>
           <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || position.priceUsd || 50)}"></label>
@@ -2937,6 +2964,8 @@ function adminStoreEditor(store) {
           <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Курьер")}"></label>
           <label class="field">Кол-во<input name="stock" type="number" min="0" value="${esc(position.stock || 1)}"></label>
         </div>
+        <label class="field">Главное фото товара<input name="mainImage" type="file" accept="image/*"></label>
+        <label class="field">Другие фото товара до 5<input name="images" type="file" accept="image/*" multiple></label>
         <button class="primary">Сохранить товар</button>
       </form>
     </article>
@@ -2959,7 +2988,7 @@ function handlePaymentSettingsSave(event) {
 
 function bindAdminProductForms() {
   document.querySelectorAll("[data-admin-product-form]").forEach((form) => {
-    form.onsubmit = (event) => {
+    form.onsubmit = async (event) => {
       event.preventDefault();
       const data = new FormData(form);
       const store = storeById(form.dataset.storeId);
@@ -2978,6 +3007,19 @@ function bindAdminProductForms() {
       product.title = data.get("title").trim();
       product.category = data.get("category").trim();
       product.description = data.get("description").trim();
+      product.sellerManaged = true;
+      product.deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      const mainFile = data.get("mainImage");
+      const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
+      const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+      if (mainFile && mainFile.size) {
+        product.image = await fileToDataUrl(mainFile);
+      }
+      if (gallery.length) {
+        product.images = [product.image || gallery[0], ...gallery.filter((image) => image !== product.image)].slice(0, 5);
+      } else if (!Array.isArray(product.images) || !product.images.length) {
+        product.images = [product.image || store.image || fallbackImage];
+      }
       product.priceUsd = priceUsd;
       product.price = `${priceUsd}$`;
       position.title = product.title;
@@ -2986,7 +3028,7 @@ function bindAdminProductForms() {
       position.city = data.get("city").trim() || "chisinau";
       position.district = data.get("district").trim();
       position.deliveryType = data.get("deliveryType").trim() || "Курьер";
-      position.stock = Number(data.get("stock") || 0);
+      position.stock = product.deliveryItems.length || Number(data.get("stock") || 0);
       saveDb();
       showToast("Товар сохранён");
       renderAdmin();
@@ -3065,6 +3107,16 @@ function renderSeller() {
     <section class="screen">
       <article class="panel">
         <h2>${tr("seller")}: ${esc(store.name)}</h2>
+        <form class="form" data-seller-profile-form>
+          <label class="field">Имя магазина<input name="name" value="${esc(store.name || "")}" required></label>
+          <label class="field">Короткое описание<input name="short" value="${esc(store.short || "")}"></label>
+          <label class="field">Описание страницы<textarea name="description">${esc(store.description || "")}</textarea></label>
+          <label class="field">Фото страницы<input name="image" type="file" accept="image/*"></label>
+          <button class="primary">Сохранить страницу</button>
+        </form>
+      </article>
+      <article class="panel">
+        <h2>Добавить товар</h2>
         <form class="form" data-product-form>
           <label class="field">${tr("name")}<input name="title" required></label>
           <label class="field">${tr("short")}<input name="category" required></label>
@@ -3079,6 +3131,8 @@ function renderSeller() {
             <label class="field">Город<input name="city" value="chisinau"></label>
             <label class="field">Район<input name="district" placeholder="Чеканы"></label>
           </div>
+          <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ"></textarea></label>
+          <label class="field">Главное фото<input name="mainImage" type="file" accept="image/*"></label>
           <label class="field">${tr("upload")}<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">${tr("addProduct")}</button>
         </form>
@@ -3087,13 +3141,33 @@ function renderSeller() {
       ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);
+  document.querySelector("[data-seller-profile-form]").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const file = data.get("image");
+    store.name = data.get("name").trim();
+    store.short = data.get("short").trim();
+    store.description = data.get("description").trim();
+    if (file && file.size) {
+      const image = await fileToDataUrl(file);
+      store.image = image;
+      store.cover = image;
+    }
+    saveDb();
+    showToast("Страница магазина сохранена");
+    renderSeller();
+  };
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const files = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
-    const images = files.length ? await Promise.all(files.map(fileToDataUrl)) : [store.image];
+    const mainFile = data.get("mainImage");
+    const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
+    const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+    const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image);
+    const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
     const priceUsd = Number(data.get("priceUsd") || 0);
     const productId = `product-${Date.now()}`;
+    const deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
     store.products.unshift({
       id: productId,
       title: data.get("title").trim(),
@@ -3103,6 +3177,8 @@ function renderSeller() {
       priceUsd,
       image: images[0],
       images,
+      sellerManaged: true,
+      deliveryItems,
       rating: 5,
       reviews: 0,
       purchases: 0,
@@ -3115,7 +3191,7 @@ function renderSeller() {
         city: data.get("city").trim(),
         district: data.get("district").trim(),
         deliveryType: data.get("deliveryType").trim() || "Курьер",
-        stock: Number(data.get("stock") || 0),
+        stock: deliveryItems.length || Number(data.get("stock") || 0),
         status: "ready"
       }],
       reviewsList: []
