@@ -135,13 +135,44 @@ const defaults = {
       rating: 5,
       products: [
         {
-          id: "demo-product",
-          title: "Доступная позиция будет добавлена позже",
-          category: "Демо / Позиция",
-          price: "0 $",
+          id: "courier-work",
+          title: "Курьер - Подработка 💰",
+          category: "Работа / Курьер",
+          description: "Подработка курьером по Кишиневу. Выберите доступную позицию по району, посмотрите условия и оформите заявку через внутренний LTC баланс.",
+          price: "от 10$",
+          priceUsd: 10,
           image: "assets/soleniy-malchik.jpg",
+          images: ["assets/soleniy-malchik.jpg"],
           rating: 5,
-          reviews: 281
+          reviews: 1,
+          purchases: 0,
+          positions: [
+            {
+              id: "courier-checany",
+              title: "Чеканы",
+              description: "Курьерская подработка по району Чеканы.",
+              priceUsd: 10,
+              country: "moldova",
+              city: "chisinau",
+              district: "Чеканы",
+              deliveryType: "Городская доставка",
+              stock: 12,
+              status: "ready"
+            },
+            {
+              id: "courier-botanica",
+              title: "Ботаника",
+              description: "Курьерская подработка по району Ботаника.",
+              priceUsd: 10,
+              country: "moldova",
+              city: "chisinau",
+              district: "Ботаника",
+              deliveryType: "Городская доставка",
+              stock: 8,
+              status: "ready"
+            }
+          ],
+          reviewsList: [defaultReview("courier-work-review-1")]
         }
       ],
       reviewsList: [defaultReview("review-demo-1")]
@@ -170,6 +201,7 @@ const defaults = {
   referralPayments: [],
   referralCodes: {},
   balances: {},
+  ltcBalances: {},
   referralPeriod: {},
   filters: {
     country: "moldova",
@@ -184,6 +216,8 @@ let db = loadDb();
 let route = "home";
 let activeStoreId = "";
 let activeStoreTab = "positions";
+let activeProductId = "";
+let activePositionId = "";
 let authMode = "login";
 let activeOrdersTab = "all";
 let activeReferralTab = "referrals";
@@ -421,11 +455,13 @@ function normalizeDb(next) {
   if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
   if (!next.referralCodes) next.referralCodes = {};
   if (!next.balances) next.balances = {};
+  if (!next.ltcBalances) next.ltcBalances = {};
   if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
   (next.users || []).forEach((user) => {
     if (!user.createdAt) user.createdAt = "2026-05-28";
     if (!next.balances[user.login]) next.balances[user.login] = 0;
+    if (!next.ltcBalances[user.login]) next.ltcBalances[user.login] = 0;
   });
   normalizeOrders(next);
   next.stores = (next.stores || []).map((store) => {
@@ -435,12 +471,88 @@ function normalizeDb(next) {
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
       reviews: Number.isFinite(Number(store.reviews)) ? Number(store.reviews) : NEW_STORE_STATS.reviews,
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
-      products: Array.isArray(store.products) ? store.products : [],
+      products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
   next.exchangeCards = next.exchangeCards.map(normalizeExchangeCard);
   if (!next.exchangeCards.length) next.exchangeCards = structuredClone(defaults.exchangeCards).map(normalizeExchangeCard);
+}
+
+function normalizeProduct(product, store = {}) {
+  let priceUsd = Number(product.priceUsd || String(product.price || "").replace(/[^0-9.]/g, "")) || 0;
+  if (product.id === "courier-work" || /courier/i.test(String(product.id || ""))) {
+    product = {
+      ...product,
+      title: "Курьер - Подработка 💰",
+      category: "Работа / Курьер",
+      description: "Подработка в курьерском формате по Кишиневу. Выберите доступную позицию по району, проверьте условия и оформите заявку через внутренний LTC баланс.",
+      price: "от 10$",
+      priceUsd: 10,
+      image: product.image || "assets/soleniy-malchik.jpg",
+      images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : ["assets/soleniy-malchik.jpg"],
+      positions: Array.isArray(product.positions) && product.positions.length ? product.positions : [
+        {
+          id: "courier-checany",
+          title: "Курьер - Подработка 💰",
+          description: "Подработка по району Чеканы. Детали и график уточняются после оформления заявки.",
+          priceUsd: 10,
+          country: "moldova",
+          city: "chisinau",
+          district: "Чеканы",
+          deliveryType: "Городская доставка",
+          stock: 12,
+          status: "ready"
+        },
+        {
+          id: "courier-centru",
+          title: "Курьер - Подработка 💰",
+          description: "Подработка по центральному району Кишинева. Детали и график уточняются после оформления заявки.",
+          priceUsd: 10,
+          country: "moldova",
+          city: "chisinau",
+          district: "Центр",
+          deliveryType: "Городская доставка",
+          stock: 8,
+          status: "ready"
+        }
+      ]
+    };
+    product.positions = product.positions.map((position) => {
+      if (position.id === "courier-checany") return { ...position, title: "Курьер - Подработка 💰", district: "Чеканы", deliveryType: "Городская доставка", priceUsd: 10 };
+      if (position.id === "courier-botanica") return { ...position, title: "Курьер - Подработка 💰", district: "Ботаника", deliveryType: "Городская доставка", priceUsd: 10 };
+      if (position.id === "courier-centru") return { ...position, title: "Курьер - Подработка 💰", district: "Центр", deliveryType: "Городская доставка", priceUsd: 10 };
+      return position;
+    });
+    priceUsd = 10;
+  }
+  return {
+    ...product,
+    id: product.id || `product-${Date.now()}`,
+    title: product.title || "Товар",
+    category: product.category || "Разное",
+    description: product.description || product.category || "",
+    priceUsd,
+    price: product.price || (priceUsd ? `от ${priceUsd}$` : "0 $"),
+    image: product.image || store.image || fallbackImage,
+    images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : [product.image || store.image || fallbackImage],
+    rating: Number(product.rating || 5),
+    reviews: Number(product.reviews || 0),
+    purchases: Number(product.purchases || 0),
+    positions: Array.isArray(product.positions) ? product.positions.map((position) => ({
+      id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: position.title || position.district || "Позиция",
+      description: position.description || "",
+      priceUsd: Number(position.priceUsd || priceUsd || 0),
+      country: position.country || "moldova",
+      city: position.city || "chisinau",
+      district: position.district || "",
+      deliveryType: position.deliveryType || "Городская доставка",
+      stock: Number(position.stock || 0),
+      status: position.status || "ready"
+    })) : [],
+    reviewsList: Array.isArray(product.reviewsList) ? product.reviewsList : []
+  };
 }
 
 function normalizeExchangeCard(card) {
@@ -637,6 +749,7 @@ async function persistRemoteState() {
           referralPayments: db.referralPayments,
           referralCodes: db.referralCodes,
           balances: db.balances,
+          ltcBalances: db.ltcBalances,
           referralPeriod: db.referralPeriod,
           filters: db.filters
         }
@@ -679,6 +792,7 @@ function isAdmin() {
 }
 
 function sellerStores() {
+  if (isAdmin()) return db.stores;
   return db.stores.filter((store) => sameLogin(store.ownerLogin, db.currentUser));
 }
 
@@ -692,6 +806,37 @@ function exchangeCardById(id = activeExchangeId) {
 
 function userBalance(login = db.currentUser) {
   return Number(db.balances?.[login] || 0);
+}
+
+function userLtcBalance(login = db.currentUser) {
+  return Number(db.ltcBalances?.[login] || 0);
+}
+
+function userLtcUsdBalance(login = db.currentUser) {
+  return userLtcBalance(login) * Number(ltcUsdCache || 0);
+}
+
+function storeById(id = activeStoreId) {
+  return db.stores.find((store) => store.id === id) || db.stores[0];
+}
+
+function productById(store, id = activeProductId) {
+  return (store?.products || []).find((product) => product.id === id) || store?.products?.[0] || null;
+}
+
+function positionById(product, id = activePositionId) {
+  return (product?.positions || []).find((position) => position.id === id) || product?.positions?.[0] || null;
+}
+
+function usdToLtc(amountUsd) {
+  const rate = Number(ltcUsdCache || 0);
+  return rate > 0 ? Number(amountUsd || 0) / rate : 0;
+}
+
+function locationLabel(position = {}) {
+  const country = filterOptions.countries[position.country]?.label || position.country || "";
+  const city = filterOptions.countries[position.country]?.cities?.[position.city]?.label || position.city || "";
+  return [country, city, position.district].filter(Boolean).join(", ");
 }
 
 function referralCodeFor(login = db.currentUser) {
@@ -917,13 +1062,15 @@ const supportTopics = [
 
 function layout(content) {
   document.body.dataset.theme = db.theme;
+  const ltcBalance = userLtcBalance();
+  const ltcUsd = userLtcUsdBalance();
   root.innerHTML = `
     <main class="app">
       <header class="topbar">
         <button class="logo-button" data-route="home"><img class="logo" src="assets/logo1-white.png" alt="CERBER"></button>
         <button class="balance" data-account>
-          <strong>0 LTC</strong>
-          <span>${userBalance().toFixed(2)} $</span>
+          <strong>${ltcBalance.toFixed(6)} LTC</strong>
+          <span>${ltcUsd.toFixed(2)} $</span>
           <img class="avatar" src="assets/user-avatar.png" alt="">
         </button>
       </header>
@@ -1166,7 +1313,11 @@ function renderOrders(tab = activeOrdersTab) {
     button.onclick = () => renderOrders(button.dataset.orderTab);
   });
   document.querySelectorAll("[data-order-open]").forEach((button) => {
-    button.onclick = () => renderExchangeOrderDetail(button.dataset.orderOpen);
+    button.onclick = () => {
+      const order = db.orders.find((item) => item.id === button.dataset.orderOpen);
+      if (order?.type === "product") return showProductOrder(order.id);
+      renderExchangeOrderDetail(button.dataset.orderOpen);
+    };
   });
   document.querySelectorAll("[data-order-dispute]").forEach((button) => {
     button.onclick = () => openExchangeDispute(button.dataset.orderDispute);
@@ -1193,6 +1344,19 @@ function orderCard(order) {
       </div>
     </article>
   `;
+}
+
+function showProductOrder(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  showModal(`
+    <h2>${esc(order.product)}</h2>
+    <p>${esc(order.storeName || "")}</p>
+    <p>${esc(order.location || "")}</p>
+    <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || 0).toFixed(6)} LTC</p>
+    <p>Статус: ${esc(order.status || "active")}</p>
+    <button class="primary" data-close-modal>${tr("close")}</button>
+  `);
 }
 
 function renderFilters() {
@@ -1327,16 +1491,172 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
 function productCard(product, store) {
   return `
     <article class="product-card">
-      <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
+      <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
+        <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
       <div class="product-body">
         <h3>${esc(product.title)}</h3>
         <p>${esc(product.category)}</p>
         <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
-        <p class="price">${esc(product.price)}</p>
-        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
-      </div>
+        <p class="price">${esc(product.price || `от ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
+        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} покупок</p>
+        </div>
+      </button>
     </article>
   `;
+}
+
+function productPositions(product) {
+  const filters = db.filters || {};
+  return (product.positions || []).filter((position) => {
+    if (filters.country && position.country && filters.country !== position.country) return false;
+    if (filters.city && position.city && filters.city !== position.city) return false;
+    if (filters.district && position.district && filters.district !== position.district) return false;
+    return true;
+  });
+}
+
+function renderProduct(storeId, productId) {
+  route = "product";
+  activeStoreId = storeId;
+  activeProductId = productId;
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  if (!product) return renderStore(store.id, "positions");
+  const positions = productPositions(product);
+  const ltc = usdToLtc(product.priceUsd || 0);
+  layout(`
+    <section class="screen product-screen">
+      <p class="breadcrumbs">Магазины > ${esc(store.name)} > ${esc(product.title)}</p>
+      <article class="panel product-detail">
+        <div class="product-gallery">
+          ${(product.images || [product.image]).slice(0, 5).map((image) => `<img src="${esc(image || store.image || fallbackImage)}" alt="${esc(product.title)}">`).join("")}
+        </div>
+        <div class="product-detail-body">
+          <h1>${esc(product.title)}</h1>
+          <p class="desc">${esc(product.category)}</p>
+          <p>${esc(product.description || "")}</p>
+          <p><strong>Магазин:</strong> ${esc(store.name)} <span class="verify">вњ“</span></p>
+          <div class="product-stats">
+            <span>${esc(product.purchases || 0)} покупок</span>
+            <span>${esc(product.reviews || 0)} отзывов</span>
+            <span>${Number(product.rating || 5).toFixed(2)} ★</span>
+          </div>
+          <p class="price">от ${Number(product.priceUsd || 0).toFixed(2)} $ · ${ltc.toFixed(6)} LTC</p>
+        </div>
+      </article>
+      <div class="pill-tabs">
+        <button>Доступные позиции <span>${positions.length}</span></button>
+        <button class="muted">Отзывы <span>${esc(product.reviews || 0)}</span></button>
+      </div>
+      ${positions.length ? positions.map((position) => positionCard(position, product, store)).join("") : `
+        <article class="panel empty-state">
+          <p>По выбранным фильтрам позиций нет. Измените город или район в фильтрах.</p>
+          <button class="primary" data-filters>Открыть фильтры</button>
+        </article>
+      `}
+    </section>
+  `);
+  fetchLitecoinUsdRate().then(() => {
+    if (route === "product" && activeProductId === productId) {
+      document.querySelectorAll("[data-ltc-price]").forEach((node) => {
+        node.textContent = `${usdToLtc(Number(node.dataset.usd || 0)).toFixed(6)} LTC`;
+      });
+    }
+  });
+}
+
+function positionCard(position, product, store) {
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  return `
+    <article class="panel position-card">
+      <div>
+        <h3>${esc(position.title || product.title)}</h3>
+        <p>${esc(position.description || product.description || "")}</p>
+      </div>
+      <div class="position-grid">
+        <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
+        <p><span>Тип доставки</span><strong>${esc(position.deliveryType || "Городская доставка")}</strong></p>
+        <p><span>Цена</span><strong>${priceUsd.toFixed(2)} $</strong></p>
+        <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${usdToLtc(priceUsd).toFixed(6)} LTC</strong></p>
+        <p><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
+      </div>
+      <button class="primary" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>Купить</button>
+    </article>
+  `;
+}
+
+function renderProductPayment(storeId, productId, positionId) {
+  route = "product-payment";
+  activeStoreId = storeId;
+  activeProductId = productId;
+  activePositionId = positionId;
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  const position = positionById(product, positionId);
+  if (!product || !position) return renderStore(store.id, "positions");
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
+  const balance = userLtcBalance();
+  const enough = balance >= ltcAmount && ltcAmount > 0;
+  layout(`
+    <section class="screen product-payment-screen">
+      <h1>Оплата</h1>
+      <article class="panel payment-product">
+        <img src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <div>
+          <h2>${esc(product.title)}</h2>
+          <p>${esc(position.title)} · ${esc(locationLabel(position))}</p>
+          <p>${esc(product.category)}</p>
+        </div>
+      </article>
+      <article class="panel payment-wallet">
+        <h3>Внутренний кошелек LTC</h3>
+        <p>Баланс: ${balance.toFixed(6)} LTC</p>
+        <p>${userLtcUsdBalance().toFixed(2)} $ по текущему курсу</p>
+      </article>
+      <article class="panel payment-summary">
+        <p><span>Стоимость</span><strong>${priceUsd.toFixed(2)} $</strong></p>
+        <p><span>Курс LTC</span><strong>1 LTC ≈ ${Number(ltcUsdCache || 0).toFixed(2)} $</strong></p>
+        <p><span>Сумма к оплате</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+      </article>
+      ${enough ? "" : `<article class="alert">Недостаточно средств на LTC балансе для оплаты этим способом</article>`}
+      <button class="primary" data-confirm-product-pay ${enough ? "" : "disabled"}>Оплатить</button>
+      <p class="desc center">Нажимая на кнопку оплаты, вы соглашаетесь с правилами площадки.</p>
+    </section>
+  `);
+  fetchLitecoinUsdRate();
+  document.querySelector("[data-confirm-product-pay]")?.addEventListener("click", () => handleProductPurchase(store.id, product.id, position.id));
+}
+
+function handleProductPurchase(storeId, productId, positionId) {
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  const position = positionById(product, positionId);
+  if (!product || !position) return;
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
+  if (userLtcBalance() < ltcAmount) return;
+  db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
+  position.stock = Math.max(0, Number(position.stock || 0) - 1);
+  product.purchases = Number(product.purchases || 0) + 1;
+  store.orders = Number(store.orders || 0) + 1;
+  db.orders.unshift({
+    id: `order-${Date.now()}`,
+    type: "product",
+    login: db.currentUser,
+    storeId,
+    productId,
+    positionId,
+    product: product.title,
+    storeName: store.name,
+    status: "active",
+    createdAt: Date.now(),
+    amountUsd: priceUsd,
+    ltcAmount,
+    location: locationLabel(position)
+  });
+  saveDb();
+  renderOrders("active");
 }
 
 function reviewCard(review) {
@@ -2052,6 +2372,11 @@ function openExchangeDispute(id) {
     order.disputeOpen = true;
     order.disputeUntil = disputeUntil;
   }
+  if (!request) {
+    saveDb();
+    showToast("Спор открыт на 12 часов");
+    return renderOrders("disputes");
+  }
   if (request) {
     request.status = "dispute";
     request.disputeOpen = true;
@@ -2253,7 +2578,18 @@ function renderAdmin() {
           <div class="row">
             ${exchangeMethods.map((method) => `<label class="field">${method}<input name="req_${method}" value="60327998"></label>`).join("")}
           </div>
-          <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*"></label>
+          <label class="field">Описание<textarea name="description" required></textarea></label>
+          <div class="row">
+            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
+            <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
+          </div>
+          <label class="field">Тип доставки<input name="deliveryType" value="Городская доставка"></label>
+          <div class="row">
+            <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
+            <label class="field">Город<input name="city" value="chisinau"></label>
+            <label class="field">Район<input name="district" placeholder="Чеканы"></label>
+          </div>
+          <label class="field">${tr("upload")}<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">Добавить обменник</button>
         </form>
       </article>
@@ -2338,8 +2674,18 @@ function renderSeller() {
         <form class="form" data-product-form>
           <label class="field">${tr("name")}<input name="title" required></label>
           <label class="field">${tr("short")}<input name="category" required></label>
-          <label class="field">Цена<input name="price" required></label>
-          <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*"></label>
+          <label class="field">Описание<textarea name="description" required></textarea></label>
+          <div class="row">
+            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
+            <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
+          </div>
+          <label class="field">Тип доставки<input name="deliveryType" value="Городская доставка"></label>
+          <div class="row">
+            <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
+            <label class="field">Город<input name="city" value="chisinau"></label>
+            <label class="field">Район<input name="district" placeholder="Чеканы"></label>
+          </div>
+          <label class="field">${tr("upload")}<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">${tr("addProduct")}</button>
         </form>
       </article>
@@ -2349,16 +2695,35 @@ function renderSeller() {
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const file = data.get("image");
-    const image = file && file.size ? await fileToDataUrl(file) : store.image;
+    const files = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
+    const images = files.length ? await Promise.all(files.map(fileToDataUrl)) : [store.image];
+    const priceUsd = Number(data.get("priceUsd") || 0);
+    const productId = `product-${Date.now()}`;
     store.products.unshift({
-      id: Date.now().toString(),
-      title: data.get("title"),
-      category: data.get("category"),
-      price: data.get("price"),
-      image,
+      id: productId,
+      title: data.get("title").trim(),
+      category: data.get("category").trim(),
+      description: data.get("description").trim(),
+      price: `от ${priceUsd}$`,
+      priceUsd,
+      image: images[0],
+      images,
       rating: 5,
-      reviews: 0
+      reviews: 0,
+      purchases: 0,
+      positions: [{
+        id: `${productId}-position`,
+        title: data.get("title").trim(),
+        description: data.get("description").trim(),
+        priceUsd,
+        country: data.get("country"),
+        city: data.get("city").trim(),
+        district: data.get("district").trim(),
+        deliveryType: data.get("deliveryType").trim(),
+        stock: Number(data.get("stock") || 0),
+        status: "ready"
+      }],
+      reviewsList: []
     });
     saveDb();
     renderSeller();
@@ -2469,6 +2834,16 @@ function bindGlobal() {
   document.querySelectorAll("[data-store-tab]").forEach((button) => {
     button.onclick = () => renderStore(button.dataset.storeId, button.dataset.storeTab);
   });
+  document.querySelectorAll("[data-product]").forEach((button) => {
+    if (button.dataset.buyPosition) return;
+    button.onclick = () => renderProduct(button.dataset.productStore, button.dataset.product);
+  });
+  document.querySelectorAll("[data-buy-position]").forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      renderProductPayment(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
+    };
+  });
   document.querySelector("[data-menu]").onclick = () => document.querySelector("[data-nav-pop]").classList.add("open");
   document.querySelector("[data-account]").onclick = () => document.querySelector("[data-account-pop]").classList.add("open");
   document.querySelectorAll("[data-nav-pop], [data-account-pop], [data-modal]").forEach((overlay) => {
@@ -2527,6 +2902,8 @@ function renderCurrent() {
   if (["wallet"].includes(route)) return renderSimplePage(route);
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
+  if (route === "product") return renderProduct(activeStoreId || db.stores[0].id, activeProductId);
+  if (route === "product-payment") return renderProductPayment(activeStoreId || db.stores[0].id, activeProductId, activePositionId);
   if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
   if (route === "chat") return renderChat(activeStoreId || db.stores[0].id);
   renderHome();
@@ -2535,6 +2912,7 @@ function renderCurrent() {
 async function initApp() {
   await loadRemoteConfig();
   await loadRemoteSession();
+  await fetchLitecoinUsdRate();
   renderCurrent();
 }
 

@@ -396,6 +396,16 @@ body[data-theme="dark"] .logo {
   overflow: hidden;
 }
 
+.product-click {
+  display: grid;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
 .product-image {
   aspect-ratio: 1 / 1;
 }
@@ -413,6 +423,108 @@ body[data-theme="dark"] .logo {
 .price {
   font-size: 22px;
   font-weight: 800;
+}
+
+.product-detail {
+  overflow: hidden;
+  padding: 0;
+}
+
+.product-gallery {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(210px, 1fr);
+  gap: 12px;
+  overflow-x: auto;
+  padding: 18px;
+}
+
+.product-gallery img,
+.payment-product img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 18px;
+  object-fit: cover;
+}
+
+.product-detail-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 22px 24px;
+}
+
+.product-detail-body h1 {
+  margin: 0;
+  font-size: 34px;
+}
+
+.product-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.product-stats span {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.position-card {
+  display: grid;
+  gap: 18px;
+}
+
+.position-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 22px;
+}
+
+.position-grid p,
+.payment-summary p {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.position-grid span,
+.payment-summary span {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.payment-product {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.payment-product h2 {
+  margin: 0 0 6px;
+}
+
+.payment-wallet,
+.payment-summary {
+  display: grid;
+  gap: 14px;
+}
+
+.alert {
+  padding: 22px;
+  border-radius: 22px;
+  background: #ffdfe1;
+  color: #af1724;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.center {
+  text-align: center;
 }
 
 .review-card {

@@ -149,6 +149,7 @@ async function ensureSeed() {
       referralPayments: [],
       referralCodes: {},
       balances: {},
+      ltcBalances: {},
       referralPeriod: {},
       filters: {
         country: "moldova",
@@ -186,6 +187,7 @@ async function stateFor(user) {
       referralPayments: settings?.data?.referralPayments || [],
       referralCodes: settings?.data?.referralCodes || {},
       balances: settings?.data?.balances || {},
+      ltcBalances: settings?.data?.ltcBalances || {},
       referralPeriod: settings?.data?.referralPeriod || {},
       filters: settings?.data?.filters || {}
     }
@@ -285,6 +287,7 @@ app.put("/api/state", async (req, res, next) => {
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},
         balances: state.balances || {},
+        ltcBalances: state.ltcBalances || {},
         referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
       }

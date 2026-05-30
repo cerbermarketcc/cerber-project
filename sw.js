@@ -1,4 +1,4 @@
-const CACHE_NAME = "cerber-mobile-v24";
+const CACHE_NAME = "cerber-mobile-v25";
 const ASSETS = [
   "./",
   "./index.html",
