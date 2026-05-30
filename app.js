@@ -1526,8 +1526,8 @@ function showProductOrder(orderId) {
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p><span>Сумма:</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
         <p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet || "Кошелек не указан")}</strong></p>
-        <p><span>Комментарий:</span><strong>${esc(order.id)}</strong></p>
         <div class="row">
+          <button class="ghost-button" data-copy="${esc(`Адрес LTC: ${order.sellerLtcWallet || ""}\nСумма: ${ltcAmount.toFixed(6)} LTC`)}">Скопировать всё</button>
           <button class="ghost-button" data-copy="${esc(order.sellerLtcWallet || "")}">Скопировать кошелек</button>
           <button class="ghost-button" data-copy="${ltcAmount.toFixed(6)}">Скопировать сумму</button>
         </div>
