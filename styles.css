@@ -950,30 +950,72 @@ body[data-theme="dark"] .logo {
   font-size: 38px;
 }
 
-.top-pulse-mark {
+.top-fire-sticker {
   display: inline-block;
-  width: 26px;
-  height: 26px;
-  margin-left: 10px;
-  border-radius: 50% 50% 50% 8px;
-  background: #111;
-  box-shadow: 0 0 0 7px rgba(17, 17, 17, 0.08);
-  animation: topPulseMark 1.25s ease-in-out infinite;
-  transform: rotate(-35deg);
-  transform-origin: 50% 70%;
+  position: relative;
+  margin-left: 8px;
+  font-size: 0.95em;
+  line-height: 1;
+  animation: topFireFlicker 0.95s ease-in-out infinite;
+  transform-origin: 50% 85%;
 }
 
-@keyframes topPulseMark {
+.top-fire-sticker i {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #ffb12d;
+  opacity: 0;
+  animation: fireSpark 1.35s ease-out infinite;
+}
+
+.top-fire-sticker i:nth-child(1) {
+  left: 4px;
+  top: 4px;
+}
+
+.top-fire-sticker i:nth-child(2) {
+  right: 2px;
+  top: 7px;
+  animation-delay: 0.32s;
+}
+
+.top-fire-sticker i:nth-child(3) {
+  left: 50%;
+  top: 2px;
+  animation-delay: 0.68s;
+}
+
+@keyframes topFireFlicker {
   0%, 100% {
-    transform: translateY(0) rotate(-35deg) scale(1);
-    box-shadow: 0 0 0 7px rgba(17, 17, 17, 0.08);
+    transform: translateY(0) rotate(-2deg) scale(1);
   }
 
   50% {
-    transform: translateY(-4px) rotate(-28deg) scale(1.12);
-    box-shadow: 0 0 0 12px rgba(17, 17, 17, 0.04);
+    transform: translateY(-2px) rotate(4deg) scale(1.08);
   }
 }
+
+@keyframes fireSpark {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.6);
+  }
+
+  25% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(var(--spark-x, 8px), -18px) scale(0.2);
+  }
+}
+
+.top-fire-sticker i:nth-child(1) { --spark-x: -7px; }
+.top-fire-sticker i:nth-child(2) { --spark-x: 9px; }
+.top-fire-sticker i:nth-child(3) { --spark-x: 2px; }
 
 .wallet-card-ltc {
   display: grid;

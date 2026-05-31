@@ -1409,7 +1409,7 @@ function renderHome() {
 }
 
 function topTitleView() {
-  return esc(tr("storesTop")).replace("🔥", `<span class="top-pulse-mark" aria-hidden="true"></span>`);
+  return esc(tr("storesTop")).replace("🔥", `<span class="top-fire-sticker" aria-hidden="true">🔥<i></i><i></i><i></i></span>`);
 }
 
 function renderCatalog() {
