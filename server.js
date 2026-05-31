@@ -545,8 +545,6 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       price_amount: amountUsd,
       price_currency: "usd",
       pay_currency: "ltc",
-      payout_address: state.paymentSettings?.platformLtcWallet || mainLtcWallet,
-      payout_currency: "ltc",
       order_id: deposit.id,
       order_description: `CERBER MARKET wallet top up / ${user.login}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`

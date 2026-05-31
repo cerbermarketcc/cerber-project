@@ -2009,6 +2009,129 @@ body[data-theme="dark"] .logo {
   line-height: 1.45;
 }
 
+.private-messages-screen {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 170px;
+}
+
+.private-search-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.private-search {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.private-search input {
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  padding: 0 18px;
+}
+
+.private-layout {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.private-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.private-list button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper);
+  color: var(--ink);
+  text-align: left;
+  padding: 12px 14px;
+}
+
+.private-list button.active {
+  border-color: #111;
+  background: var(--soft);
+}
+
+.private-list span {
+  font-weight: 900;
+}
+
+.private-list small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.private-chat {
+  display: grid;
+  gap: 12px;
+}
+
+.private-chat-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.private-chat-head h3,
+.private-chat-head p {
+  margin: 0;
+}
+
+.private-chat-head p {
+  color: var(--muted);
+}
+
+.private-chat-list {
+  display: grid;
+  gap: 10px;
+  max-height: 52vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.private-form {
+  position: sticky;
+  bottom: 90px;
+  padding-top: 8px;
+  background: var(--paper);
+}
+
+@media (max-width: 620px) {
+  .private-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .private-list {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .private-list button {
+    min-width: 190px;
+  }
+
+  .private-search {
+    grid-template-columns: 1fr;
+  }
+}
+
 .detail-head {
   display: grid;
   grid-template-columns: 96px 1fr;

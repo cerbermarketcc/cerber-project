@@ -174,6 +174,10 @@ let activeExchangeId = "";
 let activeExchangeTab = "calculator";
 let activeExchangeOrderId = "";
 let sellerAdminStoreId = "";
+let activePrivateLogin = "";
+let privateVoiceRecorder = null;
+let privateVoiceChunks = [];
+let privateVoiceDraft = null;
 
 const root = document.getElementById("app");
 
@@ -2292,28 +2296,235 @@ function renderChat(storeId) {
 function renderMessages() {
   route = "messages";
   const user = currentUser();
-  const messages = db.messages.filter((msg) => isAdmin() || sameLogin(msg.fromLogin, user.login) || sameLogin(msg.toLogin, user.login));
+  const visibleMessages = privateVisibleMessages(user.login);
+  const conversations = privateConversations(visibleMessages, user.login);
+  if (!activePrivateLogin && conversations.length) activePrivateLogin = conversations[0].login;
+  const activeMessages = activePrivateLogin ? privateConversationMessages(activePrivateLogin, visibleMessages, user.login) : [];
   layout(`
-    <section class="screen">
-      <article class="panel">
+    <section class="screen private-messages-screen">
+      <article class="panel private-search-panel">
         <h2>${tr("messages")}</h2>
-        ${messages.length ? messages.map((msg) => `
-          <article class="product-card product-body message-card">
-            <h3>${esc(msg.subject)}</h3>
-            <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
-            <p>${esc(msg.fromLogin)} → ${esc(msg.storeTag)} · ${esc(msg.date)}</p>
-            ${messageActions(msg)}
-          </article>
-        `).join("") : `<p>${tr("noMessages")}</p>`}
+        <form class="private-search" data-private-search-form>
+          <input name="login" list="private-users" placeholder="Поиск по логину" autocomplete="off">
+          <datalist id="private-users">
+            ${(db.users || []).filter((item) => !sameLogin(item.login, user.login)).map((item) => `<option value="${esc(item.login)}"></option>`).join("")}
+          </datalist>
+          <button class="primary">Открыть</button>
+        </form>
       </article>
+      <div class="private-layout">
+        <aside class="private-list">
+          ${conversations.length ? conversations.map((chat) => `
+            <button class="${sameLogin(chat.login, activePrivateLogin) ? "active" : ""}" data-private-open="${esc(chat.login)}">
+              <span>${esc(chat.login)}</span>
+              <small>${esc(chat.preview || "")}</small>
+            </button>
+          `).join("") : `<p>${tr("noMessages")}</p>`}
+        </aside>
+        <article class="panel private-chat">
+          ${activePrivateLogin ? `
+            <header class="private-chat-head">
+              <button class="group-avatar">${esc(activePrivateLogin.slice(0, 1).toUpperCase())}</button>
+              <div>
+                <h3>${esc(activePrivateLogin)}</h3>
+                <p>Личный диалог</p>
+              </div>
+            </header>
+            <div class="private-chat-list">
+              ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+            </div>
+            <form class="group-form private-form" data-private-chat-form>
+              <div class="group-compose-box">
+                <textarea name="body" placeholder="Сообщение"></textarea>
+                <div class="group-emoji-row">
+                  ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-private-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
+                </div>
+                <div class="group-file-name" data-private-file-name></div>
+              </div>
+              <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*" data-private-attachment>
+              <button type="button" class="group-tool-button" data-private-attach>📎</button>
+              <button type="button" class="group-tool-button" data-private-voice>🎙</button>
+              <button class="primary">${tr("send")}</button>
+            </form>
+          ` : `<p class="empty-chat">Найдите пользователя по логину и начните диалог</p>`}
+        </article>
+      </div>
     </section>
   `);
+  document.querySelector("[data-private-search-form]")?.addEventListener("submit", handlePrivateSearch);
+  document.querySelectorAll("[data-private-open]").forEach((button) => {
+    button.onclick = () => {
+      activePrivateLogin = button.dataset.privateOpen;
+      renderMessages();
+    };
+  });
+  document.querySelector("[data-private-chat-form]")?.addEventListener("submit", handlePrivateMessageSend);
+  document.querySelector("[data-private-attach]")?.addEventListener("click", () => document.querySelector("[data-private-attachment]")?.click());
+  document.querySelector("[data-private-voice]")?.addEventListener("click", togglePrivateVoiceRecord);
+  document.querySelector("[data-private-attachment]")?.addEventListener("change", (event) => {
+    const file = event.currentTarget.files?.[0];
+    document.querySelector("[data-private-file-name]").textContent = file ? file.name : "";
+  });
+  document.querySelectorAll("[data-private-emoji]").forEach((button) => {
+    button.onclick = () => {
+      const textarea = document.querySelector("[data-private-chat-form] textarea");
+      textarea.value = `${textarea.value}${button.dataset.privateEmoji}`;
+      textarea.focus();
+    };
+  });
+  document.querySelectorAll("[data-private-message]").forEach((message) => {
+    message.ondblclick = () => togglePrivateLike(message.dataset.privateMessage);
+  });
   document.querySelectorAll("[data-close-exchange]").forEach((button) => {
     button.onclick = () => closeExchangeOrder(button.dataset.closeExchange, "closed");
   });
   document.querySelectorAll("[data-dispute-exchange]").forEach((button) => {
     button.onclick = () => openExchangeDispute(button.dataset.disputeExchange);
   });
+}
+
+function privateVisibleMessages(login = db.currentUser) {
+  return (db.messages || []).filter((msg) => isAdmin() || sameLogin(msg.fromLogin, login) || sameLogin(msg.toLogin, login));
+}
+
+function privatePeer(msg, login = db.currentUser) {
+  if (sameLogin(msg.fromLogin, login)) return msg.toLogin || msg.storeTag || msg.storeId || "system";
+  return msg.fromLogin || msg.storeTag || "system";
+}
+
+function privateConversations(messages, login = db.currentUser) {
+  const map = new Map();
+  messages.forEach((msg) => {
+    const peer = privatePeer(msg, login);
+    if (!peer || sameLogin(peer, login)) return;
+    const current = map.get(loginKey(peer));
+    if (!current || Number(msg.createdAt || 0) > Number(current.createdAt || 0)) {
+      map.set(loginKey(peer), {
+        login: peer,
+        preview: msg.body || msg.subject || "Вложение",
+        createdAt: msg.createdAt || 0
+      });
+    }
+  });
+  return [...map.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function privateConversationMessages(peer, messages = privateVisibleMessages(), login = db.currentUser) {
+  return messages.filter((msg) => sameLogin(privatePeer(msg, login), peer)).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+function privateMessageView(msg) {
+  const own = sameLogin(msg.fromLogin, db.currentUser);
+  const likes = Array.isArray(msg.likes) ? msg.likes : [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  return `
+    <article class="group-message private-message ${own ? "own" : ""}" data-private-message="${esc(msg.id)}">
+      <button class="group-avatar">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
+      <div>
+        <div class="group-meta">
+          <span>${esc(msg.fromLogin)}</span>
+          <span>${esc(msg.date)}</span>
+        </div>
+        ${msg.subject ? `<strong>${esc(msg.subject)}</strong>` : ""}
+        <p>${esc(msg.body || "").replace(/\n/g, "<br>")}</p>
+        ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
+        ${likes.length ? `<button class="group-like-badge" data-private-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
+        ${messageActions(msg)}
+      </div>
+    </article>
+  `;
+}
+
+function handlePrivateSearch(event) {
+  event.preventDefault();
+  const login = String(new FormData(event.currentTarget).get("login") || "").trim();
+  if (!login || sameLogin(login, db.currentUser)) return;
+  const user = (db.users || []).find((item) => sameLogin(item.login, login));
+  if (!user) {
+    showToast("Пользователь не найден");
+    return;
+  }
+  activePrivateLogin = user.login;
+  renderMessages();
+}
+
+async function togglePrivateVoiceRecord(event) {
+  const button = event.currentTarget;
+  if (privateVoiceRecorder && privateVoiceRecorder.state === "recording") {
+    privateVoiceRecorder.stop();
+    button.classList.remove("recording");
+    button.textContent = "🎙";
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    showToast("Запись голоса недоступна в этом браузере");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    privateVoiceChunks = [];
+    privateVoiceRecorder = new MediaRecorder(stream);
+    privateVoiceRecorder.ondataavailable = (recordEvent) => {
+      if (recordEvent.data.size) privateVoiceChunks.push(recordEvent.data);
+    };
+    privateVoiceRecorder.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(privateVoiceChunks, { type: privateVoiceRecorder.mimeType || "audio/webm" });
+      privateVoiceDraft = {
+        name: `voice-${Date.now()}.webm`,
+        type: blob.type,
+        url: await blobToDataUrl(blob)
+      };
+      document.querySelector("[data-private-file-name]").textContent = "Голосовое сообщение готово";
+    };
+    privateVoiceRecorder.start();
+    button.classList.add("recording");
+    button.textContent = "■";
+    document.querySelector("[data-private-file-name]").textContent = "Идёт запись голоса...";
+  } catch {
+    showToast("Не удалось включить микрофон");
+  }
+}
+
+async function handlePrivateMessageSend(event) {
+  event.preventDefault();
+  if (!activePrivateLogin) return;
+  const data = new FormData(event.currentTarget);
+  const body = String(data.get("body") || "").trim();
+  const file = data.get("attachment");
+  if (!body && (!file || !file.size) && !privateVoiceDraft) return;
+  const attachments = file && file.size ? [{
+    name: file.name,
+    type: file.type,
+    url: await fileToDataUrl(file)
+  }] : (privateVoiceDraft ? [privateVoiceDraft] : []);
+  db.messages.unshift({
+    id: `private-${Date.now()}`,
+    storeId: "",
+    storeTag: activePrivateLogin,
+    toLogin: activePrivateLogin,
+    fromLogin: db.currentUser,
+    subject: "",
+    body,
+    attachments,
+    likes: [],
+    createdAt: Date.now(),
+    date: new Date().toLocaleString()
+  });
+  privateVoiceDraft = null;
+  saveDb();
+  renderMessages();
+}
+
+function togglePrivateLike(messageId) {
+  const msg = db.messages.find((item) => item.id === messageId);
+  if (!msg) return;
+  msg.likes = Array.isArray(msg.likes) ? msg.likes : [];
+  const index = msg.likes.findIndex((login) => sameLogin(login, db.currentUser));
+  if (index >= 0) msg.likes.splice(index, 1);
+  else msg.likes.push(db.currentUser);
+  saveDb();
+  renderMessages();
 }
 
 function isGroupModerator(login = db.currentUser) {
@@ -2640,33 +2851,8 @@ function handleGroupCommand(body) {
 
 function openPrivateMessageModal(login) {
   if (!login || login === "cerber-market" || sameLogin(login, db.currentUser)) return;
-  showModal(`
-    <h2>Личное сообщение</h2>
-    <p>Получатель: ${esc(login)}</p>
-    <form class="form" data-private-message-form>
-      <label class="field">${tr("subject")}<input name="subject"></label>
-      <label class="field">${tr("message")}<textarea name="body" required></textarea></label>
-      <button class="primary">${tr("send")}</button>
-    </form>
-    <button class="ghost-button" data-close-modal>${tr("close")}</button>
-  `);
-  document.querySelector("[data-private-message-form]").onsubmit = (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    db.messages.unshift({
-      id: Date.now().toString(),
-      storeId: "",
-      storeTag: login,
-      toLogin: login,
-      fromLogin: db.currentUser,
-      subject: data.get("subject") || `Личное сообщение от ${db.currentUser}`,
-      body: data.get("body"),
-      date: new Date().toLocaleString()
-    });
-    saveDb();
-    document.querySelector("[data-modal]").classList.remove("open");
-    showToast(tr("sent"));
-  };
+  activePrivateLogin = login;
+  renderMessages();
 }
 
 function messageActions(msg) {
