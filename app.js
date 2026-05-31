@@ -1409,7 +1409,7 @@ function renderHome() {
 }
 
 function topTitleView() {
-  return esc(tr("storesTop")).replace("🔥", `<span class="black-fire" aria-hidden="true">🔥</span>`);
+  return esc(tr("storesTop")).replace("🔥", `<span class="top-pulse-mark" aria-hidden="true"></span>`);
 }
 
 function renderCatalog() {
@@ -3670,18 +3670,24 @@ function renderWallet() {
     </section>
   `);
   document.querySelector("[data-wallet-deposit]")?.addEventListener("click", openWalletDepositModal);
+  document.querySelectorAll("[data-wallet-deposit]").forEach((button) => {
+    if (button.dataset.walletDeposit) button.addEventListener("click", () => showWalletDepositDetails(button.dataset.walletDeposit));
+  });
 }
 
 function walletTransactionView(tx) {
   const sign = Number(tx.amountLtc || 0) >= 0 ? "+" : "";
   const status = walletTransactionStatus(tx);
+  const deposit = walletDepositForTransaction(tx);
   return `
-    <article class="wallet-tx ${status.key}">
-      <div>
+    <article class="wallet-tx ${status.key}" ${deposit ? `data-wallet-deposit="${esc(deposit.id)}"` : ""}>
+      <div class="wallet-tx-main">
         <h3>${esc(tx.title)}</h3>
         <p>${esc(tx.date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
+        ${deposit ? `<small>К оплате: ${Number(deposit.payAmount || tx.amountLtc || 0).toFixed(8)} LTC</small>` : ""}
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
+      ${deposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
     </article>
   `;
 }
@@ -3693,10 +3699,58 @@ function walletTransactionStatus(tx) {
     if (expiresAt && expiresAt <= Date.now()) return { key: "cancelled", label: "Отменено" };
     const left = expiresAt ? Math.max(0, expiresAt - Date.now()) : 0;
     const minutes = left ? Math.ceil(left / 60000) : 0;
-    return { key: "processing", label: "В обработке", timer: minutes ? `бронь ${minutes} мин` : "" };
+    return { key: "processing", label: "В обработке", timer: minutes ? `истекает через ${minutes} мин` : "" };
   }
   if (["failed", "expired", "cancelled", "canceled"].includes(raw)) return { key: "cancelled", label: "Отменено" };
   return { key: "completed", label: "Завершено" };
+}
+
+function walletDepositForTransaction(tx) {
+  if (tx.type !== "deposit") return null;
+  const id = String(tx.id || "").replace(/^tx-/, "");
+  return (db.walletDeposits || []).find((deposit) => deposit.id === id || deposit.paymentId === tx.paymentId) || null;
+}
+
+function walletDepositStatusText(deposit) {
+  const status = walletTransactionStatus({
+    status: deposit.status === "waiting" ? "processing" : deposit.status,
+    expiresAt: deposit.expiresAt
+  });
+  return `${status.label}${status.timer ? ` · ${status.timer}` : ""}`;
+}
+
+function walletDepositCopyText(deposit) {
+  return `Адрес LTC: ${deposit.payAddress || ""}\nСумма: ${Number(deposit.payAmount || 0).toFixed(8)} LTC`;
+}
+
+function bindCopyButtons() {
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    button.onclick = async (event) => {
+      event.stopPropagation();
+      await navigator.clipboard.writeText(button.dataset.copy || "");
+      showToast("Скопировано");
+    };
+  });
+}
+
+function showWalletDepositDetails(depositId) {
+  const deposit = (db.walletDeposits || []).find((item) => item.id === depositId);
+  if (!deposit) return;
+  showModal(`
+    <h2>Пополнение LTC</h2>
+    <p>${esc(walletDepositStatusText(deposit))}</p>
+    <div class="deposit-address">
+      <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
+      <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
+    </div>
+    <div class="deposit-address">
+      <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
+      <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
+    </div>
+    <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать всё вместе</button>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  bindCopyButtons();
 }
 
 function openWalletDepositModal() {
@@ -3733,10 +3787,9 @@ async function createWalletDeposit(event) {
     applyRemoteState(payload);
     const deposit = payload.deposit || {};
     renderWallet();
-    const copyAll = `Адрес LTC: ${deposit.payAddress || ""}\nСумма: ${Number(deposit.payAmount || 0).toFixed(8)} LTC`;
     showModal(`
       <h2>Ваш LTC-кошелек</h2>
-      <p>Скопируйте адрес кошелька и сумму ниже. Бронь на оплату действует 40 минут, транзакция уже добавлена в обработку.</p>
+      <p>Скопируйте адрес кошелька и сумму ниже. Оплата истекает через 40 минут, транзакция уже добавлена в обработку.</p>
       <div class="deposit-address">
         <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
         <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
@@ -3745,16 +3798,11 @@ async function createWalletDeposit(event) {
         <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
         <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
       </div>
-      <button class="primary" data-copy="${esc(copyAll)}">Скопировать всё вместе</button>
+      <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать всё вместе</button>
       ${deposit.paymentUrl ? `<a class="primary link-button" href="${esc(deposit.paymentUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : ""}
       <button class="ghost-button" data-close-modal>${tr("close")}</button>
     `);
-    document.querySelectorAll("[data-copy]").forEach((button) => {
-      button.onclick = async () => {
-        await navigator.clipboard.writeText(button.dataset.copy || "");
-        showToast("Скопировано");
-      };
-    });
+    bindCopyButtons();
   } catch (error) {
     showToast(error.message || "Не удалось создать пополнение");
   }
