@@ -220,6 +220,127 @@ body[data-theme="dark"] .logo {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
 }
 
+.group-chat-screen {
+  padding-bottom: 160px;
+}
+
+.group-chat-head {
+  display: grid;
+  gap: 14px;
+}
+
+.group-title-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.group-title-form input,
+.group-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  padding: 14px 16px;
+}
+
+.group-chat-list {
+  display: grid;
+  gap: 10px;
+}
+
+.group-pinned,
+.group-message {
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--paper);
+  padding: 14px;
+}
+
+.group-pinned {
+  border-color: #f4a735;
+}
+
+.group-message {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 12px;
+}
+
+.group-message.own {
+  background: var(--soft);
+}
+
+.group-avatar {
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 50%;
+  background: #111;
+  color: #fff;
+  font-weight: 900;
+}
+
+.group-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.group-message p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.group-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.group-actions button,
+.group-title-form button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--ink);
+  padding: 9px 12px;
+}
+
+.group-compose {
+  position: fixed;
+  right: max(10px, calc((100vw - 620px) / 2 + 10px));
+  bottom: 96px;
+  left: max(10px, calc((100vw - 620px) / 2 + 10px));
+  z-index: 7;
+  padding: 12px;
+}
+
+.group-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.group-form textarea {
+  min-height: 50px;
+  max-height: 120px;
+  resize: vertical;
+}
+
+.empty-chat {
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 0;
+}
+
 .shop-card {
   overflow: hidden;
 }

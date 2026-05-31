@@ -123,6 +123,12 @@ const defaults = {
   ],
   stores: [],
   messages: [],
+  groupMessages: [],
+  groupSettings: {
+    title: "Общий чат",
+    pinnedMessageId: "",
+    mutedUntil: {}
+  },
   orders: [],
   exchangeCards: [],
   exchangeRequests: [],
@@ -385,6 +391,9 @@ function merge(base, saved) {
 
 function normalizeDb(next) {
   if (!Array.isArray(next.orders)) next.orders = [];
+  if (!Array.isArray(next.groupMessages)) next.groupMessages = [];
+  if (!next.groupSettings) next.groupSettings = structuredClone(defaults.groupSettings);
+  if (!next.groupSettings.mutedUntil) next.groupSettings.mutedUntil = {};
   if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
@@ -711,6 +720,8 @@ async function persistRemoteState() {
           lang: db.lang,
           stores: db.stores,
           messages: db.messages,
+          groupMessages: db.groupMessages,
+          groupSettings: db.groupSettings,
           orders: db.orders,
           exchangeCards: db.exchangeCards,
           exchangeRequests: db.exchangeRequests,
@@ -1153,6 +1164,7 @@ function layout(content) {
         ${accountMenuButton("stores", "Магазины", `data-route="catalog"`)}
         ${accountMenuButton("orders", "Заказы", `data-route="orders"`)}
         ${accountMenuButton("messages", tr("messages"), `data-route="messages"`)}
+        ${accountMenuButton("messages", "Общий чат", `data-route="group-chat"`)}
         ${accountMenuButton("referrals", "Реферальная программа", `data-route="referrals"`, `<b>NEW</b>`)}
         ${accountMenuButton("exchange", "Заявки на обмен", `data-route="exchange"`)}
         <div class="divider"></div>
@@ -2237,6 +2249,198 @@ function renderMessages() {
   document.querySelectorAll("[data-dispute-exchange]").forEach((button) => {
     button.onclick = () => openExchangeDispute(button.dataset.disputeExchange);
   });
+}
+
+function isGroupModerator(login = db.currentUser) {
+  return isAdmin() || ["cerber", "cerberm"].some((item) => sameLogin(item, login));
+}
+
+function groupMuteUntil(login = db.currentUser) {
+  return Number(db.groupSettings?.mutedUntil?.[login] || 0);
+}
+
+function renderGroupChat() {
+  route = "group-chat";
+  const user = currentUser();
+  const settings = db.groupSettings || structuredClone(defaults.groupSettings);
+  const moderator = isGroupModerator();
+  const muteUntil = groupMuteUntil(user?.login);
+  const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted);
+  const messages = (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  layout(`
+    <section class="screen group-chat-screen">
+      <article class="panel group-chat-head">
+        <div>
+          <h2>${esc(settings.title || "Общий чат")}</h2>
+          <p>Писать могут все зарегистрированные пользователи.</p>
+        </div>
+        ${moderator ? `
+          <form class="group-title-form" data-group-title-form>
+            <input name="title" value="${esc(settings.title || "Общий чат")}" aria-label="Название чата">
+            <button>Сохранить</button>
+          </form>
+        ` : ""}
+      </article>
+      ${pinned ? `
+        <article class="group-pinned">
+          <strong>Закреплено</strong>
+          <p><button class="link-button" data-group-user="${esc(pinned.fromLogin)}">${esc(pinned.fromLogin)}</button>: ${esc(pinned.body)}</p>
+        </article>
+      ` : ""}
+      <article class="group-chat-list">
+        ${messages.length ? messages.map(groupMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+      </article>
+      <article class="panel group-compose">
+        ${muteUntil > Date.now() ? `
+          <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+        ` : `
+          <form class="group-form" data-group-form>
+            <textarea name="body" required placeholder="Сообщение"></textarea>
+            <button class="primary">${tr("send")}</button>
+          </form>
+          ${moderator ? `<p class="desc">Команды: /mute логин 15, /title новое название</p>` : ""}
+        `}
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-group-form]")?.addEventListener("submit", handleGroupMessageSend);
+  document.querySelector("[data-group-title-form]")?.addEventListener("submit", handleGroupTitleSave);
+  document.querySelectorAll("[data-group-user]").forEach((button) => {
+    button.onclick = () => openPrivateMessageModal(button.dataset.groupUser);
+  });
+  document.querySelectorAll("[data-group-pin]").forEach((button) => {
+    button.onclick = () => {
+      if (!isGroupModerator()) return;
+      db.groupSettings.pinnedMessageId = button.dataset.groupPin;
+      saveDb();
+      renderGroupChat();
+    };
+  });
+  document.querySelectorAll("[data-group-delete]").forEach((button) => {
+    button.onclick = () => {
+      if (!isGroupModerator()) return;
+      const msg = db.groupMessages.find((item) => item.id === button.dataset.groupDelete);
+      if (msg) msg.deleted = true;
+      saveDb();
+      renderGroupChat();
+    };
+  });
+}
+
+function groupMessageView(msg) {
+  const moderator = isGroupModerator();
+  const own = sameLogin(msg.fromLogin, db.currentUser);
+  return `
+    <article class="group-message ${own ? "own" : ""}">
+      <button class="group-avatar" data-group-user="${esc(msg.fromLogin)}">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
+      <div>
+        <div class="group-meta">
+          <button class="link-button" data-group-user="${esc(msg.fromLogin)}">${esc(msg.fromLogin)}</button>
+          <span>${esc(msg.date)}</span>
+        </div>
+        <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
+        ${moderator ? `
+          <div class="group-actions">
+            <button data-group-pin="${esc(msg.id)}">Закрепить</button>
+            <button data-group-delete="${esc(msg.id)}">Удалить у всех</button>
+          </div>
+        ` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function handleGroupTitleSave(event) {
+  event.preventDefault();
+  if (!isGroupModerator()) return;
+  const title = new FormData(event.currentTarget).get("title").trim();
+  if (!title) return;
+  db.groupSettings.title = title;
+  saveDb();
+  renderGroupChat();
+}
+
+function handleGroupMessageSend(event) {
+  event.preventDefault();
+  const user = currentUser();
+  if (!user) return renderAuth();
+  const muted = groupMuteUntil(user.login);
+  if (muted > Date.now()) {
+    showToast("Вы временно замучены");
+    return;
+  }
+  const body = new FormData(event.currentTarget).get("body").trim();
+  if (!body) return;
+  if (isGroupModerator() && handleGroupCommand(body)) {
+    event.currentTarget.reset();
+    renderGroupChat();
+    return;
+  }
+  db.groupMessages.push({
+    id: `group-${Date.now()}`,
+    fromLogin: user.login,
+    body,
+    createdAt: Date.now(),
+    date: new Date().toLocaleString()
+  });
+  saveDb();
+  renderGroupChat();
+}
+
+function handleGroupCommand(body) {
+  const mute = body.match(/^\/mute\s+(\S+)\s+(\d+)/i);
+  if (mute) {
+    const login = mute[1];
+    const minutes = Math.max(1, Number(mute[2] || 15));
+    db.groupSettings.mutedUntil[login] = Date.now() + minutes * 60 * 1000;
+    db.groupMessages.push({
+      id: `group-${Date.now()}`,
+      fromLogin: "system",
+      body: `${login} замучен на ${minutes} минут`,
+      createdAt: Date.now(),
+      date: new Date().toLocaleString()
+    });
+    saveDb();
+    return true;
+  }
+  const title = body.match(/^\/title\s+(.+)/i);
+  if (title) {
+    db.groupSettings.title = title[1].trim();
+    saveDb();
+    return true;
+  }
+  return false;
+}
+
+function openPrivateMessageModal(login) {
+  if (!login || sameLogin(login, db.currentUser)) return;
+  showModal(`
+    <h2>Личное сообщение</h2>
+    <p>Получатель: ${esc(login)}</p>
+    <form class="form" data-private-message-form>
+      <label class="field">${tr("subject")}<input name="subject"></label>
+      <label class="field">${tr("message")}<textarea name="body" required></textarea></label>
+      <button class="primary">${tr("send")}</button>
+    </form>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-private-message-form]").onsubmit = (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    db.messages.unshift({
+      id: Date.now().toString(),
+      storeId: "",
+      storeTag: login,
+      toLogin: login,
+      fromLogin: db.currentUser,
+      subject: data.get("subject") || `Личное сообщение от ${db.currentUser}`,
+      body: data.get("body"),
+      date: new Date().toLocaleString()
+    });
+    saveDb();
+    document.querySelector("[data-modal]").classList.remove("open");
+    showToast(tr("sent"));
+  };
 }
 
 function messageActions(msg) {
@@ -3581,6 +3785,7 @@ function renderCurrent() {
   if (route === "catalog") return renderCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
+  if (route === "group-chat") return renderGroupChat();
   if (route === "support") return renderSupport();
   if (route === "referrals") return renderReferrals(activeReferralTab);
   if (route === "exchange") return renderExchangeCatalog();
