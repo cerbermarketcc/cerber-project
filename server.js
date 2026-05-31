@@ -18,6 +18,7 @@ const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
+const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -103,7 +104,8 @@ async function ensureSeed() {
       groupSettings: {
         title: "Общий чат",
         pinnedMessageId: "",
-        mutedUntil: {}
+        mutedUntil: {},
+        rollTimers: []
       },
       referrals: [],
       referralPayments: [],
@@ -116,7 +118,7 @@ async function ensureSeed() {
         provider: "nowpayments",
         payBaseUrl: "",
         platformCommissionPercent: 0,
-        platformLtcWallet: ""
+        platformLtcWallet: mainLtcWallet
       },
       referralPeriod: {},
       filters: {
@@ -156,7 +158,7 @@ async function stateFor(user) {
       exchangeCards: visibleExchangeCards,
       exchangeRequests: settingsData.exchangeRequests || [],
       groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
-      groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {} },
+      groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
       referrals: settingsData.referrals || [],
       referralPayments: settingsData.referralPayments || [],
       referralCodes: settingsData.referralCodes || {},
@@ -318,7 +320,7 @@ app.put("/api/state", async (req, res, next) => {
         exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards : defaultExchangeCards,
         exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
         groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
-        groupSettings: state.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {} },
+        groupSettings: state.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
         referrals: Array.isArray(state.referrals) ? state.referrals : [],
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},
@@ -543,6 +545,8 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       price_amount: amountUsd,
       price_currency: "usd",
       pay_currency: "ltc",
+      payout_address: state.paymentSettings?.platformLtcWallet || mainLtcWallet,
+      payout_currency: "ltc",
       order_id: deposit.id,
       order_description: `CERBER MARKET wallet top up / ${user.login}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`

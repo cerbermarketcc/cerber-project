@@ -246,6 +246,51 @@ body[data-theme="dark"] .logo {
   padding: 14px 16px;
 }
 
+.group-compose-box {
+  display: grid;
+  gap: 8px;
+}
+
+.group-emoji-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.group-emoji-row button,
+.group-tool-button,
+.group-like-badge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+.group-emoji-row button {
+  min-width: 38px;
+  height: 36px;
+}
+
+.group-tool-button {
+  width: 52px;
+  min-height: 52px;
+  font-size: 22px;
+}
+
+.group-tool-button.recording {
+  background: var(--danger);
+  color: #fff;
+}
+
+.group-file-name {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .group-chat-list {
   display: grid;
   gap: 10px;
@@ -273,6 +318,11 @@ body[data-theme="dark"] .logo {
   background: var(--soft);
 }
 
+.group-message.system {
+  border-color: #f4a735;
+  background: rgba(244, 167, 53, 0.08);
+}
+
 .group-avatar {
   width: 42px;
   height: 42px;
@@ -295,6 +345,31 @@ body[data-theme="dark"] .logo {
 .group-message p {
   margin: 8px 0 0;
   overflow-wrap: anywhere;
+}
+
+.group-attachments {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.group-attachment {
+  width: min(100%, 360px);
+  max-height: 380px;
+  border-radius: 16px;
+  object-fit: cover;
+  background: var(--soft);
+}
+
+.group-audio {
+  width: min(100%, 360px);
+}
+
+.group-like-badge {
+  margin-top: 8px;
+  padding: 6px 10px;
+  color: #e54862;
+  font-weight: 800;
 }
 
 .group-actions {
@@ -324,7 +399,7 @@ body[data-theme="dark"] .logo {
 
 .group-form {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 10px;
   align-items: end;
 }

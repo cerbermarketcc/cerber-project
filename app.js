@@ -11,6 +11,12 @@ let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
 
 const fallbackImage = "assets/soleniy-malchik.jpg";
+const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
+const scheduledRollTimers = new Set();
+let groupVoiceRecorder = null;
+let groupVoiceChunks = [];
+let groupVoiceDraft = null;
 const NEW_STORE_STATS = {
   orders: 0,
   reviews: 0,
@@ -143,7 +149,7 @@ const defaults = {
     provider: "nowpayments",
     payBaseUrl: "",
     platformCommissionPercent: 0,
-    platformLtcWallet: ""
+    platformLtcWallet: MAIN_LTC_WALLET
   },
   referralPeriod: {},
   filters: {
@@ -396,6 +402,7 @@ function normalizeDb(next) {
   if (!Array.isArray(next.groupMessages)) next.groupMessages = [];
   if (!next.groupSettings) next.groupSettings = structuredClone(defaults.groupSettings);
   if (!next.groupSettings.mutedUntil) next.groupSettings.mutedUntil = {};
+  if (!Array.isArray(next.groupSettings.rollTimers)) next.groupSettings.rollTimers = [];
   if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
@@ -406,6 +413,7 @@ function normalizeDb(next) {
   if (!Array.isArray(next.walletTransactions)) next.walletTransactions = [];
   if (!Array.isArray(next.walletDeposits)) next.walletDeposits = [];
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
+  if (!next.paymentSettings.platformLtcWallet) next.paymentSettings.platformLtcWallet = MAIN_LTC_WALLET;
   const previousPaymentProvider = next.paymentSettings.provider;
   next.paymentSettings.provider = "nowpayments";
   if (previousPaymentProvider !== "nowpayments") next.paymentSettings.platformCommissionPercent = 0;
@@ -2316,8 +2324,57 @@ function groupMuteUntil(login = db.currentUser) {
   return Number(db.groupSettings?.mutedUntil?.[login] || 0);
 }
 
+function groupMessageAuthor(login) {
+  return login === "cerber-market" ? "CERBER MARKET" : login;
+}
+
+function ensureGroupSettings() {
+  db.groupSettings = db.groupSettings || structuredClone(defaults.groupSettings);
+  db.groupSettings.mutedUntil = db.groupSettings.mutedUntil || {};
+  db.groupSettings.rollTimers = Array.isArray(db.groupSettings.rollTimers) ? db.groupSettings.rollTimers : [];
+}
+
+function pushGroupSystemMessage(body) {
+  ensureGroupSettings();
+  db.groupMessages.push({
+    id: `group-system-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    fromLogin: "cerber-market",
+    body,
+    createdAt: Date.now(),
+    date: new Date().toLocaleString()
+  });
+}
+
+function scheduleRollTimer(timer) {
+  if (!timer?.id || scheduledRollTimers.has(timer.id)) return;
+  const delay = Number(timer.expiresAt || 0) - Date.now();
+  if (delay <= 0) {
+    finishRollTimer(timer.id);
+    return;
+  }
+  scheduledRollTimers.add(timer.id);
+  setTimeout(() => finishRollTimer(timer.id), delay);
+}
+
+function scheduleOpenRollTimers() {
+  ensureGroupSettings();
+  db.groupSettings.rollTimers.filter((timer) => !timer.done).forEach(scheduleRollTimer);
+}
+
+function finishRollTimer(timerId) {
+  ensureGroupSettings();
+  const timer = db.groupSettings.rollTimers.find((item) => item.id === timerId);
+  if (!timer || timer.done) return;
+  timer.done = true;
+  pushGroupSystemMessage("Время истекло");
+  saveDb();
+  if (route === "group-chat") renderGroupChat();
+}
+
 function renderGroupChat() {
   route = "group-chat";
+  ensureGroupSettings();
+  scheduleOpenRollTimers();
   const user = currentUser();
   const settings = db.groupSettings || structuredClone(defaults.groupSettings);
   const moderator = isGroupModerator();
@@ -2329,7 +2386,6 @@ function renderGroupChat() {
       <article class="panel group-chat-head">
         <div>
           <h2>${esc(settings.title || "Общий чат")}</h2>
-          <p>Писать могут все зарегистрированные пользователи.</p>
         </div>
         ${moderator ? `
           <form class="group-title-form" data-group-title-form>
@@ -2352,15 +2408,36 @@ function renderGroupChat() {
           <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
         ` : `
           <form class="group-form" data-group-form>
-            <textarea name="body" required placeholder="Сообщение"></textarea>
+            <div class="group-compose-box">
+              <textarea name="body" placeholder="Сообщение"></textarea>
+              <div class="group-emoji-row">
+                ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-group-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
+              </div>
+              <div class="group-file-name" data-group-file-name></div>
+            </div>
+            <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*" data-group-attachment>
+            <button type="button" class="group-tool-button" data-group-attach>📎</button>
+            <button type="button" class="group-tool-button" data-group-voice>🎙</button>
             <button class="primary">${tr("send")}</button>
           </form>
-          ${moderator ? `<p class="desc">Команды: /mute логин 15, /title новое название</p>` : ""}
         `}
       </article>
     </section>
   `);
   document.querySelector("[data-group-form]")?.addEventListener("submit", handleGroupMessageSend);
+  document.querySelector("[data-group-attach]")?.addEventListener("click", () => document.querySelector("[data-group-attachment]")?.click());
+  document.querySelector("[data-group-voice]")?.addEventListener("click", toggleGroupVoiceRecord);
+  document.querySelector("[data-group-attachment]")?.addEventListener("change", (event) => {
+    const file = event.currentTarget.files?.[0];
+    document.querySelector("[data-group-file-name]").textContent = file ? file.name : "";
+  });
+  document.querySelectorAll("[data-group-emoji]").forEach((button) => {
+    button.onclick = () => {
+      const textarea = document.querySelector("[data-group-form] textarea");
+      textarea.value = `${textarea.value}${button.dataset.groupEmoji}`;
+      textarea.focus();
+    };
+  });
   document.querySelector("[data-group-title-form]")?.addEventListener("submit", handleGroupTitleSave);
   document.querySelectorAll("[data-group-user]").forEach((button) => {
     button.onclick = () => openPrivateMessageModal(button.dataset.groupUser);
@@ -2382,20 +2459,66 @@ function renderGroupChat() {
       renderGroupChat();
     };
   });
+  document.querySelectorAll("[data-group-message]").forEach((message) => {
+    message.ondblclick = () => toggleGroupLike(message.dataset.groupMessage);
+  });
+}
+
+async function toggleGroupVoiceRecord(event) {
+  const button = event.currentTarget;
+  if (groupVoiceRecorder && groupVoiceRecorder.state === "recording") {
+    groupVoiceRecorder.stop();
+    button.classList.remove("recording");
+    button.textContent = "🎙";
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    showToast("Запись голоса недоступна в этом браузере");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    groupVoiceChunks = [];
+    groupVoiceRecorder = new MediaRecorder(stream);
+    groupVoiceRecorder.ondataavailable = (recordEvent) => {
+      if (recordEvent.data.size) groupVoiceChunks.push(recordEvent.data);
+    };
+    groupVoiceRecorder.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(groupVoiceChunks, { type: groupVoiceRecorder.mimeType || "audio/webm" });
+      groupVoiceDraft = {
+        name: `voice-${Date.now()}.webm`,
+        type: blob.type,
+        url: await blobToDataUrl(blob)
+      };
+      document.querySelector("[data-group-file-name]").textContent = "Голосовое сообщение готово";
+    };
+    groupVoiceRecorder.start();
+    button.classList.add("recording");
+    button.textContent = "■";
+    document.querySelector("[data-group-file-name]").textContent = "Идёт запись голоса...";
+  } catch {
+    showToast("Не удалось включить микрофон");
+  }
 }
 
 function groupMessageView(msg) {
   const moderator = isGroupModerator();
   const own = sameLogin(msg.fromLogin, db.currentUser);
+  const system = msg.fromLogin === "cerber-market";
+  const likes = Array.isArray(msg.likes) ? msg.likes : [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
   return `
-    <article class="group-message ${own ? "own" : ""}">
+    <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""}" data-group-message="${esc(msg.id)}">
       <button class="group-avatar" data-group-user="${esc(msg.fromLogin)}">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
       <div>
         <div class="group-meta">
-          <button class="link-button" data-group-user="${esc(msg.fromLogin)}">${esc(msg.fromLogin)}</button>
+          <button class="link-button" data-group-user="${esc(msg.fromLogin)}">${esc(groupMessageAuthor(msg.fromLogin))}</button>
           <span>${esc(msg.date)}</span>
         </div>
         <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
+        ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
+        ${likes.length ? `<button class="group-like-badge" data-group-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
         ${moderator ? `
           <div class="group-actions">
             <button data-group-pin="${esc(msg.id)}">Закрепить</button>
@@ -2405,6 +2528,25 @@ function groupMessageView(msg) {
       </div>
     </article>
   `;
+}
+
+function groupAttachmentView(file) {
+  if (!file?.url) return "";
+  if (String(file.type || "").startsWith("image/")) return `<img class="group-attachment" src="${esc(file.url)}" alt="${esc(file.name || "")}">`;
+  if (String(file.type || "").startsWith("video/")) return `<video class="group-attachment" src="${esc(file.url)}" controls></video>`;
+  if (String(file.type || "").startsWith("audio/")) return `<audio class="group-audio" src="${esc(file.url)}" controls></audio>`;
+  return `<a class="proof-link" href="${esc(file.url)}" download="${esc(file.name || "file")}">${esc(file.name || "Файл")}</a>`;
+}
+
+function toggleGroupLike(messageId) {
+  const msg = db.groupMessages.find((item) => item.id === messageId);
+  if (!msg) return;
+  msg.likes = Array.isArray(msg.likes) ? msg.likes : [];
+  const index = msg.likes.findIndex((login) => sameLogin(login, db.currentUser));
+  if (index >= 0) msg.likes.splice(index, 1);
+  else msg.likes.push(db.currentUser);
+  saveDb();
+  renderGroupChat();
 }
 
 function handleGroupTitleSave(event) {
@@ -2417,7 +2559,7 @@ function handleGroupTitleSave(event) {
   renderGroupChat();
 }
 
-function handleGroupMessageSend(event) {
+async function handleGroupMessageSend(event) {
   event.preventDefault();
   const user = currentUser();
   if (!user) return renderAuth();
@@ -2426,25 +2568,52 @@ function handleGroupMessageSend(event) {
     showToast("Вы временно замучены");
     return;
   }
-  const body = new FormData(event.currentTarget).get("body").trim();
-  if (!body) return;
-  if (isGroupModerator() && handleGroupCommand(body)) {
+  const data = new FormData(event.currentTarget);
+  const body = String(data.get("body") || "").trim();
+  const file = data.get("attachment");
+  if (!body && (!file || !file.size) && !groupVoiceDraft) return;
+  if (body && handleGroupCommand(body)) {
     event.currentTarget.reset();
     renderGroupChat();
     return;
   }
+  const attachments = file && file.size ? [{
+    name: file.name,
+    type: file.type,
+    url: await fileToDataUrl(file)
+  }] : (groupVoiceDraft ? [groupVoiceDraft] : []);
   db.groupMessages.push({
     id: `group-${Date.now()}`,
     fromLogin: user.login,
     body,
+    attachments,
+    likes: [],
     createdAt: Date.now(),
     date: new Date().toLocaleString()
   });
+  groupVoiceDraft = null;
   saveDb();
   renderGroupChat();
 }
 
 function handleGroupCommand(body) {
+  const roll = body.match(/^\/roll\s+(\d+)/i);
+  if (roll) {
+    const max = Math.max(1, Math.min(1000000, Number(roll[1] || 100)));
+    const number = Math.floor(Math.random() * max) + 1;
+    const timer = {
+      id: `roll-${Date.now()}`,
+      expiresAt: Date.now() + 2 * 60 * 1000,
+      done: false
+    };
+    ensureGroupSettings();
+    db.groupSettings.rollTimers.push(timer);
+    pushGroupSystemMessage(`Выпал номер ${number}. Таймер на 2 минуты включен`);
+    scheduleRollTimer(timer);
+    saveDb();
+    return true;
+  }
+  if (!isGroupModerator()) return false;
   const mute = body.match(/^\/mute\s+(\S+)\s+(\d+)/i);
   if (mute) {
     const login = mute[1];
@@ -2470,7 +2639,7 @@ function handleGroupCommand(body) {
 }
 
 function openPrivateMessageModal(login) {
-  if (!login || sameLogin(login, db.currentUser)) return;
+  if (!login || login === "cerber-market" || sameLogin(login, db.currentUser)) return;
   showModal(`
     <h2>Личное сообщение</h2>
     <p>Получатель: ${esc(login)}</p>
@@ -3859,6 +4028,14 @@ function fileToDataUrl(file) {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.readAsDataURL(file);
+  });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
   });
 }
 
