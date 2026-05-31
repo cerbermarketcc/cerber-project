@@ -110,6 +110,8 @@ async function ensureSeed() {
       referralCodes: {},
       balances: {},
       ltcBalances: {},
+      walletTransactions: [],
+      walletDeposits: [],
       paymentSettings: {
         provider: "nowpayments",
         payBaseUrl: "",
@@ -160,6 +162,8 @@ async function stateFor(user) {
       referralCodes: settingsData.referralCodes || {},
       balances: settingsData.balances || {},
       ltcBalances: settingsData.ltcBalances || {},
+      walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
+      walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
       paymentSettings: settingsData.paymentSettings || {},
       referralPeriod: settingsData.referralPeriod || {},
       filters: settingsData.filters || {}
@@ -320,6 +324,8 @@ app.put("/api/state", async (req, res, next) => {
         referralCodes: state.referralCodes || {},
         balances: state.balances || {},
         ltcBalances: state.ltcBalances || {},
+        walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
+        walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
         paymentSettings: state.paymentSettings || {},
         referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
@@ -423,6 +429,41 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   }
 }
 
+async function completeWalletDeposit(deposit, state, providerPayload = {}) {
+  if (deposit.status === "completed") {
+    await saveSettingsState(state);
+    return;
+  }
+
+  const paidLtc = Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0);
+  const paidUsd = Number(deposit.amountUsd || providerPayload.price_amount || 0);
+  deposit.status = "completed";
+  deposit.paidAt = Date.now();
+  deposit.amountLtc = paidLtc;
+  deposit.paymentProviderPayload = providerPayload;
+
+  state.ltcBalances = state.ltcBalances || {};
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  state.ltcBalances[deposit.login] = Number(state.ltcBalances[deposit.login] || 0) + paidLtc;
+
+  const txId = `tx-${deposit.id}`;
+  if (!state.walletTransactions.some((tx) => tx.id === txId)) {
+    state.walletTransactions.unshift({
+      id: txId,
+      login: deposit.login,
+      type: "deposit",
+      title: "Пополнение LTC",
+      amountLtc: paidLtc,
+      amountUsd: paidUsd,
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU"),
+      status: "completed"
+    });
+  }
+
+  await saveSettingsState(state);
+}
+
 app.post("/api/payments/nowpayments/create", async (req, res, next) => {
   try {
     requireDb();
@@ -476,6 +517,68 @@ app.post("/api/payments/nowpayments/create", async (req, res, next) => {
   }
 });
 
+app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    const amountUsd = Number(req.body.amountUsd || 0);
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму пополнения" });
+
+    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settings?.data || {};
+    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const deposit = {
+      id: `deposit-${Date.now()}`,
+      login: user.login,
+      status: "waiting",
+      amountUsd,
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU")
+    };
+
+    const paymentPayload = {
+      price_amount: amountUsd,
+      price_currency: "usd",
+      pay_currency: "ltc",
+      order_id: deposit.id,
+      order_description: `CERBER MARKET wallet top up / ${user.login}`,
+      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
+    };
+
+    const response = await fetch("https://api.nowpayments.io/v1/payment", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": nowpaymentsApiKey
+      },
+      body: JSON.stringify(paymentPayload)
+    });
+    const payment = await response.json().catch(() => ({}));
+    if (!response.ok) return res.status(502).json({ error: payment.message || "NOWPayments payment error" });
+
+    deposit.paymentId = payment.payment_id || payment.id || "";
+    deposit.payAddress = payment.pay_address || payment.address || "";
+    deposit.payAmount = Number(payment.pay_amount || 0);
+    deposit.payCurrency = "ltc";
+    deposit.paymentStatus = payment.payment_status || "waiting";
+    deposit.paymentProviderPayload = {
+      paymentId: deposit.paymentId,
+      payAddress: deposit.payAddress,
+      payAmount: deposit.payAmount
+    };
+
+    deposits.unshift(deposit);
+    await saveSettingsState({ ...state, walletDeposits: deposits });
+
+    res.json({ deposit, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
   try {
     requireDb();
@@ -489,7 +592,14 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const state = settings?.data || {};
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const order = orders.find((item) => item.id === orderId);
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!order) {
+      const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+      const paymentId = String(req.body.payment_id || req.body.id || "");
+      const deposit = deposits.find((item) => item.id === orderId || String(item.paymentId || "") === paymentId);
+      if (!deposit) return res.status(404).json({ error: "Order not found" });
+      await completeWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
+      return res.json({ ok: true });
+    }
 
     await completeProductOrder(order, { ...state, orders }, req.body);
 

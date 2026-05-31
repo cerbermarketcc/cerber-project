@@ -137,6 +137,8 @@ const defaults = {
   referralCodes: {},
   balances: {},
   ltcBalances: {},
+  walletTransactions: [],
+  walletDeposits: [],
   paymentSettings: {
     provider: "nowpayments",
     payBaseUrl: "",
@@ -401,6 +403,8 @@ function normalizeDb(next) {
   if (!next.referralCodes) next.referralCodes = {};
   if (!next.balances) next.balances = {};
   if (!next.ltcBalances) next.ltcBalances = {};
+  if (!Array.isArray(next.walletTransactions)) next.walletTransactions = [];
+  if (!Array.isArray(next.walletDeposits)) next.walletDeposits = [];
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
   const previousPaymentProvider = next.paymentSettings.provider;
   next.paymentSettings.provider = "nowpayments";
@@ -730,6 +734,8 @@ async function persistRemoteState() {
           referralCodes: db.referralCodes,
           balances: db.balances,
           ltcBalances: db.ltcBalances,
+          walletTransactions: db.walletTransactions,
+          walletDeposits: db.walletDeposits,
           paymentSettings: db.paymentSettings,
           referralPeriod: db.referralPeriod,
           filters: db.filters
@@ -861,6 +867,25 @@ function userLtcBalance(login = db.currentUser) {
 
 function userLtcUsdBalance(login = db.currentUser) {
   return userLtcBalance(login) * Number(ltcUsdCache || 0);
+}
+
+function walletTransactions(login = db.currentUser) {
+  return (db.walletTransactions || []).filter((item) => sameLogin(item.login, login)).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function addWalletTransaction(tx) {
+  db.walletTransactions = db.walletTransactions || [];
+  db.walletTransactions.unshift({
+    id: tx.id || `tx-${Date.now()}`,
+    login: tx.login || db.currentUser,
+    type: tx.type || "info",
+    title: tx.title || "Операция",
+    amountLtc: Number(tx.amountLtc || 0),
+    amountUsd: Number(tx.amountUsd || 0),
+    createdAt: tx.createdAt || Date.now(),
+    date: tx.date || new Date().toLocaleString(),
+    status: tx.status || "completed"
+  });
 }
 
 function storeById(id = activeStoreId) {
@@ -1511,6 +1536,7 @@ function showProductOrder(orderId) {
         <h3>Оплата LTC</h3>
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p><span>Сумма:</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+        ${userLtcBalance() >= ltcAmount ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
         <p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet || "Кошелек не указан")}</strong></p>
         <div class="row">
           <button class="ghost-button" data-copy="${esc(`Адрес LTC: ${order.sellerLtcWallet || ""}\nСумма: ${ltcAmount.toFixed(6)} LTC`)}">Скопировать всё</button>
@@ -1536,6 +1562,7 @@ function showProductOrder(orderId) {
     };
   });
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
+  document.querySelector("[data-pay-from-balance]")?.addEventListener("click", (event) => payProductOrderFromBalance(event.currentTarget.dataset.payFromBalance));
   document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
   document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
 }
@@ -2004,9 +2031,12 @@ function handleProductPurchase(storeId, productId, positionId) {
   if (!product || !position) return;
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  if (userLtcBalance() < ltcAmount) return;
+  if (userLtcBalance() < ltcAmount) {
+    showToast("У вас недостаточно средств");
+    return;
+  }
   db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
-  db.orders.unshift({
+  const order = {
     id: `order-${Date.now()}`,
     type: "product",
     login: db.currentUser,
@@ -2020,9 +2050,36 @@ function handleProductPurchase(storeId, productId, positionId) {
     amountUsd: priceUsd,
     ltcAmount,
     location: locationLabel(position)
+  };
+  db.orders.unshift(order);
+  addWalletTransaction({
+    type: "purchase",
+    title: `Покупка: ${product.title}`,
+    amountLtc: -ltcAmount,
+    amountUsd: -priceUsd
   });
   saveDb();
   renderOrders("active");
+}
+
+function payProductOrderFromBalance(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || order.status !== "pending_payment") return;
+  const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
+  if (userLtcBalance() < ltcAmount) {
+    showToast("У вас недостаточно средств");
+    return;
+  }
+  db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
+  markProductOrderPaid(order.id);
+  addWalletTransaction({
+    type: "purchase",
+    title: `Покупка: ${order.product}`,
+    amountLtc: -ltcAmount,
+    amountUsd: -Number(order.amountUsd || 0)
+  });
+  saveDb();
+  renderOrders("completed");
 }
 
 function handleProductReservation(storeId, productId, positionId) {
@@ -3212,6 +3269,120 @@ function renderExchangeChat(cardId) {
   };
 }
 
+function renderWallet() {
+  route = "wallet";
+  const ltc = userLtcBalance();
+  const usd = userLtcUsdBalance();
+  const txs = walletTransactions();
+  layout(`
+    <section class="screen wallet-screen">
+      <article class="wallet-hero">
+        <h1>Баланс</h1>
+        <p>Все платежи поступают на ваш кошелек CERBER MARKET.<br>На платформе доступна монета LiteCoin - LTC.</p>
+        <div class="coin-tabs">
+          <button class="active"><span class="ltc-badge">Ł</span> LTC</button>
+        </div>
+      </article>
+      <article class="wallet-balance-card">
+        <p>Личный</p>
+        <div class="wallet-balance-row">
+          <strong>${ltc.toFixed(6)} LTC</strong>
+          <strong>${usd.toFixed(2)} USD</strong>
+        </div>
+        <div class="wallet-actions">
+          <button class="ghost-button" data-wallet-deposit>Пополнить +</button>
+          <button class="ghost-button" data-route="exchange">Купить LTC ↙</button>
+        </div>
+      </article>
+      <article class="wallet-convert-card">
+        <p><span>${ltc.toFixed(6)}</span><strong>LTC</strong></p>
+        <p><span>${usd.toFixed(2)}</span><strong>USD</strong></p>
+      </article>
+      <article class="wallet-transactions">
+        <h2>Транзакции</h2>
+        ${txs.length ? txs.map(walletTransactionView).join("") : `
+          <div class="empty-orders">
+            <h2>Транзакций нет</h2>
+            <p>Здесь будет отображаться список транзакций</p>
+          </div>
+        `}
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-wallet-deposit]")?.addEventListener("click", openWalletDepositModal);
+}
+
+function walletTransactionView(tx) {
+  const sign = Number(tx.amountLtc || 0) >= 0 ? "+" : "";
+  return `
+    <article class="wallet-tx">
+      <div>
+        <h3>${esc(tx.title)}</h3>
+        <p>${esc(tx.date)} · ${esc(tx.status || "completed")}</p>
+      </div>
+      <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
+    </article>
+  `;
+}
+
+function openWalletDepositModal() {
+  showModal(`
+    <h2>Ваш LTC-кошелек</h2>
+    <p>Введите сумму пополнения. Адрес генерируется через NOWPayments для каждой транзакции.</p>
+    <form class="form" data-wallet-deposit-form>
+      <label class="field">Сумма в USD<input name="amountUsd" type="number" min="1" step="0.01" value="10" required></label>
+      <button class="primary">Создать адрес LTC</button>
+    </form>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-wallet-deposit-form]").onsubmit = createWalletDeposit;
+}
+
+async function createWalletDeposit(event) {
+  event.preventDefault();
+  const amountUsd = Number(new FormData(event.currentTarget).get("amountUsd") || 0);
+  if (amountUsd <= 0) return;
+  if (!API_ENABLED) {
+    const amountLtc = usdToLtc(amountUsd);
+    db.ltcBalances[db.currentUser] = userLtcBalance() + amountLtc;
+    addWalletTransaction({ type: "deposit", title: "Пополнение LTC", amountLtc, amountUsd });
+    saveDb();
+    document.querySelector("[data-modal]").classList.remove("open");
+    renderWallet();
+    return;
+  }
+  try {
+    const payload = await apiFetch("/api/wallet/nowpayments/create", {
+      method: "POST",
+      body: JSON.stringify({ amountUsd })
+    });
+    applyRemoteState(payload);
+    const deposit = payload.deposit || {};
+    showModal(`
+      <h2>Ваш LTC-кошелек</h2>
+      <p>Скопируйте адрес кошелька или отправьте LTC-сумму ниже. Зачисление происходит после подтверждения сети.</p>
+      <div class="deposit-address">
+        <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
+        <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
+      </div>
+      <div class="deposit-address">
+        <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
+        <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
+      </div>
+      ${deposit.paymentUrl ? `<a class="primary link-button" href="${esc(deposit.paymentUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : ""}
+      <button class="ghost-button" data-close-modal>${tr("close")}</button>
+    `);
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.onclick = async () => {
+        await navigator.clipboard.writeText(button.dataset.copy || "");
+        showToast("Скопировано");
+      };
+    });
+  } catch (error) {
+    showToast(error.message || "Не удалось создать пополнение");
+  }
+}
+
 function renderSimplePage(kind) {
   const titles = {
     wallet: "Кошелек",
@@ -3793,7 +3964,7 @@ function renderCurrent() {
   if (route === "exchange-chat") return renderExchangeChat(activeExchangeId);
   if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
   if (route === "exchange-admin") return renderExchangeOperator();
-  if (["wallet"].includes(route)) return renderSimplePage(route);
+  if (route === "wallet") return renderWallet();
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "product") return renderProductView(activeStoreId || db.stores[0].id, activeProductId);

@@ -2146,3 +2146,159 @@ body[data-theme="dark"] .logo {
   border: 1px solid var(--line);
   border-radius: 16px;
 }
+
+.wallet-screen {
+  display: grid;
+  gap: 22px;
+  padding-bottom: 190px;
+}
+
+.wallet-hero h1 {
+  margin: 18px 0 12px;
+  font-size: clamp(36px, 9vw, 56px);
+  font-weight: 700;
+}
+
+.wallet-hero p {
+  max-width: 620px;
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1.45;
+}
+
+.coin-tabs {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.coin-tabs button {
+  min-height: 58px;
+  padding: 0 22px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+}
+
+.coin-tabs .active {
+  box-shadow: var(--shadow-soft);
+}
+
+.ltc-badge,
+.ltc-coin {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #f6a313;
+  color: #fff;
+  font-weight: 900;
+}
+
+.wallet-balance-card,
+.wallet-convert-card,
+.wallet-transactions {
+  padding: 34px;
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.wallet-balance-card > p {
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 20px;
+}
+
+.wallet-balance-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  margin-bottom: 46px;
+}
+
+.wallet-balance-row strong {
+  font-size: 28px;
+}
+
+.wallet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.wallet-convert-card {
+  display: grid;
+  gap: 16px;
+  background: var(--soft);
+}
+
+.wallet-convert-card p,
+.deposit-address {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0;
+  padding: 18px 22px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+}
+
+.wallet-convert-card span {
+  color: var(--muted);
+  font-size: 22px;
+}
+
+.wallet-transactions {
+  box-shadow: none;
+}
+
+.wallet-transactions h2 {
+  margin: 0 0 18px;
+}
+
+.wallet-tx {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.wallet-tx h3,
+.wallet-tx p {
+  margin: 0;
+}
+
+.wallet-tx p {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.wallet-tx .plus {
+  color: #22b573;
+}
+
+.wallet-tx .minus {
+  color: var(--danger);
+}
+
+.deposit-address {
+  margin: 14px 0;
+  border-radius: 18px;
+}
+
+.deposit-address strong {
+  overflow-wrap: anywhere;
+}
