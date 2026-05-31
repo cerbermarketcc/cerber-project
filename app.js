@@ -12,6 +12,12 @@ let turnstileWidgetId = null;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const officialOnionMirrors = [
+  "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
+  "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
+  "ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+];
+const officialClearDomains = ["cerber.to", "cerber.love", "cerber.vip"];
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
@@ -1395,8 +1401,12 @@ function renderHome() {
         <button class="tab">${tr("new")}</button>
       </div>
     </section>
-    <section class="feed" data-feed>${cards}</section>
+    <section class="feed">
+      ${officialMirrorsView()}
+      <div class="store-feed" data-feed>${cards}</div>
+    </section>
   `);
+  bindCopyButtons();
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
     document.querySelector("[data-feed]").innerHTML = visibleStores(true)
@@ -1408,6 +1418,33 @@ function renderHome() {
 
 function topTitleView() {
   return esc(tr("storesTop")).replace("🔥", `<span class="top-fire-sticker" aria-hidden="true">🔥<i></i><i></i><i></i></span>`);
+}
+
+function mirrorRow(url) {
+  return `
+    <div class="mirror-row">
+      <span>${esc(url)}</span>
+      <button class="mirror-copy" data-copy="${esc(url)}" aria-label="Скопировать ${esc(url)}">⧉</button>
+    </div>
+  `;
+}
+
+function officialMirrorsView() {
+  return `
+    <details class="official-mirrors">
+      <summary>
+        <span>Официальные зеркала</span>
+        <small>${esc(officialOnionMirrors[0])}</small>
+        <b>Ещё</b>
+      </summary>
+      <div class="mirror-list">
+        <h3>TOR</h3>
+        ${officialOnionMirrors.map(mirrorRow).join("")}
+        <h3>Clear domains</h3>
+        ${officialClearDomains.map(mirrorRow).join("")}
+      </div>
+    </details>
+  `;
 }
 
 function renderCatalog() {

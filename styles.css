@@ -211,6 +211,118 @@ body[data-theme="dark"] .logo {
   padding: 10px 8px 18px;
 }
 
+.store-feed {
+  display: grid;
+  gap: 10px;
+}
+
+.official-mirrors {
+  overflow: hidden;
+  border-radius: 20px;
+  background: #eaf2ff;
+  color: #1f2a3a;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+}
+
+body[data-theme="dark"] .official-mirrors {
+  background: #182131;
+  color: var(--ink);
+}
+
+.official-mirrors summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px 10px;
+  align-items: center;
+  padding: 17px 18px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.official-mirrors summary::-webkit-details-marker {
+  display: none;
+}
+
+.official-mirrors summary span {
+  font-size: 17px;
+  color: var(--muted);
+}
+
+.official-mirrors summary small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.official-mirrors summary b {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.official-mirrors[open] summary b {
+  color: var(--accent);
+}
+
+.mirror-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 14px 16px;
+}
+
+.mirror-list h3 {
+  margin: 10px 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.mirror-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+  align-items: center;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 10px 10px 10px 13px;
+}
+
+body[data-theme="dark"] .mirror-row {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mirror-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.mirror-copy {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 19px;
+  transition: transform 150ms ease, background 150ms ease;
+}
+
+.mirror-copy:active {
+  transform: scale(0.9);
+  background: var(--soft);
+}
+
 .shop-card,
 .panel,
 .product-card,
