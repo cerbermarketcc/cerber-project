@@ -14,6 +14,7 @@ const fallbackImage = "assets/soleniy-malchik.jpg";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
 const scheduledRollTimers = new Set();
+const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
@@ -1388,7 +1389,7 @@ function renderHome() {
   const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
     <section class="hero">
-      <h1>${tr("storesTop")}</h1>
+      <h1>${topTitleView()}</h1>
       <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
       <div class="tabs">
         <button class="tab active">${tr("all")}</button>
@@ -1405,6 +1406,10 @@ function renderHome() {
       .slice(0, 10).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
+}
+
+function topTitleView() {
+  return esc(tr("storesTop")).replace("🔥", `<span class="black-fire" aria-hidden="true">🔥</span>`);
 }
 
 function renderCatalog() {
@@ -3669,15 +3674,29 @@ function renderWallet() {
 
 function walletTransactionView(tx) {
   const sign = Number(tx.amountLtc || 0) >= 0 ? "+" : "";
+  const status = walletTransactionStatus(tx);
   return `
-    <article class="wallet-tx">
+    <article class="wallet-tx ${status.key}">
       <div>
         <h3>${esc(tx.title)}</h3>
-        <p>${esc(tx.date)} · ${esc(tx.status || "completed")}</p>
+        <p>${esc(tx.date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
     </article>
   `;
+}
+
+function walletTransactionStatus(tx) {
+  const raw = String(tx.status || "completed").toLowerCase();
+  const expiresAt = Number(tx.expiresAt || 0);
+  if (["waiting", "pending", "processing"].includes(raw)) {
+    if (expiresAt && expiresAt <= Date.now()) return { key: "cancelled", label: "Отменено" };
+    const left = expiresAt ? Math.max(0, expiresAt - Date.now()) : 0;
+    const minutes = left ? Math.ceil(left / 60000) : 0;
+    return { key: "processing", label: "В обработке", timer: minutes ? `бронь ${minutes} мин` : "" };
+  }
+  if (["failed", "expired", "cancelled", "canceled"].includes(raw)) return { key: "cancelled", label: "Отменено" };
+  return { key: "completed", label: "Завершено" };
 }
 
 function openWalletDepositModal() {
@@ -3713,9 +3732,11 @@ async function createWalletDeposit(event) {
     });
     applyRemoteState(payload);
     const deposit = payload.deposit || {};
+    renderWallet();
+    const copyAll = `Адрес LTC: ${deposit.payAddress || ""}\nСумма: ${Number(deposit.payAmount || 0).toFixed(8)} LTC`;
     showModal(`
       <h2>Ваш LTC-кошелек</h2>
-      <p>Скопируйте адрес кошелька или отправьте LTC-сумму ниже. Зачисление происходит после подтверждения сети.</p>
+      <p>Скопируйте адрес кошелька и сумму ниже. Бронь на оплату действует 40 минут, транзакция уже добавлена в обработку.</p>
       <div class="deposit-address">
         <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
         <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
@@ -3724,6 +3745,7 @@ async function createWalletDeposit(event) {
         <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
         <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
       </div>
+      <button class="primary" data-copy="${esc(copyAll)}">Скопировать всё вместе</button>
       ${deposit.paymentUrl ? `<a class="primary link-button" href="${esc(deposit.paymentUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : ""}
       <button class="ghost-button" data-close-modal>${tr("close")}</button>
     `);

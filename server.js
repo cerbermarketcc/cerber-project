@@ -19,6 +19,7 @@ const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const walletDepositTtlMs = 40 * 60 * 1000;
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -449,7 +450,13 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
   state.ltcBalances[deposit.login] = Number(state.ltcBalances[deposit.login] || 0) + paidLtc;
 
   const txId = `tx-${deposit.id}`;
-  if (!state.walletTransactions.some((tx) => tx.id === txId)) {
+  const existingTx = state.walletTransactions.find((tx) => tx.id === txId);
+  if (existingTx) {
+    existingTx.status = "completed";
+    existingTx.amountLtc = paidLtc;
+    existingTx.amountUsd = paidUsd;
+    existingTx.completedAt = Date.now();
+  } else {
     state.walletTransactions.unshift({
       id: txId,
       login: deposit.login,
@@ -463,6 +470,19 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     });
   }
 
+  await saveSettingsState(state);
+}
+
+async function cancelWalletDeposit(deposit, state, providerPayload = {}) {
+  deposit.status = "cancelled";
+  deposit.cancelledAt = Date.now();
+  deposit.paymentProviderPayload = providerPayload;
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const tx = state.walletTransactions.find((item) => item.id === `tx-${deposit.id}`);
+  if (tx) {
+    tx.status = "cancelled";
+    tx.cancelledAt = Date.now();
+  }
   await saveSettingsState(state);
 }
 
@@ -532,12 +552,14 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const state = settings?.data || {};
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const deposit = {
       id: `deposit-${Date.now()}`,
       login: user.login,
       status: "waiting",
       amountUsd,
       createdAt: Date.now(),
+      expiresAt: Date.now() + walletDepositTtlMs,
       date: new Date().toLocaleString("ru-RU")
     };
 
@@ -573,7 +595,19 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
     };
 
     deposits.unshift(deposit);
-    await saveSettingsState({ ...state, walletDeposits: deposits });
+    walletTransactions.unshift({
+      id: `tx-${deposit.id}`,
+      login: user.login,
+      type: "deposit",
+      title: "Пополнение LTC",
+      amountLtc: deposit.payAmount,
+      amountUsd,
+      createdAt: deposit.createdAt,
+      expiresAt: deposit.expiresAt,
+      date: deposit.date,
+      status: "processing"
+    });
+    await saveSettingsState({ ...state, walletDeposits: deposits, walletTransactions });
 
     res.json({ deposit, ...(await stateFor(user)) });
   } catch (error) {
@@ -588,7 +622,8 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const orderId = String(req.body.order_id || req.body.order || req.body.orderId || "");
     const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
     const paid = ["finished", "confirmed", "sending", "partially_paid"].includes(status);
-    if (!orderId || !paid) return res.status(400).json({ error: "Unsupported payment callback" });
+    const cancelled = ["failed", "expired", "refunded", "cancelled", "canceled"].includes(status);
+    if (!orderId) return res.status(400).json({ error: "Unsupported payment callback" });
 
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const state = settings?.data || {};
@@ -599,10 +634,13 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
       const paymentId = String(req.body.payment_id || req.body.id || "");
       const deposit = deposits.find((item) => item.id === orderId || String(item.paymentId || "") === paymentId);
       if (!deposit) return res.status(404).json({ error: "Order not found" });
-      await completeWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
+      if (paid) await completeWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
+      else if (cancelled) await cancelWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
+      else return res.json({ ok: true, ignored: status });
       return res.json({ ok: true });
     }
 
+    if (!paid) return res.json({ ok: true, ignored: status });
     await completeProductOrder(order, { ...state, orders }, req.body);
 
     res.json({ ok: true });

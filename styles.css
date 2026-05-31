@@ -950,6 +950,29 @@ body[data-theme="dark"] .logo {
   font-size: 38px;
 }
 
+.black-fire {
+  display: inline-block;
+  margin-left: 8px;
+  color: #111;
+  filter: grayscale(1) brightness(0);
+  animation: fireDance 1.15s ease-in-out infinite;
+  transform-origin: 50% 90%;
+}
+
+@keyframes fireDance {
+  0%, 100% {
+    transform: translateY(0) rotate(-2deg) scale(1);
+  }
+
+  45% {
+    transform: translateY(-4px) rotate(4deg) scale(1.08);
+  }
+
+  70% {
+    transform: translateY(1px) rotate(-5deg) scale(0.98);
+  }
+}
+
 .wallet-card-ltc {
   display: grid;
   grid-template-columns: 1fr 82px;
@@ -975,6 +998,15 @@ body[data-theme="dark"] .logo {
   color: #575757;
   font-size: 42px;
   font-weight: 900;
+}
+
+.wallet-card-ltc .ltc-coin {
+  width: 76px;
+  height: 76px;
+  margin: 0;
+  background: linear-gradient(135deg, #5586c8, #345d9d);
+  color: #fff;
+  font-size: 42px;
 }
 
 .payment-lines {
@@ -2395,7 +2427,7 @@ body[data-theme="dark"] .logo {
   height: 30px;
   margin-right: 8px;
   border-radius: 50%;
-  background: #f6a313;
+  background: linear-gradient(135deg, #5586c8, #345d9d);
   color: #fff;
   font-weight: 900;
 }
@@ -2490,6 +2522,14 @@ body[data-theme="dark"] .logo {
 
 .wallet-tx .minus {
   color: var(--danger);
+}
+
+.wallet-tx.processing strong {
+  color: #d68a11;
+}
+
+.wallet-tx.cancelled {
+  opacity: 0.62;
 }
 
 .deposit-address {
