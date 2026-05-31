@@ -13,3 +13,19 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TURNSTILE_SITE_KEY
+        sync: false
+      - key: TURNSTILE_SECRET_KEY
+        sync: false
+      - key: NOWPAYMENTS_API_KEY
+        sync: false
+      - key: NOWPAYMENTS_IPN_SECRET
+        sync: false
+      - key: NOWPAYMENTS_PUBLIC_KEY
+        sync: false
+      - key: NOWPAYMENTS_LTC_WALLET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        value: "https://cerber.vip"

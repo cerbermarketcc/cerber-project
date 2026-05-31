@@ -35,6 +35,13 @@ const supabase = supabaseUrl && supabaseServiceKey
 const defaultExchangeCards = [];
 
 app.use(express.json({ limit: "25mb" }));
+app.use((req, res, next) => {
+  const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+  if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?)$/i.test(pathname)) {
+    return res.status(404).send("Not found");
+  }
+  next();
+});
 app.use(express.static(__dirname));
 
 function loginKey(value) {
@@ -88,7 +95,8 @@ async function ensureSeed() {
   const { count } = await supabase.from("profiles").select("login_key", { count: "exact", head: true });
   if (count && count > 0) return;
 
-  const adminHash = await bcrypt.hash("admin", 12);
+  const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(18).toString("base64url");
+  const adminHash = await bcrypt.hash(adminPassword, 12);
   await supabase.from("profiles").upsert([
     { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
   ], { onConflict: "login_key" });

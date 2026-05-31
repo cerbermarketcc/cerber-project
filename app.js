@@ -1,5 +1,5 @@
 const STORE_KEY = "cerber_state_v1";
-const LEGACY_STORE_KEY = "cerber_demo_state_v1";
+const LEGACY_STORE_KEY = "cerber_legacy_state_v1";
 const SESSION_KEY = "cerber_current_user_v1";
 const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
@@ -10,7 +10,7 @@ const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"]
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
 
-const fallbackImage = "assets/soleniy-malchik.jpg";
+const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
 const scheduledRollTimers = new Set();
@@ -125,9 +125,7 @@ const defaults = {
   currentUser: "",
   theme: "light",
   lang: "ru",
-  users: [
-    { login: "admin", password: "admin", name: "Admin", role: "admin", createdAt: "2026-05-28" }
-  ],
+  users: [],
   stores: [],
   messages: [],
   groupMessages: [],
@@ -461,8 +459,8 @@ function normalizeProduct(product, store = {}) {
       description: "",
       price: "50$",
       priceUsd: 50,
-      image: product.image || "assets/soleniy-malchik.jpg",
-      images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : ["assets/soleniy-malchik.jpg"],
+      image: product.image || fallbackImage,
+      images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : [fallbackImage],
       reviewsList: [],
       positions: [
         {
@@ -1500,7 +1498,7 @@ function orderCard(order) {
         <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
-        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание будет доступно в деталях заказа.")}</p>` : ""}
+        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -1716,7 +1714,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const reviewsList = store.reviewsList || [];
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
-    : (store.products.length ? store.products.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("positions")} появятся позже</p></article>`);
+    : (store.products.length ? store.products.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>Позиции пока не добавлены</p></article>`);
   layout(`
     <section class="screen">
       <article class="panel">
@@ -2994,7 +2992,7 @@ function renderReferrals(tab = activeReferralTab) {
   });
   document.querySelector("[data-show-qr]")?.addEventListener("click", () => showReferralQr(qrUrl, code, link));
   document.querySelector("[data-ref-terms]")?.addEventListener("click", () => {
-    showModal(`<h2>Условия реферальной программы</h2><p>За каждого пользователя, зарегистрированного по вашей ссылке, вы будете видеть регистрацию в списке рефералов.</p><p>С каждого будущего пополнения реферала начисляется 3% на ваш личный баланс CERBER.</p><p>Начисленные средства можно будет использовать для покупок внутри площадки после подключения платежей.</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+    showModal(`<h2>Условия реферальной программы</h2><p>За каждого пользователя, зарегистрированного по вашей ссылке, вы будете видеть регистрацию в списке рефералов.</p><p>С каждого будущего пополнения реферала начисляется 3% на ваш личный баланс CERBER.</p><p>Начисленные средства можно использовать для покупок внутри площадки.</p><button class="primary" data-close-modal>${tr("close")}</button>`);
   });
   document.querySelector("[data-ref-search]")?.addEventListener("input", (event) => {
     const q = event.target.value.toLowerCase();
@@ -3099,7 +3097,7 @@ function renderExchangeCatalog() {
       <h1>Заявки на обмен</h1>
       <label class="search"><b>⌕</b><input data-exchange-search placeholder="${tr("search")}"></label>
       <section class="exchange-grid" data-exchange-list>
-        ${cards.map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Обменники появятся позже</p></article>`}
+        ${cards.map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Обменники пока не добавлены</p></article>`}
       </section>
     </section>
   `);
@@ -3650,7 +3648,7 @@ function renderWallet() {
           <strong>${usd.toFixed(2)} USD</strong>
         </div>
         <div class="wallet-actions">
-          <button class="ghost-button" data-wallet-deposit>Пополнить +</button>
+          <button class="ghost-button" data-wallet-deposit-open>Пополнить +</button>
           <button class="ghost-button" data-route="exchange">Купить LTC ↙</button>
         </div>
       </article>
@@ -3669,9 +3667,15 @@ function renderWallet() {
       </article>
     </section>
   `);
-  document.querySelector("[data-wallet-deposit]")?.addEventListener("click", openWalletDepositModal);
-  document.querySelectorAll("[data-wallet-deposit]").forEach((button) => {
-    if (button.dataset.walletDeposit) button.addEventListener("click", () => showWalletDepositDetails(button.dataset.walletDeposit));
+  document.querySelector("[data-wallet-deposit-open]")?.addEventListener("click", openWalletDepositModal);
+  document.querySelectorAll(".wallet-tx[data-wallet-deposit]").forEach((row) => {
+    row.addEventListener("click", () => showWalletDepositDetails(row.dataset.walletDeposit));
+  });
+  document.querySelectorAll(".wallet-tx-details[data-wallet-deposit]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showWalletDepositDetails(button.dataset.walletDeposit);
+    });
   });
 }
 
@@ -3679,15 +3683,16 @@ function walletTransactionView(tx) {
   const sign = Number(tx.amountLtc || 0) >= 0 ? "+" : "";
   const status = walletTransactionStatus(tx);
   const deposit = walletDepositForTransaction(tx);
+  const canOpenDeposit = Boolean(deposit && status.key !== "cancelled");
   return `
-    <article class="wallet-tx ${status.key}" ${deposit ? `data-wallet-deposit="${esc(deposit.id)}"` : ""}>
+    <article class="wallet-tx ${status.key}" ${canOpenDeposit ? `data-wallet-deposit="${esc(deposit.id)}"` : ""}>
       <div class="wallet-tx-main">
         <h3>${esc(tx.title)}</h3>
         <p>${esc(tx.date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
         ${deposit ? `<small>К оплате: ${Number(deposit.payAmount || tx.amountLtc || 0).toFixed(8)} LTC</small>` : ""}
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
-      ${deposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
+      ${canOpenDeposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
     </article>
   `;
 }
@@ -3825,7 +3830,7 @@ function renderSimplePage(kind) {
     <section class="screen">
       <article class="panel simple-page">
         <h2>${titles[kind] || "Раздел"}</h2>
-        <p>${bodies[kind] || "Раздел будет настроен позже."}</p>
+        <p>${bodies[kind] || "Раздел сейчас пуст."}</p>
       </article>
     </section>
   `);

@@ -1,16 +1,15 @@
-const CACHE_NAME = "cerber-mobile-v25";
+const CACHE_NAME = "cerber-mobile-v26";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=24",
-  "./app.js?v=24",
+  "./styles.css?v=26",
+  "./app.js?v=26",
   "./manifest.webmanifest",
   "./assets/cerber-head-logo.png",
   "./assets/logo1-header.png",
   "./assets/logo1-white.png",
   "./assets/user-avatar.png",
-  "./assets/kent-ltc-card.png",
-  "./assets/soleniy-malchik.jpg",
+  "./assets/cerber-emblem.png",
   "./assets/market-banner.png"
 ];
 
