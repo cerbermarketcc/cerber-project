@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#ff2f2f"/>
+      <stop offset="0.55" stop-color="#b80018"/>
+      <stop offset="1" stop-color="#3b0008"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="35%" r="60%">
+      <stop offset="0" stop-color="#fff3d8" stop-opacity=".75"/>
+      <stop offset=".45" stop-color="#ff9b38" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="800" height="800" rx="150" fill="url(#bg)"/>
+  <circle cx="400" cy="330" r="300" fill="url(#glow)"/>
+  <path d="M170 500c70-160 155-240 255-240 86 0 152 46 205 138 20 35 12 80-20 106-73 59-153 89-240 89-76 0-143-31-200-93Z" fill="#17090b" opacity=".8"/>
+  <path d="M235 440c42-92 102-138 180-138 73 0 126 37 160 111-95-34-209-26-340 27Z" fill="#fff" opacity=".92"/>
+  <path d="M286 420c52-54 107-72 165-55 42 12 77 39 105 81-62-13-121-12-178 2-34 8-65 6-92-28Z" fill="#111"/>
+  <circle cx="330" cy="403" r="32" fill="#ff3434"/>
+  <circle cx="474" cy="403" r="32" fill="#ff3434"/>
+  <path d="M220 610h360" stroke="#fff" stroke-width="34" stroke-linecap="round"/>
+  <path d="M252 658h296" stroke="#ffce54" stroke-width="24" stroke-linecap="round"/>
+  <text x="400" y="735" text-anchor="middle" font-family="Arial, sans-serif" font-size="72" font-weight="900" fill="#fff">M</text>
+</svg>

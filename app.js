@@ -166,6 +166,57 @@ const defaults = {
   }
 };
 
+function marketologSeedStore() {
+  const chisinauDistricts = filterOptions.countries.moldova.cities.chisinau.districts;
+  return {
+    id: "marketolog",
+    tag: "@marketolog",
+    ownerLogin: "marketolog",
+    adminPassword: "marketolog",
+    isTop: true,
+    countries: ["moldova"],
+    cities: ["chisinau"],
+    name: "Marketolog",
+    short: "Маркетолог это семья ❤️",
+    description: "Тестовое описание для подготовки проекта святая троица.",
+    image: "assets/marketolog-avatar.svg",
+    cover: "assets/marketolog-banner.svg",
+    banner: "assets/marketolog-banner.svg",
+    ...NEW_STORE_STATS,
+    products: [
+      {
+        id: "marketolog-service",
+        title: "Подготовка проекта",
+        category: "Услуги",
+        description: "",
+        price: "0$",
+        priceUsd: 0,
+        image: "assets/marketolog-avatar.svg",
+        images: ["assets/marketolog-avatar.svg"],
+        sellerManaged: true,
+        reviews: 0,
+        rating: 5,
+        purchases: 0,
+        deliveryItems: [],
+        positions: chisinauDistricts.map((district) => ({
+          id: `marketolog-${district.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, "-")}`,
+          title: "Подготовка проекта",
+          description: "",
+          priceUsd: 0,
+          country: "moldova",
+          city: "chisinau",
+          district,
+          deliveryType: "Услуга",
+          weight: "",
+          stock: 0,
+          status: "ready"
+        }))
+      }
+    ],
+    reviewsList: []
+  };
+}
+
 let db = loadDb();
 let route = "home";
 let activeStoreId = "";
@@ -452,6 +503,9 @@ function normalizeDb(next) {
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
+  if (!next.stores.some((store) => store.id === "marketolog")) {
+    next.stores.unshift(marketologSeedStore());
+  }
   next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
 }
 
@@ -1748,6 +1802,8 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   activeStoreTab = tab;
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
   if (!store) return renderCatalog();
+  const coverImage = store.cover || store.banner || store.image || fallbackImage;
+  const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
@@ -1755,8 +1811,9 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   layout(`
     <section class="screen">
       <article class="panel">
-        <img class="profile-cover" src="${esc(store.image || store.cover || fallbackImage)}" alt="">
+        <img class="profile-cover" src="${esc(coverImage)}" alt="">
         <div class="profile-body">
+          <img class="profile-avatar" src="${esc(avatarImage)}" alt="${esc(store.name)}">
           <p class="breadcrumbs">${tr("storesTop").split(" ")[0]} > ${esc(store.name)}</p>
           <div class="shop-title"><h1 class="profile-title">${esc(store.name)}</h1><span class="verify">✓</span></div>
           <p>${esc(store.short)}</p>
@@ -3900,6 +3957,7 @@ function renderAdmin() {
             <label class="field">Города для фильтра<input name="cities" placeholder="chisinau, balti"></label>
           </div>
           <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*,video/*"></label>
+          <label class="field">Баннер страницы<input name="cover" type="file" accept="image/*"></label>
           <button class="primary">${tr("addStore")}</button>
         </form>
       </article>
@@ -3957,7 +4015,9 @@ function adminStoreEditor(store) {
     <article class="panel">
       <h2>${esc(store.name)}</h2>
       <p>${esc(store.tag)} · ${esc(store.ownerLogin)}</p>
-      <form class="form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
+      <form class="form admin-store-form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
+        <div class="admin-section-title"><strong>Основное магазина</strong><span>Карточка, профиль и отдельная админка</span></div>
+        <label class="field">Баннер страницы магазина<input name="storeCover" type="file" accept="image/*"></label>
         <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
         <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
         <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>
@@ -4043,10 +4103,13 @@ function bindAdminProductForms() {
       const storeImage = data.get("storeImage");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
       const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+      const storeCover = data.get("storeCover");
       if (storeImage && storeImage.size) {
         const image = await fileToDataUrl(storeImage);
         store.image = image;
-        store.cover = image;
+      }
+      if (storeCover && storeCover.size) {
+        store.cover = await fileToDataUrl(storeCover);
       }
       if (mainFile && mainFile.size) {
         product.image = await fileToDataUrl(mainFile);
@@ -4079,6 +4142,8 @@ async function handleStoreCreate(event) {
   const data = new FormData(event.currentTarget);
   const file = data.get("image");
   const image = file && file.size ? await fileToDataUrl(file) : fallbackImage;
+  const coverFile = data.get("cover");
+  const cover = coverFile && coverFile.size ? await fileToDataUrl(coverFile) : image;
   const ownerLogin = data.get("ownerLogin").trim();
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   const finalOwnerLogin = existingOwner?.login || ownerLogin;
@@ -4097,7 +4162,7 @@ async function handleStoreCreate(event) {
     short: data.get("short").trim(),
     description: data.get("description").trim(),
     image,
-    cover: image,
+    cover,
     ...NEW_STORE_STATS,
     products: [],
     reviewsList: []

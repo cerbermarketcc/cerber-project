@@ -595,12 +595,25 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .profile-cover {
-  height: 430px;
+  height: 240px;
   background: var(--soft);
 }
 
 .profile-body {
+  position: relative;
   padding: 34px 38px 28px;
+}
+
+.profile-avatar {
+  width: 118px;
+  height: 118px;
+  margin-top: -92px;
+  margin-bottom: 22px;
+  border: 8px solid var(--paper);
+  border-radius: 50%;
+  background: var(--paper);
+  object-fit: cover;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.16);
 }
 
 .breadcrumbs {
@@ -1323,6 +1336,33 @@ body[data-theme="dark"] .mirror-row {
   border-radius: 14px;
   background: var(--paper);
   color: var(--danger);
+}
+
+.admin-store-panel {
+  border: 1px solid var(--line);
+}
+
+.admin-store-form {
+  gap: 16px;
+}
+
+.admin-section-title {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: var(--soft);
+}
+
+.admin-section-title strong {
+  font-size: 18px;
+}
+
+.admin-section-title span {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.3;
 }
 
 .captcha-box {

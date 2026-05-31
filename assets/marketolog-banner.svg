@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 520">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0f7d3b"/>
+      <stop offset=".48" stop-color="#19b864"/>
+      <stop offset="1" stop-color="#07361d"/>
+    </linearGradient>
+    <pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">
+      <path d="M80 0H0v80" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <rect width="1400" height="520" rx="42" fill="url(#g)"/>
+  <rect width="1400" height="520" fill="url(#grid)"/>
+  <circle cx="1080" cy="130" r="210" fill="#fff" opacity=".09"/>
+  <circle cx="260" cy="390" r="260" fill="#001b0c" opacity=".2"/>
+  <path d="M140 360C310 130 520 90 770 240c170 102 320 112 490 30" fill="none" stroke="#fff" stroke-opacity=".34" stroke-width="18" stroke-linecap="round"/>
+  <text x="104" y="205" font-family="Arial, sans-serif" font-size="86" font-weight="900" fill="#fff">MARKETOLOG</text>
+  <text x="108" y="292" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#ddffe9">CERBER MARKET</text>
+</svg>

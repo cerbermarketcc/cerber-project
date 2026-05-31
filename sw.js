@@ -1,16 +1,18 @@
-const CACHE_NAME = "cerber-mobile-v27";
+const CACHE_NAME = "cerber-mobile-v28";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=27",
-  "./app.js?v=27",
+  "./styles.css?v=28",
+  "./app.js?v=28",
   "./manifest.webmanifest",
   "./assets/cerber-head-logo.png",
   "./assets/logo1-header.png",
   "./assets/logo1-white.png",
   "./assets/user-avatar.png",
   "./assets/cerber-emblem.png",
-  "./assets/market-banner.png"
+  "./assets/market-banner.png",
+  "./assets/marketolog-avatar.svg",
+  "./assets/marketolog-banner.svg"
 ];
 
 self.addEventListener("install", (event) => {
