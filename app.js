@@ -13,12 +13,11 @@ let turnstileWidgetId = null;
 const fallbackImage = "assets/soleniy-malchik.jpg";
 const NEW_STORE_STATS = {
   orders: 0,
-  reviews: 1,
+  reviews: 0,
   rating: 5
 };
 const exchangeMethods = ["Мия", "RunPay", "BPay"];
 const defaultExchangeRequisites = exchangeMethods.map((method) => ({ method, value: "60327998", active: true }));
-const KENT_IMAGE = "assets/kent-ltc-card.png";
 let ltcUsdCache = 54.2;
 
 function city(label, districts = []) {
@@ -120,77 +119,12 @@ const defaults = {
   theme: "light",
   lang: "ru",
   users: [
-    { login: "admin", password: "admin", name: "Admin", role: "admin", createdAt: "2026-05-28" },
-    { login: "skboy", password: "123", name: "SK BOY", role: "seller", createdAt: "2026-05-28" }
+    { login: "admin", password: "admin", name: "Admin", role: "admin", createdAt: "2026-05-28" }
   ],
-  stores: [
-    {
-      id: "skboy",
-      tag: "@skboy",
-      ownerLogin: "skboy",
-      adminPassword: "skboy",
-      name: "Солёный Мальчик",
-      short: "SK BOY это семья",
-      description: "",
-      ltcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
-      image: "assets/soleniy-malchik.jpg",
-      cover: "assets/soleniy-malchik.jpg",
-      orders: 0,
-      reviews: 1,
-      rating: 5,
-      products: [
-        {
-          id: "courier-work",
-          title: "Подработка",
-          category: "Работа / Курьер",
-          description: "",
-          price: "50$",
-          priceUsd: 50,
-          image: "assets/soleniy-malchik.jpg",
-          images: ["assets/soleniy-malchik.jpg"],
-          sellerManaged: true,
-          deliveryItems: [],
-          rating: 5,
-          reviews: 1,
-          purchases: 0,
-          positions: [
-            {
-              id: "courier-checany",
-              title: "Подработка",
-              description: "",
-              priceUsd: 50,
-              country: "moldova",
-              city: "chisinau",
-              district: "",
-              deliveryType: "Курьер",
-              stock: 1,
-              status: "ready"
-            }
-          ],
-          reviewsList: []
-        }
-      ],
-      reviewsList: []
-    }
-  ],
+  stores: [],
   messages: [],
   orders: [],
-  exchangeCards: [
-    {
-      id: "kent-ltc",
-      name: "KENT LTC",
-      ownerLogin: "skboy",
-      description: "По всей Молдове. Выберите обмен или обнал, укажите сумму в долларах или LTC, реквизиты и отправьте заявку оператору.",
-      image: KENT_IMAGE,
-      regions: ["moldova"],
-      exchangeRate: 19,
-      cashoutRate: 17,
-      ltcUsd: 54.2,
-      ltcWallet: "ltc1qrj4ca4m2r0njnf97xtsvmtl9472z9zquc5aszh",
-      requisites: defaultExchangeRequisites,
-      active: true
-    }
-  ],
+  exchangeCards: [],
   exchangeRequests: [],
   referrals: [],
   referralPayments: [],
@@ -222,7 +156,7 @@ let activePositionId = "";
 let authMode = "login";
 let activeOrdersTab = "all";
 let activeReferralTab = "referrals";
-let activeExchangeId = "kent-ltc";
+let activeExchangeId = "";
 let activeExchangeTab = "calculator";
 let activeExchangeOrderId = "";
 let sellerAdminStoreId = "";
@@ -471,54 +405,24 @@ function normalizeDb(next) {
     if (!next.ltcBalances[user.login]) next.ltcBalances[user.login] = 0;
   });
   normalizeOrders(next);
-  next.stores = (next.stores || []).map((store) => {
+  next.orders = (next.orders || []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
+  next.stores = (next.stores || []).filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || ""))).map((store) => {
     const seed = defaults.stores.find((item) => item.id === store.id);
-    if (store.id === "skboy" && /демо|demo/i.test(String(store.description || ""))) store.description = "";
-    if (store.id === "skboy" && (!store.ltcWallet || store.ltcWallet === "ltc1q-store-wallet")) {
-      store.ltcWallet = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
-    }
     return {
       ...store,
+      isTop: Boolean(store.isTop),
+      countries: Array.isArray(store.countries) ? store.countries : [],
+      cities: Array.isArray(store.cities) ? store.cities : [],
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
       reviews: Number.isFinite(Number(store.reviews)) ? Number(store.reviews) : NEW_STORE_STATS.reviews,
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
       ltcWallet: store.ltcWallet || seed?.ltcWallet || "",
-      adminPassword: store.adminPassword || seed?.adminPassword || (store.id === "skboy" ? "skboy" : ""),
+      adminPassword: store.adminPassword || seed?.adminPassword || "",
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
-  next.exchangeCards = next.exchangeCards.map(normalizeExchangeCard);
-  if (!next.exchangeCards.length) next.exchangeCards = structuredClone(defaults.exchangeCards).map(normalizeExchangeCard);
-  ensureCerberPaidPreviewOrder(next);
-}
-
-function ensureCerberPaidPreviewOrder(next) {
-  if ((next.orders || []).some((order) => order.id === "order-cerber-paid-preview")) return;
-  const paidAt = Date.now() - 5 * 60 * 1000;
-  next.orders.unshift({
-    id: "order-cerber-paid-preview",
-    type: "product",
-    login: "cerber",
-    storeId: "skboy",
-    productId: "courier-work",
-    positionId: "courier-checany",
-    product: "Подработка",
-    storeName: "Солёный Мальчик",
-    status: "completed",
-    paymentStatus: "paid",
-    createdAt: paidAt,
-    paidAt,
-    completedAt: paidAt,
-    amountUsd: 50,
-    ltcAmount: usdToLtc(50),
-    location: "Кишинёв",
-    productDescription: "",
-    reservedDescription: "Тестовая выдача после оплаты: заявка успешно оплачена. Здесь будет описание, которое магазин добавит в админке для конкретного товара.",
-    reservedStock: false,
-    sellerLtcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
-    paymentProvider: "preview"
-  });
+  next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
 }
 
 function normalizeProduct(product, store = {}) {
@@ -586,9 +490,17 @@ function normalizeProduct(product, store = {}) {
 }
 
 function normalizeExchangeCard(card) {
-  const seed = defaults.exchangeCards.find((item) => item.id === card.id) || defaults.exchangeCards[0];
+  const seed = defaults.exchangeCards.find((item) => item.id === card.id) || {
+    image: fallbackImage,
+    regions: ["moldova"],
+    exchangeRate: 0,
+    cashoutRate: 0,
+    ltcUsd: ltcUsdCache,
+    ltcWallet: "",
+    requisites: defaultExchangeRequisites
+  };
   const requisites = Array.isArray(card.requisites) && card.requisites.length ? card.requisites : seed.requisites;
-  const image = card.id === "kent-ltc" && (!card.image || card.image === "assets/market-banner.png") ? KENT_IMAGE : (card.image || seed.image);
+  const image = card.image || seed.image || fallbackImage;
   return {
     ...seed,
     ...card,
@@ -889,7 +801,7 @@ function sellerAdminStore() {
 }
 
 function storeAdminPassword(store) {
-  return store?.adminPassword || (store?.id === "skboy" ? "skboy" : "");
+  return store?.adminPassword || "";
 }
 
 function sellerAdminLink(store) {
@@ -910,6 +822,22 @@ function operatorExchangeCards() {
 
 function exchangeCardById(id = activeExchangeId) {
   return db.exchangeCards.find((card) => card.id === id) || db.exchangeCards[0];
+}
+
+function visibleStores(topOnly = false) {
+  const filters = db.filters || {};
+  return (db.stores || []).filter((store) => {
+    if (topOnly && !store.isTop) return false;
+    const products = store.products || [];
+    const positions = products.flatMap((product) => product.positions || []);
+    const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
+    const hasCityScope = (store.cities || []).length || positions.some((position) => position.city);
+    const countryMatch = !filters.country || !hasCountryScope || (store.countries || []).includes(filters.country) || positions.some((position) => position.country === filters.country);
+    const cityMatch = !filters.city || !hasCityScope || (store.cities || []).includes(filters.city) || positions.some((position) => position.city === filters.city);
+    const districtMatch = !filters.district || !positions.length || positions.some((position) => position.district === filters.district);
+    const categoryMatch = !filters.category || filters.category === "Все товары" || !products.length || products.some((product) => String(product.category || "").includes(filters.category));
+    return countryMatch && cityMatch && districtMatch && categoryMatch;
+  }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
 }
 
 function userBalance(login = db.currentUser) {
@@ -1045,7 +973,7 @@ async function fetchLitecoinUsdRate() {
     if (value > 0) {
       ltcUsdCache = value;
       db.exchangeCards.forEach((card) => {
-        if (card.id === "kent-ltc" || Number(card.ltcUsd || 0) <= 0) card.ltcUsd = value;
+        if (Number(card.ltcUsd || 0) <= 0) card.ltcUsd = value;
       });
       return value;
     }
@@ -1273,8 +1201,9 @@ function renderAuth(message = "") {
   mountTurnstile();
 }
 
-function renderSellerAdminLogin(storeId = "skboy", message = "") {
-  const store = db.stores.find((item) => item.id === storeId) || db.stores.find((item) => item.id === "skboy") || db.stores[0];
+function renderSellerAdminLogin(storeId = "", message = "") {
+  const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
+  if (!store) return renderAuth("Магазин ещё не создан. Добавьте его в общей админке.");
   sellerAdminStoreId = store?.id || storeId;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
@@ -1406,7 +1335,8 @@ async function handleAuth(event) {
 
 function renderHome() {
   route = "home";
-  const cards = db.stores.map((store) => storeCard(store)).join("");
+  const stores = visibleStores(true).slice(0, 10);
+  const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
     <section class="hero">
       <h1>${tr("storesTop")}</h1>
@@ -1421,16 +1351,16 @@ function renderHome() {
   `);
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
-    document.querySelector("[data-feed]").innerHTML = db.stores
+    document.querySelector("[data-feed]").innerHTML = visibleStores(true)
       .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
-      .map((store) => storeCard(store)).join("");
+      .slice(0, 10).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
 }
 
 function renderCatalog() {
   route = "catalog";
-  const cards = db.stores.map((store) => storeCard(store)).join("");
+  const cards = visibleStores(false).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
     <section class="hero">
       <h1>Магазины</h1>
@@ -1440,9 +1370,9 @@ function renderCatalog() {
   `);
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
-    document.querySelector("[data-feed]").innerHTML = db.stores
+    document.querySelector("[data-feed]").innerHTML = visibleStores(false)
       .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
-      .map((store) => storeCard(store)).join("");
+      .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
 }
@@ -1516,7 +1446,7 @@ function orderCard(order) {
         <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
-        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.productDescription || "Описание будет доступно в деталях заказа.")}</p>` : ""}
+        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание будет доступно в деталях заказа.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -1549,6 +1479,21 @@ function showProductOrder(orderId) {
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
     <p>Статус: ${productOrderStatus(order)}</p>
     ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
+    ${order.status === "completed" && !order.reviewLeft ? `
+      <form class="form" data-review-form="${esc(order.id)}">
+        <label class="field">Оценка
+          <select name="rating">
+            <option value="5">5 звезд</option>
+            <option value="4">4 звезды</option>
+            <option value="3">3 звезды</option>
+            <option value="2">2 звезды</option>
+            <option value="1">1 звезда</option>
+          </select>
+        </label>
+        <label class="field">Отзыв<textarea name="text" required placeholder="Напишите отзыв о покупке"></textarea></label>
+        <button class="primary">Оставить отзыв</button>
+      </form>
+    ` : ""}
     ${order.status === "pending_payment" ? `
       <div class="payment-instructions">
         <h3>Оплата LTC</h3>
@@ -1580,6 +1525,38 @@ function showProductOrder(orderId) {
   });
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
   document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
+  document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
+}
+
+function handleProductReview(event) {
+  event.preventDefault();
+  const orderId = event.currentTarget.dataset.reviewForm;
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || order.status !== "completed" || order.reviewLeft) return;
+  const store = storeById(order.storeId);
+  const product = productById(store, order.productId);
+  if (!store) return;
+  const data = new FormData(event.currentTarget);
+  const review = {
+    id: `review-${Date.now()}`,
+    serviceDate: new Date().toLocaleDateString("ru-RU"),
+    rating: Number(data.get("rating") || 5),
+    product: order.product,
+    text: data.get("text").trim()
+  };
+  if (!review.text) return;
+  store.reviewsList = [review, ...(store.reviewsList || [])];
+  store.reviews = Number(store.reviews || 0) + 1;
+  store.rating = ((Number(store.rating || 5) * (store.reviews - 1)) + review.rating) / store.reviews;
+  if (product) {
+    product.reviewsList = [review, ...(product.reviewsList || [])];
+    product.reviews = Number(product.reviews || 0) + 1;
+    product.rating = ((Number(product.rating || 5) * (product.reviews - 1)) + review.rating) / product.reviews;
+  }
+  order.reviewLeft = true;
+  saveDb();
+  showToast("Отзыв добавлен");
+  showProductOrder(order.id);
 }
 
 function renderFilters() {
@@ -1679,6 +1656,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   activeStoreId = storeId;
   activeStoreTab = tab;
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
+  if (!store) return renderCatalog();
   const reviewsList = store.reviewsList || [];
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
@@ -1827,7 +1805,9 @@ function positionCardView(position, product, store) {
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
         <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
-        <p><span>Тип</span><strong>${esc(position.deliveryType || "Курьер")}</strong></p>
+        <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
+        <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
+        <p><span>Вес</span><strong>${esc(position.weight || "-")}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
         <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
@@ -2949,7 +2929,7 @@ function renderExchangeOrderDetail(id = activeExchangeOrderId) {
     <section class="screen exchange-profile">
       <article class="panel exchange-detail">
         <div class="detail-head">
-          <img src="${esc(card?.image || KENT_IMAGE)}" alt="">
+          <img src="${esc(card?.image || fallbackImage)}" alt="">
           <div>
             <p class="breadcrumbs">Заявка > ${esc(request.cardName)}</p>
             <h1>${exchangeTypeLabel(request.type)}</h1>
@@ -3064,9 +3044,19 @@ function renderAdmin() {
             <label class="field">${tr("tag")}<input name="tag" required placeholder="@tag"></label>
           </div>
           <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="seller login"></label>
+          <label><input name="isTop" type="checkbox"> Показывать в TOP 10</label>
           <label class="field">${tr("name")}<input name="name" required></label>
           <label class="field">${tr("short")}<input name="short" required></label>
           <label class="field">${tr("full")}<textarea name="description" required></textarea></label>
+          <div class="row">
+            <label class="field">Страна
+              <select name="country">
+                <option value="moldova">Молдова</option>
+                <option value="transnistria">Приднестровье</option>
+              </select>
+            </label>
+            <label class="field">Города для фильтра<input name="cities" placeholder="chisinau, balti"></label>
+          </div>
           <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*,video/*"></label>
           <button class="primary">${tr("addStore")}</button>
         </form>
@@ -3075,10 +3065,10 @@ function renderAdmin() {
         <h2>Добавить обменник</h2>
         <form class="form" data-exchange-admin-form>
           <div class="row">
-            <label class="field">ID<input name="id" required placeholder="kent-ltc"></label>
+            <label class="field">ID<input name="id" required placeholder="exchange-1"></label>
             <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="operator login"></label>
           </div>
-          <label class="field">${tr("name")}<input name="name" required placeholder="KENT LTC"></label>
+          <label class="field">${tr("name")}<input name="name" required placeholder="Обменник"></label>
           <label class="field">${tr("full")}<textarea name="description" required></textarea></label>
           <div class="row">
             <label class="field">Курс обмена MDL/$<input name="exchangeRate" type="number" step="0.01" value="19" required></label>
@@ -3128,6 +3118,16 @@ function adminStoreEditor(store) {
       <form class="form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
         <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
         <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
+        <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>
+        <div class="row">
+          <label class="field">Название магазина<input name="storeName" value="${esc(store.name || "")}"></label>
+          <label class="field">Короткое описание<input name="storeShort" value="${esc(store.short || "")}"></label>
+        </div>
+        <label class="field">Описание страницы магазина<textarea name="storeDescription">${esc(store.description || "")}</textarea></label>
+        <div class="row">
+          <label class="field">Страны фильтра<input name="storeCountries" value="${esc((store.countries || []).join(", "))}" placeholder="moldova, transnistria"></label>
+          <label class="field">Города фильтра<input name="storeCities" value="${esc((store.cities || []).join(", "))}" placeholder="chisinau, balti"></label>
+        </div>
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
         <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
@@ -3137,11 +3137,14 @@ function adminStoreEditor(store) {
           <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || position.priceUsd || 50)}"></label>
         </div>
         <div class="row">
+          <label class="field">Страна<input name="country" value="${esc(position.country || "moldova")}"></label>
           <label class="field">Город<input name="city" value="${esc(position.city || "chisinau")}"></label>
           <label class="field">Район<input name="district" value="${esc(position.district || "")}"></label>
-          <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Курьер")}"></label>
+          <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
+          <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
           <label class="field">Кол-во<input name="stock" type="number" min="0" value="${esc(position.stock || 1)}"></label>
         </div>
+        <label class="field">Фото страницы магазина<input name="storeImage" type="file" accept="image/*"></label>
         <label class="field">Главное фото товара<input name="mainImage" type="file" accept="image/*"></label>
         <label class="field">Другие фото товара до 5<input name="images" type="file" accept="image/*" multiple></label>
         <button class="primary">Сохранить товар</button>
@@ -3183,14 +3186,26 @@ function bindAdminProductForms() {
       const priceUsd = Number(data.get("priceUsd") || 0);
       store.ltcWallet = data.get("ltcWallet").trim();
       store.adminPassword = data.get("adminPassword").trim() || storeAdminPassword(store);
+      store.isTop = Boolean(data.get("isTop"));
+      store.name = data.get("storeName").trim() || store.name;
+      store.short = data.get("storeShort").trim() || store.short;
+      store.description = data.get("storeDescription").trim();
+      store.countries = String(data.get("storeCountries") || "").split(",").map((item) => item.trim()).filter(Boolean);
+      store.cities = String(data.get("storeCities") || "").split(",").map((item) => item.trim()).filter(Boolean);
       product.title = data.get("title").trim();
       product.category = data.get("category").trim();
       product.description = data.get("description").trim();
       product.sellerManaged = true;
       product.deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
       const mainFile = data.get("mainImage");
+      const storeImage = data.get("storeImage");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
       const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+      if (storeImage && storeImage.size) {
+        const image = await fileToDataUrl(storeImage);
+        store.image = image;
+        store.cover = image;
+      }
       if (mainFile && mainFile.size) {
         product.image = await fileToDataUrl(mainFile);
       }
@@ -3204,9 +3219,11 @@ function bindAdminProductForms() {
       position.title = product.title;
       position.description = product.description;
       position.priceUsd = priceUsd;
+      position.country = data.get("country").trim() || store.countries[0] || "moldova";
       position.city = data.get("city").trim() || "chisinau";
       position.district = data.get("district").trim();
-      position.deliveryType = data.get("deliveryType").trim() || "Курьер";
+      position.deliveryType = data.get("deliveryType").trim() || "Товар";
+      position.weight = data.get("weight").trim();
       position.stock = product.deliveryItems.length || Number(data.get("stock") || 0);
       saveDb();
       showToast("Товар сохранён");
@@ -3230,7 +3247,10 @@ async function handleStoreCreate(event) {
     id: data.get("id").trim(),
     tag: data.get("tag").trim(),
     ownerLogin: finalOwnerLogin,
-    adminPassword: data.get("id").trim() === "skboy" ? "skboy" : "123",
+    adminPassword: "123",
+    isTop: Boolean(data.get("isTop")),
+    countries: [data.get("country")].filter(Boolean),
+    cities: String(data.get("cities") || "").split(",").map((item) => item.trim()).filter(Boolean),
     name: data.get("name").trim(),
     short: data.get("short").trim(),
     description: data.get("description").trim(),
@@ -3238,7 +3258,7 @@ async function handleStoreCreate(event) {
     cover: image,
     ...NEW_STORE_STATS,
     products: [],
-    reviewsList: [defaultReview(`${data.get("id").trim()}-review-1`)]
+    reviewsList: []
   });
   saveDb();
   renderAdmin();
@@ -3259,7 +3279,7 @@ async function handleExchangeCardCreate(event) {
     db.users.push({ login: ownerLogin, password: "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
   }
   const file = data.get("image");
-  const image = file && file.size ? await fileToDataUrl(file) : KENT_IMAGE;
+  const image = file && file.size ? await fileToDataUrl(file) : fallbackImage;
   db.exchangeCards.push(normalizeExchangeCard({
     id,
     name: data.get("name").trim(),
@@ -3280,7 +3300,7 @@ async function handleExchangeCardCreate(event) {
 
 function renderSeller() {
   const stores = sellerStores();
-  if (!stores.length) return renderSellerAdminLogin(sellerAdminStoreId || "skboy");
+  if (!stores.length) return renderSellerAdminLogin(sellerAdminStoreId);
   route = "seller";
   const store = stores[0];
   const standalone = Boolean(sellerAdminStore());

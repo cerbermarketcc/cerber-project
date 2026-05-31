@@ -30,69 +30,7 @@ const supabase = supabaseUrl && supabaseServiceKey
     })
   : null;
 
-const defaultStore = {
-  id: "skboy",
-  tag: "@skboy",
-  ownerLogin: "skboy",
-  adminPassword: "skboy",
-  name: "Солёный Мальчик",
-  short: "SK BOY это семья",
-  description: "",
-  ltcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
-  image: "assets/soleniy-malchik.jpg",
-  cover: "assets/soleniy-malchik.jpg",
-  orders: 0,
-  reviews: 1,
-  rating: 5,
-  products: [{
-    id: "courier-work",
-    title: "Подработка",
-    category: "Работа / Курьер",
-    description: "",
-    price: "50$",
-    priceUsd: 50,
-    image: "assets/soleniy-malchik.jpg",
-    images: ["assets/soleniy-malchik.jpg"],
-    rating: 5,
-    reviews: 1,
-    purchases: 0,
-    sellerManaged: true,
-    deliveryItems: [],
-    positions: [{
-      id: "courier-chisinau",
-      title: "Подработка",
-      description: "",
-      priceUsd: 50,
-      country: "moldova",
-      city: "chisinau",
-      district: "",
-      deliveryType: "Курьер",
-      stock: 1,
-      status: "ready"
-    }],
-    reviewsList: []
-  }],
-  reviewsList: []
-};
-
-const defaultExchangeCards = [{
-  id: "kent-ltc",
-  name: "KENT LTC",
-  ownerLogin: "skboy",
-  description: "По всей Молдове. Выберите обмен или обнал, укажите сумму в долларах или LTC, реквизиты и отправьте заявку оператору.",
-  image: "assets/kent-ltc-card.png",
-  regions: ["moldova"],
-  exchangeRate: 19,
-  cashoutRate: 17,
-  ltcUsd: 54.2,
-  ltcWallet: "ltc1qrj4ca4m2r0njnf97xtsvmtl9472z9zquc5aszh",
-  requisites: [
-    { method: "Мия", value: "60327998", active: true },
-    { method: "RunPay", value: "60327998", active: true },
-    { method: "BPay", value: "60327998", active: true }
-  ],
-  active: true
-}];
+const defaultExchangeCards = [];
 
 app.use(express.json({ limit: "25mb" }));
 app.use(express.static(__dirname));
@@ -149,13 +87,10 @@ async function ensureSeed() {
   if (count && count > 0) return;
 
   const adminHash = await bcrypt.hash("admin", 12);
-  const sellerHash = await bcrypt.hash("123", 12);
   await supabase.from("profiles").upsert([
-    { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" },
-    { login: "skboy", login_key: "skboy", password_hash: sellerHash, name: "SK BOY", role: "seller" }
+    { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
   ], { onConflict: "login_key" });
 
-  await supabase.from("stores").upsert({ id: defaultStore.id, data: defaultStore }, { onConflict: "id" });
   await supabase.from("app_settings").upsert({
     id: "main",
     data: {
@@ -196,33 +131,9 @@ async function stateFor(user) {
     supabase.from("profiles").select("login,name,role")
   ]);
   const settingsData = settings?.data || {};
-  const orders = Array.isArray(settingsData.orders) ? [...settingsData.orders] : [];
-  if (loginKey(user?.login) === "cerber" && !orders.some((order) => order.id === "order-cerber-paid-preview")) {
-    const paidAt = Date.now() - 5 * 60 * 1000;
-    orders.unshift({
-      id: "order-cerber-paid-preview",
-      type: "product",
-      login: user.login,
-      storeId: "skboy",
-      productId: "courier-work",
-      positionId: "courier-checany",
-      product: "Подработка",
-      storeName: "Солёный Мальчик",
-      status: "completed",
-      paymentStatus: "paid",
-      createdAt: paidAt,
-      paidAt,
-      completedAt: paidAt,
-      amountUsd: 50,
-      ltcAmount: 0.5,
-      location: "Кишинёв",
-      productDescription: "",
-      reservedDescription: "Тестовая выдача после оплаты: заявка успешно оплачена. Здесь будет описание, которое магазин добавит в админке для конкретного товара.",
-      reservedStock: false,
-      sellerLtcWallet: "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu",
-      paymentProvider: "preview"
-    });
-  }
+  const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
+  const visibleStores = (stores || []).map((row) => row.data).filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")));
+  const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
   return {
     user: publicUser(user),
@@ -231,10 +142,10 @@ async function stateFor(user) {
       theme: settingsData.theme || "light",
       lang: settingsData.lang || "ru",
       users: profiles || [],
-      stores: (stores || []).map((row) => row.data),
+      stores: visibleStores,
       messages: (messages || []).map((row) => row.data),
       orders,
-      exchangeCards: settingsData.exchangeCards || defaultExchangeCards,
+      exchangeCards: visibleExchangeCards,
       exchangeRequests: settingsData.exchangeRequests || [],
       referrals: settingsData.referrals || [],
       referralPayments: settingsData.referralPayments || [],
@@ -345,8 +256,8 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const password = String(req.body.password || "");
     const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
-    const store = row?.data || (storeId === defaultStore.id ? defaultStore : null);
-    if (!store || password !== (store.adminPassword || (store.id === "skboy" ? "skboy" : ""))) {
+    const store = row?.data || null;
+    if (!store || password !== (store.adminPassword || "")) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     res.json({ token: signSellerAdminToken(store.id), ...(await stateFor(null)) });
