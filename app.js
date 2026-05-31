@@ -186,11 +186,11 @@ function marketologSeedStore() {
     products: [
       {
         id: "marketolog-service",
-        title: "Подготовка проекта",
+        title: "Тестовый товар",
         category: "Услуги",
-        description: "",
-        price: "0$",
-        priceUsd: 0,
+        description: "Тестовая позиция для проверки оплаты и выдачи.",
+        price: "10$",
+        priceUsd: 10,
         image: "assets/marketolog-avatar.svg",
         images: ["assets/marketolog-avatar.svg"],
         sellerManaged: true,
@@ -200,15 +200,15 @@ function marketologSeedStore() {
         deliveryItems: [],
         positions: chisinauDistricts.map((district) => ({
           id: `marketolog-${district.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, "-")}`,
-          title: "Подготовка проекта",
-          description: "",
-          priceUsd: 0,
+          title: "Тестовый товар",
+          description: "Тестовая позиция для проверки оплаты и выдачи.",
+          priceUsd: 10,
           country: "moldova",
           city: "chisinau",
           district,
           deliveryType: "Услуга",
           weight: "",
-          stock: 0,
+          stock: 10,
           status: "ready"
         }))
       }
@@ -505,6 +505,23 @@ function normalizeDb(next) {
   });
   if (!next.stores.some((store) => store.id === "marketolog")) {
     next.stores.unshift(marketologSeedStore());
+  } else {
+    const marketolog = next.stores.find((store) => store.id === "marketolog");
+    const product = marketolog?.products?.find((item) => item.id === "marketolog-service");
+    if (product && (!Number(product.priceUsd) || product.title === "Подготовка проекта")) {
+      product.title = "Тестовый товар";
+      product.category = product.category || "Услуги";
+      product.description = product.description || "Тестовая позиция для проверки оплаты и выдачи.";
+      product.price = "10$";
+      product.priceUsd = 10;
+      product.positions = (product.positions || []).map((position) => ({
+        ...position,
+        title: "Тестовый товар",
+        description: position.description || "Тестовая позиция для проверки оплаты и выдачи.",
+        priceUsd: 10,
+        stock: Number(position.stock || 0) > 0 ? Number(position.stock || 0) : 10
+      }));
+    }
   }
   next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
 }
@@ -955,7 +972,9 @@ function addWalletTransaction(tx) {
     amountUsd: Number(tx.amountUsd || 0),
     createdAt: tx.createdAt || Date.now(),
     date: tx.date || new Date().toLocaleString(),
-    status: tx.status || "completed"
+    status: tx.status || "completed",
+    expiresAt: tx.expiresAt || null,
+    paymentId: tx.paymentId || ""
   });
 }
 
@@ -1127,6 +1146,20 @@ function showToast(message) {
   toast.classList.add("show");
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 2600);
+}
+
+function setButtonLoading(button, loading, label = "Загрузка") {
+  if (!button) return;
+  if (loading) {
+    button.dataset.originalText = button.dataset.originalText || button.textContent;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.innerHTML = `<span class="button-spinner"></span><span>${esc(label)}</span>`;
+  } else {
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    if (button.dataset.originalText) button.textContent = button.dataset.originalText;
+  }
 }
 
 function navIcon(name) {
@@ -1615,6 +1648,10 @@ function showProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
   const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
+  const linkedDeposit = order.walletDepositId ? (db.walletDeposits || []).find((item) => item.id === order.walletDepositId) : null;
+  const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || (order.status === "pending_payment" ? MAIN_LTC_WALLET : "");
+  const orderDepositLtc = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
+  const orderDepositUsd = Number(linkedDeposit?.amountUsd || order.walletDepositAmountUsd || order.amountUsd || 0);
   showModal(`
     <h2>${esc(order.product)}</h2>
     <p>${esc(order.storeName || "")}</p>
@@ -1641,9 +1678,19 @@ function showProductOrder(orderId) {
       <div class="payment-instructions">
         <h3>Оплата LTC</h3>
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
+        <p>Истекает через ${Math.max(0, Math.ceil((Number(order.paymentExpiresAt || 0) - Date.now()) / 60000))} минут</p>
         <p><span>Сумма:</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+        ${orderDepositAddress ? `
+          <p><span>Счет пополнения:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${orderDepositLtc.toFixed(8)} LTC</strong></p>
+          <p><span>Куда оплатить:</span><strong class="mono-line">${esc(orderDepositAddress)}</strong></p>
+          <button class="ghost-button" data-copy="${esc(walletDepositCopyText(linkedDeposit || {
+            amountUsd: orderDepositUsd,
+            payAmount: orderDepositLtc,
+            payAddress: orderDepositAddress
+          }))}">Скопировать счет пополнения</button>
+        ` : ""}
         ${userLtcBalance() >= ltcAmount ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
-        <p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet || "Кошелек не указан")}</strong></p>
+        ${order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet)}</strong></p>` : ""}
         <div class="row">
           <button class="ghost-button" data-copy="${esc(`Адрес LTC: ${order.sellerLtcWallet || ""}\nСумма: ${ltcAmount.toFixed(6)} LTC`)}">Скопировать всё</button>
           <button class="ghost-button" data-copy="${esc(order.sellerLtcWallet || "")}">Скопировать кошелек</button>
@@ -2191,7 +2238,7 @@ function payProductOrderFromBalance(orderId) {
   renderOrders("completed");
 }
 
-function handleProductReservation(storeId, productId, positionId) {
+function handleProductReservation(storeId, productId, positionId, options = {}) {
   const store = storeById(storeId);
   const product = productById(store, productId);
   const position = positionById(product, positionId);
@@ -2233,8 +2280,64 @@ function handleProductReservation(storeId, productId, positionId) {
   };
   db.orders.unshift(order);
   saveDb();
+  if (options.silent) return order;
   showToast("Бронь создана. Заказ в разделе Активные.");
   renderOrders("active");
+  return order;
+}
+
+function openProductCheckoutModal(storeId, productId, positionId) {
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  const position = positionById(product, positionId);
+  if (!product || !position) return;
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
+  const enough = userLtcBalance() >= ltcAmount && ltcAmount > 0;
+  showModal(`
+    <h2>Покупка товара</h2>
+    <article class="checkout-mini">
+      <strong>${esc(product.title)}</strong>
+      <span>${esc(store.name)} · ${esc(locationLabel(position))}</span>
+      <b>${priceUsd.toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</b>
+    </article>
+    <div class="checkout-actions">
+      <button class="primary" data-checkout-balance ${enough ? "" : "disabled"}>Оплатить с баланса</button>
+      <button class="primary" data-checkout-deposit>Пополнить и оплатить</button>
+    </div>
+    ${enough ? `<p class="desc">На балансе достаточно средств. После оплаты описание товара появится в деталях заказа.</p>` : `<p class="notice">На балансе недостаточно средств. Пополните LTC на нужную сумму, заказ будет в обработке 40 минут.</p>`}
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-checkout-balance]")?.addEventListener("click", (event) => {
+    setButtonLoading(event.currentTarget, true);
+    const order = handleProductReservation(storeId, productId, positionId, { silent: true });
+    if (!order) return;
+    payProductOrderFromBalance(order.id);
+    document.querySelector("[data-modal]")?.classList.remove("open");
+  });
+  document.querySelector("[data-checkout-deposit]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    setButtonLoading(button, true, "Создаём счет");
+    const order = handleProductReservation(storeId, productId, positionId, { silent: true });
+    if (!order) {
+      setButtonLoading(button, false);
+      return;
+    }
+    try {
+      const deposit = await createWalletDepositRequest(priceUsd, `Пополнение для заказа: ${product.title}`);
+      order.walletDepositId = deposit.id;
+      order.walletDepositAmountUsd = priceUsd;
+      order.walletDepositAmountLtc = deposit.payAmount || usdToLtc(priceUsd);
+      order.walletDepositAddress = deposit.payAddress || "";
+      order.walletDepositPaymentUrl = deposit.paymentUrl || "";
+      saveDb();
+      showProductOrder(order.id);
+    } catch (error) {
+      cancelProductOrder(order.id, { silent: true });
+      showToast(error.message || "Не удалось создать счет LTC");
+      setButtonLoading(button, false);
+    }
+  });
 }
 
 function renderProductPaymentOrder(orderId) {
@@ -2265,11 +2368,12 @@ function renderProductPaymentOrder(orderId) {
       </article>
     </section>
   `);
-  document.querySelector("[data-create-now-payment]")?.addEventListener("click", (event) => createNowPaymentsInvoice(event.currentTarget.dataset.createNowPayment));
+  document.querySelector("[data-create-now-payment]")?.addEventListener("click", (event) => createNowPaymentsInvoice(event.currentTarget.dataset.createNowPayment, event.currentTarget));
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
 }
 
-async function createNowPaymentsInvoice(orderId) {
+async function createNowPaymentsInvoice(orderId, button = null) {
+  setButtonLoading(button, true, "Создаём оплату");
   try {
     const payload = await apiFetch("/api/payments/nowpayments/create", {
       method: "POST",
@@ -2308,7 +2412,7 @@ function markProductOrderPaid(orderId) {
   `);
 }
 
-function cancelProductOrder(orderId) {
+function cancelProductOrder(orderId, options = {}) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.paymentStatus === "paid") return;
   restoreReservedProductItem(order, db);
@@ -2316,6 +2420,7 @@ function cancelProductOrder(orderId) {
   order.paymentStatus = "canceled";
   order.canceledAt = Date.now();
   saveDb();
+  if (options.silent) return;
   renderOrders("canceled");
 }
 
@@ -3865,26 +3970,52 @@ function openWalletDepositModal() {
   document.querySelector("[data-wallet-deposit-form]").onsubmit = createWalletDeposit;
 }
 
+async function createWalletDepositRequest(amountUsd, title = "Пополнение LTC") {
+  if (!API_ENABLED) {
+    const amountLtc = usdToLtc(amountUsd);
+    const deposit = {
+      id: `deposit-${Date.now()}`,
+      login: db.currentUser,
+      amountUsd,
+      payAmount: amountLtc,
+      payAddress: MAIN_LTC_WALLET,
+      status: "processing",
+      expiresAt: Date.now() + WALLET_DEPOSIT_TTL_MS,
+      createdAt: Date.now()
+    };
+    db.walletDeposits.unshift(deposit);
+    addWalletTransaction({
+      id: `tx-${deposit.id}`,
+      type: "deposit",
+      title,
+      amountLtc,
+      amountUsd,
+      status: "processing",
+      expiresAt: deposit.expiresAt
+    });
+    saveDb();
+    return deposit;
+  }
+  const payload = await apiFetch("/api/wallet/nowpayments/create", {
+    method: "POST",
+    body: JSON.stringify({ amountUsd })
+  });
+  applyRemoteState(payload);
+  const deposit = payload.deposit || {};
+  const tx = (db.walletTransactions || []).find((item) => item.id === `tx-${deposit.id}` || item.paymentId === deposit.paymentId);
+  if (tx && title) tx.title = title;
+  saveDb();
+  return deposit;
+}
+
 async function createWalletDeposit(event) {
   event.preventDefault();
   const amountUsd = Number(new FormData(event.currentTarget).get("amountUsd") || 0);
   if (amountUsd <= 0) return;
-  if (!API_ENABLED) {
-    const amountLtc = usdToLtc(amountUsd);
-    db.ltcBalances[db.currentUser] = userLtcBalance() + amountLtc;
-    addWalletTransaction({ type: "deposit", title: "Пополнение LTC", amountLtc, amountUsd });
-    saveDb();
-    document.querySelector("[data-modal]").classList.remove("open");
-    renderWallet();
-    return;
-  }
+  const submit = event.currentTarget.querySelector("button");
+  setButtonLoading(submit, true, "Создаём счет");
   try {
-    const payload = await apiFetch("/api/wallet/nowpayments/create", {
-      method: "POST",
-      body: JSON.stringify({ amountUsd })
-    });
-    applyRemoteState(payload);
-    const deposit = payload.deposit || {};
+    const deposit = await createWalletDepositRequest(amountUsd);
     renderWallet();
     showModal(`
       <h2>Ваш LTC-кошелек</h2>
@@ -3904,6 +4035,7 @@ async function createWalletDeposit(event) {
     bindCopyButtons();
   } catch (error) {
     showToast(error.message || "Не удалось создать пополнение");
+    setButtonLoading(submit, false);
   }
 }
 
@@ -4439,7 +4571,7 @@ function bindGlobal() {
   document.querySelectorAll("[data-buy-position]").forEach((button) => {
     button.onclick = (event) => {
       event.stopPropagation();
-      handleProductReservation(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
+      openProductCheckoutModal(button.dataset.productStore, button.dataset.product, button.dataset.buyPosition);
     };
   });
   document.querySelector("[data-menu]").onclick = () => document.querySelector("[data-nav-pop]").classList.add("open");

@@ -46,6 +46,20 @@ select {
 button {
   cursor: pointer;
   touch-action: manipulation;
+  transition: transform 140ms ease, opacity 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+button:active {
+  transform: scale(0.96);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+button:disabled:active {
+  transform: none;
 }
 
 .app {
@@ -667,13 +681,56 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .primary {
-  min-height: 64px;
+  min-height: 54px;
   border: 0;
   border-radius: 999px;
   background: #000;
   color: #fff;
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 600;
+  padding: 0 22px;
+}
+
+.primary.is-loading,
+.ghost-button.is-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.button-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: button-spin 750ms linear infinite;
+}
+
+@keyframes button-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.checkout-mini {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--soft);
+}
+
+.checkout-mini span {
+  color: var(--muted);
+}
+
+.checkout-actions {
+  display: grid;
+  gap: 10px;
 }
 
 .green-dot {
@@ -700,12 +757,12 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .pill-tabs button {
-  min-height: 68px;
+  min-height: 56px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--paper);
   color: var(--ink);
-  font-size: 20px;
+  font-size: 17px;
 }
 
 .pill-tabs button.muted {
@@ -2551,14 +2608,15 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .ghost-button {
-  min-height: 52px;
-  padding: 0 18px;
+  min-height: 46px;
+  padding: 0 16px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--paper);
   color: var(--ink);
   font: inherit;
-  font-weight: 800;
+  font-size: 16px;
+  font-weight: 750;
 }
 
 .requisites-list {
