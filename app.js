@@ -760,10 +760,19 @@ async function apiFetch(path, options = {}) {
   };
   const token = localStorage.getItem(API_TOKEN_KEY);
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(path, { ...options, headers });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || "API error");
-  return payload;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 25000);
+  try {
+    const response = await fetch(path, { ...options, headers, signal: controller.signal });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "API error");
+    return payload;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("Сервер оплаты долго не отвечает. Попробуйте ещё раз.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function applyRemoteState(payload) {
@@ -890,6 +899,12 @@ function isAdmin() {
 function sellerAdminHashId() {
   const match = decodeURIComponent(location.hash || "").match(/^#(?:seller|shop-admin)-([a-z0-9_-]+)$/i);
   return match?.[1] || "";
+}
+
+function hashRoute() {
+  const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
+  const routes = new Set(["admin", "wallet", "catalog", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
+  return routes.has(hash) ? hash : "";
 }
 
 function sellerAdminSessionId() {
@@ -1437,7 +1452,7 @@ async function handleAuth(event) {
         registerReferral(payload.user?.login || login);
         saveDb();
         authMode = "login";
-        return renderHome();
+        return renderCurrent();
       } catch (error) {
         resetCaptcha();
         return renderAuth(error.message);
@@ -1460,7 +1475,7 @@ async function handleAuth(event) {
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);
-      return renderHome();
+      return renderCurrent();
     } catch (error) {
       resetCaptcha();
       return renderAuth(error.message);
@@ -1471,7 +1486,7 @@ async function handleAuth(event) {
   if (!user) return renderAuth(tr("badLogin"));
   db.currentUser = user.login;
   saveDb();
-  renderHome();
+  renderCurrent();
 }
 
 function renderHome() {
@@ -1652,6 +1667,7 @@ function showProductOrder(orderId) {
   const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || (order.status === "pending_payment" ? MAIN_LTC_WALLET : "");
   const orderDepositLtc = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
   const orderDepositUsd = Number(linkedDeposit?.amountUsd || order.walletDepositAmountUsd || order.amountUsd || 0);
+  const orderPaymentUrl = linkedDeposit?.paymentUrl || order.walletDepositPaymentUrl || order.paymentUrl || "";
   showModal(`
     <h2>${esc(order.product)}</h2>
     <p>${esc(order.storeName || "")}</p>
@@ -1689,6 +1705,7 @@ function showProductOrder(orderId) {
             payAddress: orderDepositAddress
           }))}">Скопировать счет пополнения</button>
         ` : ""}
+        ${orderPaymentUrl ? `<a class="primary link-button" href="${esc(orderPaymentUrl)}" target="_blank" rel="noopener">Открыть основную ссылку оплаты</a>` : ""}
         ${userLtcBalance() >= ltcAmount ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
         ${order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet)}</strong></p>` : ""}
         <div class="row">
@@ -2330,6 +2347,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       order.walletDepositAmountLtc = deposit.payAmount || usdToLtc(priceUsd);
       order.walletDepositAddress = deposit.payAddress || "";
       order.walletDepositPaymentUrl = deposit.paymentUrl || "";
+      order.paymentUrl = deposit.paymentUrl || order.paymentUrl || "";
       saveDb();
       showProductOrder(order.id);
     } catch (error) {
@@ -4063,7 +4081,18 @@ function renderSimplePage(kind) {
 }
 
 function renderAdmin() {
-  if (!isAdmin()) return renderHome();
+  if (!isAdmin()) {
+    route = "admin";
+    return layout(`
+      <section class="screen">
+        <article class="panel empty-state">
+          <h2>Нет доступа к общей админке</h2>
+          <p>Для общей админки сайта нужно войти под аккаунтом администратора.</p>
+          <button class="primary" data-logout>Войти в другой аккаунт</button>
+        </article>
+      </section>
+    `);
+  }
   route = "admin";
   layout(`
     <section class="screen">
@@ -4624,6 +4653,8 @@ function renderCurrent() {
     return renderSellerAdminLogin(hashStoreId);
   }
   if (!db.currentUser || !currentUser()) return renderAuth();
+  const directRoute = hashRoute();
+  if (directRoute) route = directRoute;
   if (route === "home") return renderHome();
   if (route === "catalog") return renderCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);

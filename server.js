@@ -20,6 +20,7 @@ const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const walletDepositTtlMs = 40 * 60 * 1000;
+const nowpaymentsTimeoutMs = 25000;
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -403,6 +404,26 @@ function sortedObject(value) {
   return value;
 }
 
+async function nowpaymentsJson(pathname, payload) {
+  const response = await fetch(`https://api.nowpayments.io/v1/${pathname}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": nowpaymentsApiKey
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(nowpaymentsTimeoutMs)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.message || body.error || "NOWPayments error");
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  return body;
+}
+
 function verifyNowpaymentsSignature(req) {
   if (!nowpaymentsIpnSecret) return true;
   const signature = String(req.headers["x-nowpayments-sig"] || "");
@@ -580,26 +601,39 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
     };
 
-    const response = await fetch("https://api.nowpayments.io/v1/payment", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": nowpaymentsApiKey
-      },
-      body: JSON.stringify(paymentPayload)
-    });
-    const payment = await response.json().catch(() => ({}));
-    if (!response.ok) return res.status(502).json({ error: payment.message || "NOWPayments payment error" });
+    let payment = {};
+    try {
+      payment = await nowpaymentsJson("payment", paymentPayload);
+    } catch (paymentError) {
+      const invoice = await nowpaymentsJson("invoice", {
+        price_amount: amountUsd,
+        price_currency: "usd",
+        pay_currency: "ltc",
+        order_id: deposit.id,
+        order_description: `CERBER MARKET wallet top up / ${user.login}`,
+        ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
+        success_url: `${publicBaseUrl}/`,
+        cancel_url: `${publicBaseUrl}/`
+      });
+      payment = {
+        payment_id: invoice.id || invoice.invoice_id || "",
+        payment_status: "waiting",
+        payment_url: invoice.invoice_url || invoice.payment_url || "",
+        invoice_url: invoice.invoice_url || invoice.payment_url || ""
+      };
+    }
 
     deposit.paymentId = payment.payment_id || payment.id || "";
     deposit.payAddress = payment.pay_address || payment.address || "";
     deposit.payAmount = Number(payment.pay_amount || 0);
     deposit.payCurrency = "ltc";
+    deposit.paymentUrl = payment.payment_url || payment.invoice_url || "";
     deposit.paymentStatus = payment.payment_status || "waiting";
     deposit.paymentProviderPayload = {
       paymentId: deposit.paymentId,
       payAddress: deposit.payAddress,
-      payAmount: deposit.payAmount
+      payAmount: deposit.payAmount,
+      paymentUrl: deposit.paymentUrl
     };
 
     deposits.unshift(deposit);
