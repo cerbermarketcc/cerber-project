@@ -14,6 +14,15 @@ let turnstileWidgetId = null;
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const ADMIN_PANEL_PASSWORD = "admin2026";
+const WALLET_COINS = [
+  { id: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
+  { id: "usdt_trc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
+  { id: "usdt_erc20", symbol: "USDT", name: "USDT ERC-20", network: "ERC-20", accent: "#26a17b" },
+  { id: "usdt_sol", symbol: "USDT", name: "USDT Solana", network: "SOL", accent: "#26a17b" },
+  { id: "trx", symbol: "TRX", name: "Tron", network: "TRX", accent: "#ef0027" },
+  { id: "eth", symbol: "ETH", name: "Ethereum", network: "ERC-20", accent: "#627eea" },
+  { id: "sol", symbol: "SOL", name: "Solana", network: "SOL", accent: "#14f195" }
+];
 const officialOnionMirrors = [
   "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
   "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
@@ -158,6 +167,7 @@ const defaults = {
     platformCommissionPercent: 0,
     swapCommissionPercent: 0,
     walletServiceFeePercent: 0,
+    walletCoinFees: Object.fromEntries(WALLET_COINS.map((coin) => [coin.id, { percent: 0, fixed: 0, enabled: true }])),
     disputeArbiters: [],
     exchangeOperators: [],
     riskRules: {
@@ -501,6 +511,15 @@ function normalizeDb(next) {
   next.ownerSettings.platformCommissionPercent = Number(next.ownerSettings.platformCommissionPercent || 0);
   next.ownerSettings.swapCommissionPercent = Number(next.ownerSettings.swapCommissionPercent || 0);
   next.ownerSettings.walletServiceFeePercent = Number(next.ownerSettings.walletServiceFeePercent || 0);
+  next.ownerSettings.walletCoinFees = next.ownerSettings.walletCoinFees || {};
+  WALLET_COINS.forEach((coin) => {
+    const current = next.ownerSettings.walletCoinFees[coin.id] || {};
+    next.ownerSettings.walletCoinFees[coin.id] = {
+      enabled: current.enabled !== false,
+      percent: Number(current.percent || 0),
+      fixed: Number(current.fixed || 0)
+    };
+  });
   next.ownerSettings.disputeArbiters = Array.isArray(next.ownerSettings.disputeArbiters) ? next.ownerSettings.disputeArbiters : [];
   next.ownerSettings.exchangeOperators = Array.isArray(next.ownerSettings.exchangeOperators) ? next.ownerSettings.exchangeOperators : [];
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
@@ -3941,6 +3960,7 @@ function renderWallet() {
           <button class="active"><span class="ltc-badge">Ł</span> LTC</button>
         </div>
       </article>
+      ${walletCoinSecondaryTabs()}
       <article class="wallet-balance-card">
         <p>Личный</p>
         <div class="wallet-balance-row">
@@ -3977,6 +3997,22 @@ function renderWallet() {
       showWalletDepositDetails(button.dataset.walletDeposit);
     });
   });
+}
+
+function walletCoinSecondaryTabs() {
+  return `
+    <article class="wallet-coin-panel">
+      <button class="wallet-coin-main active" type="button"><span class="ltc-badge">Ł</span><strong>LTC</strong><small>Litecoin</small></button>
+      <div class="wallet-coin-list">
+        ${WALLET_COINS.filter((coin) => !coin.base).map((coin) => `
+          <button class="wallet-coin-small" type="button" disabled style="--coin-accent:${esc(coin.accent)}">
+            <span>${esc(coin.symbol)}</span>
+            <small>${esc(coin.network)}</small>
+          </button>
+        `).join("")}
+      </div>
+    </article>
+  `;
 }
 
 function walletTransactionView(tx) {
@@ -4279,6 +4315,7 @@ function renderOwnerPanel() {
           <button class="primary">Сохранить настройки</button>
         </form>
       </article>
+      ${ownerWalletFeesPanel(settings)}
       ${ownerStoreBuilderPanel()}
       <article class="panel">
         <h2>Заявки магазинов</h2>
@@ -4355,6 +4392,21 @@ function bindOwnerPanel() {
     showToast("Настройки сохранены");
     renderOwnerPanel();
   });
+  document.querySelector("[data-owner-wallet-fees-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    db.ownerSettings.walletCoinFees = db.ownerSettings.walletCoinFees || {};
+    WALLET_COINS.forEach((coin) => {
+      db.ownerSettings.walletCoinFees[coin.id] = {
+        enabled: Boolean(data.get(`${coin.id}_enabled`)),
+        percent: Math.max(0, Number(data.get(`${coin.id}_percent`) || 0)),
+        fixed: Math.max(0, Number(data.get(`${coin.id}_fixed`) || 0))
+      };
+    });
+    saveDb();
+    showToast("Настройки монет сохранены");
+    renderOwnerPanel();
+  });
   document.querySelectorAll("[data-owner-approve]").forEach((button) => button.onclick = () => approveStoreApplication(button.dataset.ownerApprove));
   document.querySelectorAll("[data-owner-reject]").forEach((button) => button.onclick = () => rejectStoreApplication(button.dataset.ownerReject));
   document.querySelectorAll("[data-store-auto-release]").forEach((input) => {
@@ -4376,6 +4428,24 @@ function bindOwnerPanel() {
       renderOwnerPanel();
     };
   });
+  document.querySelectorAll("[data-owner-toggle-top]").forEach((button) => {
+    button.onclick = () => {
+      const store = storeById(button.dataset.ownerToggleTop);
+      if (!store) return;
+      store.isTop = !store.isTop;
+      saveDb();
+      renderOwnerPanel();
+    };
+  });
+  document.querySelectorAll("[data-owner-toggle-catalog]").forEach((button) => {
+    button.onclick = () => {
+      const store = storeById(button.dataset.ownerToggleCatalog);
+      if (!store) return;
+      store.visibleInCatalog = store.visibleInCatalog === false;
+      saveDb();
+      renderOwnerPanel();
+    };
+  });
   document.querySelectorAll("[data-owner-open-store]").forEach((button) => button.onclick = () => renderStore(button.dataset.ownerOpenStore, "positions"));
   document.querySelectorAll("[data-owner-resolve-client]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveClient, "client"));
   document.querySelectorAll("[data-owner-resolve-store]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveStore, "store"));
@@ -4385,6 +4455,35 @@ function bindOwnerPanel() {
   document.querySelectorAll("[data-owner-add-position]").forEach((form) => form.addEventListener("submit", handleOwnerAddPosition));
   document.querySelectorAll("[data-owner-delete-product]").forEach((button) => button.onclick = () => ownerDeleteProduct(button.dataset.ownerDeleteProduct, button.dataset.storeId));
   document.querySelectorAll("[data-owner-delete-position]").forEach((button) => button.onclick = () => ownerDeletePosition(button.dataset.ownerDeletePosition, button.dataset.productId, button.dataset.storeId));
+}
+
+function ownerWalletFeesPanel(settings) {
+  const fees = settings.walletCoinFees || {};
+  return `
+    <article class="panel owner-wallet-settings">
+      <h2>Настройки кошельков</h2>
+      <p class="desc">Базовая монета оплаты - LTC. Остальные монеты подготовлены для пополнений, выводов и будущего обмена без функций анонимизации.</p>
+      <form class="form" data-owner-wallet-fees-form>
+        <div class="wallet-fee-grid">
+          ${WALLET_COINS.map((coin) => {
+            const fee = fees[coin.id] || { enabled: true, percent: 0, fixed: 0 };
+            return `
+              <article class="wallet-fee-row">
+                <div>
+                  <strong>${esc(coin.name)}</strong>
+                  <span>${esc(coin.network)}</span>
+                </div>
+                <label><input name="${coin.id}_enabled" type="checkbox" ${fee.enabled !== false ? "checked" : ""}> включена</label>
+                <label class="field">Комиссия, %<input name="${coin.id}_percent" type="number" min="0" step="0.01" value="${esc(fee.percent || 0)}"></label>
+                <label class="field">Фикс, монет<input name="${coin.id}_fixed" type="number" min="0" step="0.000001" value="${esc(fee.fixed || 0)}"></label>
+              </article>
+            `;
+          }).join("")}
+        </div>
+        <button class="primary">Сохранить комиссии монет</button>
+      </form>
+    </article>
+  `;
 }
 
 function ownerStoreBuilderPanel() {
