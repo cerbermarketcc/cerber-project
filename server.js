@@ -93,14 +93,14 @@ async function verifyCaptcha(token, req) {
 
 async function ensureSeed() {
   if (!supabase) return;
-  const { count } = await supabase.from("profiles").select("login_key", { count: "exact", head: true });
-  if (count && count > 0) return;
-
-  const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(18).toString("base64url");
+  const adminPassword = process.env.ADMIN_PASSWORD || "admin2026";
   const adminHash = await bcrypt.hash(adminPassword, 12);
   await supabase.from("profiles").upsert([
     { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
   ], { onConflict: "login_key" });
+
+  const { data: existingSettings } = await supabase.from("app_settings").select("id").eq("id", "main").maybeSingle();
+  if (existingSettings) return;
 
   await supabase.from("app_settings").upsert({
     id: "main",
