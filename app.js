@@ -5149,7 +5149,6 @@ function renderSeller() {
           <button class="primary">${tr("addProduct")}</button>
         </form>
       </article>
-      ${adminStoreEditor(store)}
       ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);

@@ -32,7 +32,10 @@ body {
   min-width: 320px;
   background: var(--bg);
   color: var(--ink);
-  font-family: "Inter", "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+  font-family: "Manrope", "Inter", "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -2852,4 +2855,89 @@ body[data-theme="dark"] .mirror-row {
 
 .deposit-address strong {
   overflow-wrap: anywhere;
+}
+
+/* Compact business typography */
+.app {
+  font-size: 14px;
+}
+
+h1,
+h2,
+h3,
+p,
+button,
+input,
+textarea,
+select,
+label,
+.store-title,
+.profile-title,
+.details-title,
+.ref-section-head h2,
+.product-body h3,
+.wallet-page,
+.message-title {
+  letter-spacing: 0;
+}
+
+.hero h1,
+.screen > h1 {
+  font-size: clamp(28px, 7vw, 38px);
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+.big-title {
+  font-size: clamp(34px, 9vw, 48px);
+  line-height: 1.05;
+  font-weight: 700;
+}
+
+.panel h2,
+.profile-title,
+.details-title,
+.wallet-page h1,
+.support-card h1,
+.ref-page h1 {
+  font-size: clamp(24px, 6vw, 32px);
+  line-height: 1.14;
+  font-weight: 700;
+}
+
+.store-title,
+.product-body h3,
+.ref-card h2,
+.owner-section h2 {
+  font-size: clamp(19px, 4.8vw, 24px);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.desc,
+.store-card p,
+.product-body p,
+.profile-short,
+.ref-card p,
+.field,
+.field input,
+.field textarea,
+.field select,
+.primary,
+.ghost-button,
+.account-row,
+.tab,
+.pill-tabs button,
+.menu-sheet,
+.wallet-tx,
+.message-preview {
+  font-size: 14px;
+}
+
+.muted,
+.store-meta,
+.review-card,
+.wallet-tx small,
+.caption {
+  font-size: 13px;
 }
