@@ -523,6 +523,7 @@ function normalizeDb(next) {
     return {
       ...store,
       isTop: Boolean(store.isTop),
+      visibleInCatalog: store.visibleInCatalog !== false,
       countries: Array.isArray(store.countries) ? store.countries : [],
       cities: Array.isArray(store.cities) ? store.cities : [],
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
@@ -533,6 +534,7 @@ function normalizeDb(next) {
       status: store.status || "active",
       salesBlocked: Boolean(store.salesBlocked),
       autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || next.ownerSettings.defaultAutoReleaseHours || 24)),
+      gallery: Array.isArray(store.gallery) ? store.gallery.slice(0, 5) : [],
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
@@ -1005,6 +1007,8 @@ function visibleStores(topOnly = false) {
   const filters = db.filters || {};
   return (db.stores || []).filter((store) => {
     if (topOnly && !store.isTop) return false;
+    if (!topOnly && store.visibleInCatalog === false) return false;
+    if (store.status && store.status !== "active" && !isAdmin()) return false;
     const products = store.products || [];
     const positions = products.flatMap((product) => product.positions || []);
     const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
@@ -4262,6 +4266,7 @@ function renderOwnerPanel() {
           <button class="primary">Сохранить настройки</button>
         </form>
       </article>
+      ${ownerStoreBuilderPanel()}
       <article class="panel">
         <h2>Заявки магазинов</h2>
         ${(db.storeApplications || []).map((application) => `
@@ -4361,6 +4366,130 @@ function bindOwnerPanel() {
   document.querySelectorAll("[data-owner-open-store]").forEach((button) => button.onclick = () => renderStore(button.dataset.ownerOpenStore, "positions"));
   document.querySelectorAll("[data-owner-resolve-client]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveClient, "client"));
   document.querySelectorAll("[data-owner-resolve-store]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveStore, "store"));
+  document.querySelector("[data-owner-create-store]")?.addEventListener("submit", handleOwnerCreateStore);
+  document.querySelectorAll("[data-owner-profile-form]").forEach((form) => form.addEventListener("submit", handleOwnerProfileSave));
+  document.querySelectorAll("[data-owner-add-product]").forEach((form) => form.addEventListener("submit", handleOwnerAddProduct));
+  document.querySelectorAll("[data-owner-add-position]").forEach((form) => form.addEventListener("submit", handleOwnerAddPosition));
+  document.querySelectorAll("[data-owner-delete-product]").forEach((button) => button.onclick = () => ownerDeleteProduct(button.dataset.ownerDeleteProduct, button.dataset.storeId));
+  document.querySelectorAll("[data-owner-delete-position]").forEach((button) => button.onclick = () => ownerDeletePosition(button.dataset.ownerDeletePosition, button.dataset.productId, button.dataset.storeId));
+}
+
+function ownerStoreBuilderPanel() {
+  return `
+    <article class="panel owner-builder">
+      <h2>Конструктор карточек магазинов</h2>
+      <form class="form" data-owner-create-store>
+        <div class="row">
+          <label class="field">Название<input name="name" required placeholder="Market name"></label>
+          <label class="field">Тег<input name="tag" placeholder="@market"></label>
+        </div>
+        <label class="field">Описание карточки<input name="short" placeholder="Короткое описание"></label>
+        <div class="row">
+          <label><input name="isTop" type="checkbox" checked> TOP 10</label>
+          <label><input name="visibleInCatalog" type="checkbox" checked> Раздел магазины</label>
+        </div>
+        <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
+        <button class="primary">Создать карточку</button>
+      </form>
+    </article>
+    ${db.stores.map(ownerStoreManager).join("")}
+  `;
+}
+
+function ownerStoreManager(store) {
+  const gallery = (store.gallery || []).slice(0, 5);
+  return `
+    <article class="panel owner-store-manager">
+      <h2>${esc(store.name)} · управление</h2>
+      <form class="form" data-owner-profile-form data-store-id="${esc(store.id)}">
+        <div class="row">
+          <label class="field">Название<input name="name" value="${esc(store.name || "")}" required></label>
+          <label class="field">Тег<input name="tag" value="${esc(store.tag || "")}"></label>
+        </div>
+        <label class="field">Описание карточки<input name="short" value="${esc(store.short || "")}"></label>
+        <label class="field">Описание профиля<textarea name="description">${esc(store.description || "")}</textarea></label>
+        <div class="row">
+          <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> TOP 10</label>
+          <label><input name="visibleInCatalog" type="checkbox" ${store.visibleInCatalog !== false ? "checked" : ""}> Раздел магазины</label>
+          <label><input name="salesBlocked" type="checkbox" ${store.salesBlocked ? "checked" : ""}> Остановить продажи</label>
+        </div>
+        <div class="row">
+          <label class="field">Страны фильтра<input name="countries" value="${esc((store.countries || []).join(", "))}" placeholder="moldova, transnistria"></label>
+          <label class="field">Города фильтра<input name="cities" value="${esc((store.cities || []).join(", "))}" placeholder="chisinau"></label>
+        </div>
+        <div class="row">
+          <label class="field">LTC кошелек<input name="ltcWallet" value="${esc(store.ltcWallet || "")}"></label>
+          <label class="field">Пароль админки магазина<input name="adminPassword" value="${esc(store.adminPassword || "")}"></label>
+        </div>
+        <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
+        <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
+        <label class="field">Галерея профиля до 5 фото<input name="gallery" type="file" accept="image/*" multiple></label>
+        ${gallery.length ? `<div class="owner-gallery">${gallery.map((image) => `<img src="${esc(image)}" alt="">`).join("")}</div>` : ""}
+        <button class="primary">Сохранить профиль</button>
+      </form>
+      <div class="owner-products">
+        <h3>Блоки товаров</h3>
+        <form class="form" data-owner-add-product data-store-id="${esc(store.id)}">
+          <div class="row">
+            <label class="field">Название товара<input name="title" required></label>
+            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
+          </div>
+          <label class="field">Описание<textarea name="description"></textarea></label>
+          <label class="field">Фото товара<input name="image" type="file" accept="image/*"></label>
+          <button class="primary">Добавить товар</button>
+        </form>
+        ${(store.products || []).map((product) => ownerProductManager(store, product)).join("") || `<p>Товаров пока нет.</p>`}
+      </div>
+    </article>
+  `;
+}
+
+function ownerProductManager(store, product) {
+  return `
+    <article class="owner-product-box">
+      <div class="ref-item">
+        <img class="owner-thumb" src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <div>
+          <h3>${esc(product.title)}</h3>
+          <p>${esc(product.description || product.category || "")}</p>
+          <p>${Number(product.priceUsd || 0).toFixed(2)} $ · ${usdToLtc(Number(product.priceUsd || 0)).toFixed(6)} LTC</p>
+        </div>
+        <button class="ghost-button" data-owner-delete-product="${esc(product.id)}" data-store-id="${esc(store.id)}">Удалить товар</button>
+      </div>
+      <form class="form" data-owner-add-position data-store-id="${esc(store.id)}" data-product-id="${esc(product.id)}">
+        <div class="row">
+          <label class="field">Название позиции<input name="title" value="${esc(product.title || "")}" required></label>
+          <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || 10)}" required></label>
+          <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1"></label>
+        </div>
+        <div class="row">
+          <label class="field">Тип<input name="deliveryType" placeholder="Прикоп / Курьер / Готовый"></label>
+          <label class="field">Вес<input name="weight" placeholder="-"></label>
+          <label class="field">Город<input name="city" value="chisinau"></label>
+          <label class="field">Район<input name="district" placeholder="Центр"></label>
+        </div>
+        <label class="field">Описание позиции<textarea name="description"></textarea></label>
+        <button class="primary">Добавить позицию</button>
+      </form>
+      <div class="owner-position-list">
+        ${(product.positions || []).map((position) => `
+          <article class="position-card mega-position-card">
+            <div class="position-grid mega-position-grid">
+              <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
+              <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
+              <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
+              <p><span>Вес</span><strong>${esc(position.weight || "-")}</strong></p>
+              <p><span>Цена</span><strong>${Number(position.priceUsd || product.priceUsd || 0).toFixed(2)} $</strong></p>
+              <p><span>LTC</span><strong>${usdToLtc(Number(position.priceUsd || product.priceUsd || 0)).toFixed(6)} LTC</strong></p>
+              <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
+            </div>
+            ${position.description ? `<p class="desc">${esc(position.description)}</p>` : ""}
+            <button class="ghost-button" data-owner-delete-position="${esc(position.id)}" data-product-id="${esc(product.id)}" data-store-id="${esc(store.id)}">Удалить позицию</button>
+          </article>
+        `).join("") || `<p>Позиций внутри товара пока нет.</p>`}
+      </div>
+    </article>
+  `;
 }
 
 function approveStoreApplication(id) {
@@ -4380,6 +4509,7 @@ function approveStoreApplication(id) {
     ownerLogin,
     adminPassword: application.adminPassword || "123",
     isTop: false,
+    visibleInCatalog: true,
     countries: [application.country || "moldova"],
     cities: application.cities || [],
     name: application.name || finalId,
@@ -4421,6 +4551,162 @@ function resolveOwnerDispute(orderId, winner) {
   order.resolution = winner === "client" ? "client_refund" : "store_release";
   order.status = winner === "client" ? "canceled" : "completed";
   order.paymentStatus = winner === "client" ? "refunded" : "paid";
+  saveDb();
+  renderOwnerPanel();
+}
+
+function listFromInput(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function uniqueStoreId(name) {
+  const base = String(name || `store-${Date.now()}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || `store-${Date.now()}`;
+  let finalId = base;
+  let counter = 2;
+  while (db.stores.some((store) => store.id === finalId)) finalId = `${base}-${counter++}`;
+  return finalId;
+}
+
+async function handleOwnerCreateStore(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const name = String(data.get("name") || "").trim();
+  if (!name) return;
+  const imageFile = data.get("image");
+  const image = imageFile && imageFile.size ? await fileToDataUrl(imageFile) : fallbackImage;
+  const id = uniqueStoreId(name);
+  db.stores.unshift({
+    id,
+    tag: String(data.get("tag") || `@${id}`).trim(),
+    ownerLogin: db.currentUser,
+    adminPassword: "",
+    isTop: Boolean(data.get("isTop")),
+    visibleInCatalog: Boolean(data.get("visibleInCatalog")),
+    countries: [],
+    cities: [],
+    name,
+    short: String(data.get("short") || "").trim(),
+    description: "",
+    image,
+    cover: image,
+    gallery: [],
+    status: "active",
+    salesBlocked: false,
+    autoReleaseHours: Math.max(1, Number(db.ownerSettings?.defaultAutoReleaseHours || 24)),
+    ltcWallet: "",
+    ...NEW_STORE_STATS,
+    products: [],
+    reviewsList: []
+  });
+  saveDb();
+  showToast("Карточка магазина создана");
+  renderOwnerPanel();
+}
+
+async function handleOwnerProfileSave(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const store = storeById(form.dataset.storeId);
+  if (!store) return;
+  const data = new FormData(form);
+  store.name = String(data.get("name") || store.name).trim();
+  store.tag = String(data.get("tag") || store.tag || "").trim();
+  store.short = String(data.get("short") || "").trim();
+  store.description = String(data.get("description") || "").trim();
+  store.isTop = Boolean(data.get("isTop"));
+  store.visibleInCatalog = Boolean(data.get("visibleInCatalog"));
+  store.salesBlocked = Boolean(data.get("salesBlocked"));
+  store.status = store.salesBlocked ? "blocked" : "active";
+  store.countries = listFromInput(data.get("countries"));
+  store.cities = listFromInput(data.get("cities"));
+  store.ltcWallet = String(data.get("ltcWallet") || "").trim();
+  store.adminPassword = String(data.get("adminPassword") || "").trim();
+  const imageFile = data.get("image");
+  const coverFile = data.get("cover");
+  const galleryFiles = Array.from(data.getAll("gallery")).filter((file) => file && file.size).slice(0, 5);
+  if (imageFile && imageFile.size) store.image = await fileToDataUrl(imageFile);
+  if (coverFile && coverFile.size) store.cover = await fileToDataUrl(coverFile);
+  if (galleryFiles.length) store.gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
+  saveDb();
+  showToast("Профиль магазина сохранен");
+  renderOwnerPanel();
+}
+
+async function handleOwnerAddProduct(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const store = storeById(form.dataset.storeId);
+  if (!store) return;
+  const data = new FormData(form);
+  const title = String(data.get("title") || "").trim();
+  if (!title) return;
+  const imageFile = data.get("image");
+  const image = imageFile && imageFile.size ? await fileToDataUrl(imageFile) : (store.image || fallbackImage);
+  const priceUsd = Number(data.get("priceUsd") || 0);
+  store.products = store.products || [];
+  store.products.unshift(normalizeProduct({
+    id: `product-${Date.now()}`,
+    title,
+    category: "Товар",
+    description: String(data.get("description") || "").trim(),
+    price: `${priceUsd}$`,
+    priceUsd,
+    image,
+    images: [image],
+    sellerManaged: true,
+    rating: 5,
+    reviews: 0,
+    purchases: 0,
+    positions: [],
+    reviewsList: []
+  }, store));
+  saveDb();
+  showToast("Товар добавлен");
+  renderOwnerPanel();
+}
+
+function handleOwnerAddPosition(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const store = storeById(form.dataset.storeId);
+  const product = productById(store, form.dataset.productId);
+  if (!product) return;
+  const data = new FormData(form);
+  const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
+  product.positions = product.positions || [];
+  product.positions.unshift({
+    id: `position-${Date.now()}`,
+    title: String(data.get("title") || product.title).trim(),
+    description: String(data.get("description") || "").trim(),
+    priceUsd,
+    country: (store.countries || [])[0] || "moldova",
+    city: String(data.get("city") || "chisinau").trim(),
+    district: String(data.get("district") || "").trim(),
+    deliveryType: String(data.get("deliveryType") || "Товар").trim(),
+    weight: String(data.get("weight") || "-").trim(),
+    stock: Number(data.get("stock") || 1),
+    status: "ready"
+  });
+  product.priceUsd = product.priceUsd || priceUsd;
+  product.price = `${Number(product.priceUsd || priceUsd).toFixed(2)}$`;
+  saveDb();
+  showToast("Позиция добавлена");
+  renderOwnerPanel();
+}
+
+function ownerDeleteProduct(productId, storeId) {
+  const store = storeById(storeId);
+  if (!store) return;
+  store.products = (store.products || []).filter((product) => product.id !== productId);
+  saveDb();
+  renderOwnerPanel();
+}
+
+function ownerDeletePosition(positionId, productId, storeId) {
+  const store = storeById(storeId);
+  const product = productById(store, productId);
+  if (!product) return;
+  product.positions = (product.positions || []).filter((position) => position.id !== positionId);
   saveDb();
   renderOwnerPanel();
 }
@@ -4741,6 +5027,7 @@ async function handleStoreCreate(event) {
     ownerLogin: finalOwnerLogin,
     adminPassword: "123",
     isTop: Boolean(data.get("isTop")),
+    visibleInCatalog: true,
     countries: [data.get("country")].filter(Boolean),
     cities: String(data.get("cities") || "").split(",").map((item) => item.trim()).filter(Boolean),
     name: data.get("name").trim(),

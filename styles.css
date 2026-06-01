@@ -2445,6 +2445,42 @@ body[data-theme="dark"] .mirror-row {
   font-weight: 800;
 }
 
+.owner-builder,
+.owner-store-manager,
+.owner-products,
+.owner-product-box,
+.owner-position-list {
+  display: grid;
+  gap: 18px;
+}
+
+.owner-gallery {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.owner-gallery img,
+.owner-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 14px;
+  object-fit: cover;
+  background: var(--soft);
+}
+
+.owner-thumb {
+  width: 74px;
+  min-width: 74px;
+}
+
+.owner-product-box {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--paper);
+}
+
 .exchange-detail {
   display: grid;
   gap: 18px;
