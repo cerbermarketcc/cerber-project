@@ -152,6 +152,19 @@ const defaults = {
   ltcBalances: {},
   walletTransactions: [],
   walletDeposits: [],
+  storeApplications: [],
+  ownerSettings: {
+    defaultAutoReleaseHours: 24,
+    platformCommissionPercent: 0,
+    swapCommissionPercent: 0,
+    walletServiceFeePercent: 0,
+    disputeArbiters: [],
+    exchangeOperators: [],
+    riskRules: {
+      highDisputePercent: 20,
+      highCancelPercent: 30
+    }
+  },
   paymentSettings: {
     provider: "nowpayments",
     payBaseUrl: "",
@@ -474,6 +487,22 @@ function normalizeDb(next) {
   if (!next.ltcBalances) next.ltcBalances = {};
   if (!Array.isArray(next.walletTransactions)) next.walletTransactions = [];
   if (!Array.isArray(next.walletDeposits)) next.walletDeposits = [];
+  if (!Array.isArray(next.storeApplications)) next.storeApplications = [];
+  if (!next.ownerSettings) next.ownerSettings = structuredClone(defaults.ownerSettings);
+  next.ownerSettings = {
+    ...structuredClone(defaults.ownerSettings),
+    ...next.ownerSettings,
+    riskRules: {
+      ...structuredClone(defaults.ownerSettings.riskRules),
+      ...(next.ownerSettings.riskRules || {})
+    }
+  };
+  next.ownerSettings.defaultAutoReleaseHours = Math.max(1, Number(next.ownerSettings.defaultAutoReleaseHours || 24));
+  next.ownerSettings.platformCommissionPercent = Number(next.ownerSettings.platformCommissionPercent || 0);
+  next.ownerSettings.swapCommissionPercent = Number(next.ownerSettings.swapCommissionPercent || 0);
+  next.ownerSettings.walletServiceFeePercent = Number(next.ownerSettings.walletServiceFeePercent || 0);
+  next.ownerSettings.disputeArbiters = Array.isArray(next.ownerSettings.disputeArbiters) ? next.ownerSettings.disputeArbiters : [];
+  next.ownerSettings.exchangeOperators = Array.isArray(next.ownerSettings.exchangeOperators) ? next.ownerSettings.exchangeOperators : [];
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
   if (!next.paymentSettings.platformLtcWallet) next.paymentSettings.platformLtcWallet = MAIN_LTC_WALLET;
   const previousPaymentProvider = next.paymentSettings.provider;
@@ -501,10 +530,30 @@ function normalizeDb(next) {
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
       ltcWallet: store.ltcWallet || seed?.ltcWallet || "",
       adminPassword: store.adminPassword || seed?.adminPassword || "",
+      status: store.status || "active",
+      salesBlocked: Boolean(store.salesBlocked),
+      autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || next.ownerSettings.defaultAutoReleaseHours || 24)),
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
+  next.storeApplications = next.storeApplications.map((application) => ({
+    id: application.id || `store-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    status: application.status || "pending",
+    createdAt: application.createdAt || Date.now(),
+    applicantLogin: application.applicantLogin || application.ownerLogin || "",
+    ownerLogin: application.ownerLogin || application.applicantLogin || "",
+    name: application.name || "",
+    tag: application.tag || "",
+    short: application.short || "",
+    description: application.description || "",
+    country: application.country || "moldova",
+    cities: Array.isArray(application.cities) ? application.cities : String(application.cities || "").split(",").map((item) => item.trim()).filter(Boolean),
+    adminPassword: application.adminPassword || "",
+    ltcWallet: application.ltcWallet || "",
+    decisionAt: application.decisionAt || null,
+    decisionBy: application.decisionBy || ""
+  }));
   if (!next.stores.some((store) => store.id === "marketolog")) {
     next.stores.unshift(marketologSeedStore());
   } else {
@@ -835,6 +884,8 @@ async function persistRemoteState() {
           ltcBalances: db.ltcBalances,
           walletTransactions: db.walletTransactions,
           walletDeposits: db.walletDeposits,
+          storeApplications: db.storeApplications,
+          ownerSettings: db.ownerSettings,
           paymentSettings: db.paymentSettings,
           referralPeriod: db.referralPeriod,
           filters: db.filters
@@ -909,7 +960,7 @@ function sellerAdminHashId() {
 
 function hashRoute() {
   const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
-  const routes = new Set(["admin", "wallet", "catalog", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
+  const routes = new Set(["admin", "owner", "seller", "wallet", "catalog", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
   return routes.has(hash) ? hash : "";
 }
 
@@ -1320,6 +1371,8 @@ function layout(content) {
         <div class="divider"></div>
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
+        <button class="account-row" data-route="seller">⚙ <span>Панель магазина</span></button>
+        <button class="account-row" data-route="owner">⚙ <span>Панель владельца</span></button>
         <button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>
         ${(operatorExchangeCards().length || isAdmin()) ? accountMenuButton("exchange", "Панель обменника", `data-route="exchange-admin"`) : ""}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
@@ -2208,6 +2261,7 @@ function handleProductPurchase(storeId, productId, positionId) {
   const product = productById(store, productId);
   const position = positionById(product, positionId);
   if (!product || !position) return;
+  if (store.status !== "active" || store.salesBlocked) return showToast("Продажи магазина временно остановлены");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
   if (userLtcBalance() < ltcAmount) {
@@ -2288,6 +2342,8 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     paymentStatus: "waiting",
     createdAt: Date.now(),
     paymentExpiresAt: Date.now() + 40 * 60 * 1000,
+    autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || db.ownerSettings?.defaultAutoReleaseHours || 24)),
+    autoReleaseAt: null,
     amountUsd: priceUsd,
     ltcAmount,
     location: locationLabel(position),
@@ -2314,6 +2370,10 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   const product = productById(store, productId);
   const position = positionById(product, positionId);
   if (!product || !position) return;
+  if (store.status !== "active" || store.salesBlocked) {
+    showToast("Продажи магазина временно остановлены");
+    return;
+  }
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
   const enough = userLtcBalance() >= ltcAmount && ltcAmount > 0;
@@ -4086,6 +4146,348 @@ function renderSimplePage(kind) {
   `);
 }
 
+function storeStatusLabel(store) {
+  if (store.salesBlocked) return "Продажи остановлены";
+  if (store.status === "pending") return "На проверке";
+  if (store.status === "blocked") return "Заблокирован";
+  return "Активен";
+}
+
+function storeApplicationsForCurrentUser() {
+  return (db.storeApplications || []).filter((item) => sameLogin(item.applicantLogin, db.currentUser) || sameLogin(item.ownerLogin, db.currentUser));
+}
+
+function storeSalesUsd(storeId) {
+  return (db.orders || [])
+    .filter((order) => order.type === "product" && order.storeId === storeId && ["completed", "closed"].includes(order.status))
+    .reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+}
+
+function marketStats() {
+  const orders = db.orders || [];
+  const productOrders = orders.filter((order) => order.type === "product");
+  const disputes = productOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const completed = productOrders.filter((order) => ["completed", "closed"].includes(order.status));
+  return {
+    stores: db.stores.length,
+    activeStores: db.stores.filter((store) => store.status === "active" && !store.salesBlocked).length,
+    pendingApplications: (db.storeApplications || []).filter((item) => item.status === "pending").length,
+    orders: productOrders.length,
+    completed: completed.length,
+    disputes: disputes.length,
+    salesUsd: completed.reduce((sum, order) => sum + Number(order.amountUsd || 0), 0),
+    users: db.users.length
+  };
+}
+
+function storeDisputes(storeId) {
+  return (db.orders || []).filter((order) => order.type === "product" && order.storeId === storeId && (order.disputeOpen || order.status === "dispute"));
+}
+
+function storeRisk(store) {
+  const orders = (db.orders || []).filter((order) => order.type === "product" && order.storeId === store.id);
+  const total = orders.length || 1;
+  const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute").length;
+  const canceled = orders.filter((order) => order.status === "canceled").length;
+  const disputePercent = disputes / total * 100;
+  const cancelPercent = canceled / total * 100;
+  const flags = [];
+  if (disputePercent >= Number(db.ownerSettings?.riskRules?.highDisputePercent || 20)) flags.push(`споры ${disputePercent.toFixed(0)}%`);
+  if (cancelPercent >= Number(db.ownerSettings?.riskRules?.highCancelPercent || 30)) flags.push(`отмены ${cancelPercent.toFixed(0)}%`);
+  if (store.salesBlocked || store.status === "blocked") flags.push("продажи остановлены");
+  return { orders: orders.length, disputes, canceled, flags };
+}
+
+function renderOwnerAccess() {
+  route = "owner";
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>Панель владельца</h2>
+        <p>Введите общий пароль владельца, чтобы открыть управление маркетом.</p>
+        <form class="form" data-owner-access-form>
+          <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
+          <button class="primary">Войти</button>
+        </form>
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-owner-access-form]").onsubmit = (event) => {
+    event.preventDefault();
+    const password = new FormData(event.currentTarget).get("password");
+    if (password !== ADMIN_PANEL_PASSWORD) return showToast("Неверный пароль");
+    try {
+      localStorage.setItem(ADMIN_ACCESS_KEY, "ok");
+    } catch {}
+    renderOwnerPanel();
+  };
+}
+
+function ownerStatCard(label, value) {
+  return `<div class="stat"><strong>${esc(value)}</strong><span>${esc(label)}</span></div>`;
+}
+
+function renderOwnerPanel() {
+  if (!isAdmin()) return renderOwnerAccess();
+  route = "owner";
+  const stats = marketStats();
+  const settings = db.ownerSettings || structuredClone(defaults.ownerSettings);
+  const disputes = (db.orders || []).filter((order) => order.type === "product" && (order.disputeOpen || order.status === "dispute"));
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>Панель владельца</h2>
+        <div class="stats">
+          ${ownerStatCard("магазинов", stats.stores)}
+          ${ownerStatCard("активных", stats.activeStores)}
+          ${ownerStatCard("заявок", stats.pendingApplications)}
+          ${ownerStatCard("заказов", stats.orders)}
+          ${ownerStatCard("диспутов", stats.disputes)}
+          ${ownerStatCard("оборот, $", stats.salesUsd.toFixed(2))}
+        </div>
+      </article>
+      <article class="panel">
+        <h2>Настройки маркета</h2>
+        <form class="form" data-owner-settings-form>
+          <div class="row">
+            <label class="field">Автозавершение сделки, часов<input name="defaultAutoReleaseHours" type="number" min="1" max="168" value="${esc(settings.defaultAutoReleaseHours)}"></label>
+            <label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" min="0" step="0.01" value="${esc(settings.platformCommissionPercent)}"></label>
+          </div>
+          <div class="row">
+            <label class="field">Комиссия обмена, %<input name="swapCommissionPercent" type="number" min="0" step="0.01" value="${esc(settings.swapCommissionPercent)}"></label>
+            <label class="field">Сервисная комиссия кошелька, %<input name="walletServiceFeePercent" type="number" min="0" step="0.01" value="${esc(settings.walletServiceFeePercent)}"></label>
+          </div>
+          <label class="field">Арбитры диспутов, логины через запятую<input name="disputeArbiters" value="${esc((settings.disputeArbiters || []).join(", "))}"></label>
+          <label class="field">Операторы обмена, логины через запятую<input name="exchangeOperators" value="${esc((settings.exchangeOperators || []).join(", "))}"></label>
+          <button class="primary">Сохранить настройки</button>
+        </form>
+      </article>
+      <article class="panel">
+        <h2>Заявки магазинов</h2>
+        ${(db.storeApplications || []).map((application) => `
+          <article class="ref-item">
+            <div>
+              <h3>${esc(application.name || "Новая заявка")}</h3>
+              <p>${esc(application.tag || "")} · ${esc(application.applicantLogin || application.ownerLogin || "")} · ${esc(application.status)}</p>
+              <p>${esc(application.description || "")}</p>
+            </div>
+            <div>
+              ${application.status === "pending" ? `<button class="primary" data-owner-approve="${esc(application.id)}">Одобрить</button><button class="ghost-button" data-owner-reject="${esc(application.id)}">Отклонить</button>` : `<span class="status-pill">${esc(application.status)}</span>`}
+            </div>
+          </article>
+        `).join("") || `<p>Заявок пока нет.</p>`}
+      </article>
+      <article class="panel">
+        <h2>Магазины</h2>
+        ${db.stores.map((store) => {
+          const risk = storeRisk(store);
+          return `
+            <article class="ref-item">
+              <div>
+                <h3>${esc(store.name)}</h3>
+                <p>${esc(store.tag || "")} · ${esc(store.ownerLogin || "")} · ${storeStatusLabel(store)}</p>
+                <p>Заказы: ${risk.orders} · Споры: ${risk.disputes} · Отмены: ${risk.canceled} · Продажи: ${storeSalesUsd(store.id).toFixed(2)} $</p>
+                ${risk.flags.length ? `<p class="notice">Риск: ${esc(risk.flags.join(", "))}</p>` : ""}
+              </div>
+              <div>
+                <label class="field">Автозавершение, ч<input data-store-auto-release="${esc(store.id)}" type="number" min="1" max="168" value="${esc(store.autoReleaseHours || settings.defaultAutoReleaseHours)}"></label>
+                <button class="ghost-button" data-owner-toggle-sales="${esc(store.id)}">${store.salesBlocked ? "Включить продажи" : "Остановить продажи"}</button>
+                <button class="ghost-button" data-owner-open-store="${esc(store.id)}">Открыть витрину</button>
+              </div>
+            </article>
+          `;
+        }).join("") || `<p>Магазинов нет.</p>`}
+      </article>
+      <article class="panel">
+        <h2>Диспуты</h2>
+        ${disputes.map((order) => `
+          <article class="ref-item">
+            <div>
+              <h3>${esc(order.product || order.id)}</h3>
+              <p>${esc(order.login)} · ${esc(order.storeName || order.storeId)} · ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+              <p>${order.disputeUntil ? `Срок: ${new Date(Number(order.disputeUntil)).toLocaleString()}` : "Срок не задан"}</p>
+            </div>
+            <div>
+              <button class="primary" data-owner-resolve-client="${esc(order.id)}">В пользу клиента</button>
+              <button class="ghost-button" data-owner-resolve-store="${esc(order.id)}">В пользу магазина</button>
+            </div>
+          </article>
+        `).join("") || `<p>Открытых диспутов нет.</p>`}
+      </article>
+    </section>
+  `);
+  bindOwnerPanel();
+}
+
+function bindOwnerPanel() {
+  document.querySelector("[data-owner-settings-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    db.ownerSettings = {
+      ...db.ownerSettings,
+      defaultAutoReleaseHours: Math.max(1, Number(data.get("defaultAutoReleaseHours") || 24)),
+      platformCommissionPercent: Number(data.get("platformCommissionPercent") || 0),
+      swapCommissionPercent: Number(data.get("swapCommissionPercent") || 0),
+      walletServiceFeePercent: Number(data.get("walletServiceFeePercent") || 0),
+      disputeArbiters: String(data.get("disputeArbiters") || "").split(",").map((item) => item.trim()).filter(Boolean),
+      exchangeOperators: String(data.get("exchangeOperators") || "").split(",").map((item) => item.trim()).filter(Boolean)
+    };
+    db.paymentSettings.platformCommissionPercent = db.ownerSettings.platformCommissionPercent;
+    saveDb();
+    showToast("Настройки сохранены");
+    renderOwnerPanel();
+  });
+  document.querySelectorAll("[data-owner-approve]").forEach((button) => button.onclick = () => approveStoreApplication(button.dataset.ownerApprove));
+  document.querySelectorAll("[data-owner-reject]").forEach((button) => button.onclick = () => rejectStoreApplication(button.dataset.ownerReject));
+  document.querySelectorAll("[data-store-auto-release]").forEach((input) => {
+    input.onchange = () => {
+      const store = storeById(input.dataset.storeAutoRelease);
+      if (!store) return;
+      store.autoReleaseHours = Math.max(1, Number(input.value || db.ownerSettings.defaultAutoReleaseHours || 24));
+      saveDb();
+      showToast("Срок магазина сохранен");
+    };
+  });
+  document.querySelectorAll("[data-owner-toggle-sales]").forEach((button) => {
+    button.onclick = () => {
+      const store = storeById(button.dataset.ownerToggleSales);
+      if (!store) return;
+      store.salesBlocked = !store.salesBlocked;
+      store.status = store.salesBlocked ? "blocked" : "active";
+      saveDb();
+      renderOwnerPanel();
+    };
+  });
+  document.querySelectorAll("[data-owner-open-store]").forEach((button) => button.onclick = () => renderStore(button.dataset.ownerOpenStore, "positions"));
+  document.querySelectorAll("[data-owner-resolve-client]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveClient, "client"));
+  document.querySelectorAll("[data-owner-resolve-store]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveStore, "store"));
+}
+
+function approveStoreApplication(id) {
+  const application = (db.storeApplications || []).find((item) => item.id === id);
+  if (!application || application.status !== "pending") return;
+  const ownerLogin = application.ownerLogin || application.applicantLogin;
+  const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
+  if (existingOwner) existingOwner.role = existingOwner.role === "admin" ? "admin" : "seller";
+  if (!existingOwner && ownerLogin) db.users.push({ login: ownerLogin, password: application.adminPassword || "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
+  const baseId = String(application.name || application.tag || `store-${Date.now()}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || `store-${Date.now()}`;
+  let finalId = baseId;
+  let counter = 2;
+  while (db.stores.some((store) => store.id === finalId)) finalId = `${baseId}-${counter++}`;
+  db.stores.push({
+    id: finalId,
+    tag: application.tag || `@${finalId}`,
+    ownerLogin,
+    adminPassword: application.adminPassword || "123",
+    isTop: false,
+    countries: [application.country || "moldova"],
+    cities: application.cities || [],
+    name: application.name || finalId,
+    short: application.short || "",
+    description: application.description || "",
+    image: fallbackImage,
+    cover: fallbackImage,
+    status: "active",
+    salesBlocked: false,
+    autoReleaseHours: Math.max(1, Number(db.ownerSettings?.defaultAutoReleaseHours || 24)),
+    ltcWallet: application.ltcWallet || "",
+    ...NEW_STORE_STATS,
+    products: [],
+    reviewsList: []
+  });
+  application.status = "approved";
+  application.decisionAt = Date.now();
+  application.decisionBy = db.currentUser;
+  saveDb();
+  renderOwnerPanel();
+}
+
+function rejectStoreApplication(id) {
+  const application = (db.storeApplications || []).find((item) => item.id === id);
+  if (!application) return;
+  application.status = "rejected";
+  application.decisionAt = Date.now();
+  application.decisionBy = db.currentUser;
+  saveDb();
+  renderOwnerPanel();
+}
+
+function resolveOwnerDispute(orderId, winner) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  order.disputeOpen = false;
+  order.resolvedAt = Date.now();
+  order.resolvedBy = db.currentUser;
+  order.resolution = winner === "client" ? "client_refund" : "store_release";
+  order.status = winner === "client" ? "canceled" : "completed";
+  order.paymentStatus = winner === "client" ? "refunded" : "paid";
+  saveDb();
+  renderOwnerPanel();
+}
+
+function renderSellerPortal() {
+  route = "seller";
+  const applications = storeApplicationsForCurrentUser();
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>Панель магазина</h2>
+        <p>Здесь магазин подает заявку. После одобрения владельцем появится управление витриной, товарами, статистикой и диспутами.</p>
+        <form class="form" data-store-application-form>
+          <div class="row">
+            <label class="field">Название магазина<input name="name" required></label>
+            <label class="field">Тег<input name="tag" placeholder="@store"></label>
+          </div>
+          <label class="field">Короткое описание<input name="short"></label>
+          <label class="field">Полное описание<textarea name="description"></textarea></label>
+          <div class="row">
+            <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
+            <label class="field">Города через запятую<input name="cities" placeholder="chisinau, balti"></label>
+          </div>
+          <label class="field">LTC кошелек магазина<input name="ltcWallet" placeholder="ltc1..."></label>
+          <label class="field">Пароль отдельной админки<input name="adminPassword" type="password" required></label>
+          <button class="primary">Отправить заявку</button>
+        </form>
+      </article>
+      <article class="panel">
+        <h2>Мои заявки</h2>
+        ${applications.map((application) => `
+          <article class="ref-item">
+            <div><h3>${esc(application.name)}</h3><p>${esc(application.tag || "")} · ${esc(application.status)}</p></div>
+            <span class="status-pill">${esc(application.status)}</span>
+          </article>
+        `).join("") || `<p>Заявок пока нет.</p>`}
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-store-application-form]").onsubmit = handleStoreApplicationCreate;
+}
+
+function handleStoreApplicationCreate(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const name = String(data.get("name") || "").trim();
+  if (!name) return;
+  db.storeApplications.unshift({
+    id: `store-app-${Date.now()}`,
+    status: "pending",
+    createdAt: Date.now(),
+    applicantLogin: db.currentUser,
+    ownerLogin: db.currentUser,
+    name,
+    tag: String(data.get("tag") || "").trim(),
+    short: String(data.get("short") || "").trim(),
+    description: String(data.get("description") || "").trim(),
+    country: data.get("country") || "moldova",
+    cities: String(data.get("cities") || "").split(",").map((item) => item.trim()).filter(Boolean),
+    ltcWallet: String(data.get("ltcWallet") || "").trim(),
+    adminPassword: String(data.get("adminPassword") || "").trim()
+  });
+  saveDb();
+  showToast("Заявка отправлена владельцу");
+  renderSellerPortal();
+}
+
 function renderAdmin() {
   if (!isAdmin()) {
     route = "admin";
@@ -4346,6 +4748,9 @@ async function handleStoreCreate(event) {
     description: data.get("description").trim(),
     image,
     cover,
+    status: "active",
+    salesBlocked: false,
+    autoReleaseHours: Math.max(1, Number(db.ownerSettings?.defaultAutoReleaseHours || 24)),
     ...NEW_STORE_STATS,
     products: [],
     reviewsList: []
@@ -4390,15 +4795,24 @@ async function handleExchangeCardCreate(event) {
 
 function renderSeller() {
   const stores = sellerStores();
-  if (!stores.length) return renderSellerAdminLogin(sellerAdminStoreId);
+  if (!stores.length) return renderSellerPortal();
   route = "seller";
   const store = stores[0];
   const standalone = Boolean(sellerAdminStore());
+  const risk = storeRisk(store);
+  const disputes = storeDisputes(store.id);
   layout(`
     <section class="screen">
       <article class="panel">
         <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
         ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
+        <p class="status-pill">${storeStatusLabel(store)}</p>
+        <div class="stats">
+          ${ownerStatCard("заказов", risk.orders)}
+          ${ownerStatCard("споров", risk.disputes)}
+          ${ownerStatCard("продажи, $", storeSalesUsd(store.id).toFixed(2))}
+          ${ownerStatCard("автозавершение, ч", store.autoReleaseHours || db.ownerSettings?.defaultAutoReleaseHours || 24)}
+        </div>
         <form class="form" data-seller-profile-form>
           <label class="field">Имя магазина<input name="name" value="${esc(store.name || "")}" required></label>
           <label class="field">Короткое описание<input name="short" value="${esc(store.short || "")}"></label>
@@ -4409,6 +4823,12 @@ function renderSeller() {
       </article>
       <article class="panel">
         <h2>Добавить товар</h2>
+        ${disputes.map((order) => `
+          <article class="ref-item">
+            <div><h3>${esc(order.product || order.id)}</h3><p>${esc(order.login)} · ${Number(order.amountUsd || 0).toFixed(2)} $</p></div>
+            <span class="status-pill">Открыт</span>
+          </article>
+        `).join("") || `<p>Открытых диспутов нет.</p>`}
         <form class="form" data-product-form>
           <label class="field">${tr("name")}<input name="title" required></label>
           <label class="field">${tr("short")}<input name="category" required></label>
@@ -4690,6 +5110,7 @@ function renderCurrent() {
   if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
   if (route === "exchange-admin") return renderExchangeOperator();
   if (route === "wallet") return renderWallet();
+  if (route === "owner") return renderOwnerPanel();
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "product") return renderProductView(activeStoreId || db.stores[0].id, activeProductId);

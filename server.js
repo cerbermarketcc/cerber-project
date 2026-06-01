@@ -176,6 +176,8 @@ async function stateFor(user) {
       ltcBalances: settingsData.ltcBalances || {},
       walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
       walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
+      storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
+      ownerSettings: settingsData.ownerSettings || {},
       paymentSettings: settingsData.paymentSettings || {},
       referralPeriod: settingsData.referralPeriod || {},
       filters: settingsData.filters || {}
@@ -321,6 +323,11 @@ app.put("/api/state", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const state = req.body.state || {};
+    if (Array.isArray(state.stores)) {
+      for (const store of state.stores.filter((item) => item && item.id)) {
+        await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+      }
+    }
     await supabase.from("app_settings").upsert({
       id: "main",
       data: {
@@ -338,6 +345,8 @@ app.put("/api/state", async (req, res, next) => {
         ltcBalances: state.ltcBalances || {},
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
+        storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
+        ownerSettings: state.ownerSettings || {},
         paymentSettings: state.paymentSettings || {},
         referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
