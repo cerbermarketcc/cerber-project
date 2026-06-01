@@ -5,6 +5,7 @@ const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
 const SELLER_ADMIN_KEY = "cerber_seller_admin_v1";
 const SELLER_ADMIN_API_TOKEN_KEY = "cerber_seller_admin_token_v1";
+const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
 let TURNSTILE_SITE_KEY = "";
@@ -12,6 +13,7 @@ let turnstileWidgetId = null;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const ADMIN_PANEL_PASSWORD = "admin2026";
 const officialOnionMirrors = [
   "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
   "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
@@ -893,7 +895,11 @@ function currentUser() {
 }
 
 function isAdmin() {
-  return currentUser()?.role === "admin";
+  try {
+    return currentUser()?.role === "admin" || localStorage.getItem(ADMIN_ACCESS_KEY) === "ok";
+  } catch {
+    return currentUser()?.role === "admin";
+  }
 }
 
 function sellerAdminHashId() {
@@ -1314,7 +1320,7 @@ function layout(content) {
         <div class="divider"></div>
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
-        ${isAdmin() ? `<button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>` : ""}
+        <button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>
         ${(operatorExchangeCards().length || isAdmin()) ? accountMenuButton("exchange", "Панель обменника", `data-route="exchange-admin"`) : ""}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
@@ -4083,15 +4089,31 @@ function renderSimplePage(kind) {
 function renderAdmin() {
   if (!isAdmin()) {
     route = "admin";
-    return layout(`
+    layout(`
       <section class="screen">
-        <article class="panel empty-state">
-          <h2>Нет доступа к общей админке</h2>
-          <p>Для общей админки сайта нужно войти под аккаунтом администратора.</p>
-          <button class="primary" data-logout>Войти в другой аккаунт</button>
+        <article class="panel">
+          <h2>Общая админка</h2>
+          <p>Введите пароль общей админки сайта.</p>
+          <form class="form" data-admin-access-form>
+            <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
+            <button class="primary">Войти в админку</button>
+          </form>
         </article>
       </section>
     `);
+    document.querySelector("[data-admin-access-form]").onsubmit = (event) => {
+      event.preventDefault();
+      const password = new FormData(event.currentTarget).get("password");
+      if (password !== ADMIN_PANEL_PASSWORD) {
+        showToast("Неверный пароль админки");
+        return;
+      }
+      try {
+        localStorage.setItem(ADMIN_ACCESS_KEY, "ok");
+      } catch {}
+      renderAdmin();
+    };
+    return;
   }
   route = "admin";
   layout(`
