@@ -627,18 +627,24 @@ function normalizeProduct(product, store = {}) {
     purchases: Number(product.purchases || 0),
     sellerManaged: Boolean(product.sellerManaged),
     deliveryItems,
-    positions: Array.isArray(product.positions) ? product.positions.map((position) => ({
-      id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      title: position.title || position.district || "Позиция",
-      description: position.description || "",
-      priceUsd: Number(position.priceUsd || priceUsd || 0),
-      country: position.country || "moldova",
-      city: position.city || "chisinau",
-      district: position.district || "",
-      deliveryType: position.deliveryType || "Курьер",
-      stock: deliveryItems.length || Number(position.stock || 0),
-      status: position.status || "ready"
-    })) : [],
+    positions: Array.isArray(product.positions) ? product.positions.map((position) => {
+      const positionItems = Array.isArray(position.deliveryItems)
+        ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean)
+        : String(position.deliveryItemsText || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      return {
+        id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        title: position.title || position.district || "Позиция",
+        description: position.description || "",
+        deliveryItems: positionItems,
+        priceUsd: Number(position.priceUsd || priceUsd || 0),
+        country: position.country || "moldova",
+        city: position.city || "chisinau",
+        district: position.district || "",
+        deliveryType: position.deliveryType || "Курьер",
+        stock: positionItems.length || deliveryItems.length || Number(position.stock || 0),
+        status: position.status || "ready"
+      };
+    }) : [],
     reviewsList: Array.isArray(product.reviewsList) ? product.reviewsList : []
   };
 }
@@ -678,7 +684,9 @@ function restoreReservedProductItem(order, next = db) {
   const store = (next.stores || []).find((item) => item.id === order.storeId);
   const product = (store?.products || []).find((item) => item.id === order.productId);
   const position = (product?.positions || []).find((item) => item.id === order.positionId);
-  if (product && order.reservedDescription) {
+  if (position && order.reservedDescription && order.reservedFromPosition) {
+    position.deliveryItems = [order.reservedDescription, ...(position.deliveryItems || [])];
+  } else if (product && order.reservedDescription) {
     product.deliveryItems = [order.reservedDescription, ...(product.deliveryItems || [])];
   }
   if (position) position.stock = Number(position.stock || 0) + 1;
@@ -2326,8 +2334,12 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   if (!product || !position) return;
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
-  const requiresIssuedDescription = Array.isArray(product.deliveryItems) && product.deliveryItems.length > 0;
-  const reservedDescription = (product.deliveryItems || []).shift() || "";
+  const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+  const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+  const issueFromPosition = positionItems.length > 0;
+  const issuedItems = issueFromPosition ? positionItems : productItems;
+  const requiresIssuedDescription = issuedItems.length > 0;
+  const reservedDescription = issuedItems.shift() || "";
   if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
   const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
@@ -2353,6 +2365,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     location: locationLabel(position),
     productDescription: product.description || "",
     reservedDescription,
+    reservedFromPosition: issueFromPosition,
     reservedStock: true,
     sellerLtcWallet: store.ltcWallet || "",
     platformLtcWallet: db.paymentSettings?.platformLtcWallet || "",
@@ -4460,7 +4473,6 @@ function ownerProductManager(store, product) {
         <div class="row">
           <label class="field">Название позиции<input name="title" value="${esc(product.title || "")}" required></label>
           <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || 10)}" required></label>
-          <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1"></label>
         </div>
         <div class="row">
           <label class="field">Тип<input name="deliveryType" placeholder="Прикоп / Курьер / Готовый"></label>
@@ -4469,6 +4481,7 @@ function ownerProductManager(store, product) {
           <label class="field">Район<input name="district" placeholder="Центр"></label>
         </div>
         <label class="field">Описание позиции<textarea name="description"></textarea></label>
+        <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный товар"></textarea></label>
         <button class="primary">Добавить позицию</button>
       </form>
       <div class="owner-position-list">
@@ -4684,7 +4697,8 @@ function handleOwnerAddPosition(event) {
     district: String(data.get("district") || "").trim(),
     deliveryType: String(data.get("deliveryType") || "Товар").trim(),
     weight: String(data.get("weight") || "-").trim(),
-    stock: Number(data.get("stock") || 1),
+    deliveryItems: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+    stock: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length,
     status: "ready"
   });
   product.priceUsd = product.priceUsd || priceUsd;
@@ -4891,7 +4905,7 @@ function adminStoreEditor(store) {
         <label class="field">Баннер страницы магазина<input name="storeCover" type="file" accept="image/*"></label>
         <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
         <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
-        <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>
+        ${route !== "seller" ? `<label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>` : ""}
         <div class="row">
           <label class="field">Название магазина<input name="storeName" value="${esc(store.name || "")}"></label>
           <label class="field">Короткое описание<input name="storeShort" value="${esc(store.short || "")}"></label>
@@ -4915,7 +4929,6 @@ function adminStoreEditor(store) {
           <label class="field">Район<input name="district" value="${esc(position.district || "")}"></label>
           <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
           <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
-          <label class="field">Кол-во<input name="stock" type="number" min="0" value="${esc(position.stock || 1)}"></label>
         </div>
         <label class="field">Фото страницы магазина<input name="storeImage" type="file" accept="image/*"></label>
         <label class="field">Главное фото товара<input name="mainImage" type="file" accept="image/*"></label>
@@ -4959,7 +4972,7 @@ function bindAdminProductForms() {
       const priceUsd = Number(data.get("priceUsd") || 0);
       store.ltcWallet = data.get("ltcWallet").trim();
       store.adminPassword = data.get("adminPassword").trim() || storeAdminPassword(store);
-      store.isTop = Boolean(data.get("isTop"));
+      if (data.has("isTop")) store.isTop = Boolean(data.get("isTop"));
       store.name = data.get("storeName").trim() || store.name;
       store.short = data.get("storeShort").trim() || store.short;
       store.description = data.get("storeDescription").trim();
@@ -5000,7 +5013,7 @@ function bindAdminProductForms() {
       position.district = data.get("district").trim();
       position.deliveryType = data.get("deliveryType").trim() || "Товар";
       position.weight = data.get("weight").trim();
-      position.stock = product.deliveryItems.length || Number(data.get("stock") || 0);
+      position.stock = product.deliveryItems.length;
       saveDb();
       showToast("Товар сохранён");
       renderAdmin();
@@ -5199,7 +5212,8 @@ function renderSeller() {
         city: data.get("city").trim(),
         district: data.get("district").trim(),
         deliveryType: data.get("deliveryType").trim() || "Курьер",
-        stock: deliveryItems.length || Number(data.get("stock") || 0),
+        deliveryItems,
+        stock: deliveryItems.length,
         status: "ready"
       }],
       reviewsList: []
