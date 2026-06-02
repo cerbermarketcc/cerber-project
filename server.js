@@ -544,7 +544,7 @@ async function cancelWalletDeposit(deposit, state, providerPayload = {}) {
   await saveSettingsState(state);
 }
 
-app.post("/api/payments/nowpayments/create", async (req, res, next) => {
+app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], async (req, res, next) => {
   try {
     requireDb();
     if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
@@ -597,7 +597,7 @@ app.post("/api/payments/nowpayments/create", async (req, res, next) => {
   }
 });
 
-app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
+app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], async (req, res, next) => {
   try {
     requireDb();
     if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });

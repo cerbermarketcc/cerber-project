@@ -176,7 +176,7 @@ const defaults = {
     }
   },
   paymentSettings: {
-    provider: "nowpayments",
+    provider: "gateway",
     payBaseUrl: "",
     platformCommissionPercent: 0,
     platformLtcWallet: MAIN_LTC_WALLET
@@ -525,8 +525,8 @@ function normalizeDb(next) {
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
   if (!next.paymentSettings.platformLtcWallet) next.paymentSettings.platformLtcWallet = MAIN_LTC_WALLET;
   const previousPaymentProvider = next.paymentSettings.provider;
-  next.paymentSettings.provider = "nowpayments";
-  if (previousPaymentProvider !== "nowpayments") next.paymentSettings.platformCommissionPercent = 0;
+  next.paymentSettings.provider = "gateway";
+  if (previousPaymentProvider !== "gateway") next.paymentSettings.platformCommissionPercent = 0;
   next.paymentSettings.platformCommissionPercent = Number(next.paymentSettings.platformCommissionPercent || 0);
   if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
@@ -2412,7 +2412,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     platformCommissionPercent: commissionPercent,
     platformCommissionUsd: commissionUsd,
     sellerAmountUsd: priceUsd - commissionUsd,
-    paymentProvider: "nowpayments"
+    paymentProvider: "gateway"
   };
   db.orders.unshift(order);
   saveDb();
@@ -2516,7 +2516,7 @@ function renderProductPaymentOrder(orderId) {
 async function createNowPaymentsInvoice(orderId, button = null) {
   setButtonLoading(button, true, "Создаём оплату");
   try {
-    const payload = await apiFetch("/api/payments/nowpayments/create", {
+    const payload = await apiFetch("/api/payments/gateway/create", {
       method: "POST",
       body: JSON.stringify({ orderId })
     });
@@ -4170,7 +4170,7 @@ async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "П
     saveDb();
     return deposit;
   }
-  const payload = await apiFetch("/api/wallet/nowpayments/create", {
+  const payload = await apiFetch("/api/wallet/deposits/create", {
     method: "POST",
     body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, amountLtcEstimate: usdToLtc(amountUsd) })
   });
@@ -5084,7 +5084,7 @@ function handlePaymentSettingsSave(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   db.paymentSettings = {
-    provider: "nowpayments",
+    provider: "gateway",
     payBaseUrl: "",
     platformCommissionPercent: Number(data.get("platformCommissionPercent") || 0),
     platformLtcWallet: data.get("platformLtcWallet").trim()
