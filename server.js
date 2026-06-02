@@ -62,6 +62,10 @@ function publicUser(row) {
   return row ? { login: row.login, name: row.name, role: row.role } : null;
 }
 
+function sameLogin(a, b) {
+  return loginKey(a) === loginKey(b);
+}
+
 function requireDb() {
   if (!supabase) {
     const error = new Error("Supabase is not configured");
@@ -204,6 +208,84 @@ async function userFromRequest(req) {
   return user || null;
 }
 
+function privatePeer(message, login) {
+  if (sameLogin(message.fromLogin, login)) return message.toLogin || message.storeTag || message.storeId || "system";
+  return message.fromLogin || message.storeTag || message.storeId || "system";
+}
+
+async function telegramUserSummary(user) {
+  await ensureSeed();
+  const [{ data: settings }, { data: messageRows }] = await Promise.all([
+    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+    supabase.from("messages").select("data").order("created_at", { ascending: false })
+  ]);
+  const state = settings?.data || {};
+  const login = user.login;
+  const key = loginKey(login);
+
+  state.referralCodes = state.referralCodes || {};
+  if (!state.referralCodes[key]) {
+    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    state.referralCodes[key] = `${seed.slice(0, 4)}${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+    await saveSettingsState(state);
+  }
+
+  const orders = (Array.isArray(state.orders) ? state.orders : []).filter((order) => sameLogin(order.login, login));
+  const exchangeRequests = (Array.isArray(state.exchangeRequests) ? state.exchangeRequests : []).filter((request) => (
+    sameLogin(request.fromLogin, login) || sameLogin(request.toLogin, login)
+  ));
+  const orderDisputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const exchangeDisputes = exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute");
+  const messages = (messageRows || [])
+    .map((row) => row.data)
+    .filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const inboundMessages = messages.filter((message) => sameLogin(message.toLogin, login));
+
+  return {
+    profile: {
+      login,
+      name: user.name,
+      role: user.role,
+      registeredAt: user.created_at,
+      balanceUsd: Number(state.balances?.[login] || state.balances?.[key] || 0),
+      balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0)
+    },
+    disputes: {
+      count: orderDisputes.length + exchangeDisputes.length,
+      items: [...orderDisputes, ...exchangeDisputes].slice(0, 10).map((item) => ({
+        id: item.id,
+        title: item.product || item.title || item.type || "Диспут",
+        status: item.status || "dispute",
+        createdAt: item.createdAt || item.disputeUntil || null
+      }))
+    },
+    orders: {
+      count: orders.length + exchangeRequests.length,
+      items: [...orders, ...exchangeRequests].slice(0, 10).map((item) => ({
+        id: item.id,
+        title: item.product || item.title || item.type || "Заказ",
+        status: item.status || "",
+        amountUsd: Number(item.amountUsd || item.priceUsd || 0),
+        createdAt: item.createdAt || null
+      }))
+    },
+    referral: {
+      code: state.referralCodes[key],
+      link: `${publicBaseUrl}/?ref=${encodeURIComponent(state.referralCodes[key])}`
+    },
+    messages: {
+      count: inboundMessages.length,
+      items: inboundMessages.slice(0, 10).map((message) => ({
+        from: privatePeer(message, login),
+        subject: message.subject || "",
+        text: message.text || message.message || message.body || "",
+        createdAt: message.createdAt || null
+      }))
+    }
+  };
+}
+
 function sellerAdminSecret() {
   return supabaseServiceKey || process.env.SELLER_ADMIN_SECRET || "cerber-local-seller-admin";
 }
@@ -275,6 +357,34 @@ app.post("/api/auth/login", async (req, res, next) => {
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: user.login_key });
     res.json({ token, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/login", async (req, res, next) => {
+  try {
+    requireDb();
+    await ensureSeed();
+    const key = loginKey(req.body.login);
+    const password = String(req.body.password || "");
+    const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ error: "Неверный логин или пароль" });
+    }
+    const token = crypto.randomBytes(32).toString("hex");
+    await supabase.from("sessions").insert({ token, login_key: user.login_key });
+    res.json({ token, user: publicUser(user), summary: await telegramUserSummary(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/telegram/me", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    res.json({ user: publicUser(user), summary: await telegramUserSummary(user) });
   } catch (error) {
     next(error);
   }
