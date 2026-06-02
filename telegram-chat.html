@@ -124,7 +124,7 @@
       position: sticky;
       bottom: 0;
       display: grid;
-      grid-template-columns: auto 1fr auto;
+      grid-template-columns: auto auto 1fr auto;
       gap: 8px;
       padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
       background: color-mix(in srgb, var(--panel) 96%, transparent);
@@ -193,6 +193,7 @@
     <main id="messages"></main>
     <footer>
       <button class="attach" id="attach" type="button">📎</button>
+      <button class="attach" id="voice" type="button">🎙</button>
       <textarea id="body" placeholder="Сообщение"></textarea>
       <button id="send" type="button">➤</button>
       <input id="file" type="file" accept="image/*,video/*">
@@ -214,6 +215,9 @@
     const fileNameEl = document.getElementById("fileName");
     let lastRendered = "";
     let sending = false;
+    let recorder = null;
+    let voiceChunks = [];
+    let voiceFile = null;
 
     function esc(value) {
       return String(value || "").replace(/[&<>"']/g, (char) => ({
@@ -311,13 +315,14 @@
       if (sending) return;
       const body = bodyEl.value.trim();
       const file = fileEl.files?.[0];
-      if (!body && !file) return;
+      if (!body && !file && !voiceFile) return;
       sending = true;
       try {
-        const attachments = file ? [{
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          url: await fileToDataUrl(file)
+        const attachmentFile = file || voiceFile;
+        const attachments = attachmentFile ? [{
+          name: attachmentFile.name,
+          type: attachmentFile.type || "application/octet-stream",
+          url: await fileToDataUrl(attachmentFile)
         }] : [];
         await api("/api/telegram/group-chat", {
           method: "POST",
@@ -325,6 +330,7 @@
         });
         bodyEl.value = "";
         fileEl.value = "";
+        voiceFile = null;
         fileNameEl.textContent = "";
         await load();
       } catch (error) {
@@ -336,7 +342,39 @@
 
     document.getElementById("attach").onclick = () => fileEl.click();
     document.getElementById("send").onclick = send;
+    document.getElementById("voice").onclick = async () => {
+      const button = document.getElementById("voice");
+      if (recorder && recorder.state === "recording") {
+        recorder.stop();
+        button.textContent = "🎙";
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+        statusEl.textContent = "Голосовые недоступны в этом браузере";
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        voiceChunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = (event) => {
+          if (event.data.size) voiceChunks.push(event.data);
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((track) => track.stop());
+          const blob = new Blob(voiceChunks, { type: recorder.mimeType || "audio/webm" });
+          voiceFile = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type });
+          fileNameEl.textContent = "Голосовое сообщение готово";
+        };
+        recorder.start();
+        button.textContent = "■";
+        fileNameEl.textContent = "Идёт запись голоса...";
+      } catch {
+        statusEl.textContent = "Не удалось включить микрофон";
+      }
+    };
     fileEl.onchange = () => {
+      voiceFile = null;
       fileNameEl.textContent = fileEl.files?.[0]?.name || "";
     };
     bodyEl.addEventListener("keydown", (event) => {

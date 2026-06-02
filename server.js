@@ -252,6 +252,14 @@ async function telegramUserSummary(user) {
     .filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login))
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   const inboundMessages = messages.filter((message) => sameLogin(message.toLogin, login));
+  const inboundNotifications = inboundMessages.slice(0, 20).map((message) => ({
+    id: message.id,
+    from: privatePeer(message, login),
+    subject: message.subject || "",
+    text: message.body || message.text || message.message || "",
+    system: message.system || "",
+    createdAt: message.createdAt || null
+  }));
 
   return {
     profile: {
@@ -287,6 +295,7 @@ async function telegramUserSummary(user) {
     },
     messages: {
       count: inboundMessages.length,
+      notifications: inboundNotifications,
       items: inboundMessages.slice(0, 10).map((message) => ({
         from: privatePeer(message, login),
         subject: message.subject || "",
