@@ -15,13 +15,13 @@ const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const ADMIN_PANEL_PASSWORD = "admin2026";
 const WALLET_COINS = [
-  { id: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
-  { id: "usdt_trc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
-  { id: "usdt_erc20", symbol: "USDT", name: "USDT ERC-20", network: "ERC-20", accent: "#26a17b" },
-  { id: "usdt_sol", symbol: "USDT", name: "USDT Solana", network: "SOL", accent: "#26a17b" },
-  { id: "trx", symbol: "TRX", name: "Tron", network: "TRX", accent: "#ef0027" },
-  { id: "eth", symbol: "ETH", name: "Ethereum", network: "ERC-20", accent: "#627eea" },
-  { id: "sol", symbol: "SOL", name: "Solana", network: "SOL", accent: "#14f195" }
+  { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
+  { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
+  { id: "usdt_erc20", payCurrency: "usdterc20", symbol: "USDT", name: "USDT ERC-20", network: "ERC-20", accent: "#26a17b" },
+  { id: "usdt_sol", payCurrency: "usdtsol", symbol: "USDT", name: "USDT Solana", network: "SOL", accent: "#26a17b" },
+  { id: "trx", payCurrency: "trx", symbol: "TRX", name: "Tron", network: "TRX", accent: "#ef0027" },
+  { id: "eth", payCurrency: "eth", symbol: "ETH", name: "Ethereum", network: "ERC-20", accent: "#627eea" },
+  { id: "sol", payCurrency: "sol", symbol: "SOL", name: "Solana", network: "SOL", accent: "#14f195" }
 ];
 const officialOnionMirrors = [
   "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
@@ -1096,6 +1096,27 @@ function positionById(product, id = activePositionId) {
 function usdToLtc(amountUsd) {
   const rate = Number(ltcUsdCache || 0);
   return rate > 0 ? Number(amountUsd || 0) / rate : 0;
+}
+
+function walletCoinById(id) {
+  return WALLET_COINS.find((coin) => coin.id === id || coin.payCurrency === id) || WALLET_COINS[0];
+}
+
+function walletCoinLabel(id) {
+  const coin = walletCoinById(id);
+  return `${coin.symbol}${coin.network && coin.network !== coin.symbol ? ` ${coin.network}` : ""}`;
+}
+
+function walletDepositPayCurrency(deposit) {
+  return String(deposit.payCurrency || deposit.coinId || "ltc").toLowerCase();
+}
+
+function walletDepositCoin(deposit) {
+  return walletCoinById(deposit.coinId || walletDepositPayCurrency(deposit));
+}
+
+function walletDepositPayAmount(deposit) {
+  return Number(deposit.payAmount || deposit.amountPay || 0);
 }
 
 function locationLabel(position = {}) {
@@ -2479,10 +2500,10 @@ function renderProductPaymentOrder(orderId) {
         <img src="${esc(storeById(order.storeId)?.image || fallbackImage)}" alt="">
       </article>
       <article class="panel">
-        <h2>Оплата через NOWPayments</h2>
+        <h2>Оплата через платежный шлюз</h2>
         <p>Оплата принимается в LTC. Средства идут на LTC-счёт магазина.</p>
         <p>Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}%.</p>
-        <p class="desc">После подтверждения NOWPayments заказ автоматически станет завершённым, а описание из строки выдачи появится в деталях заказа.</p>
+        <p class="desc">После подтверждения платежа заказ автоматически станет завершённым, а описание из строки выдачи появится в деталях заказа.</p>
         ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-now-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </article>
@@ -4020,12 +4041,15 @@ function walletTransactionView(tx) {
   const status = walletTransactionStatus(tx);
   const deposit = walletDepositForTransaction(tx);
   const canOpenDeposit = Boolean(deposit && status.key !== "cancelled");
+  const depositCoin = deposit ? walletDepositCoin(deposit) : null;
+  const depositAmount = deposit ? walletDepositPayAmount(deposit) : 0;
+  const title = depositCoin ? `Пополнение ${walletCoinLabel(depositCoin.id)}` : tx.title;
   return `
     <article class="wallet-tx ${status.key}" ${canOpenDeposit ? `data-wallet-deposit="${esc(deposit.id)}"` : ""}>
       <div class="wallet-tx-main">
-        <h3>${esc(tx.title)}</h3>
+        <h3>${esc(title)}</h3>
         <p>${esc(tx.date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
-        ${deposit ? `<small>К оплате: ${Number(deposit.payAmount || tx.amountLtc || 0).toFixed(8)} LTC</small>` : ""}
+        ${deposit ? `<small>К оплате: ${depositAmount.toFixed(8)} ${esc(walletCoinLabel(depositCoin.id))}</small>` : ""}
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
       ${canOpenDeposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
@@ -4061,7 +4085,8 @@ function walletDepositStatusText(deposit) {
 }
 
 function walletDepositCopyText(deposit) {
-  return `Адрес LTC: ${deposit.payAddress || ""}\nСумма: ${Number(deposit.payAmount || 0).toFixed(8)} LTC`;
+  const coin = walletDepositCoin(deposit);
+  return `Сеть: ${walletCoinLabel(coin.id)}\nАдрес: ${deposit.payAddress || ""}\nСумма: ${walletDepositPayAmount(deposit).toFixed(8)} ${walletCoinLabel(coin.id)}`;
 }
 
 function bindCopyButtons() {
@@ -4077,16 +4102,19 @@ function bindCopyButtons() {
 function showWalletDepositDetails(depositId) {
   const deposit = (db.walletDeposits || []).find((item) => item.id === depositId);
   if (!deposit) return;
+  const coin = walletDepositCoin(deposit);
+  const coinLabel = walletCoinLabel(coin.id);
   showModal(`
-    <h2>Пополнение LTC</h2>
+    <h2>Пополнение ${esc(coinLabel)}</h2>
     <p>${esc(walletDepositStatusText(deposit))}</p>
+    <p class="desc">После подтверждения платеж будет зачислен на внутренний баланс сайта в LTC-эквиваленте.</p>
     <div class="deposit-address">
       <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
       <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
     </div>
     <div class="deposit-address">
-      <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
-      <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
+      <strong>${walletDepositPayAmount(deposit).toFixed(8)} ${esc(coinLabel)}</strong>
+      <button class="ghost-button" data-copy="${walletDepositPayAmount(deposit).toFixed(8)}">Скопировать сумму</button>
     </div>
     <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать всё вместе</button>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
@@ -4096,25 +4124,32 @@ function showWalletDepositDetails(depositId) {
 
 function openWalletDepositModal() {
   showModal(`
-    <h2>Ваш LTC-кошелек</h2>
-    <p>Введите сумму пополнения. Адрес генерируется через NOWPayments для каждой транзакции.</p>
+    <h2>Пополнить баланс</h2>
+    <p>Выберите монету и сумму. После подтверждения платеж будет зачислен на внутренний баланс сайта в LTC-эквиваленте.</p>
     <form class="form" data-wallet-deposit-form>
       <label class="field">Сумма в USD<input name="amountUsd" type="number" min="1" step="0.01" value="10" required></label>
-      <button class="primary">Создать адрес LTC</button>
+      <label class="field">Монета и сеть<select name="coinId" required>
+        ${WALLET_COINS.map((coin) => `<option value="${esc(coin.id)}">${esc(walletCoinLabel(coin.id))}</option>`).join("")}
+      </select></label>
+      <button class="primary">Создать счет</button>
     </form>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-wallet-deposit-form]").onsubmit = createWalletDeposit;
 }
 
-async function createWalletDepositRequest(amountUsd, title = "Пополнение LTC") {
+async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "Пополнение баланса") {
+  const coin = walletCoinById(coinId);
   if (!API_ENABLED) {
     const amountLtc = usdToLtc(amountUsd);
     const deposit = {
       id: `deposit-${Date.now()}`,
       login: db.currentUser,
       amountUsd,
-      payAmount: amountLtc,
+      amountLtc,
+      payAmount: coin.id === "ltc" ? amountLtc : amountUsd,
+      coinId: coin.id,
+      payCurrency: coin.payCurrency,
       payAddress: MAIN_LTC_WALLET,
       status: "processing",
       expiresAt: Date.now() + WALLET_DEPOSIT_TTL_MS,
@@ -4127,6 +4162,8 @@ async function createWalletDepositRequest(amountUsd, title = "Пополнени
       title,
       amountLtc,
       amountUsd,
+      coinId: coin.id,
+      payCurrency: coin.payCurrency,
       status: "processing",
       expiresAt: deposit.expiresAt
     });
@@ -4135,7 +4172,7 @@ async function createWalletDepositRequest(amountUsd, title = "Пополнени
   }
   const payload = await apiFetch("/api/wallet/nowpayments/create", {
     method: "POST",
-    body: JSON.stringify({ amountUsd })
+    body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, amountLtcEstimate: usdToLtc(amountUsd) })
   });
   applyRemoteState(payload);
   const deposit = payload.deposit || {};
@@ -4147,23 +4184,28 @@ async function createWalletDepositRequest(amountUsd, title = "Пополнени
 
 async function createWalletDeposit(event) {
   event.preventDefault();
-  const amountUsd = Number(new FormData(event.currentTarget).get("amountUsd") || 0);
+  const data = new FormData(event.currentTarget);
+  const amountUsd = Number(data.get("amountUsd") || 0);
+  const coin = walletCoinById(data.get("coinId") || "ltc");
   if (amountUsd <= 0) return;
   const submit = event.currentTarget.querySelector("button");
   setButtonLoading(submit, true, "Создаём счет");
   try {
-    const deposit = await createWalletDepositRequest(amountUsd);
+    const deposit = await createWalletDepositRequest(amountUsd, coin.id);
+    const finalCoin = walletDepositCoin(deposit);
+    const coinLabel = walletCoinLabel(finalCoin.id);
     renderWallet();
     showModal(`
-      <h2>Ваш LTC-кошелек</h2>
-      <p>Скопируйте адрес кошелька и сумму ниже. Оплата истекает через 40 минут, транзакция уже добавлена в обработку.</p>
+      <h2>Счет на пополнение</h2>
+      <p>Скопируйте адрес и сумму ниже. Оплата истекает через 40 минут, транзакция уже добавлена в обработку.</p>
+      <p class="desc">После подтверждения платеж будет зачислен на внутренний баланс сайта в LTC-эквиваленте.</p>
       <div class="deposit-address">
         <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
         <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
       </div>
       <div class="deposit-address">
-        <strong>${Number(deposit.payAmount || 0).toFixed(8)} LTC</strong>
-        <button class="ghost-button" data-copy="${Number(deposit.payAmount || 0).toFixed(8)}">Скопировать сумму</button>
+        <strong>${walletDepositPayAmount(deposit).toFixed(8)} ${esc(coinLabel)}</strong>
+        <button class="ghost-button" data-copy="${walletDepositPayAmount(deposit).toFixed(8)}">Скопировать сумму</button>
       </div>
       <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать всё вместе</button>
       ${deposit.paymentUrl ? `<a class="primary link-button" href="${esc(deposit.paymentUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : ""}
@@ -4975,7 +5017,7 @@ function renderAdmin() {
       <article class="panel">
         <h2>Настройки оплат</h2>
         <form class="form" data-payment-settings-form>
-          <label class="field">Провайдер<input value="NOWPayments" readonly></label>
+          <label class="field">Платежный шлюз<input value="Подключен" readonly></label>
           <div class="row">
             <label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.01" value="${esc(db.paymentSettings?.platformCommissionPercent ?? 0)}"></label>
             <label class="field">LTC счет площадки<input name="platformLtcWallet" value="${esc(db.paymentSettings?.platformLtcWallet || "")}"></label>

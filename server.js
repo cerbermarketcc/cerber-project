@@ -21,6 +21,15 @@ const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
+const walletCoins = [
+  { id: "ltc", payCurrency: "ltc", symbol: "LTC" },
+  { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT" },
+  { id: "usdt_erc20", payCurrency: "usdterc20", symbol: "USDT" },
+  { id: "usdt_sol", payCurrency: "usdtsol", symbol: "USDT" },
+  { id: "trx", payCurrency: "trx", symbol: "TRX" },
+  { id: "eth", payCurrency: "eth", symbol: "ETH" },
+  { id: "sol", payCurrency: "sol", symbol: "SOL" }
+];
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -425,12 +434,17 @@ async function nowpaymentsJson(pathname, payload) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(body.message || body.error || "NOWPayments error");
+    const error = new Error(body.message || body.error || "Payment gateway error");
     error.status = response.status;
     error.body = body;
     throw error;
   }
   return body;
+}
+
+function walletCoinFromRequest(body = {}) {
+  const requested = String(body.payCurrency || body.coinId || "ltc").toLowerCase();
+  return walletCoins.find((coin) => coin.id === requested || coin.payCurrency === requested) || walletCoins[0];
 }
 
 function verifyNowpaymentsSignature(req) {
@@ -476,8 +490,8 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     return;
   }
 
-  const paidLtc = Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0);
   const paidUsd = Number(deposit.amountUsd || providerPayload.price_amount || 0);
+  const paidLtc = Number(deposit.amountLtcExpected || deposit.amountLtc || (deposit.payCurrency === "ltc" ? (providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0) : (paidUsd / 54.2)));
   deposit.status = "completed";
   deposit.paidAt = Date.now();
   deposit.amountLtc = paidLtc;
@@ -493,15 +507,21 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     existingTx.status = "completed";
     existingTx.amountLtc = paidLtc;
     existingTx.amountUsd = paidUsd;
+    existingTx.coinId = deposit.coinId || "ltc";
+    existingTx.payCurrency = deposit.payCurrency || "ltc";
+    existingTx.payAmount = Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0);
     existingTx.completedAt = Date.now();
   } else {
     state.walletTransactions.unshift({
       id: txId,
       login: deposit.login,
       type: "deposit",
-      title: "Пополнение LTC",
+      title: "Пополнение баланса",
       amountLtc: paidLtc,
       amountUsd: paidUsd,
+      coinId: deposit.coinId || "ltc",
+      payCurrency: deposit.payCurrency || "ltc",
+      payAmount: Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0),
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU"),
       status: "completed"
@@ -563,7 +583,7 @@ app.post("/api/payments/nowpayments/create", async (req, res, next) => {
       body: JSON.stringify(invoicePayload)
     });
     const invoice = await response.json().catch(() => ({}));
-    if (!response.ok) return res.status(502).json({ error: invoice.message || "NOWPayments invoice error" });
+    if (!response.ok) return res.status(502).json({ error: invoice.message || "Payment invoice error" });
 
     order.paymentInvoiceId = invoice.id || invoice.invoice_id || "";
     order.paymentUrl = invoice.invoice_url || invoice.payment_url || "";
@@ -585,6 +605,8 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const amountUsd = Number(req.body.amountUsd || 0);
+    const coin = walletCoinFromRequest(req.body);
+    const amountLtcExpected = Math.max(0, Number(req.body.amountLtcEstimate || 0));
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму пополнения" });
 
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
@@ -596,6 +618,9 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       login: user.login,
       status: "waiting",
       amountUsd,
+      amountLtcExpected,
+      coinId: coin.id,
+      payCurrency: coin.payCurrency,
       createdAt: Date.now(),
       expiresAt: Date.now() + walletDepositTtlMs,
       date: new Date().toLocaleString("ru-RU")
@@ -604,7 +629,7 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
     const paymentPayload = {
       price_amount: amountUsd,
       price_currency: "usd",
-      pay_currency: "ltc",
+      pay_currency: coin.payCurrency,
       order_id: deposit.id,
       order_description: `CERBER MARKET wallet top up / ${user.login}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
@@ -617,7 +642,7 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       const invoice = await nowpaymentsJson("invoice", {
         price_amount: amountUsd,
         price_currency: "usd",
-        pay_currency: "ltc",
+        pay_currency: coin.payCurrency,
         order_id: deposit.id,
         order_description: `CERBER MARKET wallet top up / ${user.login}`,
         ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
@@ -635,13 +660,16 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
     deposit.paymentId = payment.payment_id || payment.id || "";
     deposit.payAddress = payment.pay_address || payment.address || "";
     deposit.payAmount = Number(payment.pay_amount || 0);
-    deposit.payCurrency = "ltc";
+    deposit.payCurrency = coin.payCurrency;
+    deposit.coinId = coin.id;
     deposit.paymentUrl = payment.payment_url || payment.invoice_url || "";
     deposit.paymentStatus = payment.payment_status || "waiting";
     deposit.paymentProviderPayload = {
       paymentId: deposit.paymentId,
       payAddress: deposit.payAddress,
       payAmount: deposit.payAmount,
+      payCurrency: deposit.payCurrency,
+      coinId: deposit.coinId,
       paymentUrl: deposit.paymentUrl
     };
 
@@ -651,8 +679,12 @@ app.post("/api/wallet/nowpayments/create", async (req, res, next) => {
       login: user.login,
       type: "deposit",
       title: "Пополнение LTC",
-      amountLtc: deposit.payAmount,
+      title: "Пополнение баланса",
+      amountLtc: amountLtcExpected,
       amountUsd,
+      payAmount: deposit.payAmount,
+      payCurrency: deposit.payCurrency,
+      coinId: deposit.coinId,
       createdAt: deposit.createdAt,
       expiresAt: deposit.expiresAt,
       date: deposit.date,
@@ -706,7 +738,8 @@ app.get("*", (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  const message = String(error.message || "Server error");
+  let message = String(error.message || "Server error");
+  if (/nowpayments|NOWPAYMENTS/i.test(message)) message = "Платежный шлюз не настроен или временно недоступен";
   if (message.includes("Could not find the table")) {
     return res.status(500).json({
       error: "В Supabase ещё не созданы таблицы. Выполни SQL из файла supabase-schema.sql."
