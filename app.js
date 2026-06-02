@@ -4407,7 +4407,7 @@ function renderOwnerPanel() {
           ${ownerStatCard("оборот, $", stats.salesUsd.toFixed(2))}
         </div>
       </article>
-      <article class="panel">
+      <article class="panel owner-market-settings-panel">
         <h2>Настройки маркета</h2>
         <form class="form" data-owner-settings-form>
           <div class="row">
@@ -4439,7 +4439,7 @@ function renderOwnerPanel() {
           </article>
         `).join("") || `<p>Заявок пока нет.</p>`}
       </article>
-      <article class="panel">
+      <article class="panel owner-store-control-panel">
         <h2>Магазины</h2>
         ${db.stores.map((store) => {
           const risk = storeRisk(store);

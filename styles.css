@@ -3032,3 +3032,8 @@ label,
 .seller-admin-screen > .panel:first-child .stats {
   display: none;
 }
+
+.owner-market-settings-panel,
+.owner-store-control-panel {
+  display: none;
+}
