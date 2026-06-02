@@ -1594,7 +1594,11 @@ function layout(content) {
     </div>
     <div class="account-pop" data-account-pop>
       <div class="account-card">
-        <div class="account-row"><img class="avatar" src="assets/user-avatar.png" alt=""><strong>${esc(currentUser()?.name || currentUser()?.login)}</strong></div>
+        <div class="account-row account-head">
+          <img class="avatar" src="assets/user-avatar.png" alt="">
+          <strong>${esc(currentUser()?.name || currentUser()?.login)}</strong>
+          <button class="account-deposit" type="button" data-menu-deposit>Пополнить</button>
+        </div>
         <div class="divider"></div>
         ${accountMenuButton("wallet", "Кошелек", `data-route="wallet"`)}
         ${accountMenuButton("filters", "Каталог", `data-filters`)}
@@ -5683,6 +5687,11 @@ function bindGlobal() {
   });
   document.querySelector("[data-menu]").onclick = () => document.querySelector("[data-nav-pop]").classList.add("open");
   document.querySelector("[data-account]").onclick = () => document.querySelector("[data-account-pop]").classList.add("open");
+  document.querySelector("[data-menu-deposit]")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    document.querySelector("[data-account-pop]")?.classList.remove("open");
+    openWalletDepositModal();
+  });
   document.querySelectorAll("[data-nav-pop], [data-account-pop], [data-modal]").forEach((overlay) => {
     overlay.onclick = (event) => {
       if (event.target === overlay || event.target.closest("[data-close-modal]") || event.target.closest("[data-close-nav]")) overlay.classList.remove("open");
