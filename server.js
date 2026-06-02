@@ -213,6 +213,17 @@ function privatePeer(message, login) {
   return message.fromLogin || message.storeTag || message.storeId || "system";
 }
 
+function publicGroupMessage(message) {
+  return {
+    id: message.id,
+    fromLogin: message.fromLogin,
+    body: message.body || "",
+    attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    createdAt: message.createdAt || 0,
+    date: message.date || ""
+  };
+}
+
 async function telegramUserSummary(user) {
   await ensureSeed();
   const [{ data: settings }, { data: messageRows }] = await Promise.all([
@@ -284,6 +295,55 @@ async function telegramUserSummary(user) {
       }))
     }
   };
+}
+
+async function telegramGroupChat() {
+  await ensureSeed();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  const settingsData = state.groupSettings || {};
+  const messages = (Array.isArray(state.groupMessages) ? state.groupMessages : [])
+    .filter((message) => !message.deleted)
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
+    .slice(-20)
+    .map(publicGroupMessage);
+
+  return {
+    title: settingsData.title || "Общий чат",
+    messages
+  };
+}
+
+async function addTelegramGroupMessage(user, payload = {}) {
+  await ensureSeed();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  const body = String(payload.body || "").trim();
+  const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 3).map((file) => ({
+    name: String(file.name || "file").slice(0, 120),
+    type: String(file.type || "application/octet-stream").slice(0, 80),
+    url: String(file.url || "")
+  })).filter((file) => file.url) : [];
+
+  if (!body && !attachments.length) {
+    const error = new Error("Сообщение пустое");
+    error.status = 400;
+    throw error;
+  }
+
+  state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
+  const message = {
+    id: `group-tg-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+    fromLogin: user.login,
+    body,
+    attachments,
+    likes: [],
+    createdAt: Date.now(),
+    date: new Date().toLocaleString("ru-RU")
+  };
+  state.groupMessages.push(message);
+  await saveSettingsState(state);
+  return publicGroupMessage(message);
 }
 
 function sellerAdminSecret() {
@@ -385,6 +445,26 @@ app.get("/api/telegram/me", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     res.json({ user: publicUser(user), summary: await telegramUserSummary(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/telegram/group-chat", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    res.json(await telegramGroupChat());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/group-chat", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    res.json({ message: await addTelegramGroupMessage(user, req.body || {}) });
   } catch (error) {
     next(error);
   }
