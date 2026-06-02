@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>CERBER Chat</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e1117;
+      --panel: #161b22;
+      --panel-2: #1f2631;
+      --text: #f4f7fb;
+      --muted: #8d99aa;
+      --line: #2b3442;
+      --accent: #55a7ff;
+      --own: #1d4f7a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: calc(12px + env(safe-area-inset-top)) 14px 12px;
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(12px);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .status {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    main {
+      overflow-y: auto;
+      padding: 14px;
+      scroll-behavior: smooth;
+    }
+
+    .message {
+      max-width: 86%;
+      margin: 0 0 10px;
+      padding: 9px 10px;
+      border-radius: 12px;
+      background: var(--panel-2);
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+    }
+
+    .message.own {
+      margin-left: auto;
+      background: var(--own);
+      border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    }
+
+    .meta {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .author {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .body {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .attachment {
+      display: block;
+      width: 100%;
+      max-height: 300px;
+      margin-top: 8px;
+      border-radius: 8px;
+      object-fit: contain;
+      background: #07090d;
+    }
+
+    footer {
+      position: sticky;
+      bottom: 0;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+      background: color-mix(in srgb, var(--panel) 96%, transparent);
+      border-top: 1px solid var(--line);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 42px;
+      max-height: 120px;
+      resize: none;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+
+    button {
+      min-width: 42px;
+      height: 42px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .attach {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+    }
+
+    input[type="file"] { display: none; }
+
+    .file-name {
+      grid-column: 1 / -1;
+      min-height: 0;
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .empty {
+      margin: 24px auto;
+      text-align: center;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1 id="title">Общий чат</h1>
+      <div class="status" id="status">Подключение...</div>
+    </header>
+    <main id="messages"></main>
+    <footer>
+      <button class="attach" id="attach" type="button">📎</button>
+      <textarea id="body" placeholder="Сообщение"></textarea>
+      <button id="send" type="button">➤</button>
+      <input id="file" type="file" accept="image/*,video/*">
+      <div class="file-name" id="fileName"></div>
+    </footer>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    tg?.ready();
+    tg?.expand();
+
+    const token = new URLSearchParams(location.search).get("token") || location.hash.replace(/^#token=/, "");
+    const messagesEl = document.getElementById("messages");
+    const statusEl = document.getElementById("status");
+    const titleEl = document.getElementById("title");
+    const bodyEl = document.getElementById("body");
+    const fileEl = document.getElementById("file");
+    const fileNameEl = document.getElementById("fileName");
+    let lastRendered = "";
+    let sending = false;
+
+    function esc(value) {
+      return String(value || "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      }[char]));
+    }
+
+    function authHeaders() {
+      return {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      };
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { ...authHeaders(), ...(options.headers || {}) }
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "Ошибка сервера");
+      return payload;
+    }
+
+    function attachmentView(file) {
+      if (!file?.url) return "";
+      const type = String(file.type || "");
+      if (type.startsWith("image/")) return `<img class="attachment" src="${esc(file.url)}" alt="${esc(file.name || "")}">`;
+      if (type.startsWith("video/")) return `<video class="attachment" src="${esc(file.url)}" controls></video>`;
+      return `<a href="${esc(file.url)}" download="${esc(file.name || "file")}">${esc(file.name || "Файл")}</a>`;
+    }
+
+    function render(payload) {
+      titleEl.textContent = payload.title || "Общий чат";
+      const messages = payload.messages || [];
+      const signature = JSON.stringify(messages.map((item) => [item.id, item.body, item.attachments?.length || 0]));
+      if (signature === lastRendered) return;
+      lastRendered = signature;
+
+      if (!messages.length) {
+        messagesEl.innerHTML = `<p class="empty">Сообщений пока нет</p>`;
+        return;
+      }
+
+      messagesEl.innerHTML = messages.map((msg) => `
+        <article class="message">
+          <div class="meta">
+            <span class="author">${esc(msg.fromLogin || "unknown")}</span>
+            <span>${esc(msg.date || "")}</span>
+          </div>
+          ${msg.body ? `<div class="body">${esc(msg.body)}</div>` : ""}
+          ${(msg.attachments || []).map(attachmentView).join("")}
+        </article>
+      `).join("");
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function load() {
+      if (!token) {
+        statusEl.textContent = "Нет авторизации";
+        messagesEl.innerHTML = `<p class="empty">Откройте чат из Telegram-бота.</p>`;
+        return;
+      }
+      try {
+        const payload = await api("/api/telegram/group-chat");
+        render(payload);
+        statusEl.textContent = "Онлайн";
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    }
+
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function send() {
+      if (sending) return;
+      const body = bodyEl.value.trim();
+      const file = fileEl.files?.[0];
+      if (!body && !file) return;
+      sending = true;
+      try {
+        const attachments = file ? [{
+          name: file.name,
+          type: file.type || "application/octet-stream",
+          url: await fileToDataUrl(file)
+        }] : [];
+        await api("/api/telegram/group-chat", {
+          method: "POST",
+          body: JSON.stringify({ body, attachments })
+        });
+        bodyEl.value = "";
+        fileEl.value = "";
+        fileNameEl.textContent = "";
+        await load();
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        sending = false;
+      }
+    }
+
+    document.getElementById("attach").onclick = () => fileEl.click();
+    document.getElementById("send").onclick = send;
+    fileEl.onchange = () => {
+      fileNameEl.textContent = fileEl.files?.[0]?.name || "";
+    };
+    bodyEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        send();
+      }
+    });
+
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>
