@@ -4590,7 +4590,6 @@ function ownerStoreBuilderPanel() {
 }
 
 function ownerStoreManager(store) {
-  const gallery = (store.gallery || []).slice(0, 5);
   return `
     <article class="panel owner-store-manager">
       <h2>${esc(store.name)} · управление</h2>
@@ -4611,8 +4610,6 @@ function ownerStoreManager(store) {
         </div>
         <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
         <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
-        <label class="field">Галерея профиля до 5 фото<input name="gallery" type="file" accept="image/*" multiple></label>
-        ${gallery.length ? `<div class="owner-gallery">${gallery.map((image) => `<img src="${esc(image)}" alt="">`).join("")}</div>` : ""}
         <button class="primary">Сохранить профиль</button>
       </form>
       <div class="owner-products">
@@ -4623,7 +4620,7 @@ function ownerStoreManager(store) {
             <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
           </div>
           <label class="field">Описание<textarea name="description"></textarea></label>
-          <label class="field">Фото товара<input name="image" type="file" accept="image/*"></label>
+          <label class="field">Фото товара до 5 фото<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">Добавить товар</button>
         </form>
         ${(store.products || []).map((product) => ownerProductManager(store, product)).join("") || `<p>Товаров пока нет.</p>`}
@@ -4810,10 +4807,8 @@ async function handleOwnerProfileSave(event) {
   store.adminPassword = String(data.get("adminPassword") || "").trim();
   const imageFile = data.get("image");
   const coverFile = data.get("cover");
-  const galleryFiles = Array.from(data.getAll("gallery")).filter((file) => file && file.size).slice(0, 5);
   if (imageFile && imageFile.size) store.image = await fileToDataUrl(imageFile);
   if (coverFile && coverFile.size) store.cover = await fileToDataUrl(coverFile);
-  if (galleryFiles.length) store.gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
   saveDb();
   showToast("Профиль магазина сохранен");
   renderOwnerPanel();
@@ -4827,8 +4822,9 @@ async function handleOwnerAddProduct(event) {
   const data = new FormData(form);
   const title = String(data.get("title") || "").trim();
   if (!title) return;
-  const imageFile = data.get("image");
-  const image = imageFile && imageFile.size ? await fileToDataUrl(imageFile) : (store.image || fallbackImage);
+  const imageFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
+  const images = imageFiles.length ? await Promise.all(imageFiles.map(fileToDataUrl)) : [store.image || fallbackImage];
+  const image = images[0];
   const priceUsd = Number(data.get("priceUsd") || 0);
   store.products = store.products || [];
   store.products.unshift(normalizeProduct({
@@ -4839,7 +4835,7 @@ async function handleOwnerAddProduct(event) {
     price: `${priceUsd}$`,
     priceUsd,
     image,
-    images: [image],
+    images,
     sellerManaged: true,
     rating: 5,
     reviews: 0,
