@@ -2575,6 +2575,21 @@ function openProductDispute(orderId) {
   order.status = "dispute";
   order.disputeOpen = true;
   order.disputeUntil = Date.now() + 12 * 60 * 60 * 1000;
+  const store = storeById(order.storeId);
+  if (store?.ownerLogin) {
+    db.messages.unshift({
+      id: `dispute-product-${Date.now()}`,
+      storeId: order.storeId,
+      storeTag: store.tag || store.name,
+      toLogin: store.ownerLogin,
+      fromLogin: order.login || db.currentUser,
+      subject: `Диспут: ${order.product || order.id}`,
+      body: `Клиент открыл диспут по заказу ${order.id}.`,
+      createdAt: Date.now(),
+      date: new Date().toLocaleString(),
+      system: "product-dispute"
+    });
+  }
   saveDb();
   showToast("Спор открыт на 12 часов");
   renderOrders("disputes");
@@ -4357,7 +4372,6 @@ function renderOwnerPanel() {
           <button class="primary">Сохранить настройки</button>
         </form>
       </article>
-      ${ownerWalletFeesPanel(settings)}
       ${ownerStoreBuilderPanel()}
       <article class="panel">
         <h2>Заявки магазинов</h2>
@@ -4388,6 +4402,8 @@ function renderOwnerPanel() {
               </div>
               <div>
                 <label class="field">Автозавершение, ч<input data-store-auto-release="${esc(store.id)}" type="number" min="1" max="168" value="${esc(store.autoReleaseHours || settings.defaultAutoReleaseHours)}"></label>
+                <button class="ghost-button" data-owner-toggle-top="${esc(store.id)}">${store.isTop ? "Убрать из TOP 10" : "Добавить в TOP 10"}</button>
+                <button class="ghost-button" data-owner-toggle-catalog="${esc(store.id)}">${store.visibleInCatalog === false ? "Показать в магазинах" : "Скрыть из магазинов"}</button>
                 <button class="ghost-button" data-owner-toggle-sales="${esc(store.id)}">${store.salesBlocked ? "Включить продажи" : "Остановить продажи"}</button>
                 <button class="ghost-button" data-owner-open-store="${esc(store.id)}">Открыть витрину</button>
               </div>
@@ -4407,6 +4423,7 @@ function renderOwnerPanel() {
             <div>
               <button class="primary" data-owner-resolve-client="${esc(order.id)}">В пользу клиента</button>
               <button class="ghost-button" data-owner-resolve-store="${esc(order.id)}">В пользу магазина</button>
+              <button class="ghost-button" data-owner-dispute-chat="${esc(order.login)}">Ответить клиенту</button>
             </div>
           </article>
         `).join("") || `<p>Открытых диспутов нет.</p>`}
@@ -4432,21 +4449,6 @@ function bindOwnerPanel() {
     db.paymentSettings.platformCommissionPercent = db.ownerSettings.platformCommissionPercent;
     saveDb();
     showToast("Настройки сохранены");
-    renderOwnerPanel();
-  });
-  document.querySelector("[data-owner-wallet-fees-form]")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    db.ownerSettings.walletCoinFees = db.ownerSettings.walletCoinFees || {};
-    WALLET_COINS.forEach((coin) => {
-      db.ownerSettings.walletCoinFees[coin.id] = {
-        enabled: Boolean(data.get(`${coin.id}_enabled`)),
-        percent: Math.max(0, Number(data.get(`${coin.id}_percent`) || 0)),
-        fixed: Math.max(0, Number(data.get(`${coin.id}_fixed`) || 0))
-      };
-    });
-    saveDb();
-    showToast("Настройки монет сохранены");
     renderOwnerPanel();
   });
   document.querySelectorAll("[data-owner-approve]").forEach((button) => button.onclick = () => approveStoreApplication(button.dataset.ownerApprove));
@@ -4491,41 +4493,18 @@ function bindOwnerPanel() {
   document.querySelectorAll("[data-owner-open-store]").forEach((button) => button.onclick = () => renderStore(button.dataset.ownerOpenStore, "positions"));
   document.querySelectorAll("[data-owner-resolve-client]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveClient, "client"));
   document.querySelectorAll("[data-owner-resolve-store]").forEach((button) => button.onclick = () => resolveOwnerDispute(button.dataset.ownerResolveStore, "store"));
+  document.querySelectorAll("[data-owner-dispute-chat]").forEach((button) => {
+    button.onclick = () => {
+      activePrivateLogin = button.dataset.ownerDisputeChat;
+      renderMessages();
+    };
+  });
   document.querySelector("[data-owner-create-store]")?.addEventListener("submit", handleOwnerCreateStore);
   document.querySelectorAll("[data-owner-profile-form]").forEach((form) => form.addEventListener("submit", handleOwnerProfileSave));
   document.querySelectorAll("[data-owner-add-product]").forEach((form) => form.addEventListener("submit", handleOwnerAddProduct));
   document.querySelectorAll("[data-owner-add-position]").forEach((form) => form.addEventListener("submit", handleOwnerAddPosition));
   document.querySelectorAll("[data-owner-delete-product]").forEach((button) => button.onclick = () => ownerDeleteProduct(button.dataset.ownerDeleteProduct, button.dataset.storeId));
   document.querySelectorAll("[data-owner-delete-position]").forEach((button) => button.onclick = () => ownerDeletePosition(button.dataset.ownerDeletePosition, button.dataset.productId, button.dataset.storeId));
-}
-
-function ownerWalletFeesPanel(settings) {
-  const fees = settings.walletCoinFees || {};
-  return `
-    <article class="panel owner-wallet-settings">
-      <h2>Настройки кошельков</h2>
-      <p class="desc">Базовая монета оплаты - LTC. Остальные монеты подготовлены для пополнений, выводов и будущего обмена без функций анонимизации.</p>
-      <form class="form" data-owner-wallet-fees-form>
-        <div class="wallet-fee-grid">
-          ${WALLET_COINS.map((coin) => {
-            const fee = fees[coin.id] || { enabled: true, percent: 0, fixed: 0 };
-            return `
-              <article class="wallet-fee-row">
-                <div>
-                  <strong>${esc(coin.name)}</strong>
-                  <span>${esc(coin.network)}</span>
-                </div>
-                <label><input name="${coin.id}_enabled" type="checkbox" ${fee.enabled !== false ? "checked" : ""}> включена</label>
-                <label class="field">Комиссия, %<input name="${coin.id}_percent" type="number" min="0" step="0.01" value="${esc(fee.percent || 0)}"></label>
-                <label class="field">Фикс, монет<input name="${coin.id}_fixed" type="number" min="0" step="0.000001" value="${esc(fee.fixed || 0)}"></label>
-              </article>
-            `;
-          }).join("")}
-        </div>
-        <button class="primary">Сохранить комиссии монет</button>
-      </form>
-    </article>
-  `;
 }
 
 function ownerStoreBuilderPanel() {
@@ -4538,10 +4517,6 @@ function ownerStoreBuilderPanel() {
           <label class="field">Тег<input name="tag" placeholder="@market"></label>
         </div>
         <label class="field">Описание карточки<input name="short" placeholder="Короткое описание"></label>
-        <div class="row">
-          <label><input name="isTop" type="checkbox" checked> TOP 10</label>
-          <label><input name="visibleInCatalog" type="checkbox" checked> Раздел магазины</label>
-        </div>
         <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
         <button class="primary">Создать карточку</button>
       </form>
@@ -4562,11 +4537,6 @@ function ownerStoreManager(store) {
         </div>
         <label class="field">Описание карточки<input name="short" value="${esc(store.short || "")}"></label>
         <label class="field">Описание профиля<textarea name="description">${esc(store.description || "")}</textarea></label>
-        <div class="row">
-          <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> TOP 10</label>
-          <label><input name="visibleInCatalog" type="checkbox" ${store.visibleInCatalog !== false ? "checked" : ""}> Раздел магазины</label>
-          <label><input name="salesBlocked" type="checkbox" ${store.salesBlocked ? "checked" : ""}> Остановить продажи</label>
-        </div>
         <div class="row">
           <label class="field">Страны фильтра<input name="countries" value="${esc((store.countries || []).join(", "))}" placeholder="moldova, transnistria"></label>
           <label class="field">Города фильтра<input name="cities" value="${esc((store.cities || []).join(", "))}" placeholder="chisinau"></label>
@@ -4734,8 +4704,8 @@ async function handleOwnerCreateStore(event) {
     tag: String(data.get("tag") || `@${id}`).trim(),
     ownerLogin: db.currentUser,
     adminPassword: "",
-    isTop: Boolean(data.get("isTop")),
-    visibleInCatalog: Boolean(data.get("visibleInCatalog")),
+    isTop: true,
+    visibleInCatalog: true,
     countries: [],
     cities: [],
     name,
@@ -4767,10 +4737,6 @@ async function handleOwnerProfileSave(event) {
   store.tag = String(data.get("tag") || store.tag || "").trim();
   store.short = String(data.get("short") || "").trim();
   store.description = String(data.get("description") || "").trim();
-  store.isTop = Boolean(data.get("isTop"));
-  store.visibleInCatalog = Boolean(data.get("visibleInCatalog"));
-  store.salesBlocked = Boolean(data.get("salesBlocked"));
-  store.status = store.salesBlocked ? "blocked" : "active";
   store.countries = listFromInput(data.get("countries"));
   store.cities = listFromInput(data.get("cities"));
   store.ltcWallet = String(data.get("ltcWallet") || "").trim();
@@ -5267,7 +5233,10 @@ function renderSeller() {
         ${disputes.map((order) => `
           <article class="ref-item">
             <div><h3>${esc(order.product || order.id)}</h3><p>${esc(order.login)} · ${Number(order.amountUsd || 0).toFixed(2)} $</p></div>
-            <span class="status-pill">Открыт</span>
+            <div>
+              <span class="status-pill">Открыт</span>
+              <button class="ghost-button" data-seller-dispute-chat="${esc(order.login)}">Ответить клиенту</button>
+            </div>
           </article>
         `).join("") || `<p>Открытых диспутов нет.</p>`}
         <form class="form" data-product-form>
@@ -5318,6 +5287,12 @@ function renderSeller() {
     showToast("Страница магазина сохранена");
     renderSeller();
   };
+  document.querySelectorAll("[data-seller-dispute-chat]").forEach((button) => {
+    button.onclick = () => {
+      activePrivateLogin = button.dataset.sellerDisputeChat;
+      renderMessages();
+    };
+  });
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
