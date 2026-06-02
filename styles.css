@@ -1384,6 +1384,42 @@ body[data-theme="dark"] .mirror-row {
   gap: 12px;
 }
 
+.check-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+
+.check-row label {
+  align-items: center;
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 700;
+  gap: 8px;
+}
+
+.check-row input {
+  accent-color: var(--accent);
+  height: 17px;
+  width: 17px;
+}
+
+.admin-create-result h3 {
+  margin: 0 0 10px;
+}
+
+.admin-create-result p {
+  color: var(--muted);
+  margin: 8px 0;
+}
+
+.admin-create-result a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
 .panel {
   padding: 24px;
 }

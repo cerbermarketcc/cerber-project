@@ -35,6 +35,8 @@ const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
+let adminCreationNotice = "";
+let activeHomeTab = "all";
 const NEW_STORE_STATS = {
   orders: 0,
   reviews: 0,
@@ -554,6 +556,8 @@ function normalizeDb(next) {
     return {
       ...store,
       isTop: Boolean(store.isTop),
+      isFeatured: Boolean(store.isFeatured || store.featured),
+      isNew: Boolean(store.isNew || store.newStore),
       visibleInCatalog: store.visibleInCatalog !== false,
       countries: Array.isArray(store.countries) ? store.countries : [],
       cities: Array.isArray(store.cities) ? store.cities : [],
@@ -689,6 +693,10 @@ function normalizeExchangeCard(card) {
     cashoutRate: 0,
     ltcUsd: ltcUsdCache,
     ltcWallet: "",
+    adminPassword: "",
+    countries: ["moldova"],
+    cities: [],
+    districts: [],
     requisites: defaultExchangeRequisites
   };
   const requisites = Array.isArray(card.requisites) && card.requisites.length ? card.requisites : seed.requisites;
@@ -702,6 +710,10 @@ function normalizeExchangeCard(card) {
     cashoutRate: Number.isFinite(Number(card.cashoutRate)) ? Number(card.cashoutRate) : seed.cashoutRate,
     ltcUsd: Number.isFinite(Number(card.ltcUsd)) ? Number(card.ltcUsd) : seed.ltcUsd,
     ltcWallet: String(card.ltcWallet || seed.ltcWallet || "").trim(),
+    adminPassword: String(card.adminPassword || seed.adminPassword || "").trim(),
+    countries: Array.isArray(card.countries) && card.countries.length ? card.countries : (Array.isArray(seed.countries) ? seed.countries : ["moldova"]),
+    cities: Array.isArray(card.cities) ? card.cities : [],
+    districts: Array.isArray(card.districts) ? card.districts : [],
     requisites: requisites.map((item) => ({
       method: item.method,
       value: String(item.value || "").trim(),
@@ -1043,11 +1055,9 @@ function exchangeCardById(id = activeExchangeId) {
   return db.exchangeCards.find((card) => card.id === id) || db.exchangeCards[0];
 }
 
-function visibleStores(topOnly = false) {
+function filteredStores() {
   const filters = db.filters || {};
   return (db.stores || []).filter((store) => {
-    if (topOnly && !store.isTop) return false;
-    if (!topOnly && store.visibleInCatalog === false) return false;
     if (store.status && store.status !== "active" && !isAdmin()) return false;
     const products = store.products || [];
     const positions = products.flatMap((product) => product.positions || []);
@@ -1060,6 +1070,19 @@ function visibleStores(topOnly = false) {
     const categoryMatch = !filters.category || filters.category === "Все товары" || !products.length || products.some((product) => String(product.category || "").includes(filters.category));
     return countryMatch && cityMatch && districtMatch && categoryMatch;
   }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
+}
+
+function visibleStores(topOnly = false) {
+  return filteredStores().filter((store) => {
+    if (topOnly) return store.isTop;
+    return store.visibleInCatalog !== false;
+  });
+}
+
+function homeStores(tab = "all") {
+  if (tab === "top") return filteredStores().filter((store) => store.isFeatured);
+  if (tab === "new") return filteredStores().filter((store) => store.isNew);
+  return visibleStores(true).slice(0, 10);
 }
 
 function userBalance(login = db.currentUser) {
@@ -1246,12 +1269,13 @@ function bindStoreFilterSelects(root = document) {
     const countries = group.querySelector("[data-store-filter-countries]");
     const cities = group.querySelector("[data-store-filter-cities]");
     const districts = group.querySelector("[data-store-filter-districts]");
-    if (!countries || !cities || !districts) return;
+    if (!countries || !cities) return;
     const countryName = group.dataset.countryName || "countries";
     const cityName = group.dataset.cityName || "cities";
     const districtName = group.dataset.districtName || "districts";
 
     const refreshDistricts = () => {
+      if (!districts) return;
       const selectedDistricts = selectedCheckboxValues(districts);
       districts.innerHTML = storeFilterDistrictOptions(selectedCheckboxValues(countries), selectedCheckboxValues(cities), selectedDistricts, districtName);
       updateStoreFilterToggleLabels(group);
@@ -1790,16 +1814,16 @@ async function handleAuth(event) {
 
 function renderHome() {
   route = "home";
-  const stores = visibleStores(true).slice(0, 10);
+  const stores = homeStores(activeHomeTab);
   const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
     <section class="hero">
       <h1>${topTitleView()}</h1>
       <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
       <div class="tabs">
-        <button class="tab active">${tr("all")}</button>
-        <button class="tab">${tr("top")}</button>
-        <button class="tab">${tr("new")}</button>
+        <button class="tab ${activeHomeTab === "all" ? "active" : ""}" data-home-tab="all">${tr("all")}</button>
+        <button class="tab ${activeHomeTab === "top" ? "active" : ""}" data-home-tab="top">${tr("top")}</button>
+        <button class="tab ${activeHomeTab === "new" ? "active" : ""}" data-home-tab="new">${tr("new")}</button>
       </div>
     </section>
     <section class="feed">
@@ -1808,11 +1832,17 @@ function renderHome() {
     </section>
   `);
   bindCopyButtons();
+  document.querySelectorAll("[data-home-tab]").forEach((button) => {
+    button.onclick = () => {
+      activeHomeTab = button.dataset.homeTab || "all";
+      renderHome();
+    };
+  });
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
-    document.querySelector("[data-feed]").innerHTML = visibleStores(true)
+    document.querySelector("[data-feed]").innerHTML = homeStores(activeHomeTab)
       .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
-      .slice(0, 10).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
+      .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
 }
@@ -4882,6 +4912,23 @@ function uniqueStoreId(name) {
   return finalId;
 }
 
+function uniqueExchangeId(name) {
+  const base = String(name || `exchange-${Date.now()}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || `exchange-${Date.now()}`;
+  let finalId = base;
+  let counter = 2;
+  while (db.exchangeCards.some((card) => card.id === finalId)) finalId = `${base}-${counter++}`;
+  return finalId;
+}
+
+function exchangeAdminLink() {
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  return `${base}/#exchange-admin`;
+}
+
+function adminCreationNoticeView() {
+  return adminCreationNotice ? `<article class="panel admin-create-result">${adminCreationNotice}</article>` : "";
+}
+
 async function handleOwnerCreateStore(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
@@ -5134,35 +5181,32 @@ function renderAdmin() {
         <h2>${tr("admin")}</h2>
         <form class="form" data-store-form>
           <div class="row">
-            <label class="field">ID<input name="id" required placeholder="new-store"></label>
             <label class="field">${tr("tag")}<input name="tag" required placeholder="@tag"></label>
+            <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="seller login"></label>
           </div>
-          <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="seller login"></label>
-          <label><input name="isTop" type="checkbox"> Показывать в TOP 10</label>
+          <div class="check-row">
+            <label><input name="isTop" type="checkbox"> Показывать в TOP 10</label>
+            <label><input name="isFeatured" type="checkbox"> Добавить в ТОП</label>
+            <label><input name="isNew" type="checkbox"> Добавить в НОВЫЕ</label>
+            <label><input name="visibleInCatalog" type="checkbox" checked> Раздел магазины</label>
+          </div>
           <label class="field">${tr("name")}<input name="name" required></label>
           <label class="field">${tr("short")}<input name="short" required></label>
           <label class="field">${tr("full")}<textarea name="description" required></textarea></label>
-          <div class="row">
-            <label class="field">Страна
-              <select name="country">
-                <option value="moldova">Молдова</option>
-                <option value="transnistria">Приднестровье</option>
-              </select>
-            </label>
-            <label class="field">Города для фильтра<input name="cities" placeholder="chisinau, balti"></label>
+          <div class="row store-filter-selects" data-store-filter-group>
+            ${storeFilterPicker("Страны фильтра", "countries", storeFilterCountryOptions(["moldova"]))}
+            ${storeFilterPicker("Города фильтра", "cities", storeFilterCityOptions(["moldova"], []))}
           </div>
           <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*,video/*"></label>
           <label class="field">Баннер страницы<input name="cover" type="file" accept="image/*"></label>
+          <label class="field">Пароль админки этой карточки<input name="adminPassword" type="password" required placeholder="пароль для магазина"></label>
           <button class="primary">${tr("addStore")}</button>
         </form>
       </article>
       <article class="panel">
         <h2>Добавить обменник</h2>
         <form class="form" data-exchange-admin-form>
-          <div class="row">
-            <label class="field">ID<input name="id" required placeholder="exchange-1"></label>
-            <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="operator login"></label>
-          </div>
+          <label class="field">${tr("ownerLogin")}<input name="ownerLogin" required placeholder="operator login"></label>
           <label class="field">${tr("name")}<input name="name" required placeholder="Обменник"></label>
           <label class="field">${tr("full")}<textarea name="description" required></textarea></label>
           <div class="row">
@@ -5170,19 +5214,19 @@ function renderAdmin() {
             <label class="field">Курс обнала MDL/$<input name="cashoutRate" type="number" step="0.01" value="17" required></label>
           </div>
           <label class="field">LTC кошелек обменника<input name="ltcWallet" placeholder="ltc1..."></label>
-          <label class="field">Регион
-            <select name="regions">
-              <option value="moldova">Молдова</option>
-              <option value="transnistria">Приднестровье</option>
-              <option value="both">Молдова и Приднестровье</option>
-            </select>
-          </label>
+          <div class="row store-filter-selects" data-store-filter-group>
+            ${storeFilterPicker("Страны фильтра", "countries", storeFilterCountryOptions(["moldova"]))}
+            ${storeFilterPicker("Города фильтра", "cities", storeFilterCityOptions(["moldova"], []))}
+          </div>
           <div class="row">
             ${exchangeMethods.map((method) => `<label class="field">${method}<input name="req_${method}" value="60327998"></label>`).join("")}
           </div>
+          <label class="field">${tr("upload")}<input name="image" type="file" accept="image/*,video/*"></label>
+          <label class="field">Пароль админки этого обменника<input name="adminPassword" type="password" required placeholder="пароль для обменника"></label>
           <button class="primary">Добавить обменник</button>
         </form>
       </article>
+      ${adminCreationNoticeView()}
       <article class="panel">
         <h2>Настройки оплат</h2>
         <form class="form" data-payment-settings-form>
@@ -5215,7 +5259,14 @@ function adminStoreEditor(store) {
         <label class="field">Баннер страницы магазина<input name="storeCover" type="file" accept="image/*"></label>
         <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
         <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
-        ${route !== "seller" ? `<label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>` : ""}
+        ${route !== "seller" ? `
+          <div class="check-row">
+            <label><input name="isTop" type="checkbox" ${store.isTop ? "checked" : ""}> Показывать в TOP 10</label>
+            <label><input name="isFeatured" type="checkbox" ${store.isFeatured ? "checked" : ""}> Добавить в ТОП</label>
+            <label><input name="isNew" type="checkbox" ${store.isNew ? "checked" : ""}> Добавить в НОВЫЕ</label>
+            <label><input name="visibleInCatalog" type="checkbox" ${store.visibleInCatalog !== false ? "checked" : ""}> Раздел магазины</label>
+          </div>
+        ` : ""}
         <div class="row">
           <label class="field">Название магазина<input name="storeName" value="${esc(store.name || "")}"></label>
           <label class="field">Короткое описание<input name="storeShort" value="${esc(store.short || "")}"></label>
@@ -5285,7 +5336,12 @@ function bindAdminProductForms() {
       const priceUsd = Number(data.get("priceUsd") || 0);
       store.ltcWallet = data.get("ltcWallet").trim();
       store.adminPassword = data.get("adminPassword").trim() || storeAdminPassword(store);
-      if (data.has("isTop")) store.isTop = Boolean(data.get("isTop"));
+      if (route !== "seller") {
+        store.isTop = Boolean(data.get("isTop"));
+        store.isFeatured = Boolean(data.get("isFeatured"));
+        store.isNew = Boolean(data.get("isNew"));
+        store.visibleInCatalog = Boolean(data.get("visibleInCatalog"));
+      }
       store.name = data.get("storeName").trim() || store.name;
       store.short = data.get("storeShort").trim() || store.short;
       store.description = data.get("storeDescription").trim();
@@ -5343,22 +5399,27 @@ async function handleStoreCreate(event) {
   const coverFile = data.get("cover");
   const cover = coverFile && coverFile.size ? await fileToDataUrl(coverFile) : image;
   const ownerLogin = data.get("ownerLogin").trim();
+  const adminPassword = String(data.get("adminPassword") || "").trim();
+  const name = data.get("name").trim();
+  const id = uniqueStoreId(name || data.get("tag"));
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   const finalOwnerLogin = existingOwner?.login || ownerLogin;
   if (!existingOwner) {
-    db.users.push({ login: ownerLogin, password: "123", name: ownerLogin, role: "seller" });
+    db.users.push({ login: ownerLogin, password: adminPassword || "123", name: ownerLogin, role: "seller" });
   }
-  db.stores.push({
-    id: data.get("id").trim(),
+  const store = {
+    id,
     tag: data.get("tag").trim(),
     ownerLogin: finalOwnerLogin,
-    adminPassword: "123",
+    adminPassword,
     isTop: Boolean(data.get("isTop")),
-    visibleInCatalog: true,
-    countries: [data.get("country")].filter(Boolean),
-    cities: String(data.get("cities") || "").split(",").map((item) => item.trim()).filter(Boolean),
+    isFeatured: Boolean(data.get("isFeatured")),
+    isNew: Boolean(data.get("isNew")),
+    visibleInCatalog: Boolean(data.get("visibleInCatalog")),
+    countries: listFromForm(data, "countries"),
+    cities: listFromForm(data, "cities"),
     districts: [],
-    name: data.get("name").trim(),
+    name,
     short: data.get("short").trim(),
     description: data.get("description").trim(),
     image,
@@ -5369,7 +5430,15 @@ async function handleStoreCreate(event) {
     ...NEW_STORE_STATS,
     products: [],
     reviewsList: []
-  });
+  };
+  db.stores.push(store);
+  adminCreationNotice = `
+    <h3>Новая карта создана</h3>
+    <p><strong>${esc(store.name)}</strong> · ${new Date().toLocaleString()}</p>
+    <p>Админ панель магазина: <a href="${esc(sellerAdminLink(store))}">${esc(sellerAdminLink(store))}</a></p>
+    <p>Логин владельца: <strong>${esc(finalOwnerLogin)}</strong></p>
+    <p>Пароль админ панели: <strong>${esc(adminPassword || "не задан")}</strong></p>
+  `;
   saveDb();
   renderAdmin();
 }
@@ -5377,33 +5446,47 @@ async function handleStoreCreate(event) {
 async function handleExchangeCardCreate(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
-  const id = data.get("id").trim();
+  const name = data.get("name").trim();
+  const id = uniqueExchangeId(name);
   if (db.exchangeCards.some((card) => card.id === id)) {
     showToast("Такой обменник уже есть");
     return;
   }
   const ownerLogin = data.get("ownerLogin").trim();
+  const adminPassword = String(data.get("adminPassword") || "").trim();
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   const finalOwnerLogin = existingOwner?.login || ownerLogin;
   if (!existingOwner) {
-    db.users.push({ login: ownerLogin, password: "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
+    db.users.push({ login: ownerLogin, password: adminPassword || "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
   }
   const file = data.get("image");
   const image = file && file.size ? await fileToDataUrl(file) : fallbackImage;
-  db.exchangeCards.push(normalizeExchangeCard({
+  const card = normalizeExchangeCard({
     id,
-    name: data.get("name").trim(),
+    name,
     ownerLogin: finalOwnerLogin,
+    adminPassword,
     description: data.get("description").trim(),
     image,
-    regions: [data.get("regions")],
+    countries: listFromForm(data, "countries"),
+    cities: listFromForm(data, "cities"),
+    districts: [],
+    regions: listFromForm(data, "countries"),
     exchangeRate: Number(data.get("exchangeRate")),
     cashoutRate: Number(data.get("cashoutRate")),
     ltcUsd: 54.2,
     ltcWallet: data.get("ltcWallet"),
     requisites: exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: true })),
     active: true
-  }));
+  });
+  db.exchangeCards.push(card);
+  adminCreationNotice = `
+    <h3>Новая карта обменника создана</h3>
+    <p><strong>${esc(card.name)}</strong> · ${new Date().toLocaleString()}</p>
+    <p>Админ панель обменника: <a href="${esc(exchangeAdminLink())}">${esc(exchangeAdminLink())}</a></p>
+    <p>Логин владельца: <strong>${esc(finalOwnerLogin)}</strong></p>
+    <p>Пароль админ панели: <strong>${esc(adminPassword || "не задан")}</strong></p>
+  `;
   saveDb();
   renderAdmin();
 }
