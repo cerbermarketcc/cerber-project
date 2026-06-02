@@ -3038,11 +3038,54 @@ label,
   display: none;
 }
 
-.store-filter-selects select[multiple] {
-  min-height: 132px;
-  padding: 12px 14px;
+.store-filter-selects {
+  align-items: stretch;
 }
 
-.store-filter-selects select[multiple] option {
-  padding: 7px 6px;
+.store-filter-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: min(100%, 220px);
+}
+
+.store-filter-picker-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.mini-filter-toggle {
+  min-height: 34px;
+  padding: 8px 14px;
+}
+
+.store-filter-list {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  max-height: 210px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.store-filter-option {
+  align-items: center;
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  font-size: 14px;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 9px 8px;
+}
+
+.store-filter-option:hover {
+  background: var(--soft);
+}
+
+.store-filter-option input {
+  accent-color: var(--accent);
+  height: 18px;
+  width: 18px;
 }

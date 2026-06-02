@@ -1165,37 +1165,44 @@ function districtSelectOptions(country = "moldova", city = "chisinau", selected 
   ].join("");
 }
 
-function selectedOptionValues(select) {
-  return Array.from(select?.selectedOptions || []).map((option) => option.value).filter(Boolean);
+function selectedCheckboxValues(container) {
+  return Array.from(container?.querySelectorAll("input[type='checkbox']:checked") || []).map((input) => input.value).filter(Boolean);
 }
 
-function storeFilterCountryOptions(selected = []) {
+function storeFilterCheckboxOptions(name, items, selected = []) {
   const selectedSet = new Set(selected);
-  return Object.entries(filterOptions.countries).map(([key, item]) => (
-    `<option value="${esc(key)}" ${selectedSet.has(key) ? "selected" : ""}>${esc(item.label)}</option>`
+  return items.map(([key, label]) => (
+    `<label class="store-filter-option"><span>${esc(label)}</span><input type="checkbox" name="${esc(name)}" value="${esc(key)}" ${selectedSet.has(key) ? "checked" : ""}></label>`
   )).join("");
 }
 
-function storeFilterCityOptions(countries = [], selected = []) {
+function storeFilterCountryOptions(selected = [], name = "countries") {
+  return storeFilterCheckboxOptions(
+    name,
+    Object.entries(filterOptions.countries).map(([key, item]) => [key, item.label]),
+    selected
+  );
+}
+
+function storeFilterCityOptions(countries = [], selected = [], name = "cities") {
   const selectedCountries = countries.length ? countries : Object.keys(filterOptions.countries);
-  const selectedSet = new Set(selected);
   const seen = new Set();
-  return selectedCountries.flatMap((countryKey) => {
+  const items = selectedCountries.flatMap((countryKey) => {
     const country = filterOptions.countries[countryKey];
     if (!country) return [];
     return Object.entries(country.cities).map(([cityKey, item]) => {
       if (seen.has(cityKey)) return "";
       seen.add(cityKey);
-      return `<option value="${esc(cityKey)}" ${selectedSet.has(cityKey) ? "selected" : ""}>${esc(item.label)}</option>`;
+      return [cityKey, item.label];
     });
-  }).filter(Boolean).join("");
+  }).filter(Boolean);
+  return storeFilterCheckboxOptions(name, items, selected);
 }
 
-function storeFilterDistrictOptions(countries = [], cities = [], selected = []) {
+function storeFilterDistrictOptions(countries = [], cities = [], selected = [], name = "districts") {
   const selectedCountries = countries.length ? countries : Object.keys(filterOptions.countries);
-  const selectedSet = new Set(selected);
   const seen = new Set();
-  const options = [];
+  const items = [];
   selectedCountries.forEach((countryKey) => {
     const country = filterOptions.countries[countryKey];
     if (!country) return;
@@ -1204,11 +1211,34 @@ function storeFilterDistrictOptions(countries = [], cities = [], selected = []) 
       (item.districts || []).forEach((district) => {
         if (seen.has(district)) return;
         seen.add(district);
-        options.push(`<option value="${esc(district)}" ${selectedSet.has(district) ? "selected" : ""}>${esc(district)}</option>`);
+        items.push([district, district]);
       });
     });
   });
-  return options.join("");
+  return storeFilterCheckboxOptions(name, items, selected);
+}
+
+function storeFilterPicker(label, target, content) {
+  return `
+    <div class="store-filter-picker">
+      <div class="store-filter-picker-head">
+        <strong>${label}</strong>
+        <button class="ghost-button mini-filter-toggle" type="button" data-store-filter-toggle="${target}">Выбрать</button>
+      </div>
+      <div class="store-filter-list" data-store-filter-${target}>${content}</div>
+    </div>
+  `;
+}
+
+function updateStoreFilterToggleLabels(group) {
+  ["countries", "cities", "districts"].forEach((target) => {
+    const list = group.querySelector(`[data-store-filter-${target}]`);
+    const button = group.querySelector(`[data-store-filter-toggle="${target}"]`);
+    if (!list || !button) return;
+    const boxes = Array.from(list.querySelectorAll("input[type='checkbox']"));
+    const allChecked = boxes.length > 0 && boxes.every((box) => box.checked);
+    button.textContent = allChecked ? "Снять" : "Выбрать";
+  });
 }
 
 function bindStoreFilterSelects(root = document) {
@@ -1217,20 +1247,39 @@ function bindStoreFilterSelects(root = document) {
     const cities = group.querySelector("[data-store-filter-cities]");
     const districts = group.querySelector("[data-store-filter-districts]");
     if (!countries || !cities || !districts) return;
+    const countryName = group.dataset.countryName || "countries";
+    const cityName = group.dataset.cityName || "cities";
+    const districtName = group.dataset.districtName || "districts";
 
     const refreshDistricts = () => {
-      const selectedDistricts = selectedOptionValues(districts);
-      districts.innerHTML = storeFilterDistrictOptions(selectedOptionValues(countries), selectedOptionValues(cities), selectedDistricts);
+      const selectedDistricts = selectedCheckboxValues(districts);
+      districts.innerHTML = storeFilterDistrictOptions(selectedCheckboxValues(countries), selectedCheckboxValues(cities), selectedDistricts, districtName);
+      updateStoreFilterToggleLabels(group);
     };
 
     const refreshCities = () => {
-      const selectedCities = selectedOptionValues(cities);
-      cities.innerHTML = storeFilterCityOptions(selectedOptionValues(countries), selectedCities);
+      const selectedCities = selectedCheckboxValues(cities);
+      cities.innerHTML = storeFilterCityOptions(selectedCheckboxValues(countries), selectedCities, cityName);
       refreshDistricts();
     };
 
-    countries.addEventListener("change", refreshCities);
-    cities.addEventListener("change", refreshDistricts);
+    group.addEventListener("change", (event) => {
+      if (event.target.name === countryName) refreshCities();
+      if (event.target.name === cityName) refreshDistricts();
+      updateStoreFilterToggleLabels(group);
+    });
+    group.querySelectorAll("[data-store-filter-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = button.dataset.storeFilterToggle;
+        const list = group.querySelector(`[data-store-filter-${target}]`);
+        const boxes = Array.from(list?.querySelectorAll("input[type='checkbox']") || []);
+        const shouldCheck = boxes.some((box) => !box.checked);
+        boxes.forEach((box) => { box.checked = shouldCheck; });
+        if (target === "countries") refreshCities();
+        if (target === "cities") refreshDistricts();
+        updateStoreFilterToggleLabels(group);
+      });
+    });
     refreshCities();
   });
 }
@@ -4639,6 +4688,7 @@ function bindOwnerPanel() {
   });
   document.querySelector("[data-owner-create-store]")?.addEventListener("submit", handleOwnerCreateStore);
   document.querySelectorAll("[data-owner-profile-form]").forEach((form) => form.addEventListener("submit", handleOwnerProfileSave));
+  document.querySelectorAll("[data-owner-store-filter-form]").forEach((form) => form.addEventListener("submit", handleOwnerStoreFilterSave));
   document.querySelectorAll("[data-owner-add-product]").forEach((form) => form.addEventListener("submit", handleOwnerAddProduct));
   document.querySelectorAll("[data-owner-add-position]").forEach((form) => form.addEventListener("submit", handleOwnerAddPosition));
   document.querySelectorAll("[data-owner-delete-product]").forEach((button) => button.onclick = () => ownerDeleteProduct(button.dataset.ownerDeleteProduct, button.dataset.storeId));
@@ -4646,9 +4696,11 @@ function bindOwnerPanel() {
 }
 
 function ownerStoreBuilderPanel() {
+  const hasStores = (db.stores || []).length > 0;
   return `
     <article class="panel owner-builder">
-      <h2>Конструктор карточек магазинов</h2>
+      <h2>${hasStores ? "Карточки магазинов" : "Конструктор карточек магазинов"}</h2>
+      ${hasStores ? `<p class="desc">Карточки ниже редактируются и сохраняют уже созданный магазин. Новую карточку добавляет владелец сайта в общей админке.</p>` : `
       <form class="form" data-owner-create-store>
         <div class="row">
           <label class="field">Название<input name="name" required placeholder="Market name"></label>
@@ -4658,6 +4710,7 @@ function ownerStoreBuilderPanel() {
         <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
         <button class="primary">Создать карточку</button>
       </form>
+      `}
     </article>
     ${db.stores.map(ownerStoreManager).join("")}
   `;
@@ -4674,11 +4727,6 @@ function ownerStoreManager(store) {
         </div>
         <label class="field">Описание карточки<input name="short" value="${esc(store.short || "")}"></label>
         <label class="field">Описание профиля<textarea name="description">${esc(store.description || "")}</textarea></label>
-        <div class="row store-filter-selects" data-store-filter-group>
-          <label class="field">Страны фильтра<select name="countries" multiple data-store-filter-countries>${storeFilterCountryOptions(store.countries || [])}</select></label>
-          <label class="field">Города фильтра<select name="cities" multiple data-store-filter-cities>${storeFilterCityOptions(store.countries || [], store.cities || [])}</select></label>
-          <label class="field">Районы фильтра<select name="districts" multiple data-store-filter-districts>${storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [])}</select></label>
-        </div>
         <div class="row">
           <label class="field">LTC кошелек<input name="ltcWallet" value="${esc(store.ltcWallet || "")}"></label>
           <label class="field">Пароль админки магазина<input name="adminPassword" value="${esc(store.adminPassword || "")}"></label>
@@ -4686,6 +4734,15 @@ function ownerStoreManager(store) {
         <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
         <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
         <button class="primary">Сохранить профиль</button>
+      </form>
+      <form class="form store-filter-form" data-owner-store-filter-form data-store-id="${esc(store.id)}">
+        <h3>Фильтр карточки</h3>
+        <div class="row store-filter-selects" data-store-filter-group>
+          ${storeFilterPicker("Страны фильтра", "countries", storeFilterCountryOptions(store.countries || []))}
+          ${storeFilterPicker("Города фильтра", "cities", storeFilterCityOptions(store.countries || [], store.cities || []))}
+          ${storeFilterPicker("Районы фильтра", "districts", storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || []))}
+        </div>
+        <button class="primary">Сохранить фильтр</button>
       </form>
       <div class="owner-products">
         <h3>Блоки товаров</h3>
@@ -4883,9 +4940,6 @@ async function handleOwnerProfileSave(event) {
   store.tag = String(data.get("tag") || store.tag || "").trim();
   store.short = String(data.get("short") || "").trim();
   store.description = String(data.get("description") || "").trim();
-  store.countries = listFromForm(data, "countries");
-  store.cities = listFromForm(data, "cities");
-  store.districts = listFromForm(data, "districts");
   store.ltcWallet = String(data.get("ltcWallet") || "").trim();
   store.adminPassword = String(data.get("adminPassword") || "").trim();
   const imageFile = data.get("image");
@@ -4894,6 +4948,20 @@ async function handleOwnerProfileSave(event) {
   if (coverFile && coverFile.size) store.cover = await fileToDataUrl(coverFile);
   saveDb();
   showToast("Профиль магазина сохранен");
+  renderOwnerPanel();
+}
+
+function handleOwnerStoreFilterSave(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const store = storeById(form.dataset.storeId);
+  if (!store) return;
+  const data = new FormData(form);
+  store.countries = listFromForm(data, "countries");
+  store.cities = listFromForm(data, "cities");
+  store.districts = listFromForm(data, "districts");
+  saveDb();
+  showToast("Фильтр карточки сохранён");
   renderOwnerPanel();
 }
 
@@ -5164,10 +5232,10 @@ function adminStoreEditor(store) {
           <label class="field">Короткое описание<input name="storeShort" value="${esc(store.short || "")}"></label>
         </div>
         <label class="field">Описание страницы магазина<textarea name="storeDescription">${esc(store.description || "")}</textarea></label>
-        <div class="row store-filter-selects" data-store-filter-group>
-          <label class="field">Страны фильтра<select name="storeCountries" multiple data-store-filter-countries>${storeFilterCountryOptions(store.countries || [])}</select></label>
-          <label class="field">Города фильтра<select name="storeCities" multiple data-store-filter-cities>${storeFilterCityOptions(store.countries || [], store.cities || [])}</select></label>
-          <label class="field">Районы фильтра<select name="storeDistricts" multiple data-store-filter-districts>${storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [])}</select></label>
+        <div class="row store-filter-selects" data-store-filter-group data-country-name="storeCountries" data-city-name="storeCities" data-district-name="storeDistricts">
+          ${storeFilterPicker("Страны фильтра", "countries", storeFilterCountryOptions(store.countries || [], "storeCountries"))}
+          ${storeFilterPicker("Города фильтра", "cities", storeFilterCityOptions(store.countries || [], store.cities || [], "storeCities"))}
+          ${storeFilterPicker("Районы фильтра", "districts", storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [], "storeDistricts"))}
         </div>
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
