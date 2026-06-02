@@ -43,6 +43,21 @@
       backdrop-filter: blur(12px);
     }
 
+    .title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .online-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #38ff7a;
+      box-shadow: 0 0 8px #38ff7a, 0 0 18px color-mix(in srgb, #38ff7a 72%, transparent);
+      flex: 0 0 auto;
+    }
+
     h1 {
       margin: 0;
       font-size: 17px;
@@ -169,8 +184,11 @@
 <body>
   <div class="app">
     <header>
-      <h1 id="title">Общий чат</h1>
-      <div class="status" id="status">Подключение...</div>
+      <div class="title-row">
+        <span class="online-dot"></span>
+        <h1 id="title">Cerber Чат</h1>
+      </div>
+      <div class="status" id="status">онлайн: 0</div>
     </header>
     <main id="messages"></main>
     <footer>
@@ -233,7 +251,8 @@
     }
 
     function render(payload) {
-      titleEl.textContent = payload.title || "Общий чат";
+      titleEl.textContent = "Cerber Чат";
+      statusEl.textContent = `онлайн: ${Number(payload.onlineCount || 0)}`;
       const messages = payload.messages || [];
       const signature = JSON.stringify(messages.map((item) => [item.id, item.body, item.attachments?.length || 0]));
       if (signature === lastRendered) return;
@@ -266,10 +285,17 @@
       try {
         const payload = await api("/api/telegram/group-chat");
         render(payload);
-        statusEl.textContent = "Онлайн";
       } catch (error) {
         statusEl.textContent = error.message;
       }
+    }
+
+    async function presence() {
+      if (!token) return;
+      try {
+        const payload = await api("/api/telegram/group-chat/presence", { method: "POST", body: "{}" });
+        statusEl.textContent = `онлайн: ${Number(payload.onlineCount || 0)}`;
+      } catch {}
     }
 
     function fileToDataUrl(file) {
@@ -320,8 +346,11 @@
       }
     });
 
-    load();
-    setInterval(load, 3000);
+    presence().then(load);
+    setInterval(() => {
+      presence();
+      load();
+    }, 3000);
   </script>
 </body>
 </html>

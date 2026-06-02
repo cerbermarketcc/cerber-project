@@ -302,6 +302,9 @@ async function telegramGroupChat() {
   const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
   const state = settings?.data || {};
   const settingsData = state.groupSettings || {};
+  const now = Date.now();
+  const presence = state.telegramChatPresence || {};
+  const onlineCount = Object.values(presence).filter((item) => now - Number(item.seenAt || 0) < 60 * 1000).length;
   const messages = (Array.isArray(state.groupMessages) ? state.groupMessages : [])
     .filter((message) => !message.deleted)
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
@@ -309,9 +312,30 @@ async function telegramGroupChat() {
     .map(publicGroupMessage);
 
   return {
-    title: settingsData.title || "Общий чат",
+    title: "Cerber Чат",
+    onlineCount,
     messages
   };
+}
+
+async function updateTelegramChatPresence(user) {
+  await ensureSeed();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  const now = Date.now();
+  const presence = state.telegramChatPresence || {};
+  presence[loginKey(user.login)] = {
+    login: user.login,
+    seenAt: now
+  };
+  for (const [key, item] of Object.entries(presence)) {
+    if (now - Number(item.seenAt || 0) > 5 * 60 * 1000) {
+      delete presence[key];
+    }
+  }
+  state.telegramChatPresence = presence;
+  await saveSettingsState(state);
+  return Object.values(presence).filter((item) => now - Number(item.seenAt || 0) < 60 * 1000).length;
 }
 
 async function addTelegramGroupMessage(user, payload = {}) {
@@ -465,6 +489,16 @@ app.post("/api/telegram/group-chat", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     res.json({ message: await addTelegramGroupMessage(user, req.body || {}) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/group-chat/presence", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    res.json({ onlineCount: await updateTelegramChatPresence(user) });
   } catch (error) {
     next(error);
   }
