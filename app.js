@@ -13,7 +13,7 @@ let turnstileWidgetId = null;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
-const ADMIN_PANEL_PASSWORD = "admin2026";
+const ADMIN_PANEL_PASSWORD = "admincerbercc1212";
 const WALLET_COINS = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
@@ -4562,21 +4562,6 @@ function renderOwnerPanel() {
         </form>
       </article>
       ${ownerStoreBuilderPanel()}
-      <article class="panel">
-        <h2>Заявки магазинов</h2>
-        ${(db.storeApplications || []).map((application) => `
-          <article class="ref-item">
-            <div>
-              <h3>${esc(application.name || "Новая заявка")}</h3>
-              <p>${esc(application.tag || "")} · ${esc(application.applicantLogin || application.ownerLogin || "")} · ${esc(application.status)}</p>
-              <p>${esc(application.description || "")}</p>
-            </div>
-            <div>
-              ${application.status === "pending" ? `<button class="primary" data-owner-approve="${esc(application.id)}">Одобрить</button><button class="ghost-button" data-owner-reject="${esc(application.id)}">Отклонить</button>` : `<span class="status-pill">${esc(application.status)}</span>`}
-            </div>
-          </article>
-        `).join("") || `<p>Заявок пока нет.</p>`}
-      </article>
       <article class="panel owner-store-control-panel">
         <h2>Магазины</h2>
         ${db.stores.map((store) => {

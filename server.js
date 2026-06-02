@@ -106,7 +106,7 @@ async function verifyCaptcha(token, req) {
 
 async function ensureSeed() {
   if (!supabase) return;
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin2026";
+  const adminPassword = process.env.ADMIN_PASSWORD || "admincerbercc1212";
   const adminHash = await bcrypt.hash(adminPassword, 12);
   await supabase.from("profiles").upsert([
     { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
