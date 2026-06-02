@@ -124,17 +124,28 @@ const filterOptions = {
   },
   categories: [
     "Все товары",
-    "Электронные товары",
-    "SIM-Карты",
-    "Аккаунты",
-    "Безопасность",
-    "Документы",
-    "Дизайн/Кодинг",
-    "Реклама/Рассылки",
-    "Финансы",
-    "Доставки/Перевозки",
-    "Работа",
-    "Разное"
+    "Шишки",
+    "Гашиш",
+    "Масло/житкость для вейпа",
+    "Альфа (A-PVP)",
+    "Амфетамин",
+    "Мефедрон",
+    "Метамфетамин",
+    "Кокаин",
+    "MDPV",
+    "MDMA",
+    "Экстази",
+    "ЛСД",
+    "Грибы",
+    "Антидепрессанты",
+    "Subutex",
+    "Героин",
+    "Метадон",
+    "Трамадол",
+    "Обмен/Обнал",
+    "Банковские карты/кошельки",
+    "Курьер/Кладмен",
+    "Депрессанты"
   ]
 };
 
@@ -1905,6 +1916,7 @@ function handleProductReview(event) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.status !== "completed" || order.reviewLeft) return;
   const store = storeById(order.storeId);
+  
   const product = productById(store, order.productId);
   if (!store) return;
   const data = new FormData(event.currentTarget);
