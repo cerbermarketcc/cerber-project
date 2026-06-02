@@ -2504,16 +2504,16 @@ function renderProductPaymentOrder(orderId) {
         <p>Оплата принимается в LTC. Средства идут на LTC-счёт магазина.</p>
         <p>Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}%.</p>
         <p class="desc">После подтверждения платежа заказ автоматически станет завершённым, а описание из строки выдачи появится в деталях заказа.</p>
-        ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-now-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
+        ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-gateway-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </article>
     </section>
   `);
-  document.querySelector("[data-create-now-payment]")?.addEventListener("click", (event) => createNowPaymentsInvoice(event.currentTarget.dataset.createNowPayment, event.currentTarget));
+  document.querySelector("[data-create-gateway-payment]")?.addEventListener("click", (event) => createGatewayInvoice(event.currentTarget.dataset.createGatewayPayment, event.currentTarget));
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
 }
 
-async function createNowPaymentsInvoice(orderId, button = null) {
+async function createGatewayInvoice(orderId, button = null) {
   setButtonLoading(button, true, "Создаём оплату");
   try {
     const payload = await apiFetch("/api/payments/gateway/create", {
