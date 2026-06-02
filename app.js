@@ -1124,6 +1124,57 @@ function locationLabel(position = {}) {
   return [city, position.district].filter(Boolean).join(", ");
 }
 
+function countrySelectOptions(selected = "moldova") {
+  return Object.entries(filterOptions.countries).map(([key, item]) => (
+    `<option value="${esc(key)}" ${key === selected ? "selected" : ""}>${esc(item.label)}</option>`
+  )).join("");
+}
+
+function citySelectOptions(country = "moldova", selected = "chisinau") {
+  const cities = filterOptions.countries[country]?.cities || filterOptions.countries.moldova.cities;
+  const fallbackCity = Object.keys(cities)[0] || "";
+  const value = cities[selected] ? selected : fallbackCity;
+  return Object.entries(cities).map(([key, item]) => (
+    `<option value="${esc(key)}" ${key === value ? "selected" : ""}>${esc(item.label || key)}</option>`
+  )).join("");
+}
+
+function districtSelectOptions(country = "moldova", city = "chisinau", selected = "") {
+  const cityInfo = filterOptions.countries[country]?.cities?.[city]
+    || filterOptions.countries.moldova.cities.chisinau;
+  const districts = cityInfo?.districts || [];
+  return [
+    `<option value="">Любой район</option>`,
+    ...districts.map((district) => (
+      `<option value="${esc(district)}" ${district === selected ? "selected" : ""}>${esc(district)}</option>`
+    ))
+  ].join("");
+}
+
+function bindLocationSelects(root = document) {
+  root.querySelectorAll("[data-location-group]").forEach((group) => {
+    const countrySelect = group.querySelector("[data-location-country]");
+    const citySelect = group.querySelector("[data-location-city]");
+    const districtSelect = group.querySelector("[data-location-district]");
+    if (!countrySelect || !citySelect || !districtSelect) return;
+
+    const refreshDistricts = () => {
+      const currentDistrict = districtSelect.value;
+      districtSelect.innerHTML = districtSelectOptions(countrySelect.value, citySelect.value, currentDistrict);
+    };
+
+    const refreshCities = () => {
+      const currentCity = citySelect.value;
+      citySelect.innerHTML = citySelectOptions(countrySelect.value, currentCity);
+      refreshDistricts();
+    };
+
+    countrySelect.addEventListener("change", refreshCities);
+    citySelect.addEventListener("change", refreshDistricts);
+    refreshCities();
+  });
+}
+
 function orderCanDispute(order) {
   if (!order || order.type !== "product" || order.status !== "completed") return false;
   const paidAt = Number(order.paidAt || order.completedAt || 0);
@@ -4434,6 +4485,7 @@ function renderOwnerPanel() {
 }
 
 function bindOwnerPanel() {
+  bindLocationSelects();
   document.querySelector("[data-owner-settings-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -4588,8 +4640,11 @@ function ownerProductManager(store, product) {
         <div class="row">
           <label class="field">Тип<input name="deliveryType" placeholder="Прикоп / Курьер / Готовый"></label>
           <label class="field">Вес<input name="weight" placeholder="-"></label>
-          <label class="field">Город<input name="city" value="chisinau"></label>
-          <label class="field">Район<input name="district" placeholder="Центр"></label>
+        </div>
+        <div class="row" data-location-group>
+          <label class="field">Страна<select name="country" data-location-country>${countrySelectOptions((store.countries || [])[0] || "moldova")}</select></label>
+          <label class="field">Город<select name="city" data-location-city>${citySelectOptions((store.countries || [])[0] || "moldova", (store.cities || [])[0] || "chisinau")}</select></label>
+          <label class="field">Район<select name="district" data-location-district>${districtSelectOptions((store.countries || [])[0] || "moldova", (store.cities || [])[0] || "chisinau")}</select></label>
         </div>
         <label class="field">Описание позиции<textarea name="description"></textarea></label>
         <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный товар"></textarea></label>
@@ -4799,7 +4854,7 @@ function handleOwnerAddPosition(event) {
     title: String(data.get("title") || product.title).trim(),
     description: String(data.get("description") || "").trim(),
     priceUsd,
-    country: (store.countries || [])[0] || "moldova",
+    country: String(data.get("country") || (store.countries || [])[0] || "moldova").trim(),
     city: String(data.get("city") || "chisinau").trim(),
     district: String(data.get("district") || "").trim(),
     deliveryType: String(data.get("deliveryType") || "Товар").trim(),
@@ -5030,10 +5085,10 @@ function adminStoreEditor(store) {
           <label class="field">Категория<input name="category" value="${esc(product.category || "Работа / Курьер")}"></label>
           <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || position.priceUsd || 50)}"></label>
         </div>
-        <div class="row">
-          <label class="field">Страна<input name="country" value="${esc(position.country || "moldova")}"></label>
-          <label class="field">Город<input name="city" value="${esc(position.city || "chisinau")}"></label>
-          <label class="field">Район<input name="district" value="${esc(position.district || "")}"></label>
+        <div class="row" data-location-group>
+          <label class="field">Страна<select name="country" data-location-country>${countrySelectOptions(position.country || "moldova")}</select></label>
+          <label class="field">Город<select name="city" data-location-city>${citySelectOptions(position.country || "moldova", position.city || "chisinau")}</select></label>
+          <label class="field">Район<select name="district" data-location-district>${districtSelectOptions(position.country || "moldova", position.city || "chisinau", position.district || "")}</select></label>
           <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
           <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
         </div>
@@ -5061,6 +5116,7 @@ function handlePaymentSettingsSave(event) {
 }
 
 function bindAdminProductForms() {
+  bindLocationSelects();
   document.querySelectorAll("[data-admin-product-form]").forEach((form) => {
     form.onsubmit = async (event) => {
       event.preventDefault();
@@ -5209,7 +5265,7 @@ function renderSeller() {
   const risk = storeRisk(store);
   const disputes = storeDisputes(store.id);
   layout(`
-    <section class="screen">
+    <section class="screen seller-admin-screen">
       <article class="panel">
         <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
         ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
@@ -5248,10 +5304,10 @@ function renderSeller() {
             <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
           </div>
           <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
-          <div class="row">
-            <label class="field">Страна<select name="country"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option></select></label>
-            <label class="field">Город<input name="city" value="chisinau"></label>
-            <label class="field">Район<input name="district" placeholder="Чеканы"></label>
+          <div class="row" data-location-group>
+            <label class="field">Страна<select name="country" data-location-country>${countrySelectOptions("moldova")}</select></label>
+            <label class="field">Город<select name="city" data-location-city>${citySelectOptions("moldova", "chisinau")}</select></label>
+            <label class="field">Район<select name="district" data-location-district>${districtSelectOptions("moldova", "chisinau", "Чеканы")}</select></label>
           </div>
           <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ"></textarea></label>
           <label class="field">Главное фото<input name="mainImage" type="file" accept="image/*"></label>
@@ -5293,6 +5349,7 @@ function renderSeller() {
       renderMessages();
     };
   });
+  bindLocationSelects();
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -5324,8 +5381,8 @@ function renderSeller() {
         description: data.get("description").trim(),
         priceUsd,
         country: data.get("country"),
-        city: data.get("city").trim(),
-        district: data.get("district").trim(),
+        city: String(data.get("city") || "chisinau").trim(),
+        district: String(data.get("district") || "").trim(),
         deliveryType: data.get("deliveryType").trim() || "Курьер",
         deliveryItems,
         stock: deliveryItems.length,

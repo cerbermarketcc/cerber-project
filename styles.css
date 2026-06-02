@@ -3027,3 +3027,8 @@ label,
 .caption {
   font-size: 13px;
 }
+
+.seller-admin-screen > .panel:first-child .status-pill,
+.seller-admin-screen > .panel:first-child .stats {
+  display: none;
+}
