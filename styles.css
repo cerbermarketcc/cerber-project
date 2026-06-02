@@ -3037,3 +3037,12 @@ label,
 .owner-store-control-panel {
   display: none;
 }
+
+.store-filter-selects select[multiple] {
+  min-height: 132px;
+  padding: 12px 14px;
+}
+
+.store-filter-selects select[multiple] option {
+  padding: 7px 6px;
+}

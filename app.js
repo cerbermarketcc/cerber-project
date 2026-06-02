@@ -212,6 +212,7 @@ function marketologSeedStore() {
     isTop: true,
     countries: ["moldova"],
     cities: ["chisinau"],
+    districts: chisinauDistricts,
     name: "Marketolog",
     short: "Маркетолог это семья ❤️",
     description: "Тестовое описание для подготовки проекта святая троица.",
@@ -556,6 +557,7 @@ function normalizeDb(next) {
       visibleInCatalog: store.visibleInCatalog !== false,
       countries: Array.isArray(store.countries) ? store.countries : [],
       cities: Array.isArray(store.cities) ? store.cities : [],
+      districts: Array.isArray(store.districts) ? store.districts : [],
       orders: Number.isFinite(Number(store.orders)) ? Number(store.orders) : NEW_STORE_STATS.orders,
       reviews: Number.isFinite(Number(store.reviews)) ? Number(store.reviews) : NEW_STORE_STATS.reviews,
       rating: Number.isFinite(Number(store.rating)) ? Number(store.rating) : NEW_STORE_STATS.rating,
@@ -1051,9 +1053,10 @@ function visibleStores(topOnly = false) {
     const positions = products.flatMap((product) => product.positions || []);
     const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
     const hasCityScope = (store.cities || []).length || positions.some((position) => position.city);
+    const hasDistrictScope = (store.districts || []).length || positions.some((position) => position.district);
     const countryMatch = !filters.country || !hasCountryScope || (store.countries || []).includes(filters.country) || positions.some((position) => position.country === filters.country);
     const cityMatch = !filters.city || !hasCityScope || (store.cities || []).includes(filters.city) || positions.some((position) => position.city === filters.city);
-    const districtMatch = !filters.district || !positions.length || positions.some((position) => position.district === filters.district);
+    const districtMatch = !filters.district || !hasDistrictScope || (store.districts || []).includes(filters.district) || positions.some((position) => position.district === filters.district);
     const categoryMatch = !filters.category || filters.category === "Все товары" || !products.length || products.some((product) => String(product.category || "").includes(filters.category));
     return countryMatch && cityMatch && districtMatch && categoryMatch;
   }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
@@ -1160,6 +1163,76 @@ function districtSelectOptions(country = "moldova", city = "chisinau", selected 
       `<option value="${esc(district)}" ${district === selected ? "selected" : ""}>${esc(district)}</option>`
     ))
   ].join("");
+}
+
+function selectedOptionValues(select) {
+  return Array.from(select?.selectedOptions || []).map((option) => option.value).filter(Boolean);
+}
+
+function storeFilterCountryOptions(selected = []) {
+  const selectedSet = new Set(selected);
+  return Object.entries(filterOptions.countries).map(([key, item]) => (
+    `<option value="${esc(key)}" ${selectedSet.has(key) ? "selected" : ""}>${esc(item.label)}</option>`
+  )).join("");
+}
+
+function storeFilterCityOptions(countries = [], selected = []) {
+  const selectedCountries = countries.length ? countries : Object.keys(filterOptions.countries);
+  const selectedSet = new Set(selected);
+  const seen = new Set();
+  return selectedCountries.flatMap((countryKey) => {
+    const country = filterOptions.countries[countryKey];
+    if (!country) return [];
+    return Object.entries(country.cities).map(([cityKey, item]) => {
+      if (seen.has(cityKey)) return "";
+      seen.add(cityKey);
+      return `<option value="${esc(cityKey)}" ${selectedSet.has(cityKey) ? "selected" : ""}>${esc(item.label)}</option>`;
+    });
+  }).filter(Boolean).join("");
+}
+
+function storeFilterDistrictOptions(countries = [], cities = [], selected = []) {
+  const selectedCountries = countries.length ? countries : Object.keys(filterOptions.countries);
+  const selectedSet = new Set(selected);
+  const seen = new Set();
+  const options = [];
+  selectedCountries.forEach((countryKey) => {
+    const country = filterOptions.countries[countryKey];
+    if (!country) return;
+    Object.entries(country.cities).forEach(([cityKey, item]) => {
+      if (cities.length && !cities.includes(cityKey)) return;
+      (item.districts || []).forEach((district) => {
+        if (seen.has(district)) return;
+        seen.add(district);
+        options.push(`<option value="${esc(district)}" ${selectedSet.has(district) ? "selected" : ""}>${esc(district)}</option>`);
+      });
+    });
+  });
+  return options.join("");
+}
+
+function bindStoreFilterSelects(root = document) {
+  root.querySelectorAll("[data-store-filter-group]").forEach((group) => {
+    const countries = group.querySelector("[data-store-filter-countries]");
+    const cities = group.querySelector("[data-store-filter-cities]");
+    const districts = group.querySelector("[data-store-filter-districts]");
+    if (!countries || !cities || !districts) return;
+
+    const refreshDistricts = () => {
+      const selectedDistricts = selectedOptionValues(districts);
+      districts.innerHTML = storeFilterDistrictOptions(selectedOptionValues(countries), selectedOptionValues(cities), selectedDistricts);
+    };
+
+    const refreshCities = () => {
+      const selectedCities = selectedOptionValues(cities);
+      cities.innerHTML = storeFilterCityOptions(selectedOptionValues(countries), selectedCities);
+      refreshDistricts();
+    };
+
+    countries.addEventListener("change", refreshCities);
+    cities.addEventListener("change", refreshDistricts);
+    refreshCities();
+  });
 }
 
 function bindLocationSelects(root = document) {
@@ -4498,6 +4571,7 @@ function renderOwnerPanel() {
 
 function bindOwnerPanel() {
   bindLocationSelects();
+  bindStoreFilterSelects();
   document.querySelector("[data-owner-settings-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -4600,9 +4674,10 @@ function ownerStoreManager(store) {
         </div>
         <label class="field">Описание карточки<input name="short" value="${esc(store.short || "")}"></label>
         <label class="field">Описание профиля<textarea name="description">${esc(store.description || "")}</textarea></label>
-        <div class="row">
-          <label class="field">Страны фильтра<input name="countries" value="${esc((store.countries || []).join(", "))}" placeholder="moldova, transnistria"></label>
-          <label class="field">Города фильтра<input name="cities" value="${esc((store.cities || []).join(", "))}" placeholder="chisinau"></label>
+        <div class="row store-filter-selects" data-store-filter-group>
+          <label class="field">Страны фильтра<select name="countries" multiple data-store-filter-countries>${storeFilterCountryOptions(store.countries || [])}</select></label>
+          <label class="field">Города фильтра<select name="cities" multiple data-store-filter-cities>${storeFilterCityOptions(store.countries || [], store.cities || [])}</select></label>
+          <label class="field">Районы фильтра<select name="districts" multiple data-store-filter-districts>${storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [])}</select></label>
         </div>
         <div class="row">
           <label class="field">LTC кошелек<input name="ltcWallet" value="${esc(store.ltcWallet || "")}"></label>
@@ -4700,6 +4775,7 @@ function approveStoreApplication(id) {
     visibleInCatalog: true,
     countries: [application.country || "moldova"],
     cities: application.cities || [],
+    districts: application.districts || [],
     name: application.name || finalId,
     short: application.short || "",
     description: application.description || "",
@@ -4747,6 +4823,11 @@ function listFromInput(value) {
   return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function listFromForm(data, name) {
+  const selected = data.getAll(name).map((item) => String(item || "").trim()).filter(Boolean);
+  return selected.length ? selected : listFromInput(data.get(name));
+}
+
 function uniqueStoreId(name) {
   const base = String(name || `store-${Date.now()}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || `store-${Date.now()}`;
   let finalId = base;
@@ -4772,6 +4853,7 @@ async function handleOwnerCreateStore(event) {
     visibleInCatalog: true,
     countries: [],
     cities: [],
+    districts: [],
     name,
     short: String(data.get("short") || "").trim(),
     description: "",
@@ -4801,8 +4883,9 @@ async function handleOwnerProfileSave(event) {
   store.tag = String(data.get("tag") || store.tag || "").trim();
   store.short = String(data.get("short") || "").trim();
   store.description = String(data.get("description") || "").trim();
-  store.countries = listFromInput(data.get("countries"));
-  store.cities = listFromInput(data.get("cities"));
+  store.countries = listFromForm(data, "countries");
+  store.cities = listFromForm(data, "cities");
+  store.districts = listFromForm(data, "districts");
   store.ltcWallet = String(data.get("ltcWallet") || "").trim();
   store.adminPassword = String(data.get("adminPassword") || "").trim();
   const imageFile = data.get("image");
@@ -5081,9 +5164,10 @@ function adminStoreEditor(store) {
           <label class="field">Короткое описание<input name="storeShort" value="${esc(store.short || "")}"></label>
         </div>
         <label class="field">Описание страницы магазина<textarea name="storeDescription">${esc(store.description || "")}</textarea></label>
-        <div class="row">
-          <label class="field">Страны фильтра<input name="storeCountries" value="${esc((store.countries || []).join(", "))}" placeholder="moldova, transnistria"></label>
-          <label class="field">Города фильтра<input name="storeCities" value="${esc((store.cities || []).join(", "))}" placeholder="chisinau, balti"></label>
+        <div class="row store-filter-selects" data-store-filter-group>
+          <label class="field">Страны фильтра<select name="storeCountries" multiple data-store-filter-countries>${storeFilterCountryOptions(store.countries || [])}</select></label>
+          <label class="field">Города фильтра<select name="storeCities" multiple data-store-filter-cities>${storeFilterCityOptions(store.countries || [], store.cities || [])}</select></label>
+          <label class="field">Районы фильтра<select name="storeDistricts" multiple data-store-filter-districts>${storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [])}</select></label>
         </div>
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
@@ -5125,6 +5209,7 @@ function handlePaymentSettingsSave(event) {
 
 function bindAdminProductForms() {
   bindLocationSelects();
+  bindStoreFilterSelects();
   document.querySelectorAll("[data-admin-product-form]").forEach((form) => {
     form.onsubmit = async (event) => {
       event.preventDefault();
@@ -5147,8 +5232,9 @@ function bindAdminProductForms() {
       store.name = data.get("storeName").trim() || store.name;
       store.short = data.get("storeShort").trim() || store.short;
       store.description = data.get("storeDescription").trim();
-      store.countries = String(data.get("storeCountries") || "").split(",").map((item) => item.trim()).filter(Boolean);
-      store.cities = String(data.get("storeCities") || "").split(",").map((item) => item.trim()).filter(Boolean);
+      store.countries = listFromForm(data, "storeCountries");
+      store.cities = listFromForm(data, "storeCities");
+      store.districts = listFromForm(data, "storeDistricts");
       product.title = data.get("title").trim();
       product.category = data.get("category").trim();
       product.description = data.get("description").trim();
@@ -5214,6 +5300,7 @@ async function handleStoreCreate(event) {
     visibleInCatalog: true,
     countries: [data.get("country")].filter(Boolean),
     cities: String(data.get("cities") || "").split(",").map((item) => item.trim()).filter(Boolean),
+    districts: [],
     name: data.get("name").trim(),
     short: data.get("short").trim(),
     description: data.get("description").trim(),
