@@ -253,6 +253,12 @@ async function telegramUserSummary(user) {
   ));
   const orderDisputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
   const exchangeDisputes = exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute");
+  const allPurchases = [...orders, ...exchangeRequests];
+  const totalPurchaseUsd = allPurchases.reduce((sum, item) => sum + Number(item.amountUsd || item.priceUsd || 0), 0);
+  const walletDeposits = (Array.isArray(state.walletDeposits) ? state.walletDeposits : []).filter((deposit) => sameLogin(deposit.login, login));
+  const completedDeposits = walletDeposits.filter((deposit) => ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase()));
+  const totalDepositUsd = completedDeposits.reduce((sum, deposit) => sum + Number(deposit.amountUsd || deposit.priceAmount || 0), 0);
+  const totalDepositLtc = completedDeposits.reduce((sum, deposit) => sum + Number(deposit.amountLtc || deposit.payAmount || 0), 0);
   const messages = (messageRows || [])
     .map((row) => row.data)
     .filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login))
@@ -274,7 +280,12 @@ async function telegramUserSummary(user) {
       role: user.role,
       registeredAt: user.created_at,
       balanceUsd: Number(state.balances?.[login] || state.balances?.[key] || 0),
-      balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0)
+      balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0),
+      totalPurchases: allPurchases.length,
+      totalPurchaseUsd,
+      totalDisputes: orderDisputes.length + exchangeDisputes.length,
+      totalDepositUsd,
+      totalDepositLtc
     },
     disputes: {
       count: orderDisputes.length + exchangeDisputes.length,
