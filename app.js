@@ -3235,16 +3235,16 @@ function renderGroupChat() {
   const user = currentUser();
   if (!user) return renderAuth();
   if (!isGroupMember(user.login)) {
-    const membersCount = groupMemberLogins().length;
+    const membersCount = groupMemberLogins().length + 1;
     layout(`
       <section class="group-chat-screen">
         <article class="group-join-card">
           <span class="group-live-dot"></span>
           <h1>Cerber Чат</h1>
-          <p>Вступите в общий чат, чтобы видеть сообщения, отправлять фото, видео, стикеры и голосовые.</p>
+          <p>Вступите в общий чат, чтобы видеть сообщения, отправлять сообщения и играть в рулетках на призы.</p>
           <div class="group-join-stats">
             <strong>${membersCount}</strong>
-            <span>участников уже вступило</span>
+            <span>участников будет в чате после вашего входа</span>
           </div>
           <button class="group-join-button" data-group-join>Вступить в общий чат</button>
         </article>
@@ -3272,7 +3272,7 @@ function renderGroupChat() {
             <span class="group-live-dot"></span>
             <div>
               <h2>${esc(settings.title || "Общий чат")}</h2>
-              <p>${membersCount} участников · ${onlineCount} онлайн · ${messages.length} сообщений</p>
+              <p>${membersCount} участников · ${onlineCount} онлайн</p>
             </div>
           </div>
           ${moderator ? `
