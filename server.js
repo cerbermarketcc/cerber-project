@@ -719,6 +719,19 @@ async function nowpaymentsJson(pathname, payload) {
   return body;
 }
 
+async function createNowpaymentsWalletPayment(paymentPayload) {
+  const payment = await nowpaymentsJson("payment", paymentPayload);
+  const payAddress = payment.pay_address || payment.address || "";
+  const payAmount = Number(payment.pay_amount || 0);
+  if (!payAddress || !payAmount) {
+    const error = new Error("Платежный шлюз не выдал адрес оплаты. Попробуйте другую сумму или монету.");
+    error.status = 502;
+    error.body = payment;
+    throw error;
+  }
+  return payment;
+}
+
 function walletCoinFromRequest(body = {}) {
   const requested = String(body.payCurrency || body.coinId || "ltc").toLowerCase();
   return walletCoins.find((coin) => coin.id === requested || coin.payCurrency === requested) || walletCoins[0];
@@ -789,27 +802,7 @@ async function createWalletDepositRecord(user, options = {}) {
     ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
   };
 
-  let payment = {};
-  try {
-    payment = await nowpaymentsJson("payment", paymentPayload);
-  } catch {
-    const invoice = await nowpaymentsJson("invoice", {
-      price_amount: amountUsd,
-      price_currency: "usd",
-      pay_currency: coin.payCurrency,
-      order_id: deposit.id,
-      order_description: `CERBER MARKET wallet top up / ${user.login}`,
-      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
-      success_url: `${publicBaseUrl}/`,
-      cancel_url: `${publicBaseUrl}/`
-    });
-    payment = {
-      payment_id: invoice.id || invoice.invoice_id || "",
-      payment_status: "waiting",
-      payment_url: invoice.invoice_url || invoice.payment_url || "",
-      invoice_url: invoice.invoice_url || invoice.payment_url || ""
-    };
-  }
+  const payment = await createNowpaymentsWalletPayment(paymentPayload);
 
   deposit.paymentId = payment.payment_id || payment.id || "";
   deposit.payAddress = payment.pay_address || payment.address || "";
@@ -1021,27 +1014,7 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
     };
 
-    let payment = {};
-    try {
-      payment = await nowpaymentsJson("payment", paymentPayload);
-    } catch (paymentError) {
-      const invoice = await nowpaymentsJson("invoice", {
-        price_amount: amountUsd,
-        price_currency: "usd",
-        pay_currency: coin.payCurrency,
-        order_id: deposit.id,
-        order_description: `CERBER MARKET wallet top up / ${user.login}`,
-        ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
-        success_url: `${publicBaseUrl}/`,
-        cancel_url: `${publicBaseUrl}/`
-      });
-      payment = {
-        payment_id: invoice.id || invoice.invoice_id || "",
-        payment_status: "waiting",
-        payment_url: invoice.invoice_url || invoice.payment_url || "",
-        invoice_url: invoice.invoice_url || invoice.payment_url || ""
-      };
-    }
+    const payment = await createNowpaymentsWalletPayment(paymentPayload);
 
     deposit.paymentId = payment.payment_id || payment.id || "";
     deposit.payAddress = payment.pay_address || payment.address || "";
