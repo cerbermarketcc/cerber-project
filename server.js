@@ -563,10 +563,21 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     requireDb();
     await ensureSeed();
     const storeId = String(req.body.storeId || "").trim();
+    const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
-    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
-    const store = row?.data || null;
-    if (!store || password !== (store.adminPassword || "")) {
+    let store = null;
+    if (storeId) {
+      const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+      store = row?.data || null;
+    }
+    if (!store && login) {
+      const { data: rows } = await supabase.from("stores").select("data");
+      store = (rows || []).map((row) => row.data).find((item) => (
+        item && (loginKey(item.ownerLogin) === loginKey(login) || loginKey(item.id) === loginKey(login))
+      ));
+    }
+    const loginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
+    if (!store || !loginOk || password !== (store.adminPassword || "")) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     res.json({ token: signSellerAdminToken(store.id), ...(await stateFor(null)) });
