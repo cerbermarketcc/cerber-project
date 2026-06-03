@@ -72,6 +72,17 @@ button {
   justify-content: center;
 }
 
+.top-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.site-link.secondary {
+  background: #262a27;
+}
+
 .login {
   padding: 20px;
 }

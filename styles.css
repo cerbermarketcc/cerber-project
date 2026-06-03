@@ -69,6 +69,81 @@ button:disabled:active {
   transform: none;
 }
 
+.cms-visual-toolbar {
+  position: fixed;
+  z-index: 99999;
+  left: 12px;
+  right: 12px;
+  top: 12px;
+  display: grid;
+  grid-template-columns: auto minmax(130px, 1fr) auto auto minmax(140px, 1.2fr);
+  gap: 8px;
+  align-items: center;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(18, 18, 20, 0.94);
+  color: #fff;
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.28);
+}
+
+.cms-visual-toolbar input {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: #fff;
+  color: #111;
+  padding: 9px 10px;
+}
+
+.cms-visual-toolbar button,
+.cms-visual-toolbar a {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #111;
+  font-weight: 800;
+  padding: 0 12px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cms-visual-toolbar a {
+  background: #fff;
+}
+
+.cms-visual-toolbar span {
+  color: rgba(255, 255, 255, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cms-visual-editing .app,
+.cms-visual-editing .auth-wrap {
+  padding-top: 76px;
+}
+
+body.cms-visual-editing * {
+  scroll-margin-top: 90px;
+}
+
+.cms-visual-editing [data-cms-editing="true"],
+.cms-visual-editing *:hover {
+  outline: 2px solid rgba(255, 138, 31, 0.75);
+  outline-offset: 2px;
+}
+
+.cms-visual-editing .cms-visual-toolbar,
+.cms-visual-editing .cms-visual-toolbar * {
+  outline: 0 !important;
+}
+
 .app {
   max-width: 640px;
   min-height: 100vh;

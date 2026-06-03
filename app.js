@@ -16,6 +16,10 @@ const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const ADMIN_PANEL_PASSWORD = "admincerbercc1212";
 let cmsTextOverrides = {};
+let cmsVisualTextOverrides = {};
+let cmsApplyingVisualText = false;
+let cmsVisualObserver = null;
+const cmsVisualEditorActive = new URLSearchParams(location.search).has("cms-visual");
 const WALLET_COINS = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
@@ -515,6 +519,7 @@ function tr(key) {
 
 function applyCmsTextOverrides(overrides) {
   cmsTextOverrides = overrides && typeof overrides === "object" ? overrides : {};
+  cmsVisualTextOverrides = cmsTextOverrides.__visual && typeof cmsTextOverrides.__visual === "object" ? cmsTextOverrides.__visual : {};
   Object.entries(cmsTextOverrides).forEach(([lang, values]) => {
     if (!text[lang] || !values || typeof values !== "object") return;
     Object.entries(values).forEach(([key, value]) => {
@@ -524,6 +529,130 @@ function applyCmsTextOverrides(overrides) {
   if (typeof cmsTextOverrides.title === "string" && cmsTextOverrides.title.trim()) {
     document.title = cmsTextOverrides.title.trim();
   }
+}
+
+function cmsNormalizeText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function cmsElementPath(element) {
+  const parts = [];
+  let current = element;
+  while (current && current !== root && current !== document.body && parts.length < 8) {
+    const parent = current.parentElement;
+    const tag = current.tagName.toLowerCase();
+    const sameTagIndex = parent ? Array.from(parent.children).filter((child) => child.tagName === current.tagName).indexOf(current) + 1 : 1;
+    const classes = Array.from(current.classList || []).filter((item) => !/^(active|open|dark|light|selected|hidden)$/i.test(item)).slice(0, 3).join(".");
+    parts.unshift(`${tag}${classes ? `.${classes}` : ""}:nth-${sameTagIndex}`);
+    current = parent;
+  }
+  return parts.join(">");
+}
+
+function cmsVisualKey(element) {
+  const original = element.dataset.cmsOriginalText || cmsNormalizeText(element.textContent);
+  return `${db.lang || "ru"}|${cmsElementPath(element)}|${original}`;
+}
+
+function cmsEditableTextElement(element) {
+  if (!element || element.nodeType !== 1) return false;
+  if (element.closest("[data-cms-visual-toolbar]")) return false;
+  if (/^(script|style|input|textarea|select|option|svg|path|img)$/i.test(element.tagName)) return false;
+  if (element.children.length) return false;
+  const value = cmsNormalizeText(element.textContent);
+  return value.length > 0 && value.length <= 500;
+}
+
+function applyCmsVisualTextOverrides() {
+  if (cmsApplyingVisualText || !Object.keys(cmsVisualTextOverrides).length) return;
+  cmsApplyingVisualText = true;
+  document.querySelectorAll("body *").forEach((element) => {
+    if (!cmsEditableTextElement(element)) return;
+    const original = element.dataset.cmsOriginalText || cmsNormalizeText(element.textContent);
+    const key = cmsVisualKey(element);
+    if (typeof cmsVisualTextOverrides[key] === "string" && cmsVisualTextOverrides[key] !== cmsNormalizeText(element.textContent)) {
+      element.dataset.cmsOriginalText = original;
+      element.textContent = cmsVisualTextOverrides[key];
+    }
+  });
+  cmsApplyingVisualText = false;
+}
+
+function watchCmsVisualTextOverrides() {
+  if (cmsVisualObserver) return;
+  cmsVisualObserver = new MutationObserver(() => {
+    if (cmsApplyingVisualText) return;
+    clearTimeout(watchCmsVisualTextOverrides.timer);
+    watchCmsVisualTextOverrides.timer = setTimeout(applyCmsVisualTextOverrides, 30);
+  });
+  cmsVisualObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+function mountCmsVisualEditor() {
+  if (!cmsVisualEditorActive || document.querySelector("[data-cms-visual-toolbar]")) return;
+  document.body.classList.add("cms-visual-editing");
+  const toolbar = document.createElement("div");
+  toolbar.className = "cms-visual-toolbar";
+  toolbar.dataset.cmsVisualToolbar = "true";
+  toolbar.innerHTML = `
+    <strong>Textolite mode</strong>
+    <input type="password" placeholder="Пароль админки" data-cms-password>
+    <button type="button" data-cms-save>Сохранить</button>
+    <a href="/">Выйти</a>
+    <span data-cms-status>Кликни по тексту на сайте</span>
+  `;
+  document.body.appendChild(toolbar);
+
+  const status = toolbar.querySelector("[data-cms-status]");
+  const password = toolbar.querySelector("[data-cms-password]");
+  password.value = sessionStorage.getItem("cerber_text_admin_password") || "";
+  const setStatus = (message) => status.textContent = message;
+
+  document.addEventListener("click", (event) => {
+    if (!cmsVisualEditorActive || event.target.closest("[data-cms-visual-toolbar]")) return;
+    const target = event.target.closest("*");
+    if (!cmsEditableTextElement(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const original = target.dataset.cmsOriginalText || cmsNormalizeText(target.textContent);
+    target.dataset.cmsOriginalText = original;
+    target.dataset.cmsEditing = "true";
+    target.contentEditable = "true";
+    target.focus();
+    document.execCommand?.("selectAll", false, null);
+    setStatus("Измени текст и нажми Сохранить");
+  }, true);
+
+  toolbar.querySelector("[data-cms-save]").onclick = async () => {
+    const adminPassword = password.value.trim();
+    sessionStorage.setItem("cerber_text_admin_password", adminPassword);
+    document.querySelectorAll("[data-cms-original-text]").forEach((element) => {
+      const next = cmsNormalizeText(element.textContent);
+      const original = element.dataset.cmsOriginalText;
+      const key = cmsVisualKey(element);
+      if (next && next !== original) cmsVisualTextOverrides[key] = next;
+      element.contentEditable = "false";
+      element.removeAttribute("data-cms-editing");
+    });
+    cmsTextOverrides.__visual = cmsVisualTextOverrides;
+    setStatus("Сохраняю...");
+    try {
+      const response = await fetch("/api/cms-texts", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-password": adminPassword
+        },
+        body: JSON.stringify({ texts: cmsTextOverrides })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "Не удалось сохранить");
+      applyCmsTextOverrides(payload.texts || cmsTextOverrides);
+      setStatus("Сохранено");
+    } catch (error) {
+      setStatus(error.message || "Ошибка сохранения");
+    }
+  };
 }
 
 function defaultReview(id = `review-${Date.now()}`) {
@@ -1761,6 +1890,8 @@ function layout(content) {
     <div class="toast"></div>
   `;
   bindGlobal();
+  applyCmsVisualTextOverrides();
+  mountCmsVisualEditor();
 }
 
 function renderAuth(message = "") {
@@ -1793,6 +1924,8 @@ function renderAuth(message = "") {
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
   mountTurnstile();
+  applyCmsVisualTextOverrides();
+  mountCmsVisualEditor();
 }
 
 function renderSellerAdminLogin(storeId = "", message = "") {
@@ -5577,7 +5710,8 @@ function renderAdmin() {
     <section class="screen">
       <article class="panel">
         <h2>${tr("admin")}</h2>
-        <p><a href="/text-admin.html">Text Admin: edit site texts</a></p>
+        <p><a href="/?cms-visual=1">Textolite mode: edit texts on the site</a></p>
+        <p><a href="/text-admin.html">Text Admin: edit text list</a></p>
         <form class="form" data-store-form>
           <div class="row">
             <label class="field">${tr("tag")}<input name="tag" required placeholder="@tag"></label>
@@ -6684,6 +6818,7 @@ async function initApp() {
   await loadCmsTextOverrides();
   await loadRemoteSession();
   await fetchLitecoinUsdRate();
+  watchCmsVisualTextOverrides();
   renderCurrent();
 }
 
