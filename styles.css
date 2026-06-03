@@ -95,7 +95,7 @@ button:disabled:active {
   height: 56px;
   object-fit: contain;
   object-position: left center;
-  mix-blend-mode: multiply;
+  mix-blend-mode: normal;
 }
 
 .logo-button {
@@ -111,8 +111,7 @@ button:disabled:active {
 }
 
 body[data-theme="dark"] .logo {
-  filter: invert(1) contrast(1.05);
-  mix-blend-mode: screen;
+  filter: invert(1) contrast(1.08);
 }
 
 .balance {
@@ -2862,12 +2861,25 @@ body[data-theme="dark"] .mirror-row {
 .private-messages-screen {
   display: grid;
   gap: 14px;
-  padding-bottom: 170px;
+  padding-bottom: 128px;
 }
 
 .private-search-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
   gap: 14px;
+  align-items: center;
+}
+
+.private-search-panel h2,
+.private-search-panel p {
+  margin: 0;
+}
+
+.private-search-panel p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 14px;
 }
 
 .private-search {
@@ -2888,14 +2900,17 @@ body[data-theme="dark"] .mirror-row {
 
 .private-layout {
   display: grid;
-  grid-template-columns: minmax(150px, 0.42fr) minmax(0, 1fr);
+  grid-template-columns: minmax(170px, 0.38fr) minmax(0, 1fr);
   gap: 12px;
+  min-height: min(680px, calc(100dvh - 210px));
 }
 
 .private-list {
   display: grid;
   align-content: start;
   gap: 8px;
+  max-height: calc(100dvh - 230px);
+  overflow: auto;
 }
 
 .private-list button {
@@ -2927,11 +2942,15 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .private-chat {
-  display: grid;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: min(680px, calc(100dvh - 210px));
+  overflow: hidden;
 }
 
 .private-chat-head {
+  flex: 0 0 auto;
   display: flex;
   gap: 12px;
   align-items: center;
@@ -2951,26 +2970,35 @@ body[data-theme="dark"] .mirror-row {
 .private-chat-list {
   display: grid;
   gap: 10px;
-  max-height: 52vh;
+  align-content: start;
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 280px;
   overflow: auto;
-  padding-right: 4px;
+  padding: 12px 4px 12px 0;
 }
 
 .private-form {
-  position: sticky;
-  bottom: 90px;
-  padding-top: 8px;
+  flex: 0 0 auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
   background: var(--paper);
 }
 
 @media (max-width: 620px) {
+  .private-search-panel {
+    grid-template-columns: 1fr;
+  }
+
   .private-layout {
     grid-template-columns: 1fr;
+    min-height: calc(100dvh - 220px);
   }
 
   .private-list {
     display: flex;
     overflow-x: auto;
+    max-height: none;
   }
 
   .private-list button {
@@ -2979,6 +3007,10 @@ body[data-theme="dark"] .mirror-row {
 
   .private-search {
     grid-template-columns: 1fr;
+  }
+
+  .private-chat {
+    min-height: calc(100dvh - 300px);
   }
 }
 

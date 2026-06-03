@@ -279,6 +279,7 @@ let activePrivateLogin = "";
 let privateVoiceRecorder = null;
 let privateVoiceChunks = [];
 let privateVoiceDraft = null;
+let privateRefreshTimer = null;
 
 const root = document.getElementById("app");
 
@@ -1590,7 +1591,7 @@ function layout(content) {
   root.innerHTML = `
     <main class="app">
       <header class="topbar">
-        <button class="logo-button" data-route="home"><img class="logo" src="assets/logo1-white.png" alt="CERBER"></button>
+        <button class="logo-button" data-route="home"><img class="logo" src="assets/logo1-transparent.png" alt="CERBER"></button>
         <button class="balance" data-account>
           <strong>${ltcBalance.toFixed(6)} LTC</strong>
           <span>${ltcUsd.toFixed(2)} $</span>
@@ -1661,7 +1662,7 @@ function renderAuth(message = "") {
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/logo1-white.png" alt="CERBER">
+        <img src="assets/logo1-transparent.png" alt="CERBER">
         <h1>${authMode === "login" ? tr("login") : tr("register")}</h1>
         ${message ? `<p class="${message.includes("успеш") || message.includes("success") ? "" : "notice"}">${esc(message)}</p>` : `<p>${tr("adminHint")}</p>`}
         <form class="form" data-auth-form>
@@ -1695,7 +1696,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/logo1-white.png" alt="CERBER">
+        <img src="assets/logo1-transparent.png" alt="CERBER">
         <h1>Админка магазина</h1>
         <p>${esc(store?.name || "Магазин")}</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
@@ -2884,16 +2885,17 @@ function renderMessages() {
   const conversations = privateConversations(visibleMessages, user.login);
   if (!activePrivateLogin && conversations.length) activePrivateLogin = conversations[0].login;
   const activeMessages = activePrivateLogin ? privateConversationMessages(activePrivateLogin, visibleMessages, user.login) : [];
+  startPrivateMessagesRefresh();
   layout(`
     <section class="screen private-messages-screen">
       <article class="panel private-search-panel">
-        <h2>${tr("messages")}</h2>
+        <div>
+          <h2>${tr("messages")}</h2>
+          <p>Введите логин пользователя, чтобы сразу открыть личный диалог.</p>
+        </div>
         <form class="private-search" data-private-search-form>
-          <input name="login" list="private-users" placeholder="Поиск по логину" autocomplete="off">
-          <datalist id="private-users">
-            ${(db.users || []).filter((item) => !sameLogin(item.login, user.login)).map((item) => `<option value="${esc(item.login)}"></option>`).join("")}
-          </datalist>
-          <button class="primary">Открыть</button>
+          <input name="login" placeholder="Логин пользователя" autocomplete="off" required>
+          <button class="primary">Найти</button>
         </form>
       </article>
       <div class="private-layout">
@@ -2914,27 +2916,32 @@ function renderMessages() {
                 <p>Личный диалог</p>
               </div>
             </header>
-            <div class="private-chat-list">
+            <div class="private-chat-list" data-private-chat-list>
               ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
             </div>
             <form class="group-form private-form" data-private-chat-form>
-              <div class="group-compose-box">
-                <textarea name="body" placeholder="Сообщение"></textarea>
-                <div class="group-emoji-row">
+              <button type="button" class="group-round-button group-attach-button" data-private-attach title="Фото, видео или стикер">📎</button>
+              <div class="group-input-wrap">
+                <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
+                <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="Смайлики">◔</button>
+                <div class="group-sticker-row" data-private-sticker-row hidden>
                   ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-private-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
                 </div>
-                <div class="group-file-name" data-private-file-name></div>
               </div>
-              <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*" data-private-attachment>
-              <button type="button" class="group-tool-button" data-private-attach>📎</button>
-              <button type="button" class="group-tool-button" data-private-voice>🎙</button>
-              <button class="primary">${tr("send")}</button>
+              <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-private-attachment>
+              <button type="button" class="group-round-button group-voice-button" data-private-voice title="Голосовое">🎙</button>
+              <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+              <div class="group-file-name" data-private-file-name></div>
             </form>
           ` : `<p class="empty-chat">Найдите пользователя по логину и начните диалог</p>`}
         </article>
       </div>
     </section>
   `);
+  requestAnimationFrame(() => {
+    const list = document.querySelector("[data-private-chat-list]");
+    if (list) list.scrollTop = list.scrollHeight;
+  });
   document.querySelector("[data-private-search-form]")?.addEventListener("submit", handlePrivateSearch);
   document.querySelectorAll("[data-private-open]").forEach((button) => {
     button.onclick = () => {
@@ -2945,17 +2952,34 @@ function renderMessages() {
   document.querySelector("[data-private-chat-form]")?.addEventListener("submit", handlePrivateMessageSend);
   document.querySelector("[data-private-attach]")?.addEventListener("click", () => document.querySelector("[data-private-attachment]")?.click());
   document.querySelector("[data-private-voice]")?.addEventListener("click", togglePrivateVoiceRecord);
+  const syncPrivateComposer = () => {
+    const form = document.querySelector("[data-private-chat-form]");
+    if (!form) return;
+    const text = form.querySelector("textarea")?.value.trim() || "";
+    const file = form.querySelector("[data-private-attachment]")?.files?.[0];
+    form.classList.toggle("has-content", Boolean(text || file || privateVoiceDraft));
+  };
+  document.querySelector("[data-private-chat-form] textarea")?.addEventListener("input", syncPrivateComposer);
+  document.querySelector("[data-private-emoji-toggle]")?.addEventListener("click", () => {
+    const row = document.querySelector("[data-private-sticker-row]");
+    if (!row) return;
+    row.hidden = !row.hidden;
+    document.querySelector("[data-private-emoji-toggle]")?.classList.toggle("active", !row.hidden);
+  });
   document.querySelector("[data-private-attachment]")?.addEventListener("change", (event) => {
     const file = event.currentTarget.files?.[0];
     document.querySelector("[data-private-file-name]").textContent = file ? file.name : "";
+    syncPrivateComposer();
   });
   document.querySelectorAll("[data-private-emoji]").forEach((button) => {
     button.onclick = () => {
       const textarea = document.querySelector("[data-private-chat-form] textarea");
       textarea.value = `${textarea.value}${button.dataset.privateEmoji}`;
       textarea.focus();
+      syncPrivateComposer();
     };
   });
+  syncPrivateComposer();
   document.querySelectorAll("[data-private-message]").forEach((message) => {
     message.ondblclick = () => togglePrivateLike(message.dataset.privateMessage);
   });
@@ -2965,6 +2989,21 @@ function renderMessages() {
   document.querySelectorAll("[data-dispute-exchange]").forEach((button) => {
     button.onclick = () => openExchangeDispute(button.dataset.disputeExchange);
   });
+}
+
+function startPrivateMessagesRefresh() {
+  if (privateRefreshTimer) clearInterval(privateRefreshTimer);
+  privateRefreshTimer = setInterval(async () => {
+    if (route !== "messages") return;
+    const form = document.querySelector("[data-private-chat-form]");
+    const text = form?.querySelector("textarea")?.value || "";
+    if (text.trim() || privateVoiceRecorder?.state === "recording" || privateVoiceDraft) return;
+    const before = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body]).slice(-60));
+    const ok = await loadRemoteSession();
+    if (!ok || route !== "messages") return;
+    const after = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body]).slice(-60));
+    if (before !== after) renderMessages();
+  }, 6000);
 }
 
 function privateVisibleMessages(login = db.currentUser) {
@@ -3060,6 +3099,7 @@ async function togglePrivateVoiceRecord(event) {
         url: await blobToDataUrl(blob)
       };
       document.querySelector("[data-private-file-name]").textContent = "Голосовое сообщение готово";
+      document.querySelector("[data-private-chat-form]")?.classList.add("has-content");
     };
     privateVoiceRecorder.start();
     button.classList.add("recording");
