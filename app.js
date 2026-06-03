@@ -36,6 +36,7 @@ let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
 let groupChatRefreshTimer = null;
+let groupPresenceSavedAt = 0;
 let adminCreationNotice = "";
 let activeHomeTab = "all";
 const NEW_STORE_STATS = {
@@ -3121,6 +3122,51 @@ function ensureGroupSettings() {
   db.groupSettings = db.groupSettings || structuredClone(defaults.groupSettings);
   db.groupSettings.mutedUntil = db.groupSettings.mutedUntil || {};
   db.groupSettings.rollTimers = Array.isArray(db.groupSettings.rollTimers) ? db.groupSettings.rollTimers : [];
+  db.groupSettings.members = Array.isArray(db.groupSettings.members) ? db.groupSettings.members : [];
+  db.groupSettings.presence = db.groupSettings.presence || {};
+}
+
+function groupMemberLogins() {
+  ensureGroupSettings();
+  return db.groupSettings.members.filter(Boolean);
+}
+
+function isGroupMember(login = db.currentUser) {
+  return groupMemberLogins().some((item) => sameLogin(item, login));
+}
+
+function markGroupPresence(login = db.currentUser) {
+  ensureGroupSettings();
+  if (!login || !isGroupMember(login)) return;
+  db.groupSettings.presence[login] = Date.now();
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  Object.entries(db.groupSettings.presence).forEach(([key, value]) => {
+    if (Number(value || 0) < cutoff) delete db.groupSettings.presence[key];
+  });
+}
+
+function saveGroupPresenceSoon() {
+  const now = Date.now();
+  if (now - groupPresenceSavedAt < 15000) return;
+  groupPresenceSavedAt = now;
+  saveDb();
+}
+
+function groupOnlineCount() {
+  ensureGroupSettings();
+  const cutoff = Date.now() - 60 * 1000;
+  return Object.values(db.groupSettings.presence || {}).filter((seenAt) => Number(seenAt || 0) >= cutoff).length;
+}
+
+function joinGroupChat() {
+  const user = currentUser();
+  if (!user) return renderAuth();
+  ensureGroupSettings();
+  if (!isGroupMember(user.login)) db.groupSettings.members.push(user.login);
+  markGroupPresence(user.login);
+  pushGroupSystemMessage(`${user.login} вступил в общий чат.`);
+  saveDb();
+  renderGroupChat();
 }
 
 function pushGroupSystemMessage(body) {
@@ -3187,9 +3233,33 @@ function renderGroupChat() {
   scheduleOpenRollTimers();
   startGroupChatRefresh();
   const user = currentUser();
+  if (!user) return renderAuth();
+  if (!isGroupMember(user.login)) {
+    const membersCount = groupMemberLogins().length;
+    layout(`
+      <section class="group-chat-screen">
+        <article class="group-join-card">
+          <span class="group-live-dot"></span>
+          <h1>Cerber Чат</h1>
+          <p>Вступите в общий чат, чтобы видеть сообщения, отправлять фото, видео, стикеры и голосовые.</p>
+          <div class="group-join-stats">
+            <strong>${membersCount}</strong>
+            <span>участников уже вступило</span>
+          </div>
+          <button class="group-join-button" data-group-join>Вступить в общий чат</button>
+        </article>
+      </section>
+    `);
+    document.querySelector("[data-group-join]")?.addEventListener("click", joinGroupChat);
+    return;
+  }
+  markGroupPresence(user.login);
+  saveGroupPresenceSoon();
   const settings = db.groupSettings || structuredClone(defaults.groupSettings);
   const moderator = isGroupModerator();
   const muteUntil = groupMuteUntil(user?.login);
+  const membersCount = groupMemberLogins().length;
+  const onlineCount = groupOnlineCount();
   const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted);
   const messages = (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
   const lastRoll = (settings.rollTimers || []).filter((timer) => !timer.done).sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))[0];
@@ -3202,7 +3272,7 @@ function renderGroupChat() {
             <span class="group-live-dot"></span>
             <div>
               <h2>${esc(settings.title || "Общий чат")}</h2>
-              <p>${messages.length} сообщений · ${moderator ? "админ-доступ" : "общий доступ"}</p>
+              <p>${membersCount} участников · ${onlineCount} онлайн · ${messages.length} сообщений</p>
             </div>
           </div>
           ${moderator ? `
@@ -3236,17 +3306,18 @@ function renderGroupChat() {
             <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
           ` : `
             <form class="group-form" data-group-form>
-              <div class="group-compose-box">
-                <textarea name="body" rows="1" placeholder="Сообщение, /roll 999 или /mute login 15"></textarea>
-                <div class="group-sticker-row">
+              <button type="button" class="group-round-button group-attach-button" data-group-attach title="Фото, видео или стикер">📎</button>
+              <div class="group-input-wrap">
+                <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
+                <button type="button" class="group-emoji-toggle" data-group-emoji-toggle title="Смайлики">◔</button>
+                <div class="group-sticker-row" data-group-sticker-row hidden>
                   ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-group-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
                 </div>
-                <div class="group-file-name" data-group-file-name></div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-attachment>
-              <button type="button" class="group-tool-button" data-group-attach title="Фото, видео или стикер">📎</button>
-              <button type="button" class="group-tool-button" data-group-voice title="Голосовое">🎙</button>
-              <button class="group-send-button">${tr("send")}</button>
+              <button type="button" class="group-round-button group-voice-button" data-group-voice title="Голосовое">🎙</button>
+              <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+              <div class="group-file-name" data-group-file-name></div>
             </form>
           `}
         </footer>
@@ -3260,17 +3331,34 @@ function renderGroupChat() {
   document.querySelector("[data-group-form]")?.addEventListener("submit", handleGroupMessageSend);
   document.querySelector("[data-group-attach]")?.addEventListener("click", () => document.querySelector("[data-group-attachment]")?.click());
   document.querySelector("[data-group-voice]")?.addEventListener("click", toggleGroupVoiceRecord);
+  const syncGroupComposer = () => {
+    const form = document.querySelector("[data-group-form]");
+    if (!form) return;
+    const text = form.querySelector("textarea")?.value.trim() || "";
+    const file = form.querySelector("[data-group-attachment]")?.files?.[0];
+    form.classList.toggle("has-content", Boolean(text || file || groupVoiceDraft));
+  };
+  document.querySelector("[data-group-form] textarea")?.addEventListener("input", syncGroupComposer);
+  document.querySelector("[data-group-emoji-toggle]")?.addEventListener("click", () => {
+    const row = document.querySelector("[data-group-sticker-row]");
+    if (!row) return;
+    row.hidden = !row.hidden;
+    document.querySelector("[data-group-emoji-toggle]")?.classList.toggle("active", !row.hidden);
+  });
   document.querySelector("[data-group-attachment]")?.addEventListener("change", (event) => {
     const file = event.currentTarget.files?.[0];
     document.querySelector("[data-group-file-name]").textContent = file ? file.name : "";
+    syncGroupComposer();
   });
   document.querySelectorAll("[data-group-emoji]").forEach((button) => {
     button.onclick = () => {
       const textarea = document.querySelector("[data-group-form] textarea");
       textarea.value = `${textarea.value}${button.dataset.groupEmoji}`;
       textarea.focus();
+      syncGroupComposer();
     };
   });
+  syncGroupComposer();
   document.querySelector("[data-group-title-form]")?.addEventListener("submit", handleGroupTitleSave);
   document.querySelectorAll("[data-group-user]").forEach((button) => {
     button.onclick = () => openPrivateMessageModal(button.dataset.groupUser);
@@ -3325,6 +3413,7 @@ async function toggleGroupVoiceRecord(event) {
         url: await blobToDataUrl(blob)
       };
       document.querySelector("[data-group-file-name]").textContent = "Голосовое сообщение готово";
+      document.querySelector("[data-group-form]")?.classList.add("has-content");
     };
     groupVoiceRecorder.start();
     button.classList.add("recording");
