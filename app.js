@@ -15,6 +15,7 @@ let turnstileWidgetId = null;
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const ADMIN_PANEL_PASSWORD = "admincerbercc1212";
+let cmsTextOverrides = {};
 const WALLET_COINS = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
@@ -512,6 +513,19 @@ function tr(key) {
   return (text[db.lang] || text.ru)[key] || text.ru[key] || key;
 }
 
+function applyCmsTextOverrides(overrides) {
+  cmsTextOverrides = overrides && typeof overrides === "object" ? overrides : {};
+  Object.entries(cmsTextOverrides).forEach(([lang, values]) => {
+    if (!text[lang] || !values || typeof values !== "object") return;
+    Object.entries(values).forEach(([key, value]) => {
+      if (typeof value === "string") text[lang][key] = value;
+    });
+  });
+  if (typeof cmsTextOverrides.title === "string" && cmsTextOverrides.title.trim()) {
+    document.title = cmsTextOverrides.title.trim();
+  }
+}
+
 function defaultReview(id = `review-${Date.now()}`) {
   return {
     id,
@@ -985,9 +999,19 @@ async function loadRemoteConfig() {
   try {
     const config = await apiFetch("/api/config");
     TURNSTILE_SITE_KEY = config.turnstileSiteKey || "";
+    applyCmsTextOverrides(config.cmsTexts || {});
   } catch {
     TURNSTILE_SITE_KEY = "";
   }
+}
+
+async function loadCmsTextOverrides() {
+  if (location.protocol === "file:" || API_ENABLED) return;
+  try {
+    const response = await fetch("/api/cms-texts");
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) applyCmsTextOverrides(payload.texts || {});
+  } catch {}
 }
 
 async function persistRemoteState() {
@@ -5553,6 +5577,7 @@ function renderAdmin() {
     <section class="screen">
       <article class="panel">
         <h2>${tr("admin")}</h2>
+        <p><a href="/text-admin.html">Text Admin: edit site texts</a></p>
         <form class="form" data-store-form>
           <div class="row">
             <label class="field">${tr("tag")}<input name="tag" required placeholder="@tag"></label>
@@ -6656,6 +6681,7 @@ function renderCurrent() {
 
 async function initApp() {
   await loadRemoteConfig();
+  await loadCmsTextOverrides();
   await loadRemoteSession();
   await fetchLitecoinUsdRate();
   renderCurrent();

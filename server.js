@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -45,16 +46,39 @@ const supabase = supabaseUrl && supabaseServiceKey
   : null;
 
 const defaultExchangeCards = [];
+const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 
 app.use(express.json({ limit: "25mb" }));
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
-  if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?)$/i.test(pathname)) {
+  if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini)$/i.test(pathname)) {
     return res.status(404).send("Not found");
   }
   next();
 });
 app.use(express.static(__dirname));
+
+async function readCmsTexts() {
+  try {
+    return JSON.parse(await fs.readFile(cmsTextsPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+async function writeCmsTexts(payload) {
+  await fs.writeFile(cmsTextsPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function verifyCmsAdmin(req) {
+  const expected = process.env.ADMIN_PASSWORD || "admincerbercc1212";
+  const password = String(req.headers["x-admin-password"] || req.body?.password || "");
+  if (password !== expected) {
+    const error = new Error("Bad admin password");
+    error.status = 401;
+    throw error;
+  }
+}
 
 function loginKey(value) {
   return String(value || "").trim().toLowerCase();
@@ -554,8 +578,31 @@ app.post("/api/telegram/group-chat/presence", async (req, res, next) => {
   }
 });
 
-app.get("/api/config", (_req, res) => {
-  res.json({ turnstileSiteKey });
+app.get("/api/config", async (_req, res, next) => {
+  try {
+    res.json({ turnstileSiteKey, cmsTexts: await readCmsTexts() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/cms-texts", async (_req, res, next) => {
+  try {
+    res.json({ texts: await readCmsTexts() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/cms-texts", async (req, res, next) => {
+  try {
+    verifyCmsAdmin(req);
+    const texts = req.body?.texts && typeof req.body.texts === "object" ? req.body.texts : {};
+    await writeCmsTexts(texts);
+    res.json({ ok: true, texts });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/store-admin/login", async (req, res, next) => {
@@ -1625,6 +1672,10 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
+  res.sendFile(path.join(__dirname, "text-admin.html"));
 });
 
 app.get("*", (_req, res) => {
