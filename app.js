@@ -262,6 +262,65 @@ function marketologSeedStore() {
   };
 }
 
+function testSellerSeedStore() {
+  return {
+    id: "test",
+    tag: "@test",
+    ownerLogin: "test",
+    adminPassword: "test1",
+    isTop: false,
+    isFeatured: false,
+    isNew: true,
+    visibleInCatalog: false,
+    countries: ["moldova"],
+    cities: ["chisinau"],
+    districts: ["Центр", "Ботаника", "Рышкановка"],
+    name: "Test Shop",
+    short: "Тестовая витрина для админ-панели магазина",
+    description: "Демо-магазин для проверки новой панели: статистика, склад, клиенты, заказы и связь.",
+    image: "assets/cerber-emblem.png",
+    cover: "assets/market-banner.png",
+    status: "active",
+    salesBlocked: false,
+    autoReleaseHours: 24,
+    ...NEW_STORE_STATS,
+    products: [
+      {
+        id: "test-product",
+        title: "Демо товар",
+        category: "Каталог",
+        description: "Товар-заглушка для проверки склада и заказов.",
+        price: "25$",
+        priceUsd: 25,
+        image: "assets/cerber-emblem.png",
+        images: ["assets/cerber-emblem.png"],
+        sellerManaged: true,
+        reviews: 0,
+        rating: 5,
+        purchases: 0,
+        deliveryItems: ["Демо выдача #1", "Демо выдача #2"],
+        positions: [
+          {
+            id: "test-position-center",
+            title: "Демо товар",
+            description: "Товар-заглушка для проверки склада и заказов.",
+            deliveryItems: ["Демо выдача #1", "Демо выдача #2"],
+            priceUsd: 25,
+            country: "moldova",
+            city: "chisinau",
+            district: "Центр",
+            deliveryType: "Склад",
+            stock: 2,
+            status: "ready"
+          }
+        ],
+        reviewsList: []
+      }
+    ],
+    reviewsList: []
+  };
+}
+
 let db = loadDb();
 let route = "home";
 let activeStoreId = "";
@@ -618,6 +677,14 @@ function normalizeDb(next) {
         stock: Number(position.stock || 0) > 0 ? Number(position.stock || 0) : 10
       }));
     }
+  }
+  if (!next.stores.some((store) => store.id === "test")) {
+    next.stores.unshift(testSellerSeedStore());
+  } else {
+    const testStore = next.stores.find((store) => store.id === "test");
+    testStore.ownerLogin = testStore.ownerLogin || "test";
+    testStore.adminPassword = testStore.adminPassword || "test1";
+    testStore.visibleInCatalog = false;
   }
   next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
 }
@@ -1701,6 +1768,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
         <p>${esc(store?.name || "Магазин")}</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <form class="form" data-seller-admin-login>
+          <label class="field">Логин<input name="login" required autocomplete="username" value="${esc(store?.ownerLogin || "")}"></label>
           <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
           <button class="primary" type="submit">Войти</button>
         </form>
@@ -1710,13 +1778,20 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   `;
   document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
     event.preventDefault();
-    const password = new FormData(event.currentTarget).get("password");
-    if (API_ENABLED) {
+    const data = new FormData(event.currentTarget);
+    const login = String(data.get("login") || "").trim();
+    const password = data.get("password");
+    const loginOk = sameLogin(login, store.ownerLogin) || sameLogin(login, store.id);
+    if (!loginOk) {
+      renderSellerAdminLogin(store.id, "Неверный логин");
+      return;
+    }
+    if (API_ENABLED && store.id !== "test") {
       try {
         const response = await fetch("/api/store-admin/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ storeId: store.id, password })
+          body: JSON.stringify({ storeId: store.id, login, password })
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || "Неверный пароль");
@@ -5761,6 +5836,159 @@ async function handleExchangeCardCreate(event) {
   renderAdmin();
 }
 
+function sellerDashboardShell(store, standalone = false) {
+  const orders = (db.orders || []).filter((order) => order.storeId === store.id);
+  const today = new Date().toDateString();
+  const todayOrders = orders.filter((order) => new Date(order.createdAt || Date.now()).toDateString() === today);
+  const products = Array.isArray(store.products) ? store.products : [];
+  const positions = products.flatMap((product) => product.positions || []);
+  const stockTotal = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
+  const clients = new Set(orders.map((order) => order.login).filter(Boolean));
+  const salesUsd = storeSalesUsd(store.id);
+  const recentOrders = orders.slice().sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).slice(0, 6);
+  const districts = new Map();
+  positions.forEach((position) => {
+    const key = position.district || position.city || "Без района";
+    const current = districts.get(key) || { count: 0, value: 0 };
+    current.count += Number(position.stock || 0);
+    current.value += Number(position.stock || 0) * Number(position.priceUsd || 0);
+    districts.set(key, current);
+  });
+  const productRows = products.slice(0, 7).map((product) => {
+    const productStock = (product.positions || []).reduce((sum, position) => sum + Number(position.stock || 0), 0);
+    return { title: product.title || "Товар", stock: productStock, value: productStock * Number(product.priceUsd || 0) };
+  });
+  const txRows = (db.walletTransactions || []).slice(-6).reverse();
+  return `
+    <article class="seller-dashboard-shell">
+      <aside class="seller-dashboard-nav">
+        <div class="seller-dashboard-brand">
+          <img src="assets/logo1-transparent.png" alt="CERBER">
+          <span>Shop Admin</span>
+        </div>
+        ${[
+          ["⌂", "Dashboard"],
+          ["▣", "Заказы"],
+          ["▤", "Магазин"],
+          ["▥", "Склад"],
+          ["◇", "Клиенты"],
+          ["✉", "Связь"],
+          ["⚙", "Персонал"]
+        ].map(([icon, label]) => `<a href="#seller-tools"><span>${icon}</span>${label}</a>`).join("")}
+      </aside>
+      <div class="seller-dashboard-main">
+        <header class="seller-dashboard-top">
+          <div>
+            <strong>${esc(store.name)}</strong>
+            <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
+          </div>
+          <div class="seller-dashboard-balance">
+            <span>Баланс магазина</span>
+            <strong>${salesUsd.toFixed(2)} $</strong>
+            <small>${usdToLtc(salesUsd).toFixed(8)} LTC</small>
+          </div>
+          <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
+          ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : ""}
+        </header>
+
+        <section class="seller-dashboard-hero">
+          <div>
+            <h2>Dashboard</h2>
+            <p>Панель магазина: статистика, заявки, склад, клиенты и связь.</p>
+          </div>
+          <a class="primary link-button" href="#seller-tools">Управлять товарами</a>
+        </section>
+
+        <section class="seller-dashboard-stats">
+          ${sellerDashStat("Магазинов", "1", "Активная витрина")}
+          ${sellerDashStat("Заказы сегодня", todayOrders.length, "Новые заявки")}
+          ${sellerDashStat("Доход сегодня", `${todayOrders.reduce((sum, order) => sum + Number(order.amountUsd || 0), 0).toFixed(2)} $`, "За текущий день")}
+          ${sellerDashStat("Клиентов", clients.size, "Всего покупателей")}
+          ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
+          ${sellerDashStat("Диспуты", storeDisputes(store.id).length, "Открытые обращения")}
+        </section>
+
+        <section class="seller-dashboard-grid">
+          <div class="seller-dashboard-card seller-wide-card">
+            <div class="seller-card-head">
+              <h3>Ежемесячный заработок</h3>
+              <span>Последние 30 дней</span>
+            </div>
+            <strong class="seller-money">${salesUsd.toFixed(2)} $</strong>
+            <div class="seller-bars">
+              ${[35, 52, 44, 70, 48, 82, 66, 90, 62, 76, 58, 84].map((value) => `<i style="height:${value}%"></i>`).join("")}
+            </div>
+          </div>
+          <div class="seller-dashboard-card">
+            <div class="seller-card-head">
+              <h3>Источники продаж</h3>
+            </div>
+            <div class="seller-source"><span>Telegram</span><strong>${orders.filter((order) => order.source === "telegram").length}</strong></div>
+            <div class="seller-source"><span>Сайт</span><strong>${orders.filter((order) => !order.source || order.source === "site").length}</strong></div>
+            <div class="seller-source"><span>Tor</span><strong>${orders.filter((order) => order.source === "tor").length}</strong></div>
+          </div>
+          <div class="seller-dashboard-card">
+            <div class="seller-card-head">
+              <h3>Типы товаров на складе</h3>
+            </div>
+            ${productRows.length ? productRows.map((row) => `
+              <div class="seller-stock-row">
+                <span>${esc(row.title)}</span>
+                <strong>${row.stock}</strong>
+                <progress max="100" value="${Math.min(100, row.stock * 10)}"></progress>
+              </div>
+            `).join("") : `<p>Товаров пока нет.</p>`}
+          </div>
+          <div class="seller-dashboard-card">
+            <div class="seller-card-head">
+              <h3>Склад: районы</h3>
+            </div>
+            ${[...districts.entries()].slice(0, 8).map(([name, item]) => `
+              <div class="seller-tree-row"><span>${esc(name)}</span><strong>${item.count} шт.</strong></div>
+            `).join("") || `<p>Склад пока пуст.</p>`}
+          </div>
+          <div class="seller-dashboard-card seller-wide-card">
+            <div class="seller-card-head">
+              <h3>Последние заказы</h3>
+              <span>${orders.length} всего</span>
+            </div>
+            <div class="seller-dashboard-table">
+              <div><strong>#</strong><strong>Клиент</strong><strong>Сумма</strong><strong>Статус</strong></div>
+              ${recentOrders.length ? recentOrders.map((order) => `
+                <div>
+                  <span>${esc(order.id || "-")}</span>
+                  <span>${esc(order.login || "client")}</span>
+                  <span>${Number(order.amountUsd || 0).toFixed(2)} $</span>
+                  <span>${esc(order.status || "new")}</span>
+                </div>
+              `).join("") : `<p>Заказов пока нет.</p>`}
+            </div>
+          </div>
+          <div class="seller-dashboard-card">
+            <div class="seller-card-head">
+              <h3>Последние транзакции</h3>
+            </div>
+            ${txRows.length ? txRows.map((tx) => `
+              <div class="seller-source"><span>${esc(tx.title || tx.type || "Операция")}</span><strong>${Number(tx.amountUsd || 0).toFixed(2)} $</strong></div>
+            `).join("") : `<p>Транзакций пока нет.</p>`}
+          </div>
+        </section>
+      </div>
+    </article>
+    <span id="seller-tools"></span>
+  `;
+}
+
+function sellerDashStat(label, value, hint) {
+  return `
+    <div class="seller-dash-stat">
+      <span>${esc(label)}</span>
+      <strong>${esc(String(value))}</strong>
+      <small>${esc(hint)}</small>
+    </div>
+  `;
+}
+
 function renderSeller() {
   const stores = sellerStores();
   if (!stores.length) return renderSellerPortal();
@@ -5771,8 +5999,9 @@ function renderSeller() {
   const disputes = storeDisputes(store.id);
   layout(`
     <section class="screen seller-admin-screen">
+      ${sellerDashboardShell(store, standalone)}
       <article class="panel">
-        <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
+        <h2>Настройки витрины: ${esc(store.name)}</h2>
         ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
         <p class="status-pill">${storeStatusLabel(store)}</p>
         <div class="stats">
