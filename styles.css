@@ -803,7 +803,7 @@ body[data-theme="dark"] .mirror-row {
 .group-widget {
   position: fixed;
   right: 18px;
-  bottom: 112px;
+  bottom: 88px;
   z-index: 20;
 }
 
@@ -1034,7 +1034,7 @@ body[data-theme="dark"] .mirror-row {
 
   .group-widget {
     right: 12px;
-    bottom: 92px;
+    bottom: 78px;
   }
 
   .group-widget-button {
@@ -2019,13 +2019,13 @@ body[data-theme="dark"] .mirror-row {
   z-index: 50;
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
-  width: min(640px, 100vw);
-  padding: 10px 12px calc(10px + var(--safe-bottom));
+  width: min(520px, calc(100vw - 24px));
+  padding: 7px 10px calc(7px + var(--safe-bottom));
   border: 1px solid var(--line);
   border-bottom: 0;
-  border-radius: 24px 24px 0 0;
+  border-radius: 18px 18px 0 0;
   background: color-mix(in srgb, var(--paper) 94%, transparent);
   box-shadow: var(--shadow);
   transform: translateX(-50%);
@@ -2037,8 +2037,9 @@ body[data-theme="dark"] .mirror-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   color: var(--ink);
+  font-size: 13px;
   font-weight: 800;
 }
 
@@ -2064,18 +2065,18 @@ body[data-theme="dark"] .mirror-row {
 
 .switch {
   display: inline-grid;
-  width: 58px;
-  height: 34px;
+  width: 46px;
+  height: 27px;
   align-items: center;
-  padding: 3px;
+  padding: 2px;
   border-radius: 999px;
   background: var(--soft);
 }
 
 .switch i {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 23px;
+  height: 23px;
   place-items: center;
   border-radius: 50%;
   background: var(--paper);
@@ -2084,20 +2085,20 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .switch.dark i {
-  transform: translateX(24px);
+  transform: translateX(19px);
 }
 
 .language div {
   display: flex;
   gap: 4px;
-  padding: 4px;
+  padding: 3px;
   border-radius: 999px;
   background: var(--soft);
 }
 
 .language button {
-  min-width: 42px;
-  min-height: 30px;
+  min-width: 34px;
+  min-height: 25px;
   border: 0;
   border-radius: 999px;
   background: transparent;
@@ -2113,13 +2114,13 @@ body[data-theme="dark"] .mirror-row {
 .menu {
   position: fixed;
   left: 50%;
-  bottom: calc(84px + var(--safe-bottom));
+  bottom: calc(62px + var(--safe-bottom));
   z-index: 60;
   display: grid;
-  width: 56px;
-  height: 56px;
+  width: 46px;
+  height: 46px;
   place-content: center;
-  gap: 6px;
+  gap: 5px;
   border: 0;
   border-radius: 50%;
   background: #171717;
@@ -2129,7 +2130,7 @@ body[data-theme="dark"] .mirror-row {
 
 .menu span {
   display: block;
-  width: 22px;
+  width: 18px;
   height: 2px;
   border-radius: 999px;
   background: #fff;
