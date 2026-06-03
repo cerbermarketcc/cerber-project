@@ -37,6 +37,10 @@ let groupVoiceChunks = [];
 let groupVoiceDraft = null;
 let groupChatRefreshTimer = null;
 let groupPresenceSavedAt = 0;
+let groupWidgetOpen = false;
+let groupWidgetVoiceRecorder = null;
+let groupWidgetVoiceChunks = [];
+let groupWidgetVoiceDraft = null;
 let adminCreationNotice = "";
 let activeHomeTab = "all";
 const NEW_STORE_STATS = {
@@ -1644,6 +1648,7 @@ function layout(content) {
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
     </div>
+    ${renderGroupFloatingWidget()}
     <div class="modal-backdrop" data-modal></div>
     <div class="toast"></div>
   `;
@@ -3124,6 +3129,7 @@ function ensureGroupSettings() {
   db.groupSettings.rollTimers = Array.isArray(db.groupSettings.rollTimers) ? db.groupSettings.rollTimers : [];
   db.groupSettings.members = Array.isArray(db.groupSettings.members) ? db.groupSettings.members : [];
   db.groupSettings.presence = db.groupSettings.presence || {};
+  db.groupSettings.widgetSeenAt = db.groupSettings.widgetSeenAt || {};
 }
 
 function groupMemberLogins() {
@@ -3167,6 +3173,73 @@ function joinGroupChat() {
   pushGroupSystemMessage(`${user.login} вступил в общий чат.`);
   saveDb();
   renderGroupChat();
+}
+
+function visibleGroupMessages() {
+  return (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+function groupWidgetUnreadCount() {
+  if (route === "group-chat") return 0;
+  const lastSeen = Number(db.groupSettings?.widgetSeenAt?.[db.currentUser] || 0);
+  return visibleGroupMessages().filter((msg) => Number(msg.createdAt || 0) > lastSeen && !sameLogin(msg.fromLogin, db.currentUser)).length;
+}
+
+function formatGroupWidgetBadge(count) {
+  if (count <= 0) return "";
+  return count > 99 ? "+99" : String(count);
+}
+
+function renderGroupFloatingWidget() {
+  if (!db.currentUser || ["group-chat", "messages"].includes(route)) return "";
+  ensureGroupSettings();
+  const unread = groupWidgetUnreadCount();
+  const messages = visibleGroupMessages().slice(-8);
+  return `
+    <section class="group-widget ${groupWidgetOpen ? "open" : ""}" data-group-widget>
+      <button class="group-widget-button" data-group-widget-toggle aria-label="Общий чат">
+        💬
+        ${unread ? `<span>${formatGroupWidgetBadge(unread)}</span>` : ""}
+      </button>
+      ${groupWidgetOpen ? `
+        <article class="group-widget-panel">
+          <header>
+            <strong>Cerber Чат</strong>
+            <button type="button" data-group-widget-toggle>×</button>
+          </header>
+          <div class="group-widget-list" data-group-widget-list>
+            ${messages.length ? messages.map(groupWidgetMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+          </div>
+          <form class="group-widget-form" data-group-widget-form>
+            <button type="button" data-group-widget-attach title="Фото или видео">📎</button>
+            <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
+            <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-widget-file>
+            <button type="button" data-group-widget-voice title="Голосовое">🎙</button>
+            <button class="group-widget-send" title="Отправить">➤</button>
+            <div data-group-widget-file-name></div>
+          </form>
+        </article>
+      ` : ""}
+    </section>
+  `;
+}
+
+function groupWidgetMessageView(msg) {
+  const system = msg.fromLogin === "cerber-market";
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  return `
+    <div class="group-widget-message ${sameLogin(msg.fromLogin, db.currentUser) ? "own" : ""} ${system ? "system" : ""}">
+      <span>${esc(system ? "CERBER" : groupMessageAuthor(msg.fromLogin))}</span>
+      <p>${esc(msg.body || (attachments.length ? "[медиа]" : "")).replace(/\n/g, "<br>")}</p>
+    </div>
+  `;
+}
+
+function markGroupWidgetSeen() {
+  ensureGroupSettings();
+  db.groupSettings.widgetSeenAt = db.groupSettings.widgetSeenAt || {};
+  db.groupSettings.widgetSeenAt[db.currentUser] = Date.now();
+  saveDb();
 }
 
 function pushGroupSystemMessage(body) {
@@ -5938,6 +6011,97 @@ function bindGlobal() {
       renderAuth();
     };
   });
+  bindGroupFloatingWidget();
+}
+
+function bindGroupFloatingWidget() {
+  document.querySelectorAll("[data-group-widget-toggle]").forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      groupWidgetOpen = !groupWidgetOpen;
+      if (groupWidgetOpen) markGroupWidgetSeen();
+      renderCurrent();
+    };
+  });
+  const list = document.querySelector("[data-group-widget-list]");
+  if (list) list.scrollTop = list.scrollHeight;
+  document.querySelector("[data-group-widget-form]")?.addEventListener("submit", handleGroupWidgetSend);
+  document.querySelector("[data-group-widget-attach]")?.addEventListener("click", () => document.querySelector("[data-group-widget-file]")?.click());
+  document.querySelector("[data-group-widget-file]")?.addEventListener("change", (event) => {
+    const file = event.currentTarget.files?.[0];
+    document.querySelector("[data-group-widget-file-name]").textContent = file ? file.name : "";
+  });
+  document.querySelector("[data-group-widget-voice]")?.addEventListener("click", toggleGroupWidgetVoiceRecord);
+}
+
+async function handleGroupWidgetSend(event) {
+  event.preventDefault();
+  const user = currentUser();
+  if (!user) return renderAuth();
+  ensureGroupSettings();
+  if (!isGroupMember(user.login)) db.groupSettings.members.push(user.login);
+  markGroupPresence(user.login);
+  const form = event.currentTarget;
+  const body = String(new FormData(form).get("body") || "").trim();
+  const file = form.querySelector("[data-group-widget-file]")?.files?.[0];
+  if (!body && (!file || !file.size) && !groupWidgetVoiceDraft) return;
+  const attachments = file && file.size ? [{
+    name: file.name,
+    type: file.type,
+    url: await fileToDataUrl(file)
+  }] : (groupWidgetVoiceDraft ? [groupWidgetVoiceDraft] : []);
+  db.groupMessages.push({
+    id: `group-${Date.now()}`,
+    fromLogin: user.login,
+    body,
+    attachments,
+    likes: [],
+    createdAt: Date.now(),
+    date: new Date().toLocaleString()
+  });
+  groupWidgetVoiceDraft = null;
+  groupWidgetOpen = true;
+  markGroupWidgetSeen();
+  saveDb();
+  renderCurrent();
+}
+
+async function toggleGroupWidgetVoiceRecord(event) {
+  const button = event.currentTarget;
+  if (groupWidgetVoiceRecorder && groupWidgetVoiceRecorder.state === "recording") {
+    groupWidgetVoiceRecorder.stop();
+    button.classList.remove("recording");
+    button.textContent = "🎙";
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    showToast("Запись голоса недоступна в этом браузере");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    groupWidgetVoiceChunks = [];
+    groupWidgetVoiceRecorder = new MediaRecorder(stream);
+    groupWidgetVoiceRecorder.ondataavailable = (recordEvent) => {
+      if (recordEvent.data.size) groupWidgetVoiceChunks.push(recordEvent.data);
+    };
+    groupWidgetVoiceRecorder.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(groupWidgetVoiceChunks, { type: groupWidgetVoiceRecorder.mimeType || "audio/webm" });
+      groupWidgetVoiceDraft = {
+        name: `voice-${Date.now()}.webm`,
+        type: blob.type,
+        url: await blobToDataUrl(blob)
+      };
+      document.querySelector("[data-group-widget-file-name]").textContent = "Голосовое сообщение готово";
+    };
+    groupWidgetVoiceRecorder.start();
+    button.classList.add("recording");
+    button.textContent = "■";
+    document.querySelector("[data-group-widget-file-name]").textContent = "Идёт запись голоса...";
+  } catch {
+    showToast("Не удалось включить микрофон");
+  }
 }
 
 function bindStoreCards() {
