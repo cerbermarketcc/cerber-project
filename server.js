@@ -1064,6 +1064,45 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
   }
 });
 
+app.get("/api/telegram/wallet/deposits/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settings?.data || {};
+    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
+    if (!deposit) return res.status(404).json({ error: "Пополнение не найдено" });
+    res.json({ deposit });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/wallet/deposits/:id/extend", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settings?.data || {};
+    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
+    if (!deposit) return res.status(404).json({ error: "Пополнение не найдено" });
+    if (String(deposit.status || "").toLowerCase() === "completed") {
+      return res.json({ deposit });
+    }
+    const minutes = Math.min(15, Math.max(10, Number(req.body.minutes || 15)));
+    deposit.expiresAt = Math.max(Date.now(), Number(deposit.expiresAt || 0)) + minutes * 60 * 1000;
+    deposit.extendedAt = Date.now();
+    await saveSettingsState({ ...state, walletDeposits: deposits });
+    res.json({ deposit });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
   try {
     requireDb();
