@@ -1095,7 +1095,12 @@ function hashRoute() {
 
 function isShopPanelHash() {
   const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
-  return hash === "shop-panel" || hash === "shop-admin";
+  return hash === "shop-panel" || hash === "shop-admin" || /^shop-panel-[a-z0-9_-]+$/i.test(hash);
+}
+
+function shopPanelHashId() {
+  const match = decodeURIComponent(location.hash || "").match(/^#shop-panel-([a-z0-9_-]+)$/i);
+  return match?.[1] || "";
 }
 
 function sellerAdminSessionId() {
@@ -1118,6 +1123,11 @@ function storeAdminPassword(store) {
 function sellerAdminLink(store) {
   const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
   return `${base}/#seller-${store.id}`;
+}
+
+function shopPanelLink(store) {
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  return `${base}/#shop-panel-${store.id}`;
 }
 
 function sellerStores() {
@@ -2631,7 +2641,10 @@ function handleProductPurchase(storeId, productId, positionId) {
     product: product.title,
     storeName: store.name,
     status: "active",
+    paymentStatus: "paid",
     createdAt: Date.now(),
+    paidAt: Date.now(),
+    completedAt: Date.now(),
     amountUsd: priceUsd,
     ltcAmount,
     location: locationLabel(position)
@@ -4830,8 +4843,26 @@ function storeApplicationsForCurrentUser() {
 }
 
 function storeSalesUsd(storeId) {
-  return (db.orders || [])
-    .filter((order) => order.type === "product" && order.storeId === storeId && ["completed", "closed"].includes(order.status))
+  return paidStoreOrders(storeId)
+    .reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+}
+
+function paidStoreOrders(storeId) {
+  return (db.orders || []).filter((order) => {
+    if (order.type !== "product" || order.storeId !== storeId) return false;
+    if (order.disputeOpen || ["pending_payment", "canceled", "dispute"].includes(order.status)) return false;
+    return ["active", "completed", "closed"].includes(order.status) || order.paymentStatus === "paid";
+  });
+}
+
+function storeBalanceUsd(storeId) {
+  return paidStoreOrders(storeId).reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+}
+
+function storeTodaySalesUsd(storeId) {
+  const today = new Date().toDateString();
+  return paidStoreOrders(storeId)
+    .filter((order) => new Date(Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)).toDateString() === today)
     .reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
 }
 
@@ -5600,7 +5631,8 @@ function adminStoreEditor(store) {
       <form class="form admin-store-form" data-admin-product-form data-store-id="${esc(store.id)}" data-product-id="${esc(product.id || "")}" data-position-id="${esc(position.id || "")}">
         <div class="admin-section-title"><strong>Основное магазина</strong><span>Карточка, профиль и отдельная админка</span></div>
         <label class="field">Баннер страницы магазина<input name="storeCover" type="file" accept="image/*"></label>
-        <label class="field">Ссылка отдельной админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
+        <label class="field">Ссылка старой админки<input value="${esc(sellerAdminLink(store))}" readonly></label>
+        <label class="field">Ссылка новой Shop Admin панели<input value="${esc(shopPanelLink(store))}" readonly></label>
         <label class="field">Пароль отдельной админки<input name="adminPassword" value="${esc(storeAdminPassword(store))}"></label>
         ${route !== "seller" ? `
           <div class="check-row">
@@ -5778,7 +5810,8 @@ async function handleStoreCreate(event) {
   adminCreationNotice = `
     <h3>Новая карта создана</h3>
     <p><strong>${esc(store.name)}</strong> · ${new Date().toLocaleString()}</p>
-    <p>Админ панель магазина: <a href="${esc(sellerAdminLink(store))}">${esc(sellerAdminLink(store))}</a></p>
+    <p>Старая админка магазина: <a href="${esc(sellerAdminLink(store))}">${esc(sellerAdminLink(store))}</a></p>
+    <p>Новая Shop Admin панель: <a href="${esc(shopPanelLink(store))}">${esc(shopPanelLink(store))}</a></p>
     <p>Логин владельца: <strong>${esc(finalOwnerLogin)}</strong></p>
     <p>Пароль админ панели: <strong>${esc(adminPassword || "не задан")}</strong></p>
   `;
@@ -5836,13 +5869,15 @@ async function handleExchangeCardCreate(event) {
 
 function sellerDashboardShell(store, standalone = false, activeTab = "dashboard") {
   const orders = (db.orders || []).filter((order) => order.storeId === store.id);
+  const paidOrders = paidStoreOrders(store.id);
   const today = new Date().toDateString();
-  const todayOrders = orders.filter((order) => new Date(order.createdAt || Date.now()).toDateString() === today);
+  const todayOrders = paidOrders.filter((order) => new Date(Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)).toDateString() === today);
   const products = Array.isArray(store.products) ? store.products : [];
   const positions = products.flatMap((product) => product.positions || []);
   const stockTotal = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
-  const clients = new Set(orders.map((order) => order.login).filter(Boolean));
-  const salesUsd = storeSalesUsd(store.id);
+  const clients = new Set(paidOrders.map((order) => order.login).filter(Boolean));
+  const salesUsd = storeBalanceUsd(store.id);
+  const todaySalesUsd = storeTodaySalesUsd(store.id);
   const recentOrders = orders.slice().sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).slice(0, 6);
   const districts = new Map();
   positions.forEach((position) => {
@@ -5920,9 +5955,9 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         </section>
 
         <section class="seller-dashboard-stats">
-          ${sellerDashStat("Магазинов", "1", "Активная витрина")}
-          ${sellerDashStat("Заказы сегодня", todayOrders.length, "Новые заявки")}
-          ${sellerDashStat("Доход сегодня", `${todayOrders.reduce((sum, order) => sum + Number(order.amountUsd || 0), 0).toFixed(2)} $`, "За текущий день")}
+          ${sellerDashStat("Оплачено сегодня", todayOrders.length, "Продажи за день")}
+          ${sellerDashStat("Доход сегодня", `${todaySalesUsd.toFixed(2)} $`, "Зачислено за день")}
+          ${sellerDashStat("Общий доход", `${salesUsd.toFixed(2)} $`, "Баланс магазина")}
           ${sellerDashStat("Клиентов", clients.size, "Всего покупателей")}
           ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
           ${sellerDashStat("Диспуты", storeDisputes(store.id).length, "Открытые обращения")}
@@ -6114,10 +6149,20 @@ function shopPanelSession() {
 }
 
 function shopPanelStore() {
-  return db.stores.find((store) => store.id === "test") || testSellerSeedStore();
+  const id = shopPanelHashId() || shopPanelSession();
+  return db.stores.find((store) => store.id === id) || null;
+}
+
+function shopPanelLoginStore(login, password) {
+  const hashId = shopPanelHashId();
+  const candidates = hashId
+    ? db.stores.filter((store) => store.id === hashId)
+    : db.stores.filter((store) => sameLogin(store.ownerLogin, login) || sameLogin(store.id, login));
+  return candidates.find((store) => String(storeAdminPassword(store) || "") === String(password || "")) || null;
 }
 
 function renderShopPanelLogin(message = "") {
+  const hashStore = db.stores.find((store) => store.id === shopPanelHashId());
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap shop-panel-login">
@@ -6125,9 +6170,10 @@ function renderShopPanelLogin(message = "") {
         <img src="assets/logo1-transparent.png" alt="CERBER">
         <h1>Shop Admin</h1>
         <p>Отдельная панель управления магазином.</p>
+        ${hashStore ? `<p>${esc(hashStore.name)} · ${esc(hashStore.ownerLogin || hashStore.id)}</p>` : ""}
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <form class="form" data-shop-panel-login>
-          <label class="field">Логин<input name="login" required autocomplete="username" value="test"></label>
+          <label class="field">Логин<input name="login" required autocomplete="username" value="${esc(hashStore?.ownerLogin || "")}"></label>
           <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
           <button class="primary" type="submit">Войти</button>
         </form>
@@ -6140,20 +6186,21 @@ function renderShopPanelLogin(message = "") {
     const data = new FormData(event.currentTarget);
     const login = String(data.get("login") || "").trim();
     const password = String(data.get("password") || "");
-    if (!sameLogin(login, "test") || password !== "test1") {
+    const store = shopPanelLoginStore(login, password);
+    if (!store) {
       renderShopPanelLogin("Неверный логин или пароль");
       return;
     }
     try {
-      localStorage.setItem(SHOP_PANEL_SESSION_KEY, "test");
+      localStorage.setItem(SHOP_PANEL_SESSION_KEY, store.id);
     } catch {}
     renderShopPanel("dashboard");
   };
 }
 
 function renderShopPanel(activeTab = "dashboard") {
-  if (shopPanelSession() !== "test") return renderShopPanelLogin();
   const store = shopPanelStore();
+  if (!store) return renderShopPanelLogin();
   const html = sellerDashboardShell(store, false, activeTab);
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
