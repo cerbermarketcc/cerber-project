@@ -35,6 +35,7 @@ const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
+let groupChatRefreshTimer = null;
 let adminCreationNotice = "";
 let activeHomeTab = "all";
 const NEW_STORE_STATS = {
@@ -3154,64 +3155,108 @@ function finishRollTimer(timerId) {
   const timer = db.groupSettings.rollTimers.find((item) => item.id === timerId);
   if (!timer || timer.done) return;
   timer.done = true;
-  pushGroupSystemMessage("Время истекло");
+  pushGroupSystemMessage("Время истекло!");
   saveDb();
   if (route === "group-chat") renderGroupChat();
+}
+
+function startGroupChatRefresh() {
+  if (groupChatRefreshTimer) clearInterval(groupChatRefreshTimer);
+  groupChatRefreshTimer = setInterval(async () => {
+    if (route !== "group-chat") return;
+    const form = document.querySelector("[data-group-form]");
+    const text = form?.querySelector("textarea")?.value || "";
+    if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft) return;
+    const before = JSON.stringify({
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body]).slice(-40),
+      settings: db.groupSettings
+    });
+    const ok = await loadRemoteSession();
+    if (!ok || route !== "group-chat") return;
+    const after = JSON.stringify({
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body]).slice(-40),
+      settings: db.groupSettings
+    });
+    if (before !== after) renderGroupChat();
+  }, 6000);
 }
 
 function renderGroupChat() {
   route = "group-chat";
   ensureGroupSettings();
   scheduleOpenRollTimers();
+  startGroupChatRefresh();
   const user = currentUser();
   const settings = db.groupSettings || structuredClone(defaults.groupSettings);
   const moderator = isGroupModerator();
   const muteUntil = groupMuteUntil(user?.login);
   const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted);
   const messages = (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const lastRoll = (settings.rollTimers || []).filter((timer) => !timer.done).sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))[0];
+  const rollLeft = lastRoll ? Math.max(0, Math.ceil((Number(lastRoll.expiresAt || 0) - Date.now()) / 1000)) : 0;
   layout(`
-    <section class="screen group-chat-screen">
-      <article class="panel group-chat-head">
-        <div>
-          <h2>${esc(settings.title || "Общий чат")}</h2>
-        </div>
-        ${moderator ? `
-          <form class="group-title-form" data-group-title-form>
-            <input name="title" value="${esc(settings.title || "Общий чат")}" aria-label="Название чата">
-            <button>Сохранить</button>
-          </form>
-        ` : ""}
-      </article>
-      ${pinned ? `
-        <article class="group-pinned">
-          <strong>Закреплено</strong>
-          <p><button class="link-button" data-group-user="${esc(pinned.fromLogin)}">${esc(pinned.fromLogin)}</button>: ${esc(pinned.body)}</p>
-        </article>
-      ` : ""}
-      <article class="group-chat-list">
-        ${messages.length ? messages.map(groupMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
-      </article>
-      <article class="panel group-compose">
-        ${muteUntil > Date.now() ? `
-          <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
-        ` : `
-          <form class="group-form" data-group-form>
-            <div class="group-compose-box">
-              <textarea name="body" placeholder="Сообщение"></textarea>
-              <div class="group-emoji-row">
-                ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-group-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
-              </div>
-              <div class="group-file-name" data-group-file-name></div>
+    <section class="group-chat-screen">
+      <article class="group-chat-shell">
+        <header class="group-chat-head">
+          <div class="group-chat-title">
+            <span class="group-live-dot"></span>
+            <div>
+              <h2>${esc(settings.title || "Общий чат")}</h2>
+              <p>${messages.length} сообщений · ${moderator ? "админ-доступ" : "общий доступ"}</p>
             </div>
-            <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*" data-group-attachment>
-            <button type="button" class="group-tool-button" data-group-attach>📎</button>
-            <button type="button" class="group-tool-button" data-group-voice>🎙</button>
-            <button class="primary">${tr("send")}</button>
-          </form>
-        `}
+          </div>
+          ${moderator ? `
+            <form class="group-title-form" data-group-title-form>
+              <input name="title" value="${esc(settings.title || "Общий чат")}" aria-label="Название чата">
+              <button>Сохранить</button>
+            </form>
+          ` : ""}
+        </header>
+
+        ${pinned ? `
+          <section class="group-pinned">
+            <span>Закреплено</span>
+            <p><button class="link-button" data-group-user="${esc(pinned.fromLogin)}">${esc(groupMessageAuthor(pinned.fromLogin))}</button>: ${esc(pinned.body || "[медиа]")}</p>
+          </section>
+        ` : ""}
+
+        ${lastRoll ? `
+          <section class="group-roll-banner">
+            <strong>Roll активен</strong>
+            <span>Осталось ${Math.floor(rollLeft / 60)}:${String(rollLeft % 60).padStart(2, "0")}</span>
+          </section>
+        ` : ""}
+
+        <section class="group-chat-list" data-group-chat-list>
+          ${messages.length ? messages.map(groupMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+        </section>
+
+        <footer class="group-compose">
+          ${muteUntil > Date.now() ? `
+            <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+          ` : `
+            <form class="group-form" data-group-form>
+              <div class="group-compose-box">
+                <textarea name="body" rows="1" placeholder="Сообщение, /roll 999 или /mute login 15"></textarea>
+                <div class="group-sticker-row">
+                  ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-group-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
+                </div>
+                <div class="group-file-name" data-group-file-name></div>
+              </div>
+              <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-attachment>
+              <button type="button" class="group-tool-button" data-group-attach title="Фото, видео или стикер">📎</button>
+              <button type="button" class="group-tool-button" data-group-voice title="Голосовое">🎙</button>
+              <button class="group-send-button">${tr("send")}</button>
+            </form>
+          `}
+        </footer>
       </article>
     </section>
   `);
+  requestAnimationFrame(() => {
+    const list = document.querySelector("[data-group-chat-list]");
+    if (list) list.scrollTop = list.scrollHeight;
+  });
   document.querySelector("[data-group-form]")?.addEventListener("submit", handleGroupMessageSend);
   document.querySelector("[data-group-attach]")?.addEventListener("click", () => document.querySelector("[data-group-attachment]")?.click());
   document.querySelector("[data-group-voice]")?.addEventListener("click", toggleGroupVoiceRecord);
@@ -3296,6 +3341,14 @@ function groupMessageView(msg) {
   const system = msg.fromLogin === "cerber-market";
   const likes = Array.isArray(msg.likes) ? msg.likes : [];
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  if (system) {
+    return `
+      <article class="group-system-message" data-group-message="${esc(msg.id)}">
+        <span>⚡</span>
+        <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
+      </article>
+    `;
+  }
   return `
     <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""}" data-group-message="${esc(msg.id)}">
       <button class="group-avatar" data-group-user="${esc(msg.fromLogin)}">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
@@ -3310,6 +3363,7 @@ function groupMessageView(msg) {
         ${moderator ? `
           <div class="group-actions">
             <button data-group-pin="${esc(msg.id)}">Закрепить</button>
+            <button data-group-user="${esc(msg.fromLogin)}">ЛС</button>
             <button data-group-delete="${esc(msg.id)}">Удалить у всех</button>
           </div>
         ` : ""}
@@ -3387,8 +3441,8 @@ async function handleGroupMessageSend(event) {
 function handleGroupCommand(body) {
   const roll = body.match(/^\/roll\s+(\d+)/i);
   if (roll) {
-    const max = Math.max(1, Math.min(1000000, Number(roll[1] || 100)));
-    const number = Math.floor(Math.random() * max) + 1;
+    const max = Math.max(0, Math.min(999, Number(roll[1] || 999)));
+    const number = Math.floor(Math.random() * (max + 1));
     const timer = {
       id: `roll-${Date.now()}`,
       expiresAt: Date.now() + 2 * 60 * 1000,
@@ -3396,24 +3450,32 @@ function handleGroupCommand(body) {
     };
     ensureGroupSettings();
     db.groupSettings.rollTimers.push(timer);
-    pushGroupSystemMessage(`Выпал номер ${number}. Таймер на 2 минуты включен`);
+    pushGroupSystemMessage(`Выпал номер ${number} из 0-${max}. Таймер запущен на 2 минуты.`);
     scheduleRollTimer(timer);
     saveDb();
     return true;
   }
   if (!isGroupModerator()) return false;
+  const pin = body.match(/^\/pin(?:\s+(.+))?/i);
+  if (pin) {
+    const query = String(pin[1] || "").trim();
+    const messages = (db.groupMessages || []).filter((msg) => !msg.deleted && msg.fromLogin !== "cerber-market");
+    const target = query
+      ? messages.slice().reverse().find((msg) => msg.id === query || String(msg.body || "").includes(query))
+      : messages[messages.length - 1];
+    if (target) {
+      db.groupSettings.pinnedMessageId = target.id;
+      pushGroupSystemMessage(`Сообщение от ${groupMessageAuthor(target.fromLogin)} закреплено.`);
+      saveDb();
+    }
+    return true;
+  }
   const mute = body.match(/^\/mute\s+(\S+)\s+(\d+)/i);
   if (mute) {
     const login = mute[1];
     const minutes = Math.max(1, Number(mute[2] || 15));
     db.groupSettings.mutedUntil[login] = Date.now() + minutes * 60 * 1000;
-    db.groupMessages.push({
-      id: `group-${Date.now()}`,
-      fromLogin: "system",
-      body: `${login} замучен на ${minutes} минут`,
-      createdAt: Date.now(),
-      date: new Date().toLocaleString()
-    });
+    pushGroupSystemMessage(`${login} замучен на ${minutes} минут.`);
     saveDb();
     return true;
   }
