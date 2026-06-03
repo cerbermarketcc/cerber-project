@@ -2905,12 +2905,21 @@ body[data-theme="dark"] .mirror-row {
   min-height: min(680px, calc(100dvh - 210px));
 }
 
+.private-layout.is-list-only {
+  grid-template-columns: 1fr;
+}
+
 .private-list {
   display: grid;
   align-content: start;
   gap: 8px;
   max-height: calc(100dvh - 230px);
   overflow: auto;
+}
+
+.private-list h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
 }
 
 .private-list button {
@@ -2951,7 +2960,8 @@ body[data-theme="dark"] .mirror-row {
 
 .private-chat-head {
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding-bottom: 12px;
@@ -2965,6 +2975,17 @@ body[data-theme="dark"] .mirror-row {
 
 .private-chat-head p {
   color: var(--muted);
+}
+
+.private-close-chat {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--ink);
+  font-size: 26px;
+  line-height: 1;
 }
 
 .private-chat-list {
@@ -2995,14 +3016,18 @@ body[data-theme="dark"] .mirror-row {
     min-height: calc(100dvh - 220px);
   }
 
+  .private-layout.has-active .private-list {
+    display: none;
+  }
+
   .private-list {
-    display: flex;
-    overflow-x: auto;
+    display: grid;
+    overflow: visible;
     max-height: none;
   }
 
   .private-list button {
-    min-width: 190px;
+    min-width: 0;
   }
 
   .private-search {

@@ -2883,7 +2883,6 @@ function renderMessages() {
   const user = currentUser();
   const visibleMessages = privateVisibleMessages(user.login);
   const conversations = privateConversations(visibleMessages, user.login);
-  if (!activePrivateLogin && conversations.length) activePrivateLogin = conversations[0].login;
   const activeMessages = activePrivateLogin ? privateConversationMessages(activePrivateLogin, visibleMessages, user.login) : [];
   startPrivateMessagesRefresh();
   layout(`
@@ -2898,8 +2897,9 @@ function renderMessages() {
           <button class="primary">Найти</button>
         </form>
       </article>
-      <div class="private-layout">
+      <div class="private-layout ${activePrivateLogin ? "has-active" : "is-list-only"}">
         <aside class="private-list">
+          <h3>Мои диалоги</h3>
           ${conversations.length ? conversations.map((chat) => `
             <button class="${sameLogin(chat.login, activePrivateLogin) ? "active" : ""}" data-private-open="${esc(chat.login)}">
               <span>${esc(chat.login)}</span>
@@ -2907,14 +2907,15 @@ function renderMessages() {
             </button>
           `).join("") : `<p>${tr("noMessages")}</p>`}
         </aside>
-        <article class="panel private-chat">
-          ${activePrivateLogin ? `
+        ${activePrivateLogin ? `
+          <article class="panel private-chat">
             <header class="private-chat-head">
               <button class="group-avatar">${esc(activePrivateLogin.slice(0, 1).toUpperCase())}</button>
               <div>
                 <h3>${esc(activePrivateLogin)}</h3>
                 <p>Личный диалог</p>
               </div>
+              <button class="private-close-chat" type="button" data-private-close title="Закрыть диалог">×</button>
             </header>
             <div class="private-chat-list" data-private-chat-list>
               ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
@@ -2933,8 +2934,8 @@ function renderMessages() {
               <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
               <div class="group-file-name" data-private-file-name></div>
             </form>
-          ` : `<p class="empty-chat">Найдите пользователя по логину и начните диалог</p>`}
-        </article>
+          </article>
+        ` : ""}
       </div>
     </section>
   `);
@@ -2948,6 +2949,11 @@ function renderMessages() {
       activePrivateLogin = button.dataset.privateOpen;
       renderMessages();
     };
+  });
+  document.querySelector("[data-private-close]")?.addEventListener("click", () => {
+    activePrivateLogin = "";
+    privateVoiceDraft = null;
+    renderMessages();
   });
   document.querySelector("[data-private-chat-form]")?.addEventListener("submit", handlePrivateMessageSend);
   document.querySelector("[data-private-attach]")?.addEventListener("click", () => document.querySelector("[data-private-attachment]")?.click());
@@ -6151,6 +6157,7 @@ function bindStoreCards() {
 function routeTo(next) {
   if (next === "filters") return renderFilters();
   if (next === "rules") return openRulesModal();
+  if (next === "messages" && route !== "messages") activePrivateLogin = "";
   route = next;
   renderCurrent();
 }
