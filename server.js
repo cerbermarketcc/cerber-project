@@ -490,6 +490,26 @@ app.post("/api/telegram/login", async (req, res, next) => {
   }
 });
 
+app.get("/api/telegram/wallet/address", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "РЎРµСЃСЃРёСЏ РЅРµ РЅР°Р№РґРµРЅР°" });
+    const coin = walletCoinFromRequest({ coinId: req.query.coinId || "ltc" });
+    if (coin.id !== "ltc") {
+      return res.status(400).json({ error: "РџРѕСЃС‚РѕСЏРЅРЅС‹Р№ Р°РґСЂРµСЃ СЃРµР№С‡Р°СЃ РґРѕСЃС‚СѓРїРµРЅ С‚РѕР»СЊРєРѕ РґР»СЏ LTC" });
+    }
+    res.json({
+      address: mainLtcWallet,
+      coinId: coin.id,
+      payCurrency: coin.payCurrency,
+      login: user.login,
+      note: "РџРѕСЃС‚РѕСЏРЅРЅС‹Р№ LTC Р°РґСЂРµСЃ РґР»СЏ РїРѕРїРѕР»РЅРµРЅРёСЏ Р±Р°Р»Р°РЅСЃР°"
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/telegram/me", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
