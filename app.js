@@ -7,6 +7,7 @@ const SELLER_ADMIN_KEY = "cerber_seller_admin_v1";
 const SELLER_ADMIN_API_TOKEN_KEY = "cerber_seller_admin_token_v1";
 const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
+const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
@@ -1092,6 +1093,11 @@ function hashRoute() {
   return routes.has(hash) ? hash : "";
 }
 
+function isShopPanelHash() {
+  const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
+  return hash === "shop-panel" || hash === "shop-admin";
+}
+
 function sellerAdminSessionId() {
   try {
     return localStorage.getItem(SELLER_ADMIN_KEY) || "";
@@ -1768,7 +1774,6 @@ function renderSellerAdminLogin(storeId = "", message = "") {
         <p>${esc(store?.name || "Магазин")}</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <form class="form" data-seller-admin-login>
-          <label class="field">Логин<input name="login" required autocomplete="username" value="${esc(store?.ownerLogin || "")}"></label>
           <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
           <button class="primary" type="submit">Войти</button>
         </form>
@@ -1778,20 +1783,13 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   `;
   document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const login = String(data.get("login") || "").trim();
-    const password = data.get("password");
-    const loginOk = sameLogin(login, store.ownerLogin) || sameLogin(login, store.id);
-    if (!loginOk) {
-      renderSellerAdminLogin(store.id, "Неверный логин");
-      return;
-    }
-    if (API_ENABLED && store.id !== "test") {
+    const password = new FormData(event.currentTarget).get("password");
+    if (API_ENABLED) {
       try {
         const response = await fetch("/api/store-admin/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ storeId: store.id, login, password })
+          body: JSON.stringify({ storeId: store.id, password })
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || "Неверный пароль");
@@ -5836,7 +5834,7 @@ async function handleExchangeCardCreate(event) {
   renderAdmin();
 }
 
-function sellerDashboardShell(store, standalone = false) {
+function sellerDashboardShell(store, standalone = false, activeTab = "dashboard") {
   const orders = (db.orders || []).filter((order) => order.storeId === store.id);
   const today = new Date().toDateString();
   const todayOrders = orders.filter((order) => new Date(order.createdAt || Date.now()).toDateString() === today);
@@ -5859,6 +5857,36 @@ function sellerDashboardShell(store, standalone = false) {
     return { title: product.title || "Товар", stock: productStock, value: productStock * Number(product.priceUsd || 0) };
   });
   const txRows = (db.walletTransactions || []).slice(-6).reverse();
+  const navHtml = shopPanelNav(activeTab);
+  if (activeTab !== "dashboard") {
+    return `
+      <article class="seller-dashboard-shell">
+        <aside class="seller-dashboard-nav">
+          <div class="seller-dashboard-brand">
+            <img src="assets/logo1-transparent.png" alt="CERBER">
+            <span>Shop Admin</span>
+          </div>
+          ${navHtml}
+        </aside>
+        <div class="seller-dashboard-main">
+          <header class="seller-dashboard-top">
+            <div>
+              <strong>${esc(store.name)}</strong>
+              <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
+            </div>
+            <div class="seller-dashboard-balance">
+              <span>Баланс магазина</span>
+              <strong>${salesUsd.toFixed(2)} $</strong>
+              <small>${usdToLtc(salesUsd).toFixed(8)} LTC</small>
+            </div>
+            <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
+            <button class="ghost-button" data-shop-panel-logout>Выйти</button>
+          </header>
+          ${shopPanelTabContent(activeTab, { store, orders, products, positions, productRows, districts, recentOrders, txRows, clients, salesUsd, stockTotal })}
+        </div>
+      </article>
+    `;
+  }
   return `
     <article class="seller-dashboard-shell">
       <aside class="seller-dashboard-nav">
@@ -5866,15 +5894,7 @@ function sellerDashboardShell(store, standalone = false) {
           <img src="assets/logo1-transparent.png" alt="CERBER">
           <span>Shop Admin</span>
         </div>
-        ${[
-          ["⌂", "Dashboard"],
-          ["▣", "Заказы"],
-          ["▤", "Магазин"],
-          ["▥", "Склад"],
-          ["◇", "Клиенты"],
-          ["✉", "Связь"],
-          ["⚙", "Персонал"]
-        ].map(([icon, label]) => `<a href="#seller-tools"><span>${icon}</span>${label}</a>`).join("")}
+        ${navHtml}
       </aside>
       <div class="seller-dashboard-main">
         <header class="seller-dashboard-top">
@@ -5888,7 +5908,7 @@ function sellerDashboardShell(store, standalone = false) {
             <small>${usdToLtc(salesUsd).toFixed(8)} LTC</small>
           </div>
           <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
-          ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : ""}
+          ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : `<button class="ghost-button" data-shop-panel-logout>Выйти</button>`}
         </header>
 
         <section class="seller-dashboard-hero">
@@ -5989,6 +6009,170 @@ function sellerDashStat(label, value, hint) {
   `;
 }
 
+function shopPanelNav(activeTab = "dashboard") {
+  const items = [
+    ["dashboard", "⌂", "Dashboard"],
+    ["orders", "▣", "Заказы"],
+    ["shop", "▤", "Магазин"],
+    ["storage", "▥", "Склад"],
+    ["clients", "◇", "Клиенты"],
+    ["connect", "✉", "Связь"],
+    ["staff", "⚙", "Персонал"]
+  ];
+  return items.map(([id, icon, label]) => `
+    <button class="${activeTab === id ? "active" : ""}" data-shop-tab="${id}" type="button">
+      <span>${icon}</span>${label}
+    </button>
+  `).join("");
+}
+
+function shopPanelTabContent(tab, data) {
+  const { store, orders, products, positions, productRows, districts, recentOrders, txRows, clients, salesUsd, stockTotal } = data;
+  if (tab === "orders") {
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Заказы</h2><p>Таблица заявок клиентов, статусы оплат и быстрый контроль выдачи.</p></div></section>
+      <section class="seller-dashboard-card seller-wide-card">
+        <div class="seller-card-head"><h3>Последние заказы</h3><span>${orders.length} всего</span></div>
+        <div class="seller-dashboard-table">
+          <div><strong>#</strong><strong>Клиент</strong><strong>Сумма</strong><strong>Статус</strong></div>
+          ${recentOrders.length ? recentOrders.map((order) => `
+            <div><span>${esc(order.id || "-")}</span><span>${esc(order.login || "client")}</span><span>${Number(order.amountUsd || 0).toFixed(2)} $</span><span>${esc(order.status || "new")}</span></div>
+          `).join("") : `<p>Заказов пока нет.</p>`}
+        </div>
+      </section>
+    `;
+  }
+  if (tab === "shop") {
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Магазин</h2><p>Профиль витрины, описание, статус, баланс и основные показатели.</p></div></section>
+      <section class="seller-dashboard-grid">
+        ${sellerDashStat("Название", store.name || "Shop", store.tag || store.id)}
+        ${sellerDashStat("Статус", storeStatusLabel(store), "Доступность витрины")}
+        ${sellerDashStat("Оборот", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}
+        <div class="seller-dashboard-card seller-wide-card">
+          <div class="seller-card-head"><h3>Описание магазина</h3></div>
+          <p>${esc(store.description || "Описание пока не заполнено.")}</p>
+        </div>
+      </section>
+    `;
+  }
+  if (tab === "storage") {
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Склад</h2><p>Остатки по товарам, районам и позициям.</p></div></section>
+      <section class="seller-dashboard-grid">
+        <div class="seller-dashboard-card">
+          <div class="seller-card-head"><h3>Товары</h3><span>${stockTotal} шт.</span></div>
+          ${productRows.length ? productRows.map((row) => `<div class="seller-stock-row"><span>${esc(row.title)}</span><strong>${row.stock}</strong><progress max="100" value="${Math.min(100, row.stock * 10)}"></progress></div>`).join("") : `<p>Склад пока пуст.</p>`}
+        </div>
+        <div class="seller-dashboard-card">
+          <div class="seller-card-head"><h3>Районы</h3><span>${positions.length} позиций</span></div>
+          ${[...districts.entries()].map(([name, item]) => `<div class="seller-tree-row"><span>${esc(name)}</span><strong>${item.count} шт.</strong></div>`).join("") || `<p>Районов пока нет.</p>`}
+        </div>
+      </section>
+    `;
+  }
+  if (tab === "clients") {
+    const clientRows = [...clients].slice(0, 12);
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Клиенты</h2><p>Покупатели, последние активности и быстрый доступ к переписке.</p></div></section>
+      <section class="seller-dashboard-card seller-wide-card">
+        <div class="seller-card-head"><h3>Клиенты магазина</h3><span>${clients.size} всего</span></div>
+        ${clientRows.length ? clientRows.map((login) => `<div class="seller-source"><span>${esc(login)}</span><strong>${orders.filter((order) => sameLogin(order.login, login)).length} заказов</strong></div>`).join("") : `<p>Клиентов пока нет.</p>`}
+      </section>
+    `;
+  }
+  if (tab === "connect") {
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Связь</h2><p>Сообщения, поддержка, рассылки и уведомления магазина.</p></div></section>
+      <section class="seller-dashboard-grid">
+        <div class="seller-dashboard-card"><div class="seller-card-head"><h3>Сообщения</h3><span>0 новых</span></div><p>Здесь будет лента обращений и переписок с клиентами.</p></div>
+        <div class="seller-dashboard-card"><div class="seller-card-head"><h3>Рассылки</h3><span>готово к подключению</span></div><p>Блок для новостей, акций и массовых сообщений.</p></div>
+      </section>
+    `;
+  }
+  if (tab === "staff") {
+    return `
+      <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Доступы сотрудников, роли и права внутри магазина.</p></div></section>
+      <section class="seller-dashboard-card seller-wide-card">
+        <div class="seller-card-head"><h3>Команда</h3><span>1 активный доступ</span></div>
+        <div class="seller-source"><span>${esc(store.ownerLogin || "test")}</span><strong>Владелец</strong></div>
+        <p>Новые сотрудники и права будут подключаться здесь.</p>
+      </section>
+    `;
+  }
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Dashboard</h2><p>Панель магазина.</p></div></section>
+  `;
+}
+
+function shopPanelSession() {
+  try {
+    return localStorage.getItem(SHOP_PANEL_SESSION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function shopPanelStore() {
+  return db.stores.find((store) => store.id === "test") || testSellerSeedStore();
+}
+
+function renderShopPanelLogin(message = "") {
+  document.body.dataset.theme = db.theme;
+  root.innerHTML = `
+    <main class="auth-wrap shop-panel-login">
+      <section class="auth-card">
+        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <h1>Shop Admin</h1>
+        <p>Отдельная панель управления магазином.</p>
+        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        <form class="form" data-shop-panel-login>
+          <label class="field">Логин<input name="login" required autocomplete="username" value="test"></label>
+          <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
+          <button class="primary" type="submit">Войти</button>
+        </form>
+      </section>
+    </main>
+    <div class="toast"></div>
+  `;
+  document.querySelector("[data-shop-panel-login]").onsubmit = (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const login = String(data.get("login") || "").trim();
+    const password = String(data.get("password") || "");
+    if (!sameLogin(login, "test") || password !== "test1") {
+      renderShopPanelLogin("Неверный логин или пароль");
+      return;
+    }
+    try {
+      localStorage.setItem(SHOP_PANEL_SESSION_KEY, "test");
+    } catch {}
+    renderShopPanel("dashboard");
+  };
+}
+
+function renderShopPanel(activeTab = "dashboard") {
+  if (shopPanelSession() !== "test") return renderShopPanelLogin();
+  const store = shopPanelStore();
+  const html = sellerDashboardShell(store, false, activeTab);
+  document.body.dataset.theme = db.theme;
+  root.innerHTML = `
+    <main class="shop-panel-page">
+      ${html}
+    </main>
+    <div class="toast"></div>
+  `;
+  document.querySelectorAll("[data-shop-tab]").forEach((button) => {
+    button.onclick = () => renderShopPanel(button.dataset.shopTab);
+  });
+  document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", () => {
+    try {
+      localStorage.removeItem(SHOP_PANEL_SESSION_KEY);
+    } catch {}
+    renderShopPanelLogin();
+  });
+}
+
 function renderSeller() {
   const stores = sellerStores();
   if (!stores.length) return renderSellerPortal();
@@ -5999,9 +6183,8 @@ function renderSeller() {
   const disputes = storeDisputes(store.id);
   layout(`
     <section class="screen seller-admin-screen">
-      ${sellerDashboardShell(store, standalone)}
       <article class="panel">
-        <h2>Настройки витрины: ${esc(store.name)}</h2>
+        <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
         ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
         <p class="status-pill">${storeStatusLabel(store)}</p>
         <div class="stats">
@@ -6392,6 +6575,7 @@ function routeTo(next) {
 }
 
 function renderCurrent() {
+  if (isShopPanelHash()) return renderShopPanel();
   const hashStoreId = sellerAdminHashId();
   if (hashStoreId) {
     sellerAdminStoreId = hashStoreId;
