@@ -19,6 +19,8 @@ const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
+const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const walletCoins = [
@@ -137,6 +139,10 @@ async function ensureSeed() {
       ltcBalances: {},
       walletTransactions: [],
       walletDeposits: [],
+      telegramBot: {
+        users: {},
+        sentMessages: {}
+      },
       paymentSettings: {
         provider: "nowpayments",
         payBaseUrl: "",
@@ -483,6 +489,10 @@ app.get("/api/telegram/me", async (req, res, next) => {
   }
 });
 
+app.use("/api/telegram/group-chat", (_req, res) => {
+  res.status(410).json({ error: "Общий чат в Telegram-боте отключен" });
+});
+
 app.get("/api/telegram/group-chat", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
@@ -565,6 +575,8 @@ app.put("/api/state", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const state = req.body.state || {};
+    const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const currentSettingsData = currentSettings?.data || {};
     if (Array.isArray(state.stores)) {
       for (const store of state.stores.filter((item) => item && item.id)) {
         await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
@@ -587,6 +599,7 @@ app.put("/api/state", async (req, res, next) => {
         ltcBalances: state.ltcBalances || {},
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
+        telegramBot: state.telegramBot || currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
         storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
         ownerSettings: state.ownerSettings || {},
         paymentSettings: state.paymentSettings || {},
@@ -692,6 +705,115 @@ function verifyNowpaymentsSignature(req) {
 
 async function saveSettingsState(state) {
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
+async function loadSettingsState() {
+  await ensureSeed();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  state.telegramBot = state.telegramBot || { users: {}, sentMessages: {} };
+  state.telegramBot.users = state.telegramBot.users || {};
+  state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
+  return state;
+}
+
+async function createWalletDepositRecord(user, options = {}) {
+  if (!nowpaymentsApiKey) {
+    const error = new Error("NOWPAYMENTS_API_KEY не настроен на сервере");
+    error.status = 500;
+    throw error;
+  }
+
+  const amountUsd = Number(options.amountUsd || 0);
+  const coin = walletCoinFromRequest(options);
+  const amountLtcExpected = Math.max(0, Number(options.amountLtcEstimate || 0));
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    const error = new Error("Укажите сумму пополнения");
+    error.status = 400;
+    throw error;
+  }
+
+  const state = await loadSettingsState();
+  const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+  const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const deposit = {
+    id: `deposit-${Date.now()}`,
+    login: user.login,
+    status: "waiting",
+    amountUsd,
+    amountLtcExpected,
+    coinId: coin.id,
+    payCurrency: coin.payCurrency,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + walletDepositTtlMs,
+    date: new Date().toLocaleString("ru-RU")
+  };
+
+  const paymentPayload = {
+    price_amount: amountUsd,
+    price_currency: "usd",
+    pay_currency: coin.payCurrency,
+    order_id: deposit.id,
+    order_description: `CERBER MARKET wallet top up / ${user.login}`,
+    ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
+  };
+
+  let payment = {};
+  try {
+    payment = await nowpaymentsJson("payment", paymentPayload);
+  } catch {
+    const invoice = await nowpaymentsJson("invoice", {
+      price_amount: amountUsd,
+      price_currency: "usd",
+      pay_currency: coin.payCurrency,
+      order_id: deposit.id,
+      order_description: `CERBER MARKET wallet top up / ${user.login}`,
+      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
+      success_url: `${publicBaseUrl}/`,
+      cancel_url: `${publicBaseUrl}/`
+    });
+    payment = {
+      payment_id: invoice.id || invoice.invoice_id || "",
+      payment_status: "waiting",
+      payment_url: invoice.invoice_url || invoice.payment_url || "",
+      invoice_url: invoice.invoice_url || invoice.payment_url || ""
+    };
+  }
+
+  deposit.paymentId = payment.payment_id || payment.id || "";
+  deposit.payAddress = payment.pay_address || payment.address || "";
+  deposit.payAmount = Number(payment.pay_amount || 0);
+  deposit.payCurrency = coin.payCurrency;
+  deposit.coinId = coin.id;
+  deposit.paymentUrl = payment.payment_url || payment.invoice_url || "";
+  deposit.paymentStatus = payment.payment_status || "waiting";
+  deposit.paymentProviderPayload = {
+    paymentId: deposit.paymentId,
+    payAddress: deposit.payAddress,
+    payAmount: deposit.payAmount,
+    payCurrency: deposit.payCurrency,
+    coinId: deposit.coinId,
+    paymentUrl: deposit.paymentUrl
+  };
+
+  deposits.unshift(deposit);
+  walletTransactions.unshift({
+    id: `tx-${deposit.id}`,
+    login: user.login,
+    type: "deposit",
+    title: "Пополнение баланса",
+    amountLtc: amountLtcExpected,
+    amountUsd,
+    payAmount: deposit.payAmount,
+    payCurrency: deposit.payCurrency,
+    coinId: deposit.coinId,
+    createdAt: deposit.createdAt,
+    expiresAt: deposit.expiresAt,
+    date: deposit.date,
+    status: "processing"
+  });
+  await saveSettingsState({ ...state, walletDeposits: deposits, walletTransactions });
+  return deposit;
 }
 
 async function completeProductOrder(order, state, providerPayload = {}) {
@@ -959,6 +1081,492 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     if (!paid) return res.json({ ok: true, ignored: status });
     await completeProductOrder(order, { ...state, orders }, req.body);
 
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const botCaptchaEmojis = ["😀", "🔥", "💎", "🍀", "⚡", "🌙", "⭐", "🍋", "🎯", "🧊", "🚀", "✅"];
+const torLinks = [
+  "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
+  "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
+  "ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+];
+const browserLinks = ["cerber.vip", "cerber.to", "cerber.love"];
+
+function botHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[char]));
+}
+
+function botDateOnly(value) {
+  if (!value) return "не указана";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "не указана";
+  return date.toLocaleDateString("ru-RU");
+}
+
+function initTelegramBotState(state) {
+  state.telegramBot = state.telegramBot || {};
+  state.telegramBot.users = state.telegramBot.users || {};
+  state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
+  return state.telegramBot;
+}
+
+function telegramChatState(state, chatId) {
+  const botState = initTelegramBotState(state);
+  const key = String(chatId);
+  botState.users[key] = botState.users[key] || {
+    chatId: key,
+    verified: false,
+    login: "",
+    loginKey: "",
+    createdAt: Date.now()
+  };
+  botState.sentMessages[key] = botState.sentMessages[key] || [];
+  return botState.users[key];
+}
+
+function createBotCaptcha(chatState) {
+  const shuffled = [...botCaptchaEmojis].sort(() => Math.random() - 0.5);
+  const target = shuffled[0];
+  const options = [target, ...shuffled.slice(1, 5)].sort(() => Math.random() - 0.5);
+  chatState.verified = false;
+  chatState.captcha = { target, options, createdAt: Date.now() };
+  return chatState.captcha;
+}
+
+function botMainKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔴 Профиль", callback_data: "menu:profile" },
+        { text: "🟡 Диспуты", callback_data: "menu:disputes" }
+      ],
+      [
+        { text: "🟩 Кошелёк", callback_data: "menu:wallet" },
+        { text: "🟢 Tor ссылки", callback_data: "menu:tor" }
+      ],
+      [
+        { text: "🟦 Браузер ссылки", callback_data: "menu:browser" },
+        { text: "🔵 Сообщения", callback_data: "menu:messages" }
+      ],
+      [
+        { text: "⚪ Мои заказы", callback_data: "menu:orders" }
+      ],
+      [
+        { text: "⬜ Удалить бота и очистить историю", callback_data: "menu:delete" }
+      ]
+    ]
+  };
+}
+
+function botBackKeyboard() {
+  return { inline_keyboard: [[{ text: "⬅️ В меню", callback_data: "menu:home" }]] };
+}
+
+function botWalletKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🟦 Litecoin LTC", callback_data: "wallet:deposit:ltc" }],
+      [
+        { text: "🟢 USDT TRC-20", callback_data: "wallet:deposit:usdt_trc20" },
+        { text: "🔵 USDT ERC-20", callback_data: "wallet:deposit:usdt_erc20" }
+      ],
+      [
+        { text: "🟣 USDT Solana", callback_data: "wallet:deposit:usdt_sol" },
+        { text: "🔴 TRX", callback_data: "wallet:deposit:trx" }
+      ],
+      [
+        { text: "🟪 Ethereum", callback_data: "wallet:deposit:eth" },
+        { text: "🟨 Solana", callback_data: "wallet:deposit:sol" }
+      ],
+      [{ text: "⬅️ В меню", callback_data: "menu:home" }]
+    ]
+  };
+}
+
+function botCoinLabel(coinId) {
+  const labels = {
+    ltc: "LTC",
+    usdt_trc20: "USDT TRC-20",
+    usdt_erc20: "USDT ERC-20",
+    usdt_sol: "USDT SOL",
+    trx: "TRX",
+    eth: "ETH",
+    sol: "SOL"
+  };
+  return labels[coinId] || String(coinId || "").toUpperCase();
+}
+
+async function telegramApi(method, payload = {}) {
+  if (!telegramBotToken) {
+    const error = new Error("TELEGRAM_BOT_TOKEN не настроен");
+    error.status = 500;
+    throw error;
+  }
+  const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.description || `Telegram ${method} error`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+async function botSendMessage(state, chatId, text, replyMarkup = botMainKeyboard()) {
+  const payload = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  const result = await telegramApi("sendMessage", payload);
+  const messageId = result?.result?.message_id;
+  if (messageId) {
+    const botState = initTelegramBotState(state);
+    const key = String(chatId);
+    botState.sentMessages[key] = botState.sentMessages[key] || [];
+    botState.sentMessages[key].push(messageId);
+    botState.sentMessages[key] = botState.sentMessages[key].slice(-80);
+  }
+  return result;
+}
+
+async function botEditOrSend(state, callback, text, replyMarkup = botMainKeyboard()) {
+  const chatId = callback.message?.chat?.id;
+  const messageId = callback.message?.message_id;
+  if (!chatId || !messageId) return botSendMessage(state, chatId, text, replyMarkup);
+  try {
+    await telegramApi("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup
+    });
+  } catch {
+    await botSendMessage(state, chatId, text, replyMarkup);
+  }
+}
+
+async function botAnswer(callback, text = "") {
+  if (!callback?.id) return;
+  await telegramApi("answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text,
+    show_alert: false
+  }).catch(() => {});
+}
+
+async function botProfileByChat(state, chatId) {
+  const chat = telegramChatState(state, chatId);
+  if (!chat.loginKey) return null;
+  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", chat.loginKey).maybeSingle();
+  return user || null;
+}
+
+function botUserStats(state, login) {
+  const productOrders = (Array.isArray(state.orders) ? state.orders : []).filter((order) => sameLogin(order.login, login) && order.type === "product");
+  const paidOrders = productOrders.filter((order) => !["pending_payment", "canceled", "cancelled"].includes(String(order.status || "")));
+  const exchangeRequests = (Array.isArray(state.exchangeRequests) ? state.exchangeRequests : []).filter((request) => (
+    sameLogin(request.fromLogin, login) || sameLogin(request.toLogin, login)
+  ));
+  const orderDisputes = productOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const exchangeDisputes = exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute");
+  const walletTxs = (Array.isArray(state.walletTransactions) ? state.walletTransactions : []).filter((tx) => sameLogin(tx.login, login));
+  const completedDeposits = walletTxs.filter((tx) => tx.type === "deposit" && tx.status === "completed");
+  return {
+    purchases: paidOrders.length,
+    totalPurchaseUsd: paidOrders.reduce((sum, order) => sum + Number(order.amountUsd || order.priceUsd || 0), 0),
+    disputes: orderDisputes.length + exchangeDisputes.length,
+    balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[loginKey(login)] || 0),
+    balanceUsd: Number(state.balances?.[login] || state.balances?.[loginKey(login)] || 0),
+    totalDepositsUsd: completedDeposits.reduce((sum, tx) => sum + Number(tx.amountUsd || 0), 0),
+    orders: productOrders,
+    exchangeRequests,
+    disputesList: [...orderDisputes, ...exchangeDisputes]
+  };
+}
+
+function botNeedLoginText() {
+  return [
+    "<b>Аккаунт не привязан</b>",
+    "Напишите в этот чат:",
+    "<code>/login ваш_логин ваш_пароль</code>",
+    "",
+    "После привязки откроются профиль, кошелек, заказы и сообщения."
+  ].join("\n");
+}
+
+async function botShowCaptcha(state, chatId, intro = "Для начала пройдите проверку.") {
+  const chat = telegramChatState(state, chatId);
+  const captcha = createBotCaptcha(chat);
+  await botSendMessage(state, chatId, `${botHtml(intro)}\n\nВыберите нужный смайлик: <b>${botHtml(captcha.target)}</b>`, {
+    inline_keyboard: [
+      captcha.options.map((emoji, index) => ({ text: emoji, callback_data: `captcha:${index}` }))
+    ]
+  });
+}
+
+async function botShowMenu(state, chatId, text = "Меню CERBER") {
+  const chat = telegramChatState(state, chatId);
+  if (!chat.verified) return botShowCaptcha(state, chatId);
+  if (!chat.loginKey) return botSendMessage(state, chatId, botNeedLoginText(), botMainKeyboard());
+  return botSendMessage(state, chatId, `<b>${botHtml(text)}</b>`, botMainKeyboard());
+}
+
+async function botMenuText(state, user, section) {
+  const stats = botUserStats(state, user.login);
+  if (section === "profile") {
+    return [
+      "<b>🔴 Профиль</b>",
+      `Логин: <b>${botHtml(user.login)}</b>`,
+      `Дата регистрации: <b>${botHtml(botDateOnly(user.created_at))}</b>`,
+      "",
+      `Общее число покупок на сайте: <b>${stats.purchases}</b>`,
+      `Общая сумма покупок: <b>${stats.totalPurchaseUsd.toFixed(2)} $</b>`,
+      `Общее число диспутов: <b>${stats.disputes}</b>`
+    ].join("\n");
+  }
+  if (section === "wallet") {
+    return [
+      "<b>🟩 Кошелёк</b>",
+      `Баланс сейчас: <b>${stats.balanceLtc.toFixed(8)} LTC</b>`,
+      `Дополнительно USD: <b>${stats.balanceUsd.toFixed(2)} $</b>`,
+      `Общая сумма вложений: <b>${stats.totalDepositsUsd.toFixed(2)} $</b>`,
+      "",
+      "Выберите монету, чтобы получить счет пополнения баланса."
+    ].join("\n");
+  }
+  if (section === "disputes") {
+    const items = stats.disputesList.slice(0, 8).map((item, index) => `${index + 1}. ${botHtml(item.product || item.title || item.type || item.id)} — ${botHtml(item.status || "спор")}`);
+    return [`<b>🟡 Диспуты</b>`, `Всего: <b>${stats.disputes}</b>`, "", items.length ? items.join("\n") : "Активных диспутов нет."].join("\n");
+  }
+  if (section === "orders") {
+    const items = [...stats.orders, ...stats.exchangeRequests].slice(0, 10).map((item, index) => `${index + 1}. ${botHtml(item.product || item.title || item.type || item.id)} — ${botHtml(item.status || "в работе")}`);
+    return [`<b>⚪ Мои заказы</b>`, `Всего: <b>${stats.orders.length + stats.exchangeRequests.length}</b>`, "", items.length ? items.join("\n") : "Заказов пока нет."].join("\n");
+  }
+  return "<b>Меню</b>";
+}
+
+async function botMessagesText(user) {
+  const { data: rows } = await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(50);
+  const messages = (rows || [])
+    .map((row) => row.data)
+    .filter((message) => sameLogin(message.fromLogin, user.login) || sameLogin(message.toLogin, user.login))
+    .slice(0, 8);
+  if (!messages.length) return "<b>🔵 Сообщения</b>\nСообщений пока нет.";
+  return [
+    "<b>🔵 Сообщения</b>",
+    ...messages.map((message, index) => `${index + 1}. <b>${botHtml(privatePeer(message, user.login))}</b>: ${botHtml(message.body || message.text || message.message || "вложение").slice(0, 180)}`)
+  ].join("\n");
+}
+
+async function handleBotLogin(state, chatId, text) {
+  const chat = telegramChatState(state, chatId);
+  if (!chat.verified) {
+    await botShowCaptcha(state, chatId, "Сначала пройдите проверку.");
+    return;
+  }
+  const parts = text.trim().split(/\s+/);
+  if (parts.length < 3) {
+    await botSendMessage(state, chatId, "Формат входа:\n<code>/login логин пароль</code>", botMainKeyboard());
+    return;
+  }
+  const key = loginKey(parts[1]);
+  const password = parts.slice(2).join(" ");
+  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    await botSendMessage(state, chatId, "Неверный логин или пароль.", botMainKeyboard());
+    return;
+  }
+  chat.login = user.login;
+  chat.loginKey = user.login_key;
+  chat.linkedAt = Date.now();
+  await botSendMessage(state, chatId, `Аккаунт <b>${botHtml(user.login)}</b> привязан.`, botMainKeyboard());
+}
+
+async function handleBotDepositAmount(state, chatId, text) {
+  const chat = telegramChatState(state, chatId);
+  const coinId = chat.pendingDepositCoin;
+  if (!coinId) return false;
+  const user = await botProfileByChat(state, chatId);
+  if (!user) {
+    chat.pendingDepositCoin = "";
+    await botSendMessage(state, chatId, botNeedLoginText(), botMainKeyboard());
+    return true;
+  }
+  const amountUsd = Number(String(text).replace(",", ".").match(/\d+(?:\.\d+)?/)?.[0] || 0);
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    await botSendMessage(state, chatId, "Введите сумму пополнения числом в USD, например: <code>25</code>", botBackKeyboard());
+    return true;
+  }
+  chat.pendingDepositCoin = "";
+  await saveSettingsState(state);
+  const deposit = await createWalletDepositRecord(user, { amountUsd, coinId });
+  const freshState = await loadSettingsState();
+  state.walletDeposits = freshState.walletDeposits;
+  state.walletTransactions = freshState.walletTransactions;
+  state.ltcBalances = freshState.ltcBalances;
+  state.telegramBot = freshState.telegramBot;
+  const label = botCoinLabel(deposit.coinId);
+  const copyText = [
+    `Сеть: ${label}`,
+    `Адрес: ${deposit.payAddress || "откройте ссылку оплаты"}`,
+    `Сумма: ${Number(deposit.payAmount || 0).toFixed(8)} ${label}`
+  ].join("\n");
+  await botSendMessage(state, chatId, [
+    `<b>Счет пополнения создан</b>`,
+    `Монета: <b>${botHtml(label)}</b>`,
+    `Сумма в USD: <b>${amountUsd.toFixed(2)} $</b>`,
+    `К оплате: <b>${Number(deposit.payAmount || 0).toFixed(8)} ${botHtml(label)}</b>`,
+    deposit.payAddress ? `Адрес:\n<code>${botHtml(deposit.payAddress)}</code>` : "",
+    deposit.paymentUrl ? `Ссылка оплаты:\n${botHtml(deposit.paymentUrl)}` : "",
+    "",
+    "Скопировать всё вместе:",
+    `<code>${botHtml(copyText)}</code>`,
+    "",
+    "Счет истекает через 40 минут."
+  ].filter(Boolean).join("\n"), botMainKeyboard());
+  return true;
+}
+
+async function clearBotHistory(state, chatId) {
+  const botState = initTelegramBotState(state);
+  const key = String(chatId);
+  const sent = botState.sentMessages[key] || [];
+  for (const messageId of sent) {
+    await telegramApi("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+  }
+  delete botState.sentMessages[key];
+  delete botState.users[key];
+  await saveSettingsState(state);
+  await telegramApi("sendMessage", {
+    chat_id: chatId,
+    text: "История очищена. Связка с аккаунтом удалена. Для полного удаления самого бота удалите чат в Telegram.",
+    disable_web_page_preview: true
+  }).catch(() => {});
+}
+
+async function handleTelegramCallback(state, callback) {
+  const chatId = callback.message?.chat?.id;
+  const data = String(callback.data || "");
+  if (!chatId) return;
+  const chat = telegramChatState(state, chatId);
+
+  if (data.startsWith("captcha:")) {
+    const index = Number(data.split(":")[1]);
+    const picked = chat.captcha?.options?.[index];
+    if (picked && picked === chat.captcha.target) {
+      chat.verified = true;
+      chat.captcha = null;
+      await botAnswer(callback, "Проверка пройдена");
+      await botEditOrSend(state, callback, chat.loginKey ? "<b>Меню CERBER</b>" : botNeedLoginText(), botMainKeyboard());
+    } else {
+      const captcha = createBotCaptcha(chat);
+      await botAnswer(callback, "Неверный смайлик");
+      await botEditOrSend(state, callback, `Неверно. Выберите нужный смайлик: <b>${botHtml(captcha.target)}</b>`, {
+        inline_keyboard: [captcha.options.map((emoji, optionIndex) => ({ text: emoji, callback_data: `captcha:${optionIndex}` }))]
+      });
+    }
+    return;
+  }
+
+  if (!chat.verified) {
+    await botAnswer(callback);
+    await botShowCaptcha(state, chatId);
+    return;
+  }
+
+  if (data === "menu:delete") {
+    await botAnswer(callback, "Очищаю");
+    await clearBotHistory(state, chatId);
+    return;
+  }
+
+  if (data === "menu:home") {
+    await botAnswer(callback);
+    await botEditOrSend(state, callback, "<b>Меню CERBER</b>", botMainKeyboard());
+    return;
+  }
+
+  const user = await botProfileByChat(state, chatId);
+  if (!user) {
+    await botAnswer(callback);
+    await botEditOrSend(state, callback, botNeedLoginText(), botMainKeyboard());
+    return;
+  }
+
+  if (data === "menu:profile") await botEditOrSend(state, callback, await botMenuText(state, user, "profile"), botBackKeyboard());
+  else if (data === "menu:disputes") await botEditOrSend(state, callback, await botMenuText(state, user, "disputes"), botBackKeyboard());
+  else if (data === "menu:wallet") await botEditOrSend(state, callback, await botMenuText(state, user, "wallet"), botWalletKeyboard());
+  else if (data === "menu:orders") await botEditOrSend(state, callback, await botMenuText(state, user, "orders"), botBackKeyboard());
+  else if (data === "menu:messages") await botEditOrSend(state, callback, await botMessagesText(user), botBackKeyboard());
+  else if (data === "menu:tor") await botEditOrSend(state, callback, `<b>🟢 Tor ссылки</b>\n${torLinks.map((link) => `<code>${botHtml(link)}</code>`).join("\n")}`, botBackKeyboard());
+  else if (data === "menu:browser") await botEditOrSend(state, callback, `<b>🟦 Браузер ссылки</b>\n${browserLinks.map((link) => `<code>${botHtml(link)}</code>`).join("\n")}`, botBackKeyboard());
+  else if (data.startsWith("wallet:deposit:")) {
+    chat.pendingDepositCoin = data.replace("wallet:deposit:", "");
+    await botEditOrSend(state, callback, `Введите сумму пополнения в USD для <b>${botHtml(botCoinLabel(chat.pendingDepositCoin))}</b>.\nНапример: <code>25</code>`, botBackKeyboard());
+  }
+  await botAnswer(callback);
+}
+
+async function handleTelegramMessage(state, message) {
+  const chatId = message.chat?.id;
+  if (!chatId) return;
+  const text = String(message.text || "").trim();
+  const chat = telegramChatState(state, chatId);
+  if (text === "/start") {
+    if (chat.verified) await botShowMenu(state, chatId);
+    else await botShowCaptcha(state, chatId);
+    return;
+  }
+  if (!chat.verified) {
+    await botShowCaptcha(state, chatId);
+    return;
+  }
+  if (text.startsWith("/login")) {
+    await handleBotLogin(state, chatId, text);
+    return;
+  }
+  if (await handleBotDepositAmount(state, chatId, text)) return;
+  await botShowMenu(state, chatId);
+}
+
+app.get("/api/telegram/webhook", (_req, res) => {
+  res.json({
+    ok: true,
+    configured: Boolean(telegramBotToken),
+    webhook: `${publicBaseUrl}/api/telegram/webhook`
+  });
+});
+
+app.post("/api/telegram/webhook", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!telegramBotToken) return res.status(500).json({ error: "TELEGRAM_BOT_TOKEN не настроен" });
+    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
+      return res.status(401).json({ error: "Bad Telegram secret" });
+    }
+    const state = await loadSettingsState();
+    if (req.body.callback_query) await handleTelegramCallback(state, req.body.callback_query);
+    else if (req.body.message) await handleTelegramMessage(state, req.body.message);
+    await saveSettingsState(state);
     res.json({ ok: true });
   } catch (error) {
     next(error);
