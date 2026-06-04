@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { createClient } from "@supabase/supabase-js";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -49,6 +49,7 @@ const defaultExchangeCards = [];
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
+let adminRealtimeServer = null;
 
 app.use(express.json({ limit: "25mb" }));
 app.use((req, res, next) => {
@@ -170,6 +171,15 @@ async function appendAdminLog(action, actor = "admin", details = {}) {
   });
   state.adminLogs = state.adminLogs.slice(0, 500);
   await saveSettingsState(state);
+  notifyAdminRealtime(action, details);
+}
+
+function notifyAdminRealtime(type = "update", details = {}) {
+  if (!adminRealtimeServer) return;
+  const payload = JSON.stringify({ type, details, createdAt: Date.now() });
+  adminRealtimeServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  });
 }
 
 function loginKey(value) {
@@ -314,6 +324,7 @@ async function stateFor(user) {
       siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
       broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
       userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
+      blockedUsers: settingsData.blockedUsers || {},
       storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
       ownerSettings: settingsData.ownerSettings || {},
       paymentSettings: settingsData.paymentSettings || {},
@@ -330,6 +341,10 @@ async function userFromRequest(req) {
   const { data: session } = await supabase.from("sessions").select("login_key").eq("token", token).maybeSingle();
   if (!session) return null;
   const { data: user } = await supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle();
+  if (user) {
+    const state = await loadSettingsState();
+    if (adminIsUserBlocked(state, user.login)) return null;
+  }
   return user || null;
 }
 
@@ -583,6 +598,10 @@ app.post("/api/auth/login", async (req, res, next) => {
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
+    const state = await loadSettingsState();
+    if (adminIsUserBlocked(state, user.login)) {
+      return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
+    }
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: user.login_key });
     res.json({ token, ...(await stateFor(user)) });
@@ -600,6 +619,10 @@ app.post("/api/telegram/login", async (req, res, next) => {
     const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
+    }
+    const state = await loadSettingsState();
+    if (adminIsUserBlocked(state, user.login)) {
+      return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: user.login_key });
@@ -788,6 +811,7 @@ app.put("/api/state", async (req, res, next) => {
         siteNotifications: Array.isArray(state.siteNotifications) ? state.siteNotifications : (currentSettingsData.siteNotifications || []),
         broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : (currentSettingsData.broadcasts || []),
         userFilters: Array.isArray(state.userFilters) ? state.userFilters : (currentSettingsData.userFilters || []),
+        blockedUsers: state.blockedUsers || currentSettingsData.blockedUsers || {},
         storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
         ownerSettings: state.ownerSettings || {},
         paymentSettings: state.paymentSettings || {},
@@ -885,6 +909,13 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     const orders = (data.state.orders || []).filter((order) => sameLogin(order.login, login));
     const deposits = (data.state.walletDeposits || []).filter((deposit) => sameLogin(deposit.login, login));
     const messages = data.messages.filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login));
+    const balanceUsd = adminMoney(data.state.balances?.[login] || data.state.balances?.[user.login_key]);
+    const balanceLtc = adminMoney(data.state.ltcBalances?.[login] || data.state.ltcBalances?.[user.login_key]);
+    const userBots = adminCollectBots(data.state).filter((bot) => (
+      sameLogin(bot.loginKey, login) ||
+      sameLogin(bot.login, login) ||
+      sameLogin(bot.username, login)
+    ));
     const products = new Map();
     orders.forEach((order) => {
       const name = order.product || order.productName || order.productId || "Товар";
@@ -892,22 +923,43 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     });
     const completed = orders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
     const dates = completed.map(adminTimestamp).filter(Boolean).sort((a, b) => a - b);
+    const purchaseTotal = completed.reduce((sum, item) => sum + adminOrderAmount(item), 0);
+    const successfulDeposits = deposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase()));
+    const firstPurchaseAt = dates[0] || null;
+    const lastPurchaseAt = dates[dates.length - 1] || null;
+    const activeDays = firstPurchaseAt ? Math.max(1, (Date.now() - firstPurchaseAt) / (24 * 60 * 60 * 1000)) : 1;
+    const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const closedDisputes = orders.filter((order) => !order.disputeOpen && ["closed", "completed"].includes(String(order.status || "").toLowerCase()) && order.disputeUntil);
+    const messageTimes = messages.map(adminTimestamp).filter(Boolean);
+    const orderTimes = orders.map(adminTimestamp).filter(Boolean);
+    const lastActivityAt = Math.max(0, ...messageTimes, ...orderTimes) || null;
     res.json({
-      user,
+      user: { ...user, status: adminPublicUserStatus(data.state, login) },
+      status: data.state.blockedUsers?.[user.login_key] || { blocked: false },
+      balanceUsd,
+      balanceLtc,
       summary: {
         visits: data.messages.filter((message) => sameLogin(message.fromLogin, login)).length,
-        totalDeposits: deposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
-        totalPurchases: completed.reduce((sum, item) => sum + adminOrderAmount(item), 0),
-        averageCheck: completed.length ? completed.reduce((sum, item) => sum + adminOrderAmount(item), 0) / completed.length : 0,
-        firstPurchaseAt: dates[0] || null,
-        lastPurchaseAt: dates[dates.length - 1] || null,
+        totalDeposits: successfulDeposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
+        totalPurchases: purchaseTotal,
+        averageDailySpend: purchaseTotal / activeDays,
+        averageMonthlySpend: (purchaseTotal / activeDays) * 30,
+        averageCheck: completed.length ? purchaseTotal / completed.length : 0,
+        turnover: purchaseTotal + balanceUsd,
+        firstPurchaseAt,
+        lastPurchaseAt,
         averageIntervalMs: dates.length > 1 ? (dates[dates.length - 1] - dates[0]) / completed.length : 0,
-        disputes: orders.filter((order) => order.disputeOpen || order.status === "dispute").length
+        disputes: disputes.length,
+        openDisputes: disputes.length,
+        closedDisputes: closedDisputes.length,
+        disputeAmount: disputes.reduce((sum, item) => sum + adminOrderAmount(item), 0),
+        lastActivityAt
       },
       orders,
       deposits,
       products: Array.from(products.entries()).map(([name, count]) => ({ name, count })),
-      messages
+      messages,
+      bots: userBots
     });
   } catch (error) {
     next(error);
@@ -919,11 +971,28 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
     const admin = requireAdmin(req);
     const login = req.params.login;
     const key = loginKey(login);
-    const { role, name, storePassword } = req.body || {};
+    const { role, name, storePassword, blocked, blockReason } = req.body || {};
     const updates = {};
     if (role) updates.role = String(role);
     if (name) updates.name = String(name).trim();
     if (Object.keys(updates).length) await supabase.from("profiles").update(updates).eq("login_key", key);
+
+    const state = await loadSettingsState();
+    state.blockedUsers = state.blockedUsers || {};
+    if (typeof blocked === "boolean") {
+      if (blocked) {
+        state.blockedUsers[key] = {
+          blocked: true,
+          reason: String(blockReason || "Ваш аккаунт заблокирован").trim(),
+          blockedAt: Date.now(),
+          blockedBy: admin.login
+        };
+      } else {
+        delete state.blockedUsers[key];
+      }
+      await saveSettingsState(state);
+      await appendAdminLog(blocked ? "user_blocked" : "user_unblocked", admin.login, { login, reason: blockReason || "" });
+    }
 
     if (role === "seller" || storePassword) {
       const { data: rows } = await supabase.from("stores").select("id,data");
@@ -954,6 +1023,62 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
   }
 });
 
+app.get("/api/admin/disputes/:id", async (req, res, next) => {
+  try {
+    requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    const id = req.params.id;
+    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
+    const dispute = order || request;
+    if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
+    const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
+    const clientLogin = dispute.login || dispute.fromLogin || "";
+    const storeLogin = store?.ownerLogin || dispute.toLogin || "";
+    const messages = data.messages.filter((message) => (
+      message.system?.includes("dispute") ||
+      message.subject?.includes(id) ||
+      sameLogin(message.fromLogin, clientLogin) ||
+      sameLogin(message.toLogin, clientLogin) ||
+      sameLogin(message.fromLogin, storeLogin) ||
+      sameLogin(message.toLogin, storeLogin)
+    )).slice(0, 120);
+    res.json({ dispute, order, request, store, clientLogin, storeLogin, amount: adminOrderAmount(dispute), messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    const id = req.params.id;
+    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
+    const dispute = order || request;
+    if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
+    const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
+    const message = {
+      id: `admin-dispute-${Date.now()}`,
+      storeId: store?.id || dispute.storeId || "",
+      storeTag: store?.tag || store?.name || "",
+      toLogin: dispute.login || dispute.fromLogin || "",
+      fromLogin: "cerber-owner",
+      subject: `Диспут: ${id}`,
+      body: "Владелец Cerber вошел в диспут",
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU"),
+      system: "admin-dispute-join"
+    };
+    await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
+    await appendAdminLog("admin_joined_dispute", admin.login, { disputeId: id });
+    res.json(await adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/admin/stores/:id", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
@@ -964,11 +1089,31 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     allowed.forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) store[key] = req.body[key];
     });
+    if (store.status === "ACTIVE") store.status = "active";
+    if (store.status === "DISABLE") store.status = "disabled";
     store.commissionPercent = Math.min(20, Math.max(0, Number(store.commissionPercent || 0)));
     store.homepagePosition = Math.max(0, Number(store.homepagePosition || 0));
     store.autoReleaseHours = Math.min(72, Math.max(0, Number(store.autoReleaseHours || 24)));
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/stores/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
+    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    const state = await loadSettingsState();
+    const storeId = req.params.id;
+    state.orders = (state.orders || []).filter((order) => order.storeId !== storeId);
+    state.storeApplications = (state.storeApplications || []).filter((item) => item.storeId !== storeId && item.id !== storeId);
+    await saveSettingsState(state);
+    await supabase.from("stores").delete().eq("id", storeId);
+    await appendAdminLog("store_deleted", admin.login, { storeId, name: row.data.name || "" });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -1053,6 +1198,9 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
       body: String(req.body.body || "").trim(),
       channel: String(req.body.channel || "site"),
       type: String(req.body.type || "popup"),
+      photoUrl: String(req.body.photoUrl || "").trim(),
+      buttonText: String(req.body.buttonText || "").trim(),
+      buttonUrl: String(req.body.buttonUrl || "").trim(),
       filters: req.body.filters || {},
       stats: { sent: 0, delivered: 0, clicked: 0, closed: 0, botBlocked: 0, chatDeleted: 0 },
       createdAt: Date.now(),
@@ -1070,6 +1218,8 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
 
 app.post("/api/admin/bots", async (req, res, next) => {
   try {
+    requireAdmin(req);
+    return res.status(405).json({ error: "Зеркало создает только пользователь через Telegram-бота" });
     const admin = requireAdmin(req);
     const state = await loadSettingsState();
     state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
@@ -1091,6 +1241,51 @@ app.post("/api/admin/bots", async (req, res, next) => {
     if (!existing) state.mirrorBots.unshift(bot);
     await saveSettingsState(state);
     await appendAdminLog("mirror_bot_saved", admin.login, { chatId: bot.chatId, loginKey: bot.loginKey });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/bots", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    const id = String(req.body.id || "");
+    const action = String(req.body.action || "");
+    const bots = adminCollectBots(state);
+    const target = bots.find((bot) => bot.id === id || bot.chatId === req.body.chatId || bot.token === req.body.token);
+    if (!target) return res.status(404).json({ error: "Зеркало не найдено" });
+
+    const applyToBot = (bot) => {
+      if (action === "disable") bot.verified = false;
+      if (action === "enable") bot.verified = true;
+      if (action === "block") bot.blocked = true;
+      if (action === "unblock") bot.blocked = false;
+      bot.updatedAt = Date.now();
+    };
+
+    if (target.source.startsWith("telegramBot.users")) {
+      const bot = state.telegramBot?.users?.[target.chatId];
+      if (bot && action === "delete") delete state.telegramBot.users[target.chatId];
+      else if (bot) applyToBot(bot);
+    } else {
+      const lists = ["mirrorBots", "telegramBots", "clientMirrorBots", "telegramMirrors"];
+      for (const listName of lists) {
+        if (!Array.isArray(state[listName])) continue;
+        const index = state[listName].findIndex((bot) => (
+          String(bot.chatId || bot.chat_id || "") === target.chatId ||
+          String(bot.token || bot.botToken || "") === target.token
+        ));
+        if (index >= 0) {
+          if (action === "delete") state[listName].splice(index, 1);
+          else applyToBot(state[listName][index]);
+          break;
+        }
+      }
+    }
+    await saveSettingsState(state);
+    await appendAdminLog(`mirror_bot_${action}`, admin.login, { id, chatId: target.chatId, loginKey: target.loginKey });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -1181,6 +1376,7 @@ function verifyNowpaymentsSignature(req) {
 
 async function saveSettingsState(state) {
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  notifyAdminRealtime("state_updated");
 }
 
 async function loadSettingsState() {
@@ -1229,6 +1425,17 @@ function adminOrderAmount(order) {
   return adminMoney(order.amountUsd || order.priceUsd || order.totalUsd || order.total || order.price);
 }
 
+function adminIsUserBlocked(state, login) {
+  const key = loginKey(login);
+  const record = state.blockedUsers?.[key];
+  return Boolean(record?.blocked);
+}
+
+function adminPublicUserStatus(state, login) {
+  const record = state.blockedUsers?.[loginKey(login)];
+  return record?.blocked ? "blocked" : "active";
+}
+
 function adminPlatformCommission(order, state, store) {
   const storeCommission = Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0);
   return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
@@ -1268,13 +1475,18 @@ function adminCollectBots(state) {
     if (!value || typeof value !== "object") return;
     const chatId = String(value.chatId || value.chat_id || id || "").trim();
     const token = String(value.token || value.botToken || value.telegramToken || value.accessToken || "").trim();
-    const loginKeyValue = String(value.loginKey || value.login_key || value.login || value.ownerLogin || value.username || "").trim();
+    const loginKeyValue = String(value.loginKey || value.login_key || value.login || value.ownerLogin || "").trim();
     if (!chatId && !token && !loginKeyValue) return;
     const key = `${source}:${chatId || token || loginKeyValue}`;
     found.set(key, {
       id: key,
       chatId,
       loginKey: loginKeyValue,
+      login: value.login || value.ownerLogin || "",
+      username: value.username || value.telegramUsername || value.tgUsername || value.telegram || "",
+      botUsername: value.botUsername || value.bot_username || value.name || value.title || "",
+      createdAt: value.createdAt || value.created_at || value.registeredAt || null,
+      updatedAt: value.updatedAt || value.lastActivityAt || value.seenAt || value.lastSeenAt || null,
       verified: value.verified !== false,
       blocked: Boolean(value.blocked || value.isBlocked || value.deleted),
       token,
@@ -1350,6 +1562,8 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
   let siteSent = 0;
   let telegramSent = 0;
   let telegramFailed = 0;
+  let botBlocked = 0;
+  let chatDeleted = 0;
 
   if (["site", "both"].includes(broadcast.channel)) {
     recipients.forEach((user) => {
@@ -1361,6 +1575,9 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
         title: broadcast.title,
         body: broadcast.body,
         type: broadcast.type,
+        photoUrl: broadcast.photoUrl || "",
+        buttonText: broadcast.buttonText || "",
+        buttonUrl: broadcast.buttonUrl || "",
         createdAt: Date.now(),
         clickedAt: null,
         closedAt: null
@@ -1373,24 +1590,48 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
     const bots = adminCollectBots(state).filter((bot) => !bot.blocked && bot.chatId && (!bot.loginKey || recipientKeys.has(loginKey(bot.loginKey))));
     for (const bot of bots) {
       try {
+        const reply_markup = broadcast.buttonUrl ? {
+          inline_keyboard: [[{ text: broadcast.buttonText || "Открыть", url: broadcast.buttonUrl }]]
+        } : undefined;
         const payload = {
           chat_id: bot.chatId,
-          text: `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(broadcast.body)}`,
+          text: `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(broadcast.body)}${broadcast.buttonUrl ? `\n\n${botHtml(broadcast.buttonUrl)}` : ""}`,
           parse_mode: "HTML",
-          disable_web_page_preview: true
+          disable_web_page_preview: true,
+          ...(reply_markup ? { reply_markup } : {})
         };
+        const method = broadcast.photoUrl ? "sendPhoto" : "sendMessage";
+        if (broadcast.photoUrl) {
+          payload.photo = broadcast.photoUrl;
+          payload.caption = payload.text;
+          delete payload.text;
+        }
         if (bot.token) {
-          const response = await fetch(`https://api.telegram.org/bot${bot.token}/sendMessage`, {
+          const response = await fetch(`https://api.telegram.org/bot${bot.token}/${method}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
           });
-          if (!response.ok) throw new Error("Mirror bot delivery failed");
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.description || `Telegram API error ${response.status}`);
+          }
         } else {
-          await telegramApi("sendMessage", payload);
+          await telegramApi(method, payload);
         }
         telegramSent += 1;
-      } catch {
+      } catch (error) {
+        const errorText = String(error.message || error);
+        if (/blocked|bot was blocked|forbidden/i.test(errorText)) botBlocked += 1;
+        if (/chat not found|deactivated|kicked|migrate/i.test(errorText)) chatDeleted += 1;
+        broadcast.deliveryErrors = Array.isArray(broadcast.deliveryErrors) ? broadcast.deliveryErrors : [];
+        broadcast.deliveryErrors.push({
+          chatId: bot.chatId,
+          loginKey: bot.loginKey,
+          source: bot.source,
+          error: errorText.slice(0, 300),
+          createdAt: Date.now()
+        });
         telegramFailed += 1;
       }
     }
@@ -1400,6 +1641,9 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
   broadcast.stats.sent = siteSent + telegramSent;
   broadcast.stats.delivered = siteSent + telegramSent;
   broadcast.stats.telegramFailed = telegramFailed;
+  broadcast.stats.notDelivered = telegramFailed;
+  broadcast.stats.botBlocked = botBlocked;
+  broadcast.stats.chatDeleted = chatDeleted;
   broadcast.stats.siteSent = siteSent;
   broadcast.stats.telegramSent = telegramSent;
 }
@@ -1461,6 +1705,7 @@ function adminBuildOverview(data) {
       registeredAt: store.createdAt || null,
       commissionPercent: Number(store.commissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? 0),
       homepagePosition: Number(store.homepagePosition || 0),
+      autoReleaseHours: Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24),
       coins: store.enabledCoins || {}
     };
   });
@@ -1484,7 +1729,8 @@ function adminBuildOverview(data) {
       balanceLtc: adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[user.login_key]),
       disputes: userDisputes.length,
       deposits: deposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
-      status: user.status || "active"
+      status: adminPublicUserStatus(state, login),
+      blockReason: state.blockedUsers?.[user.login_key]?.reason || ""
     };
   });
 
@@ -1517,7 +1763,18 @@ function adminBuildOverview(data) {
     users: userRows,
     deals: [...productOrders, ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
     disputes,
-    finances: { walletDeposits, walletTransactions, balances: state.balances || {}, ltcBalances: state.ltcBalances || {} },
+    finances: {
+      walletDeposits,
+      walletTransactions,
+      balances: state.balances || {},
+      ltcBalances: state.ltcBalances || {},
+      depositsByStatus: {
+        successful: walletDeposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase())),
+        pending: walletDeposits.filter((item) => ["waiting", "processing", "pending"].includes(String(item.status || "").toLowerCase())),
+        cancelled: walletDeposits.filter((item) => ["cancelled", "canceled", "expired"].includes(String(item.status || "").toLowerCase())),
+        failed: walletDeposits.filter((item) => ["failed", "error"].includes(String(item.status || "").toLowerCase()))
+      }
+    },
     settings: {
       ownerSettings: state.ownerSettings || {},
       paymentSettings: state.paymentSettings || {},
@@ -2415,6 +2672,18 @@ app.use((error, _req, res, _next) => {
   res.status(error.status || 500).json({ error: message });
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+});
+
+adminRealtimeServer = new WebSocketServer({ server, path: "/api/admin/realtime" });
+adminRealtimeServer.on("connection", (socket, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+  const token = url.searchParams.get("token") || "";
+  const admin = verifyAdminToken({ headers: { authorization: `Bearer ${token}` } });
+  if (!admin) {
+    socket.close(1008, "Unauthorized");
+    return;
+  }
+  socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
 });

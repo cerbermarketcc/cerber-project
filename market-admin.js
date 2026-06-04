@@ -7,6 +7,12 @@ let token = localStorage.getItem(TOKEN_KEY) || "";
 let data = null;
 let section = "Dashboard";
 let query = "";
+let realtimeSocket = null;
+let refreshTimer = null;
+
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
+}
 
 function fmtMoney(value) {
   return `${Number(value || 0).toFixed(2)} $`;
@@ -14,11 +20,25 @@ function fmtMoney(value) {
 
 function fmtDate(value) {
   const date = Number(value) ? new Date(Number(value)) : new Date(value || 0);
-  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("ru-RU");
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("ru-RU");
 }
 
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
+function statusClass(value) {
+  return ["active", "completed", "paid", "finished", "ACTIVE"].includes(String(value)) ? "" : "off";
+}
+
+function toast(message, bad = false) {
+  let box = document.querySelector(".admin-toast");
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "admin-toast";
+    document.body.appendChild(box);
+  }
+  box.textContent = message;
+  box.classList.toggle("bad", bad);
+  box.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => box.classList.remove("show"), 2800);
 }
 
 async function api(path, options = {}) {
@@ -33,6 +53,29 @@ async function api(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || "API error");
   return payload;
+}
+
+async function refreshData(silent = false) {
+  if (!token) return;
+  try {
+    data = await api("/api/admin/overview");
+    if (!silent) renderShell();
+    else root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), drawCharts());
+  } catch (error) {
+    if (!silent) renderLogin("Сессия истекла");
+  }
+}
+
+function connectRealtime() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => refreshData(true), 6000);
+  try {
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    realtimeSocket?.close();
+    realtimeSocket = new WebSocket(`${protocol}//${location.host}/api/admin/realtime?token=${encodeURIComponent(token)}`);
+    realtimeSocket.onmessage = () => refreshData(true);
+    realtimeSocket.onclose = () => setTimeout(connectRealtime, 5000);
+  } catch {}
 }
 
 function renderLogin(message = "") {
@@ -59,7 +102,8 @@ function renderLogin(message = "") {
       });
       token = payload.token;
       localStorage.setItem(TOKEN_KEY, token);
-      await load();
+      await refreshData();
+      connectRealtime();
     } catch (error) {
       renderLogin(error.message);
     }
@@ -67,8 +111,8 @@ function renderLogin(message = "") {
 }
 
 async function load() {
-  data = await api("/api/admin/overview");
-  renderShell();
+  await refreshData();
+  connectRealtime();
 }
 
 function renderShell() {
@@ -96,18 +140,22 @@ function renderShell() {
   root.querySelector("[data-logout]").onclick = () => {
     localStorage.removeItem(TOKEN_KEY);
     token = "";
+    realtimeSocket?.close();
+    clearInterval(refreshTimer);
     renderLogin();
   };
   root.querySelector("[data-search]").oninput = (event) => {
     query = event.target.value.toLowerCase();
     root.querySelector("[data-view]").innerHTML = renderSection();
     bindActions();
+    drawCharts();
   };
   bindActions();
   drawCharts();
 }
 
 function renderSection() {
+  if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
   if (section === "Магазины") return renderStores();
   if (section === "Пользователи") return renderUsers();
@@ -125,6 +173,11 @@ function statCard(label, value, hint = "") {
   return `<article class="card"><span>${label}</span><strong>${value}</strong><small>${hint}</small></article>`;
 }
 
+function filterRows(rows, keys) {
+  if (!query) return rows;
+  return rows.filter((row) => keys.some((key) => String(row[key] ?? "").toLowerCase().includes(query)));
+}
+
 function renderDashboard() {
   const s = data.stats;
   return `
@@ -136,7 +189,7 @@ function renderDashboard() {
       ${statCard("Всего пользователей", s.totalUsers, `${s.usersWithPurchase} с покупкой`)}
       ${statCard("Диспуты", s.disputes, "открытые")}
       ${statCard("Активные сделки", s.activeDeals, "в работе")}
-      ${statCard("Онлайн", s.onlineUsers, "по сессиям")}
+      ${statCard("Онлайн", s.onlineUsers, "realtime")}
     </section>
     <section class="charts">
       ${chartBox("Продажи", "sales")}
@@ -158,19 +211,14 @@ function periodTable() {
   </tbody></table>`;
 }
 
-function filterRows(rows, keys) {
-  if (!query) return rows;
-  return rows.filter((row) => keys.some((key) => String(row[key] ?? "").toLowerCase().includes(query)));
-}
-
 function renderStores() {
   const rows = filterRows(data.stores, ["id", "name", "ownerLogin", "status"]);
   return `
     <section class="split">
       <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход</th><th>Комиссия</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
-        ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${s.status === "active" ? "" : "off"}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
+        ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
       </tbody></table></article>
-      <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления комиссией, позицией, статусом и монетами.</p></article>
+      <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления статусом, комиссией, позицией, автозакрытием и монетами.</p></article>
     </section>
   `;
 }
@@ -178,31 +226,61 @@ function renderStores() {
 function storeDetail(id) {
   const store = data.stores.find((item) => item.id === id);
   if (!store) return "";
+  const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
   return `
     <h2>${esc(store.name)}</h2>
     <form data-store-form="${esc(store.id)}">
       <div class="row">
-        <label class="field">Статус<select name="status"><option value="active" ${store.status === "active" ? "selected" : ""}>active</option><option value="disabled" ${store.status !== "active" ? "selected" : ""}>disabled</option></select></label>
+        <label class="field">Статус<select name="status"><option value="ACTIVE" ${status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option value="DISABLE" ${status === "DISABLE" ? "selected" : ""}>DISABLE</option></select></label>
         <label class="field">Комиссия 0-20%<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="${esc(store.commissionPercent)}"></label>
       </div>
       <div class="row">
         <label class="field">Позиция на главной<input name="homepagePosition" type="number" min="0" step="1" value="${esc(store.homepagePosition)}"></label>
-        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="24"></label>
+        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
       <label class="field">Пароль панели магазина<input name="adminPassword" placeholder="новый пароль магазина"></label>
       <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
-      <p><button class="primary">Сохранить магазин</button></p>
+      <p><button class="primary">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
     </form>
-    <h3>Товары</h3>
-    <p class="muted">Редактирование полного товара доступно в текущей панели магазина; здесь можно быстро удалить товар через API.</p>
   `;
 }
 
 function renderUsers() {
   const rows = filterRows(data.users, ["login", "name", "role", "status"]);
-  return `<article class="table-card"><table><thead><tr><th>№</th><th>Пользователь</th><th>Роль</th><th>Регистрация</th><th>Покупки</th><th>Сумма</th><th>Баланс</th><th>Диспуты</th><th>Действие</th></tr></thead><tbody>
-    ${rows.map((u) => `<tr><td>${u.number}</td><td><strong>${esc(u.login)}</strong><br><span class="muted">${esc(u.name)}</span></td><td>${esc(u.role)}</td><td>${fmtDate(u.registeredAt)}</td><td>${u.purchases}</td><td>${fmtMoney(u.purchaseUsd)}</td><td>${fmtMoney(u.balance)}</td><td>${u.disputes}</td><td><button class="ghost" data-user="${esc(u.login)}">Открыть</button></td></tr>`).join("")}
+  return `<article class="table-card"><table><thead><tr><th>№</th><th>Пользователь</th><th>Роль</th><th>Статус</th><th>Регистрация</th><th>Покупки</th><th>Сумма</th><th>Баланс</th><th>Диспуты</th><th>Действие</th></tr></thead><tbody>
+    ${rows.map((u) => `<tr><td>${u.number}</td><td><strong>${esc(u.login)}</strong><br><span class="muted">${esc(u.name)}</span></td><td>${esc(u.role)}</td><td><span class="status ${u.status === "blocked" ? "off" : ""}">${esc(u.status)}</span></td><td>${fmtDate(u.registeredAt)}</td><td>${u.purchases}</td><td>${fmtMoney(u.purchaseUsd)}</td><td>${fmtMoney(u.balance)}</td><td>${u.disputes}</td><td><button class="ghost" data-user="${esc(u.login)}">Открыть</button></td></tr>`).join("")}
   </tbody></table></article><div data-user-detail></div>`;
+}
+
+function userDetail(payload) {
+  const u = payload.user;
+  const s = payload.summary;
+  const bots = payload.bots || [];
+  return `<article class="split-card user-profile"><h2>${esc(u.login)}</h2>
+    <form data-user-form="${esc(u.login)}">
+      <div class="row"><label class="field">Роль<select name="role">${["admin", "moderator", "seller", "user"].map((role) => `<option value="${role}" ${u.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></label><label class="field">Пароль магазина<input name="storePassword" placeholder="задать для роли Магазин"></label></div>
+      <label class="field">Причина блокировки<input name="blockReason" value="${esc(payload.status?.reason || "Ваш аккаунт заблокирован")}"></label>
+      <p><button class="primary">Сохранить пользователя</button> <button class="ghost danger" type="button" data-block-user="${esc(u.login)}">Заблокировать</button> <button class="ghost" type="button" data-unblock-user="${esc(u.login)}">Разблокировать</button></p>
+    </form>
+    <section class="grid">
+      ${statCard("Баланс", fmtMoney(payload.balanceUsd || 0), `${Number(payload.balanceLtc || 0).toFixed(6)} LTC`)}
+      ${statCard("Пополнения", fmtMoney(s.totalDeposits), "все успешные")}
+      ${statCard("Покупки", fmtMoney(s.totalPurchases), `${payload.orders.length} заказов`)}
+      ${statCard("Средний чек", fmtMoney(s.averageCheck), "по покупкам")}
+      ${statCard("Расход/день", fmtMoney(s.averageDailySpend || 0), "с первой покупки")}
+      ${statCard("Расход/месяц", fmtMoney(s.averageMonthlySpend || 0), "расчетно")}
+      ${statCard("Диспуты", s.disputes, "история")}
+      ${statCard("Последнее действие", fmtDate(s.lastActivityAt), "активность")}
+    </section>
+    <h3>Покупки</h3>${payload.products.map((p) => `<p>${esc(p.name)} — ${p.count} покупок</p>`).join("") || "<p class='muted'>Покупок нет</p>"}
+    <h3>Заказы</h3><div class="table-card">${smallTable(["ID", "Товар", "Сумма", "Статус", "Дата"], payload.orders.map((o) => [o.id, o.product || o.productName || o.productId || "-", fmtMoney(o.amountUsd || o.priceUsd), o.status || o.paymentStatus, fmtDate(o.createdAt)]))}</div>
+    <h3>Чаты</h3><div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], payload.messages.slice(0, 80).map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>
+    <h3>Telegram зеркала</h3><div class="table-card">${smallTable(["Источник", "Кто создал", "Telegram", "Бот", "Дата", "Статус", "Token"], bots.map((b) => [b.source || "-", b.loginKey || b.login || "-", b.username || b.chatId || "-", b.botUsername || "-", fmtDate(b.createdAt), b.blocked ? "blocked" : b.verified ? "active" : "pending", b.token || "-"]))}</div>
+  </article>`;
+}
+
+function smallTable(headers, rows) {
+  return `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 }
 
 function renderDeals() {
@@ -212,66 +290,81 @@ function renderDeals() {
 }
 
 function renderDisputes() {
-  return `<article class="table-card"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Сумма</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
-    ${data.disputes.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td></tr>`).join("")}
-  </tbody></table></article>`;
+  const rows = filterRows(data.disputes, ["id", "login", "fromLogin", "storeId", "status"]);
+  return `<section class="split"><article class="table-card"><table><thead><tr><th>ID</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Срок</th><th></th></tr></thead><tbody>
+    ${rows.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Открыть</button></td></tr>`).join("")}
+  </tbody></table></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
+}
+
+function disputeDetail(payload) {
+  const d = payload.dispute;
+  return `<h2>Диспут ${esc(d.id)}</h2>
+    <p><strong>Клиент:</strong> ${esc(payload.clientLogin || "-")}</p>
+    <p><strong>Магазин:</strong> ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
+    <p><strong>Сумма:</strong> ${fmtMoney(payload.amount)}</p>
+    <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
+    <button class="primary" data-join-dispute="${esc(d.id)}">Войти в диспут</button>
+    <h3>Переписка</h3>
+    <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], payload.messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
 }
 
 function renderBroadcasts() {
   return `<section class="split"><article class="split-card"><h2>Новая рассылка</h2><form data-broadcast-form>
     <label class="field">Заголовок<input name="title" required></label>
     <label class="field">Текст<textarea name="body" required></textarea></label>
-    <div class="row"><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label></div>
-    <label class="field">Кому отправить<select name="audience">
-      <option value="all">Всем пользователям</option>
-      <option value="online">Онлайн пользователям</option>
-      <option value="buyers">Пользователям с покупками</option>
-      <option value="no_purchases">Без покупок</option>
-      <option value="balance">С балансом</option>
-      <option value="custom">По фильтрам ниже</option>
-    </select></label>
+    <div class="row"><label class="field">Фото URL<input name="photoUrl" placeholder="https://..."></label><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label></div>
+    <div class="row"><label class="field">Текст кнопки<input name="buttonText" placeholder="Открыть"></label><label class="field">Ссылка кнопки<input name="buttonUrl" placeholder="https://..."></label></div>
+    <div class="row"><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label><label class="field">Кому отправить<select name="audience"><option value="all">Всем пользователям</option><option value="online">Онлайн пользователям</option><option value="buyers">С покупками</option><option value="no_purchases">Без покупок</option><option value="balance">С балансом</option><option value="custom">По фильтрам ниже</option></select></label></div>
     <div class="row"><label class="field">Мин. сумма покупок<input name="minPurchase" type="number" step="0.01" placeholder="1"></label><label class="field">Макс. сумма покупок<input name="maxPurchase" type="number" step="0.01" placeholder="1000"></label></div>
     <div class="row"><label class="field">Без покупок N дней<input name="noPurchasesDays" type="number" step="1" placeholder="2"></label><label class="field">Баланс<select name="balanceMode"><option value="">Не важно</option><option value="with">С балансом</option><option value="without">Без баланса</option></select></label></div>
     <div class="row"><label class="field">Магазин<select name="storeId"><option value="">Любой</option>${data.stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name)}</option>`).join("")}</select></label><label class="field">Товар<input name="product" placeholder="название или ID"></label></div>
     <label class="field">Категория<input name="category" placeholder="категория товара"></label>
     <label class="field">Конкретные пользователи<input name="specificLogins" placeholder="login1, login2, login3"></label>
-    <button class="primary">Создать</button>
-  </form></article><article class="table-card"><table><thead><tr><th>Название</th><th>Канал</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
-    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0}</span></td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
+    <button class="primary">Отправить рассылку</button>
+  </form></article><article class="table-card"><table><thead><tr><th>Название</th><th>Канал</th><th>Отправлено</th><th>Ошибки</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
+    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0}</span></td><td>${b.stats?.sent || 0}</td><td>${b.stats?.telegramFailed || b.stats?.notDelivered || 0}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
   </tbody></table></article></section>`;
 }
 
 function renderFinance() {
+  const buckets = data.finances.depositsByStatus || {};
+  const bucketCard = (label, rows) => statCard(label, rows?.length || 0, fmtMoney((rows || []).reduce((sum, item) => sum + Number(item.amountUsd || item.priceAmount || 0), 0)));
   const deposits = data.finances.walletDeposits || [];
-  const tx = data.finances.walletTransactions || [];
-  return `<section class="grid">${statCard("Депозиты", deposits.length, fmtMoney(deposits.reduce((s, d) => s + Number(d.amountUsd || 0), 0)))}${statCard("Транзакции", tx.length, "история кошельков")}${statCard("Комиссия", fmtMoney(data.stats.totalCommission), "площадка")}${statCard("Оборот", fmtMoney(data.stats.totalTurnover), "площадка")}</section>
-  <article class="table-card"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Монета</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 120).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${esc(d.coinId || d.payCurrency)}</td><td>${fmtMoney(d.amountUsd)}</td><td>${esc(d.status)}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>`;
+  return `<section class="grid">${bucketCard("Успешные депозиты", buckets.successful)}${bucketCard("В ожидании", buckets.pending)}${bucketCard("Отмененные", buckets.cancelled)}${bucketCard("Ошибочные", buckets.failed)}</section>
+  <article class="table-card"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Монета</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${esc(d.coinId || d.payCurrency)}</td><td>${fmtMoney(d.amountUsd)}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function renderSettings() {
   const owner = data.settings.ownerSettings || {};
-  return `<article class="split-card"><h2>Глобальные комиссии и безопасность</h2><form data-settings-form>
+  return `<article class="split-card"><h2>Глобальные комиссии</h2><form data-settings-form>
+    <p class="muted">Комиссия анонимизации — комиссия за смешивание и защиту криптовалютных переводов.</p>
     <div class="row"><label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.1" value="${esc(owner.platformCommissionPercent || 0)}"></label><label class="field">Комиссия анонимизации, %<input name="swapCommissionPercent" type="number" step="0.1" value="${esc(owner.swapCommissionPercent || 0)}"></label></div>
     <div class="row"><label class="field">Комиссия вывода, %<input name="walletServiceFeePercent" type="number" step="0.1" value="${esc(owner.walletServiceFeePercent || 0)}"></label><label class="field">Автозакрытие сделок, часов<input name="defaultAutoReleaseHours" type="number" min="0" max="72" value="${esc(owner.defaultAutoReleaseHours || 24)}"></label></div>
+    <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
     <button class="primary">Сохранить настройки</button>
   </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form></article>`;
 }
 
 function renderLogs() {
-  return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${data.logs.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(log.actor)}</td><td>${esc(log.action)}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
+  const rows = filterRows(data.logs, ["action", "actor"]);
+  const label = (action) => ({
+    admin_login_success: "Вход администратора",
+    admin_login_failed: "Ошибка входа",
+    user_blocked: "Блокировка пользователя",
+    user_unblocked: "Разблокировка пользователя",
+    store_deleted: "Удаление магазина",
+    store_updated: "Изменение магазина",
+    settings_updated: "Изменение настроек",
+    broadcast_created: "Создание рассылки"
+  }[action] || action);
+  return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function renderBots() {
   return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <section class="split">
-    <article class="split-card"><h2>Добавить зеркало</h2><form data-bot-form>
-      <label class="field">Login пользователя<input name="loginKey" placeholder="login клиента"></label>
-      <label class="field">Telegram chat ID<input name="chatId" placeholder="123456789"></label>
-      <label class="field">Token зеркального бота<input name="token" placeholder="123:ABC..."></label>
-      <button class="primary">Сохранить зеркало</button>
-    </form><p class="muted">Для отправки в Telegram нужен chat ID. Если у зеркала свой bot token, рассылка пойдёт через него.</p></article>
-    <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Login key</th><th>Статус</th><th>Token</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "pending"}</td><td>${esc(b.token)}</td></tr>`).join("")}</tbody></table></article>
-  </section>`;
+  <article class="table-card"><table><thead><tr><th>Источник</th><th>Кто создал</th><th>Telegram</th><th>Бот</th><th>Дата</th><th>Активность</th><th>Статус</th><th>Token</th><th>Управление</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.loginKey || b.login || "-")}</td><td>${esc(b.username || b.chatId || "-")}</td><td>${esc(b.botUsername || "-")}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.updatedAt)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "disabled"}</td><td>${esc(b.token || "-")}</td><td><button class="ghost" data-bot-action="${b.verified ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.verified ? "Отключить" : "Включить"}</button> <button class="ghost danger" data-bot-action="${b.blocked ? "unblock" : "block"}" data-bot-id="${esc(b.id)}">${b.blocked ? "Разблокировать" : "Заблокировать"}</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>`;
+  return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
+  <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Создатель</th><th>Статус</th><th>Token</th><th>Управление</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey || "-")}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "disabled"}</td><td>${esc(b.token || "-")}</td><td><button class="ghost" data-bot-action="disable" data-bot-id="${esc(b.id)}">Отключить</button> <button class="ghost danger" data-bot-action="block" data-bot-id="${esc(b.id)}">Заблокировать</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function bindActions() {
@@ -283,39 +376,93 @@ function bindActions() {
     event.preventDefault();
     const fd = new FormData(form);
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
-    await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        status: fd.get("status"),
-        commissionPercent: Number(fd.get("commissionPercent")),
-        homepagePosition: Number(fd.get("homepagePosition")),
-        autoReleaseHours: Number(fd.get("autoReleaseHours")),
-        adminPassword: fd.get("adminPassword") || undefined,
-        enabledCoins
-      })
-    });
-    data = await api("/api/admin/overview");
-    renderShell();
+    try {
+      data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: fd.get("status"),
+          commissionPercent: Number(fd.get("commissionPercent")),
+          homepagePosition: Number(fd.get("homepagePosition")),
+          autoReleaseHours: Number(fd.get("autoReleaseHours")),
+          adminPassword: fd.get("adminPassword") || undefined,
+          enabledCoins
+        })
+      });
+      toast("Магазин сохранен");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-delete-store]").forEach((button) => button.onclick = async () => {
+    if (!confirm("DELETE удалит магазин, товары и данные магазина с сайта. Удалить?")) return;
+    try {
+      data = await api(`/api/admin/stores/${encodeURIComponent(button.dataset.deleteStore)}`, { method: "DELETE" });
+      toast("Магазин удален");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
   root.querySelectorAll("[data-user]").forEach((button) => button.onclick = async () => {
-    const payload = await api(`/api/admin/users/${encodeURIComponent(button.dataset.user)}`);
-    root.querySelector("[data-user-detail]").innerHTML = userDetail(payload);
-    bindActions();
+    try {
+      const payload = await api(`/api/admin/users/${encodeURIComponent(button.dataset.user)}`);
+      root.querySelector("[data-user-detail]").innerHTML = userDetail(payload);
+      bindActions();
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
   root.querySelectorAll("[data-user-form]").forEach((form) => form.onsubmit = async (event) => {
     event.preventDefault();
     const fd = new FormData(form);
-    await api(`/api/admin/users/${encodeURIComponent(form.dataset.userForm)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ role: fd.get("role"), storePassword: fd.get("storePassword") })
-    });
-    data = await api("/api/admin/overview");
-    renderShell();
+    try {
+      data = await api(`/api/admin/users/${encodeURIComponent(form.dataset.userForm)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ role: fd.get("role"), storePassword: fd.get("storePassword") })
+      });
+      toast("Пользователь сохранен");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-block-user], [data-unblock-user]").forEach((button) => button.onclick = async () => {
+    const login = button.dataset.blockUser || button.dataset.unblockUser;
+    const blocked = Boolean(button.dataset.blockUser);
+    const form = button.closest("form");
+    try {
+      data = await api(`/api/admin/users/${encodeURIComponent(login)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ blocked, blockReason: new FormData(form).get("blockReason") })
+      });
+      toast(blocked ? "Пользователь заблокирован" : "Пользователь разблокирован");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-dispute]").forEach((button) => button.onclick = async () => {
+    try {
+      const payload = await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.dispute)}`);
+      root.querySelector("[data-dispute-detail]").innerHTML = disputeDetail(payload);
+      bindActions();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-join-dispute]").forEach((button) => button.onclick = async () => {
+    try {
+      await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.joinDispute)}/join`, { method: "POST" });
+      toast("Администратор вошел в диспут");
+      await refreshData(true);
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
   root.querySelector("[data-broadcast-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const fd = new FormData(event.currentTarget);
-    const body = Object.fromEntries(fd.entries());
+    const body = Object.fromEntries(new FormData(event.currentTarget).entries());
     const filters = {
       audience: body.audience,
       minPurchase: body.minPurchase,
@@ -327,38 +474,49 @@ function bindActions() {
       category: body.category,
       specificLogins: body.specificLogins
     };
-    await api("/api/admin/broadcasts", {
-      method: "POST",
-      body: JSON.stringify({ title: body.title, body: body.body, channel: body.channel, type: body.type, filters })
-    });
-    data = await api("/api/admin/overview");
-    renderShell();
+    try {
+      const result = await api("/api/admin/broadcasts", {
+        method: "POST",
+        body: JSON.stringify({ title: body.title, body: body.body, photoUrl: body.photoUrl, buttonText: body.buttonText, buttonUrl: body.buttonUrl, channel: body.channel, type: body.type, filters })
+      });
+      data = result.overview;
+      toast(`Рассылка отправлена: ${result.broadcast.stats.sent}, ошибок: ${result.broadcast.stats.telegramFailed || 0}`);
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
-  root.querySelector("[data-bot-form]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const fd = new FormData(event.currentTarget);
-    data = await api("/api/admin/bots", { method: "POST", body: JSON.stringify(Object.fromEntries(fd.entries())) });
-    renderShell();
+  root.querySelectorAll("[data-bot-action]").forEach((button) => button.onclick = async () => {
+    if (button.dataset.botAction === "delete" && !confirm("Удалить зеркало?")) return;
+    try {
+      data = await api("/api/admin/bots", { method: "PATCH", body: JSON.stringify({ id: button.dataset.botId, action: button.dataset.botAction }) });
+      toast("Зеркало обновлено");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
   root.querySelector("[data-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
-    await api("/api/admin/settings", { method: "PUT", body: JSON.stringify({ ownerSettings: Object.fromEntries([...fd.entries()].map(([k, v]) => [k, Number(v)])) }) });
-    data = await api("/api/admin/overview");
-    renderShell();
+    try {
+      data = await api("/api/admin/settings", { method: "PUT", body: JSON.stringify({ ownerSettings: Object.fromEntries([...fd.entries()].map(([k, v]) => [k, Number(v)])) }) });
+      toast("Настройки сохранены");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
   root.querySelector("[data-password-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const fd = new FormData(event.currentTarget);
-    await api("/api/admin/password", { method: "POST", body: JSON.stringify(Object.fromEntries(fd.entries())) });
-    event.currentTarget.reset();
-    alert("Пароль обновлен");
+    try {
+      await api("/api/admin/password", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
+      event.currentTarget.reset();
+      toast("Пароль обновлен");
+    } catch (error) {
+      toast(error.message, true);
+    }
   });
-}
-
-function userDetail(payload) {
-  const u = payload.user;
-  return `<article class="split-card"><h2>${esc(u.login)}</h2><form data-user-form="${esc(u.login)}"><div class="row"><label class="field">Роль<select name="role">${["admin", "moderator", "seller", "user"].map((role) => `<option value="${role}" ${u.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></label><label class="field">Пароль магазина<input name="storePassword" placeholder="задать для роли Магазин"></label></div><button class="primary">Сохранить пользователя</button></form><h3>Статистика</h3><p>Покупки: ${fmtMoney(payload.summary.totalPurchases)} · Депозиты: ${fmtMoney(payload.summary.totalDeposits)} · Средний чек: ${fmtMoney(payload.summary.averageCheck)} · Диспуты: ${payload.summary.disputes}</p><h3>Купленные товары</h3>${payload.products.map((p) => `<p>${esc(p.name)} — ${p.count} покупок</p>`).join("") || "<p class='muted'>Покупок нет</p>"}</article>`;
 }
 
 function drawCharts() {

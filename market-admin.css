@@ -313,6 +313,42 @@ tr:hover td {
   color: var(--red);
 }
 
+.danger {
+  border-color: rgba(239, 91, 91, 0.45);
+  color: var(--red);
+}
+
+.admin-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #17120f;
+  color: var(--text);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.admin-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.admin-toast.bad {
+  border-color: rgba(239, 91, 91, 0.5);
+  color: var(--red);
+}
+
+.user-profile .grid {
+  margin: 12px 0;
+}
+
 .muted {
   color: var(--muted);
 }

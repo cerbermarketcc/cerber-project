@@ -974,6 +974,11 @@ function normalizeOrders(next) {
       if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
         return { ...order, status: "completed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
       }
+      const store = (next.stores || []).find((item) => item.id === order.storeId);
+      const autoReleaseHours = Math.min(72, Math.max(0, Number(store?.autoReleaseHours ?? next.ownerSettings?.defaultAutoReleaseHours ?? 24)));
+      if (order.status === "active" && order.paymentStatus === "paid" && !order.disputeOpen && age >= autoReleaseHours * 60 * 60 * 1000) {
+        return { ...order, status: "completed", closedAt: now, closeReason: "\u0410\u0432\u0442\u043e\u0437\u0430\u043a\u0440\u044b\u0442\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438" };
+      }
       return {
         ...order,
         createdAt,
@@ -984,7 +989,9 @@ function normalizeOrders(next) {
     if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
       return { ...order, status: "closed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
     }
-    if (order.status === "active" && !order.disputeOpen && age >= 12 * 60 * 60 * 1000) {
+    const store = (next.stores || []).find((item) => item.id === order.storeId);
+    const autoReleaseHours = Math.min(72, Math.max(0, Number(store?.autoReleaseHours ?? next.ownerSettings?.defaultAutoReleaseHours ?? 12)));
+    if (order.status === "active" && !order.disputeOpen && age >= autoReleaseHours * 60 * 60 * 1000) {
       return { ...order, status: "closed", closedAt: now, closeReason: "Автоматически закрыт как успешный" };
     }
     return { ...order, createdAt };
@@ -2785,7 +2792,7 @@ function handleProductPurchase(storeId, productId, positionId) {
   const product = productById(store, productId);
   const position = positionById(product, positionId);
   if (!product || !position) return;
-  if (store.status !== "active" || store.salesBlocked) return showToast("Продажи магазина временно остановлены");
+  if (store.status !== "active" || store.salesBlocked) return showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
   if (userLtcBalance() < ltcAmount) {
@@ -2903,7 +2910,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   const position = positionById(product, positionId);
   if (!product || !position) return;
   if (store.status !== "active" || store.salesBlocked) {
-    showToast("Продажи магазина временно остановлены");
+    showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
     return;
   }
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
@@ -6634,6 +6641,7 @@ function showPendingSiteBroadcast() {
   const isBanner = notification.type === "banner";
   showModal(`
     <h2>${esc(notification.title || "Уведомление")}</h2>
+    ${notification.photoUrl ? `<img class="broadcast-image" src="${esc(notification.photoUrl)}" alt="">` : ""}
     <p>${esc(notification.body || "")}</p>
     <button class="primary" data-broadcast-click="${esc(notification.id)}">${isBanner ? "Открыть" : "Понятно"}</button>
     <button class="ghost-button" data-broadcast-close="${esc(notification.id)}">${tr("close")}</button>
@@ -6641,6 +6649,7 @@ function showPendingSiteBroadcast() {
   document.querySelector("[data-broadcast-click]")?.addEventListener("click", async () => {
     notification.clickedAt = Date.now();
     await trackSiteBroadcast(notification, "clicked");
+    if (notification.buttonUrl) window.open(notification.buttonUrl, "_blank", "noopener");
     document.querySelector("[data-modal]")?.classList.remove("open");
   });
   document.querySelector("[data-broadcast-close]")?.addEventListener("click", async () => {
