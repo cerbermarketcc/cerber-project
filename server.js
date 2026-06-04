@@ -47,6 +47,8 @@ const supabase = supabaseUrl && supabaseServiceKey
 
 const defaultExchangeCards = [];
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
+const adminLoginAttempts = new Map();
+const adminTokenTtlMs = 12 * 60 * 60 * 1000;
 
 app.use(express.json({ limit: "25mb" }));
 app.use((req, res, next) => {
@@ -78,6 +80,96 @@ function verifyCmsAdmin(req) {
     error.status = 401;
     throw error;
   }
+}
+
+function adminSecret() {
+  return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
+}
+
+function signAdminToken(login, role = "admin") {
+  const payload = Buffer.from(JSON.stringify({ login, role, createdAt: Date.now() })).toString("base64url");
+  const signature = crypto.createHmac("sha256", adminSecret()).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyAdminToken(req) {
+  const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return null;
+  const expected = crypto.createHmac("sha256", adminSecret()).update(payload).digest("base64url");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (Date.now() - Number(data.createdAt || 0) > adminTokenTtlMs) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function requireAdmin(req) {
+  const admin = verifyAdminToken(req);
+  if (!admin) {
+    const error = new Error("Admin session required");
+    error.status = 401;
+    throw error;
+  }
+  return admin;
+}
+
+function adminClientKey(req, login = "") {
+  return `${req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local"}:${loginKey(login)}`;
+}
+
+function assertAdminRateLimit(req, login) {
+  const key = adminClientKey(req, login);
+  const record = adminLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  if (record.lockedUntil && Date.now() < record.lockedUntil) {
+    const error = new Error("Too many login attempts. Try later.");
+    error.status = 429;
+    throw error;
+  }
+}
+
+function markAdminLoginAttempt(req, login, ok) {
+  const key = adminClientKey(req, login);
+  if (ok) {
+    adminLoginAttempts.delete(key);
+    return;
+  }
+  const record = adminLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  record.count += 1;
+  if (record.count >= 5) record.lockedUntil = Date.now() + 10 * 60 * 1000;
+  adminLoginAttempts.set(key, record);
+}
+
+async function ensureAdminSecurity() {
+  await ensureSeed();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  state.adminSecurity = state.adminSecurity || {};
+  if (!state.adminSecurity.passwordHash) {
+    state.adminSecurity.passwordHash = await bcrypt.hash(process.env.MARKET_ADMIN_PASSWORD || "admin1212", 12);
+    state.adminSecurity.login = "admin";
+    await saveSettingsState(state);
+  }
+  return state;
+}
+
+async function appendAdminLog(action, actor = "admin", details = {}) {
+  const state = await loadSettingsState();
+  state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
+  state.adminLogs.unshift({
+    id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    action,
+    actor,
+    details,
+    createdAt: Date.now()
+  });
+  state.adminLogs = state.adminLogs.slice(0, 500);
+  await saveSettingsState(state);
 }
 
 function loginKey(value) {
@@ -746,6 +838,227 @@ app.put("/api/state", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/login", async (req, res, next) => {
+  const login = String(req.body.login || "").trim();
+  try {
+    requireDb();
+    assertAdminRateLimit(req, login);
+    const state = await ensureAdminSecurity();
+    const expectedLogin = state.adminSecurity?.login || "admin";
+    const password = String(req.body.password || "");
+    const ok = loginKey(login) === loginKey(expectedLogin) && await bcrypt.compare(password, state.adminSecurity.passwordHash);
+    markAdminLoginAttempt(req, login, ok);
+    await appendAdminLog(ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
+      ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || ""
+    });
+    if (!ok) return res.status(401).json({ error: "Неверный логин или пароль" });
+    res.json({ token: signAdminToken(expectedLogin, "admin"), admin: { login: expectedLogin, role: "admin" } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/overview", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    res.json({ admin, ...adminBuildOverview(data) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/users/:login", async (req, res, next) => {
+  try {
+    requireAdmin(req);
+    const login = req.params.login;
+    const data = await adminLoadMarketplace();
+    const user = data.profiles.find((item) => sameLogin(item.login, login));
+    if (!user) return res.status(404).json({ error: "Пользователь не найден" });
+    const orders = (data.state.orders || []).filter((order) => sameLogin(order.login, login));
+    const deposits = (data.state.walletDeposits || []).filter((deposit) => sameLogin(deposit.login, login));
+    const messages = data.messages.filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login));
+    const products = new Map();
+    orders.forEach((order) => {
+      const name = order.product || order.productName || order.productId || "Товар";
+      products.set(name, (products.get(name) || 0) + 1);
+    });
+    const completed = orders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const dates = completed.map(adminTimestamp).filter(Boolean).sort((a, b) => a - b);
+    res.json({
+      user,
+      summary: {
+        visits: data.messages.filter((message) => sameLogin(message.fromLogin, login)).length,
+        totalDeposits: deposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
+        totalPurchases: completed.reduce((sum, item) => sum + adminOrderAmount(item), 0),
+        averageCheck: completed.length ? completed.reduce((sum, item) => sum + adminOrderAmount(item), 0) / completed.length : 0,
+        firstPurchaseAt: dates[0] || null,
+        lastPurchaseAt: dates[dates.length - 1] || null,
+        averageIntervalMs: dates.length > 1 ? (dates[dates.length - 1] - dates[0]) / completed.length : 0,
+        disputes: orders.filter((order) => order.disputeOpen || order.status === "dispute").length
+      },
+      orders,
+      deposits,
+      products: Array.from(products.entries()).map(([name, count]) => ({ name, count })),
+      messages
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/users/:login", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const login = req.params.login;
+    const key = loginKey(login);
+    const { role, name, storePassword } = req.body || {};
+    const updates = {};
+    if (role) updates.role = String(role);
+    if (name) updates.name = String(name).trim();
+    if (Object.keys(updates).length) await supabase.from("profiles").update(updates).eq("login_key", key);
+
+    if (role === "seller" || storePassword) {
+      const { data: rows } = await supabase.from("stores").select("id,data");
+      let row = (rows || []).find((item) => sameLogin(item.data?.ownerLogin, login));
+      const store = row?.data || {
+        id: `store-${key}`,
+        tag: `@${key}`,
+        ownerLogin: login,
+        name: login,
+        short: "Новый магазин",
+        description: "",
+        image: "assets/cerber-emblem.png",
+        cover: "assets/market-banner.png",
+        status: "active",
+        visibleInCatalog: true,
+        products: [],
+        reviewsList: []
+      };
+      store.ownerLogin = login;
+      store.adminPassword = String(storePassword || store.adminPassword || "123");
+      await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    }
+
+    await appendAdminLog("user_updated", admin.login, { login, role, name: name || "", sellerPanel: Boolean(role === "seller" || storePassword) });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/stores/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
+    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    const store = row.data;
+    const allowed = ["status", "commissionPercent", "homepagePosition", "adminPassword", "salesBlocked", "autoReleaseHours", "enabledCoins", "name", "short", "description"];
+    allowed.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) store[key] = req.body[key];
+    });
+    store.commissionPercent = Math.min(20, Math.max(0, Number(store.commissionPercent || 0)));
+    store.homepagePosition = Math.max(0, Number(store.homepagePosition || 0));
+    store.autoReleaseHours = Math.min(72, Math.max(0, Number(store.autoReleaseHours || 24)));
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
+    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    const store = row.data;
+    const product = (store.products || []).find((item) => item.id === req.params.productId);
+    if (!product) return res.status(404).json({ error: "Товар не найден" });
+    ["title", "category", "description", "priceUsd", "status"].forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) product[key] = req.body[key];
+    });
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await appendAdminLog("product_updated", admin.login, { storeId: store.id, productId: product.id });
+    res.json({ store });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
+    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    const store = row.data;
+    store.products = (store.products || []).filter((item) => item.id !== req.params.productId);
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await appendAdminLog("product_deleted", admin.login, { storeId: store.id, productId: req.params.productId });
+    res.json({ store });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/admin/settings", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.ownerSettings = { ...(state.ownerSettings || {}), ...(req.body.ownerSettings || {}) };
+    state.paymentSettings = { ...(state.paymentSettings || {}), ...(req.body.paymentSettings || {}) };
+    state.userFilters = Array.isArray(req.body.userFilters) ? req.body.userFilters : (state.userFilters || []);
+    await saveSettingsState(state);
+    await appendAdminLog("settings_updated", admin.login, { sections: Object.keys(req.body || {}) });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/password", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await ensureAdminSecurity();
+    const currentPassword = String(req.body.currentPassword || "");
+    const nextPassword = String(req.body.nextPassword || "");
+    if (!(await bcrypt.compare(currentPassword, state.adminSecurity.passwordHash))) return res.status(401).json({ error: "Текущий пароль неверный" });
+    if (nextPassword.length < 8) return res.status(400).json({ error: "Минимум 8 символов" });
+    state.adminSecurity.passwordHash = await bcrypt.hash(nextPassword, 12);
+    await saveSettingsState(state);
+    await appendAdminLog("admin_password_changed", admin.login);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/broadcasts", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.broadcasts = Array.isArray(state.broadcasts) ? state.broadcasts : [];
+    const broadcast = {
+      id: `broadcast-${Date.now()}`,
+      title: String(req.body.title || "Рассылка").trim(),
+      body: String(req.body.body || "").trim(),
+      channel: String(req.body.channel || "site"),
+      type: String(req.body.type || "popup"),
+      filters: req.body.filters || {},
+      stats: { sent: 0, delivered: 0, clicked: 0, closed: 0, botBlocked: 0, chatDeleted: 0 },
+      createdAt: Date.now(),
+      createdBy: admin.login
+    };
+    state.broadcasts.unshift(broadcast);
+    await saveSettingsState(state);
+    await appendAdminLog("broadcast_created", admin.login, { broadcastId: broadcast.id, channel: broadcast.channel });
+    res.json({ broadcast, overview: adminBuildOverview(await adminLoadMarketplace()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 function sortedObject(value) {
   if (Array.isArray(value)) return value.map(sortedObject);
   if (value && typeof value === "object") {
@@ -817,6 +1130,213 @@ async function loadSettingsState() {
   state.telegramBot.users = state.telegramBot.users || {};
   state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
   return state;
+}
+
+async function adminLoadMarketplace() {
+  await ensureSeed();
+  const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
+    supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }),
+    supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }),
+    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+    supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }),
+    supabase.from("sessions").select("login_key,created_at")
+  ]);
+  const state = settings?.data || {};
+  return {
+    state,
+    stores: (stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })),
+    messages: (messages || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })),
+    profiles: profiles || [],
+    sessions: sessions || []
+  };
+}
+
+function adminMoney(value) {
+  return Number(value || 0) || 0;
+}
+
+function adminTimestamp(item) {
+  return Number(item.createdAt || item.paidAt || item.completedAt || item.closedAt || Date.parse(item.date || item.created_at || "") || 0);
+}
+
+function adminWithin(item, from) {
+  const ts = adminTimestamp(item);
+  return ts && ts >= from;
+}
+
+function adminOrderAmount(order) {
+  return adminMoney(order.amountUsd || order.priceUsd || order.totalUsd || order.total || order.price);
+}
+
+function adminPlatformCommission(order, state, store) {
+  const storeCommission = Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0);
+  return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
+}
+
+function adminPeriods() {
+  const now = Date.now();
+  return [
+    { id: "h1", label: "1 час", from: now - 60 * 60 * 1000 },
+    { id: "h3", label: "3 часа", from: now - 3 * 60 * 60 * 1000 },
+    { id: "day", label: "Сутки", from: now - 24 * 60 * 60 * 1000 },
+    { id: "week", label: "Неделя", from: now - 7 * 24 * 60 * 60 * 1000 },
+    { id: "month", label: "Месяц", from: now - 30 * 24 * 60 * 60 * 1000 },
+    { id: "year", label: "Год", from: now - 365 * 24 * 60 * 60 * 1000 },
+    { id: "all", label: "Всё время", from: 0 }
+  ];
+}
+
+function adminBucketCharts(source, valueFn = () => 1) {
+  const now = Date.now();
+  const days = Array.from({ length: 14 }, (_, index) => {
+    const start = new Date(now - (13 - index) * 24 * 60 * 60 * 1000);
+    start.setHours(0, 0, 0, 0);
+    return { label: start.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }), from: start.getTime(), value: 0 };
+  });
+  source.forEach((item) => {
+    const ts = adminTimestamp(item);
+    const bucket = days.find((day, index) => ts >= day.from && (index === days.length - 1 || ts < days[index + 1].from));
+    if (bucket) bucket.value += valueFn(item);
+  });
+  return days.map(({ label, value }) => ({ label, value: Number(value.toFixed(2)) }));
+}
+
+function adminBuildOverview(data) {
+  const { state, stores, profiles, sessions, messages } = data;
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const exchangeRequests = Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [];
+  const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+  const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const storeById = new Map(stores.map((store) => [store.id, store]));
+  const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
+  const completedOrders = productOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+  const activeOrders = productOrders.filter((order) => ["active", "pending_payment", "processing"].includes(String(order.status || "").toLowerCase()));
+  const disputes = [
+    ...orders.filter((order) => order.disputeOpen || order.status === "dispute"),
+    ...exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute")
+  ];
+  const buyers = new Set(completedOrders.map((order) => loginKey(order.login)).filter(Boolean));
+  const productsCount = stores.reduce((sum, store) => sum + (Array.isArray(store.products) ? store.products.length : 0), 0);
+  const onlineUsers = new Set(sessions.filter((session) => Date.now() - Date.parse(session.created_at) < 30 * 60 * 1000).map((session) => session.login_key)).size;
+
+  const periods = adminPeriods().map((period) => {
+    const periodOrders = completedOrders.filter((order) => adminWithin(order, period.from));
+    const periodUsers = profiles.filter((user) => Date.parse(user.created_at) >= period.from);
+    const periodDisputes = disputes.filter((item) => adminWithin(item, period.from));
+    const turnover = periodOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+    const commission = periodOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
+    return {
+      id: period.id,
+      label: period.label,
+      sales: periodOrders.length,
+      turnover,
+      commission,
+      newUsers: periodUsers.length,
+      disputes: periodDisputes.length,
+      activeDeals: activeOrders.filter((order) => adminWithin(order, period.from)).length,
+      closedDeals: periodOrders.length
+    };
+  });
+
+  const storeRows = stores.map((store) => {
+    const storeOrders = productOrders.filter((order) => order.storeId === store.id);
+    const storeCompleted = storeOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const storeDisputes = storeOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const clients = new Set(storeOrders.map((order) => loginKey(order.login)).filter(Boolean));
+    const revenue = storeCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+    return {
+      id: store.id,
+      name: store.name || store.tag || store.id,
+      status: store.status || "active",
+      ownerLogin: store.ownerLogin || "",
+      sales: storeCompleted.length,
+      revenue,
+      commission: storeCompleted.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0),
+      clients: clients.size,
+      products: Array.isArray(store.products) ? store.products.length : 0,
+      disputes: storeDisputes.length,
+      registeredAt: store.createdAt || null,
+      commissionPercent: Number(store.commissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? 0),
+      homepagePosition: Number(store.homepagePosition || 0),
+      coins: store.enabledCoins || {}
+    };
+  });
+
+  const userRows = profiles.map((user, index) => {
+    const login = user.login;
+    const userOrders = productOrders.filter((order) => sameLogin(order.login, login));
+    const userCompleted = userOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const userDisputes = userOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const deposits = walletDeposits.filter((deposit) => sameLogin(deposit.login, login));
+    return {
+      id: user.login_key,
+      number: index + 1,
+      login,
+      name: user.name,
+      role: user.role,
+      registeredAt: user.created_at,
+      purchases: userCompleted.length,
+      purchaseUsd: userCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0),
+      balance: adminMoney(state.balances?.[login] || state.balances?.[user.login_key]),
+      balanceLtc: adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[user.login_key]),
+      disputes: userDisputes.length,
+      deposits: deposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
+      status: user.status || "active"
+    };
+  });
+
+  const botUsers = Object.entries(state.telegramBot?.users || {}).map(([chatId, bot]) => ({
+    chatId,
+    loginKey: bot.loginKey || "",
+    verified: Boolean(bot.verified),
+    blocked: Boolean(bot.blocked),
+    token: bot.token || bot.botToken || ""
+  }));
+
+  return {
+    stats: {
+      totalSales: completedOrders.length,
+      totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
+      totalCommission: completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0),
+      newUsers: periods.find((period) => period.id === "day")?.newUsers || 0,
+      totalUsers: profiles.length,
+      usersWithPurchase: buyers.size,
+      disputes: disputes.length,
+      closedDeals: completedOrders.length,
+      activeDeals: activeOrders.length,
+      products: productsCount,
+      stores: stores.length,
+      onlineUsers
+    },
+    periods,
+    charts: {
+      sales: adminBucketCharts(completedOrders),
+      registrations: adminBucketCharts(profiles.map((user) => ({ createdAt: Date.parse(user.created_at) }))),
+      revenue: adminBucketCharts(completedOrders, adminOrderAmount),
+      disputes: adminBucketCharts(disputes),
+      activity: adminBucketCharts(sessions.map((session) => ({ createdAt: Date.parse(session.created_at) })))
+    },
+    stores: storeRows,
+    users: userRows,
+    deals: [...productOrders, ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
+    disputes,
+    finances: { walletDeposits, walletTransactions, balances: state.balances || {}, ltcBalances: state.ltcBalances || {} },
+    settings: {
+      ownerSettings: state.ownerSettings || {},
+      paymentSettings: state.paymentSettings || {},
+      adminSecurity: { login: state.adminSecurity?.login || "admin", hasPassword: Boolean(state.adminSecurity?.passwordHash) }
+    },
+    broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : [],
+    userFilters: Array.isArray(state.userFilters) ? state.userFilters : [],
+    bots: {
+      total: botUsers.length,
+      active: botUsers.filter((bot) => bot.verified && !bot.blocked).length,
+      blocked: botUsers.filter((bot) => bot.blocked).length,
+      items: botUsers
+    },
+    logs: Array.isArray(state.adminLogs) ? state.adminLogs : [],
+    messages
+  };
 }
 
 async function createWalletDepositRecord(user, options = {}) {
@@ -1676,6 +2196,10 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
 
 app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
   res.sendFile(path.join(__dirname, "text-admin.html"));
+});
+
+app.get(["/market-admin", "/market-admin.html"], (_req, res) => {
+  res.sendFile(path.join(__dirname, "market-admin.html"));
 });
 
 app.get("*", (_req, res) => {
