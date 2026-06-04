@@ -1426,6 +1426,14 @@ function countrySelectOptions(selected = "moldova") {
   )).join("");
 }
 
+function scopedCountrySelectOptions(countries = ["moldova"], selected = "moldova") {
+  const allowed = countries.length ? countries : Object.keys(filterOptions.countries);
+  return Object.entries(filterOptions.countries)
+    .filter(([key]) => allowed.includes(key))
+    .map(([key, item]) => `<option value="${esc(key)}" ${key === selected ? "selected" : ""}>${esc(item.label)}</option>`)
+    .join("");
+}
+
 function citySelectOptions(country = "moldova", selected = "chisinau") {
   const cities = filterOptions.countries[country]?.cities || filterOptions.countries.moldova.cities;
   const fallbackCity = Object.keys(cities)[0] || "";
@@ -2799,6 +2807,15 @@ function handleProductPurchase(storeId, productId, positionId) {
     showToast("У вас недостаточно средств");
     return;
   }
+  if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
+  const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+  const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+  const issueFromPosition = positionItems.length > 0;
+  const issuedItems = issueFromPosition ? positionItems : productItems;
+  const requiresIssuedDescription = issuedItems.length > 0;
+  const reservedDescription = issuedItems.shift() || "";
+  if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
+  position.stock = Math.max(0, Number(position.stock || 0) - 1);
   db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
   const order = {
     id: `order-${Date.now()}`,
@@ -2809,14 +2826,18 @@ function handleProductPurchase(storeId, productId, positionId) {
     positionId,
     product: product.title,
     storeName: store.name,
-    status: "active",
+    status: "completed",
     paymentStatus: "paid",
     createdAt: Date.now(),
     paidAt: Date.now(),
     completedAt: Date.now(),
     amountUsd: priceUsd,
     ltcAmount,
-    location: locationLabel(position)
+    location: locationLabel(position),
+    productDescription: product.description || "",
+    reservedDescription,
+    reservedFromPosition: issueFromPosition,
+    reservedStock: true
   };
   db.orders.unshift(order);
   addWalletTransaction({
@@ -2826,7 +2847,7 @@ function handleProductPurchase(storeId, productId, positionId) {
     amountUsd: -priceUsd
   });
   saveDb();
-  renderOrders("active");
+  renderOrders("completed");
 }
 
 function payProductOrderFromBalance(orderId) {
@@ -6396,6 +6417,9 @@ function renderSeller() {
   if (!stores.length) return renderSellerPortal();
   route = "seller";
   const store = stores[0];
+  const sellerCountries = Array.isArray(store.countries) && store.countries.length ? store.countries : ["moldova"];
+  const sellerDefaultCountry = sellerCountries[0] || "moldova";
+  const sellerDefaultCity = Object.keys(filterOptions.countries[sellerDefaultCountry]?.cities || filterOptions.countries.moldova.cities)[0] || "chisinau";
   const standalone = Boolean(sellerAdminStore());
   const risk = storeRisk(store);
   const disputes = storeDisputes(store.id);
@@ -6440,9 +6464,9 @@ function renderSeller() {
           </div>
           <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
           <div class="row" data-location-group>
-            <label class="field">Страна<select name="country" data-location-country>${countrySelectOptions("moldova")}</select></label>
-            <label class="field">Город<select name="city" data-location-city>${citySelectOptions("moldova", "chisinau")}</select></label>
-            <label class="field">Район<select name="district" data-location-district>${districtSelectOptions("moldova", "chisinau", "Чеканы")}</select></label>
+            <label class="field">Страна<select name="country" data-location-country>${scopedCountrySelectOptions(sellerCountries, sellerDefaultCountry)}</select></label>
+            <label class="field">Город<select name="city" data-location-city>${citySelectOptions(sellerDefaultCountry, sellerDefaultCity)}</select></label>
+            <label class="field">Район<select name="district" data-location-district>${districtSelectOptions(sellerDefaultCountry, sellerDefaultCity, "")}</select></label>
           </div>
           <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ"></textarea></label>
           <label class="field">Главное фото<input name="mainImage" type="file" accept="image/*"></label>

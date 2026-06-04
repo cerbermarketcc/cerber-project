@@ -1079,12 +1079,36 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/stores", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const store = adminBuildStoreFromBody(req.body || {});
+    if (!store.name || !store.ownerLogin || !store.adminPassword) {
+      return res.status(400).json({ error: "Укажите название магазина, логин владельца и пароль панели" });
+    }
+    const { data: existing } = await supabase.from("stores").select("id").eq("id", store.id).maybeSingle();
+    if (existing) return res.status(409).json({ error: "Магазин с таким ID уже существует" });
+    await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    const panel = adminStorePanelLinks(store);
+    await appendAdminLog("store_created", admin.login, { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
+    res.json({ store, panel, overview: adminBuildOverview(await adminLoadMarketplace()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/admin/stores/:id", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
     if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
-    const store = row.data;
+    const store = adminBuildStoreFromBody(req.body || {}, row.data);
+    if (store.ownerLogin) await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
+    res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(store) });
+    return;
     const allowed = ["status", "commissionPercent", "homepagePosition", "adminPassword", "salesBlocked", "autoReleaseHours", "enabledCoins", "name", "short", "description"];
     allowed.forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) store[key] = req.body[key];
@@ -1436,6 +1460,106 @@ function adminPublicUserStatus(state, login) {
   return record?.blocked ? "blocked" : "active";
 }
 
+function adminSlug(value, fallback = "store") {
+  const slug = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || `${fallback}-${Date.now()}`;
+}
+
+function adminNormalizeStoreStatus(value) {
+  const status = String(value || "ACTIVE").toUpperCase();
+  if (status === "DELETE") return "deleted";
+  if (status === "DISABLE" || status === "DISABLED") return "disabled";
+  return "active";
+}
+
+function adminNormalizeStoreRegions(input) {
+  const values = Array.isArray(input) ? input : String(input || "moldova").split(",");
+  const normalized = values.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+  const result = [];
+  if (normalized.includes("both")) result.push("moldova", "transnistria");
+  if (normalized.includes("moldova")) result.push("moldova");
+  if (normalized.includes("transnistria") || normalized.includes("pmr") || normalized.includes("pridnestrovie")) result.push("transnistria");
+  return Array.from(new Set(result.length ? result : ["moldova"]));
+}
+
+function adminStorePanelLinks(store) {
+  return {
+    shopPanelUrl: `${publicBaseUrl}/#shop-panel-${store.id}`,
+    sellerPanelUrl: `${publicBaseUrl}/#seller-${store.id}`,
+    login: store.ownerLogin || store.id,
+    password: store.adminPassword || ""
+  };
+}
+
+async function adminEnsureSellerProfile(login, password, name = "") {
+  const key = loginKey(login);
+  if (!key) return null;
+  const { data: existing } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  if (existing) {
+    const updates = { role: "seller" };
+    if (name) updates.name = existing.name || name;
+    if (password) updates.password_hash = await bcrypt.hash(String(password), 12);
+    await supabase.from("profiles").update(updates).eq("login_key", key);
+    return { ...existing, ...updates };
+  }
+  const passwordHash = await bcrypt.hash(String(password || "123"), 12);
+  const { data: user, error } = await supabase.from("profiles").insert({
+    login,
+    login_key: key,
+    password_hash: passwordHash,
+    name: name || login,
+    role: "seller"
+  }).select("*").single();
+  if (error) throw error;
+  return user;
+}
+
+function adminBuildStoreFromBody(body = {}, existing = null) {
+  const ownerLogin = String(body.ownerLogin || body.login || existing?.ownerLogin || "").trim();
+  const name = String(body.name || existing?.name || ownerLogin || "New store").trim();
+  const id = existing?.id || adminSlug(body.id || name || ownerLogin, "store");
+  const countries = adminNormalizeStoreRegions(body.countries || body.regions || existing?.countries);
+  const placement = String(body.placement || existing?.placement || "stores").trim().toUpperCase();
+  const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
+  const image = String(body.image || body.avatar || existing?.image || "assets/cerber-emblem.png").trim();
+  const cover = String(body.cover || body.banner || existing?.cover || image || "assets/market-banner.png").trim();
+  return {
+    ...(existing || {}),
+    id,
+    name,
+    tag: existing?.tag || `@${adminSlug(name, "store")}`,
+    short: String(body.short || existing?.short || "").trim(),
+    description: String(body.description || existing?.description || "").trim(),
+    ownerLogin,
+    adminPassword: String(body.adminPassword || existing?.adminPassword || "123").trim(),
+    image,
+    avatar: image,
+    cover,
+    banner: cover,
+    status: adminNormalizeStoreStatus(body.status || existing?.status || "ACTIVE"),
+    visibleInCatalog: body.visibleInCatalog !== false,
+    placement,
+    placements: Array.isArray(body.placements) ? body.placements : [placement],
+    homepagePosition: position,
+    position,
+    countries,
+    regions: countries,
+    cities: Array.isArray(body.cities) ? body.cities : (existing?.cities || []),
+    districts: Array.isArray(body.districts) ? body.districts : (existing?.districts || []),
+    commissionPercent: Math.min(20, Math.max(0, Number(body.commissionPercent ?? existing?.commissionPercent ?? 0))),
+    autoReleaseHours: Math.min(72, Math.max(0, Number(body.autoReleaseHours ?? existing?.autoReleaseHours ?? 24))),
+    enabledCoins: body.enabledCoins || existing?.enabledCoins || {},
+    products: Array.isArray(existing?.products) ? existing.products : [],
+    reviewsList: Array.isArray(existing?.reviewsList) ? existing.reviewsList : [],
+    createdAt: existing?.createdAt || Date.now(),
+    updatedAt: Date.now()
+  };
+}
+
 function adminPlatformCommission(order, state, store) {
   const storeCommission = Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0);
   return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
@@ -1482,6 +1606,8 @@ function adminCollectBots(state) {
       id: key,
       chatId,
       loginKey: loginKeyValue,
+      user_id: value.user_id || value.userId || loginKeyValue,
+      owner_id: value.owner_id || value.ownerId || loginKeyValue,
       login: value.login || value.ownerLogin || "",
       username: value.username || value.telegramUsername || value.tgUsername || value.telegram || "",
       botUsername: value.botUsername || value.bot_username || value.name || value.title || "",
@@ -1489,6 +1615,8 @@ function adminCollectBots(state) {
       updatedAt: value.updatedAt || value.lastActivityAt || value.seenAt || value.lastSeenAt || null,
       verified: value.verified !== false,
       blocked: Boolean(value.blocked || value.isBlocked || value.deleted),
+      status: value.blocked || value.isBlocked || value.deleted ? "blocked" : value.verified === false ? "disabled" : "active",
+      storage: source,
       token,
       source
     });
@@ -1698,6 +1826,16 @@ function adminBuildOverview(data) {
       commissionPercent: Number(store.commissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? 0),
       homepagePosition: Number(store.homepagePosition || 0),
       autoReleaseHours: Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24),
+      short: store.short || "",
+      description: store.description || "",
+      image: store.image || store.avatar || "",
+      cover: store.cover || store.banner || "",
+      placement: store.placement || "",
+      placements: Array.isArray(store.placements) ? store.placements : [],
+      position: Number(store.position || store.homepagePosition || 0),
+      countries: Array.isArray(store.countries) ? store.countries : [],
+      regions: Array.isArray(store.regions) ? store.regions : (Array.isArray(store.countries) ? store.countries : []),
+      panel: adminStorePanelLinks(store),
       coins: store.enabledCoins || {}
     };
   });
@@ -2639,8 +2777,56 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     mirror.createdAt = mirror.createdAt || Date.now();
     mirror.updatedAt = Date.now();
     if (!existing) state.mirrorBots.unshift(mirror);
+    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
+    state.adminLogs.unshift({
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action: "mirror_bot_created",
+      actor: chat.login || chat.loginKey || "telegram",
+      details: {
+        id: mirror.token ? `mirror-${crypto.createHash("sha1").update(mirror.token).digest("hex").slice(0, 10)}` : String(chatId),
+        userId: chat.loginKey,
+        ownerId: chat.loginKey,
+        chatId: String(chatId),
+        username: mirror.username,
+        botUsername: mirror.botUsername,
+        status: "active",
+        storage: "app_settings.mirrorBots"
+      },
+      createdAt: Date.now()
+    });
+    state.adminLogs = state.adminLogs.slice(0, 500);
+    await appendAdminLog("mirror_bot_created", chat.login || chat.loginKey || "telegram", {
+      id: mirror.token ? `mirror-${crypto.createHash("sha1").update(mirror.token).digest("hex").slice(0, 10)}` : String(chatId),
+      userId: chat.loginKey,
+      ownerId: chat.loginKey,
+      chatId: String(chatId),
+      username: mirror.username,
+      botUsername: mirror.botUsername,
+      status: "active",
+      storage: "app_settings.mirrorBots"
+    });
     await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}`);
   } catch (error) {
+    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
+    state.adminLogs.unshift({
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action: "mirror_bot_error",
+      actor: chat.login || chat.loginKey || "telegram",
+      details: {
+        userId: chat.loginKey || "",
+        chatId: String(chatId),
+        error: String(error.message || error).slice(0, 300),
+        storage: "app_settings.mirrorBots"
+      },
+      createdAt: Date.now()
+    });
+    state.adminLogs = state.adminLogs.slice(0, 500);
+    await appendAdminLog("mirror_bot_error", chat.login || chat.loginKey || "telegram", {
+      userId: chat.loginKey || "",
+      chatId: String(chatId),
+      error: String(error.message || error).slice(0, 300),
+      storage: "app_settings.mirrorBots"
+    }).catch(() => {});
     await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`);
   }
   return true;

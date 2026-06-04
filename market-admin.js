@@ -214,6 +214,30 @@ function periodTable() {
 function renderStores() {
   const rows = filterRows(data.stores, ["id", "name", "ownerLogin", "status"]);
   return `
+    <article class="split-card">
+      <h2>Создать магазин</h2>
+      <form data-create-store-form>
+        <div class="row">
+          <label class="field">Название магазина<input name="name" required></label>
+          <label class="field">Логин владельца<input name="ownerLogin" required></label>
+        </div>
+        <div class="row">
+          <label class="field">Пароль панели продавца<input name="adminPassword" required></label>
+          <label class="field">Фото магазина 3:4 / URL<input name="image" placeholder="https://..."></label>
+        </div>
+        <label class="field">Описание магазина<textarea name="description"></textarea></label>
+        <div class="row">
+          <label class="field">Размещение<select name="placement"><option value="TOP 10">TOP 10</option><option value="TOP">TOP</option><option value="NEW">NEW</option><option value="stores">Раздел Магазины</option></select></label>
+          <label class="field">Позиция<input name="position" type="number" min="1" step="1" value="1"></label>
+        </div>
+        <div class="checks">
+          <label><input name="region_moldova" type="checkbox" checked> Молдова</label>
+          <label><input name="region_transnistria" type="checkbox"> Приднестровье</label>
+        </div>
+        <button class="primary">Создать магазин</button>
+      </form>
+      <div data-created-store></div>
+    </article>
     <section class="split">
       <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход</th><th>Комиссия</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
         ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
@@ -227,6 +251,39 @@ function storeDetail(id) {
   const store = data.stores.find((item) => item.id === id);
   if (!store) return "";
   const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
+  const countries = store.countries || store.regions || [];
+  const panelUrl = store.panel?.shopPanelUrl || `https://cerber.vip/#shop-panel-${store.id}`;
+  return `
+    <h2>${esc(store.name)}</h2>
+    <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
+    <form data-store-form="${esc(store.id)}">
+      <label class="field">Название<input name="name" value="${esc(store.name || "")}"></label>
+      <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
+      <div class="row">
+        <label class="field">Статус<select name="status"><option value="ACTIVE" ${status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option value="DISABLE" ${status === "DISABLE" ? "selected" : ""}>DISABLE</option></select></label>
+        <label class="field">Логин владельца<input name="ownerLogin" value="${esc(store.ownerLogin || "")}"></label>
+      </div>
+      <div class="row">
+        <label class="field">Комиссия 0-20%<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="${esc(store.commissionPercent)}"></label>
+        <label class="field">Размещение<select name="placement"><option value="TOP 10" ${store.placement === "TOP 10" ? "selected" : ""}>TOP 10</option><option value="TOP" ${store.placement === "TOP" ? "selected" : ""}>TOP</option><option value="NEW" ${store.placement === "NEW" ? "selected" : ""}>NEW</option><option value="stores" ${store.placement === "stores" ? "selected" : ""}>Раздел Магазины</option></select></label>
+      </div>
+      <div class="row">
+        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(store.position || store.homepagePosition || 0)}"></label>
+        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || 24)}"></label>
+      </div>
+      <div class="row">
+        <label class="field">Фото / аватар URL<input name="image" value="${esc(store.image || "")}"></label>
+        <label class="field">Баннер URL<input name="cover" value="${esc(store.cover || "")}"></label>
+      </div>
+      <label class="field">Пароль панели продавца<input name="adminPassword" placeholder="оставить пустым, если не менять"></label>
+      <div class="checks">
+        <label><input name="region_moldova" type="checkbox" ${countries.includes("moldova") ? "checked" : ""}> Молдова</label>
+        <label><input name="region_transnistria" type="checkbox" ${countries.includes("transnistria") ? "checked" : ""}> Приднестровье</label>
+      </div>
+      <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
+      <p><button class="primary">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
+    </form>
+  `;
   return `
     <h2>${esc(store.name)}</h2>
     <form data-store-form="${esc(store.id)}">
@@ -368,6 +425,37 @@ function renderBots() {
 }
 
 function bindActions() {
+  root.querySelector("[data-create-store-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    const countries = [];
+    if (fd.get("region_moldova")) countries.push("moldova");
+    if (fd.get("region_transnistria")) countries.push("transnistria");
+    try {
+      const result = await api("/api/admin/stores", {
+        method: "POST",
+        body: JSON.stringify({
+          name: fd.get("name"),
+          ownerLogin: fd.get("ownerLogin"),
+          adminPassword: fd.get("adminPassword"),
+          image: fd.get("image"),
+          description: fd.get("description"),
+          placement: fd.get("placement"),
+          position: Number(fd.get("position")),
+          countries
+        })
+      });
+      data = result.overview;
+      toast("Магазин создан");
+      renderShell();
+      setTimeout(() => {
+        const box = root.querySelector("[data-created-store]");
+        if (box) box.innerHTML = `<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`;
+      });
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
   root.querySelectorAll("[data-store]").forEach((row) => row.onclick = () => {
     root.querySelector("[data-store-detail]").innerHTML = storeDetail(row.dataset.store);
     bindActions();
@@ -376,15 +464,26 @@ function bindActions() {
     event.preventDefault();
     const fd = new FormData(form);
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
+    const countries = [];
+    if (fd.get("region_moldova")) countries.push("moldova");
+    if (fd.get("region_transnistria")) countries.push("transnistria");
     try {
       data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         body: JSON.stringify({
+          name: fd.get("name"),
+          ownerLogin: fd.get("ownerLogin"),
+          description: fd.get("description"),
+          image: fd.get("image"),
+          cover: fd.get("cover"),
           status: fd.get("status"),
+          placement: fd.get("placement"),
+          position: Number(fd.get("position")),
           commissionPercent: Number(fd.get("commissionPercent")),
-          homepagePosition: Number(fd.get("homepagePosition")),
+          homepagePosition: Number(fd.get("position") || fd.get("homepagePosition")),
           autoReleaseHours: Number(fd.get("autoReleaseHours")),
           adminPassword: fd.get("adminPassword") || undefined,
+          countries,
           enabledCoins
         })
       });
