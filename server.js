@@ -1193,6 +1193,18 @@ app.put("/api/admin/settings", async (req, res, next) => {
   }
 });
 
+app.delete("/api/admin/logs", async (req, res, next) => {
+  try {
+    requireAdmin(req);
+    const state = await loadSettingsState();
+    state.adminLogs = [];
+    await saveSettingsState(state);
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/admin/password", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
