@@ -311,6 +311,9 @@ async function stateFor(user) {
       ltcBalances: settingsData.ltcBalances || {},
       walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
       walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
+      siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
+      broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
+      userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
       storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
       ownerSettings: settingsData.ownerSettings || {},
       paymentSettings: settingsData.paymentSettings || {},
@@ -781,6 +784,9 @@ app.put("/api/state", async (req, res, next) => {
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
         telegramBot: state.telegramBot || currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
+        siteNotifications: Array.isArray(state.siteNotifications) ? state.siteNotifications : (currentSettingsData.siteNotifications || []),
+        broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : (currentSettingsData.broadcasts || []),
+        userFilters: Array.isArray(state.userFilters) ? state.userFilters : (currentSettingsData.userFilters || []),
         storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
         ownerSettings: state.ownerSettings || {},
         paymentSettings: state.paymentSettings || {},
@@ -1037,7 +1043,8 @@ app.post("/api/admin/password", async (req, res, next) => {
 app.post("/api/admin/broadcasts", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    const state = await loadSettingsState();
+    const market = await adminLoadMarketplace();
+    const state = market.state;
     state.broadcasts = Array.isArray(state.broadcasts) ? state.broadcasts : [];
     const broadcast = {
       id: `broadcast-${Date.now()}`,
@@ -1050,10 +1057,34 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
       createdAt: Date.now(),
       createdBy: admin.login
     };
+    await adminDeliverBroadcast(state, broadcast, market.profiles, market.sessions);
     state.broadcasts.unshift(broadcast);
     await saveSettingsState(state);
-    await appendAdminLog("broadcast_created", admin.login, { broadcastId: broadcast.id, channel: broadcast.channel });
+    await appendAdminLog("broadcast_created", admin.login, { broadcastId: broadcast.id, channel: broadcast.channel, sent: broadcast.stats.sent });
     res.json({ broadcast, overview: adminBuildOverview(await adminLoadMarketplace()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/broadcasts/:id/track", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const notification = (state.siteNotifications || []).find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
+    if (!notification) return res.status(404).json({ error: "Уведомление не найдено" });
+    const action = String(req.body.action || "closed");
+    if (action === "clicked") notification.clickedAt = Date.now();
+    if (action === "closed") notification.closedAt = Date.now();
+    const broadcast = (state.broadcasts || []).find((item) => item.id === notification.broadcastId);
+    if (broadcast) {
+      broadcast.stats = broadcast.stats || {};
+      if (action === "clicked") broadcast.stats.clicked = Number(broadcast.stats.clicked || 0) + 1;
+      if (action === "closed") broadcast.stats.closed = Number(broadcast.stats.closed || 0) + 1;
+    }
+    await saveSettingsState(state);
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -1201,6 +1232,138 @@ function adminBucketCharts(source, valueFn = () => 1) {
   return days.map(({ label, value }) => ({ label, value: Number(value.toFixed(2)) }));
 }
 
+function adminCollectBots(state) {
+  const found = new Map();
+  const addBot = (id, value = {}, source = "telegramBot") => {
+    if (!value || typeof value !== "object") return;
+    const chatId = String(value.chatId || value.chat_id || id || "").trim();
+    const token = String(value.token || value.botToken || value.telegramToken || value.accessToken || "").trim();
+    const loginKeyValue = String(value.loginKey || value.login_key || value.login || value.ownerLogin || value.username || "").trim();
+    if (!chatId && !token && !loginKeyValue) return;
+    const key = `${source}:${chatId || token || loginKeyValue}`;
+    found.set(key, {
+      id: key,
+      chatId,
+      loginKey: loginKeyValue,
+      verified: value.verified !== false,
+      blocked: Boolean(value.blocked || value.isBlocked || value.deleted),
+      token,
+      source
+    });
+  };
+
+  Object.entries(state.telegramBot?.users || {}).forEach(([chatId, bot]) => addBot(chatId, bot, "telegramBot.users"));
+  const scan = (value, source = "state", depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 5) return;
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => scan(item, `${source}[${index}]`, depth + 1));
+      return;
+    }
+    const keys = Object.keys(value);
+    const looksLikeBot = keys.some((key) => /token|chatId|chat_id|botToken|loginKey/i.test(key));
+    if (looksLikeBot) addBot(value.chatId || value.chat_id || value.id || source, value, source);
+    keys.forEach((key) => {
+      if (/bot|mirror|telegram|зерк/i.test(key)) scan(value[key], `${source}.${key}`, depth + 1);
+    });
+  };
+  scan(state.telegramBots, "telegramBots");
+  scan(state.mirrorBots, "mirrorBots");
+  scan(state.clientMirrorBots, "clientMirrorBots");
+  scan(state.telegramMirrors, "telegramMirrors");
+  scan(state.telegramBot?.mirrors, "telegramBot.mirrors");
+  return Array.from(found.values());
+}
+
+function adminAudienceUsers({ state, profiles, sessions }, filters = {}) {
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const completed = orders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+  const onlineKeys = new Set(sessions.filter((session) => Date.now() - Date.parse(session.created_at) < 30 * 60 * 1000).map((session) => session.login_key));
+  const specific = String(filters.specificLogins || "").split(",").map((item) => loginKey(item)).filter(Boolean);
+  const minPurchase = filters.minPurchase === "" || filters.minPurchase == null ? null : Number(filters.minPurchase);
+  const maxPurchase = filters.maxPurchase === "" || filters.maxPurchase == null ? null : Number(filters.maxPurchase);
+  const noPurchasesDays = filters.noPurchasesDays === "" || filters.noPurchasesDays == null ? null : Number(filters.noPurchasesDays);
+  const productNeedle = loginKey(filters.product || "");
+  const storeId = String(filters.storeId || "").trim();
+  const categoryNeedle = loginKey(filters.category || "");
+  const balanceMode = String(filters.balanceMode || "");
+
+  return profiles.filter((user) => {
+    const key = user.login_key;
+    const login = user.login;
+    const userOrders = completed.filter((order) => sameLogin(order.login, login));
+    const purchaseUsd = userOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+    const balance = adminMoney(state.balances?.[login] || state.balances?.[key]) + adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[key]);
+    const lastPurchase = Math.max(0, ...userOrders.map(adminTimestamp));
+
+    if (specific.length && !specific.includes(key) && !specific.includes(loginKey(login))) return false;
+    if (filters.audience === "online" && !onlineKeys.has(key)) return false;
+    if (filters.audience === "buyers" && !userOrders.length) return false;
+    if (filters.audience === "no_purchases" && userOrders.length) return false;
+    if (filters.audience === "balance" && balance <= 0) return false;
+    if (balanceMode === "with" && balance <= 0) return false;
+    if (balanceMode === "without" && balance > 0) return false;
+    if (minPurchase != null && purchaseUsd < minPurchase) return false;
+    if (maxPurchase != null && purchaseUsd > maxPurchase) return false;
+    if (noPurchasesDays != null && lastPurchase && Date.now() - lastPurchase < noPurchasesDays * 24 * 60 * 60 * 1000) return false;
+    if (noPurchasesDays != null && !lastPurchase && Date.now() - Date.parse(user.created_at) < noPurchasesDays * 24 * 60 * 60 * 1000) return false;
+    if (storeId && !userOrders.some((order) => order.storeId === storeId)) return false;
+    if (productNeedle && !userOrders.some((order) => loginKey(`${order.product || ""} ${order.productName || ""} ${order.productId || ""}`).includes(productNeedle))) return false;
+    if (categoryNeedle && !userOrders.some((order) => loginKey(order.category || "").includes(categoryNeedle))) return false;
+    return true;
+  });
+}
+
+async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
+  const recipients = adminAudienceUsers({ state, profiles, sessions }, broadcast.filters || {});
+  const recipientKeys = new Set(recipients.map((user) => user.login_key));
+  state.siteNotifications = Array.isArray(state.siteNotifications) ? state.siteNotifications : [];
+  let siteSent = 0;
+  let telegramSent = 0;
+  let telegramFailed = 0;
+
+  if (["site", "both"].includes(broadcast.channel)) {
+    recipients.forEach((user) => {
+      state.siteNotifications.unshift({
+        id: `${broadcast.id}-${user.login_key}`,
+        broadcastId: broadcast.id,
+        loginKey: user.login_key,
+        login: user.login,
+        title: broadcast.title,
+        body: broadcast.body,
+        type: broadcast.type,
+        createdAt: Date.now(),
+        clickedAt: null,
+        closedAt: null
+      });
+      siteSent += 1;
+    });
+  }
+
+  if (["telegram", "both"].includes(broadcast.channel)) {
+    const bots = adminCollectBots(state).filter((bot) => !bot.blocked && bot.chatId && (!bot.loginKey || recipientKeys.has(loginKey(bot.loginKey))));
+    for (const bot of bots) {
+      try {
+        await telegramApi("sendMessage", {
+          chat_id: bot.chatId,
+          text: `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(broadcast.body)}`,
+          parse_mode: "HTML",
+          disable_web_page_preview: true
+        });
+        telegramSent += 1;
+      } catch {
+        telegramFailed += 1;
+      }
+    }
+  }
+
+  broadcast.recipients = recipients.map((user) => ({ login: user.login, loginKey: user.login_key }));
+  broadcast.stats.sent = siteSent + telegramSent;
+  broadcast.stats.delivered = siteSent + telegramSent;
+  broadcast.stats.telegramFailed = telegramFailed;
+  broadcast.stats.siteSent = siteSent;
+  broadcast.stats.telegramSent = telegramSent;
+}
+
 function adminBuildOverview(data) {
   const { state, stores, profiles, sessions, messages } = data;
   const orders = Array.isArray(state.orders) ? state.orders : [];
@@ -1285,13 +1448,7 @@ function adminBuildOverview(data) {
     };
   });
 
-  const botUsers = Object.entries(state.telegramBot?.users || {}).map(([chatId, bot]) => ({
-    chatId,
-    loginKey: bot.loginKey || "",
-    verified: Boolean(bot.verified),
-    blocked: Boolean(bot.blocked),
-    token: bot.token || bot.botToken || ""
-  }));
+  const botUsers = adminCollectBots(state);
 
   return {
     stats: {

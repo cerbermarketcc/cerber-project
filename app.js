@@ -186,6 +186,9 @@ const defaults = {
   ltcBalances: {},
   walletTransactions: [],
   walletDeposits: [],
+  siteNotifications: [],
+  broadcasts: [],
+  userFilters: [],
   storeApplications: [],
   ownerSettings: {
     defaultAutoReleaseHours: 24,
@@ -721,6 +724,9 @@ function normalizeDb(next) {
   if (!next.ltcBalances) next.ltcBalances = {};
   if (!Array.isArray(next.walletTransactions)) next.walletTransactions = [];
   if (!Array.isArray(next.walletDeposits)) next.walletDeposits = [];
+  if (!Array.isArray(next.siteNotifications)) next.siteNotifications = [];
+  if (!Array.isArray(next.broadcasts)) next.broadcasts = [];
+  if (!Array.isArray(next.userFilters)) next.userFilters = [];
   if (!Array.isArray(next.storeApplications)) next.storeApplications = [];
   if (!next.ownerSettings) next.ownerSettings = structuredClone(defaults.ownerSettings);
   next.ownerSettings = {
@@ -1166,6 +1172,9 @@ async function persistRemoteState() {
           ltcBalances: db.ltcBalances,
           walletTransactions: db.walletTransactions,
           walletDeposits: db.walletDeposits,
+          siteNotifications: db.siteNotifications,
+          broadcasts: db.broadcasts,
+          userFilters: db.userFilters,
           storeApplications: db.storeApplications,
           ownerSettings: db.ownerSettings,
           paymentSettings: db.paymentSettings,
@@ -6602,6 +6611,45 @@ function showModal(html, className = "") {
   document.querySelector("[data-modal]").classList.add("open");
 }
 
+async function trackSiteBroadcast(notification, action) {
+  if (!notification?.id || !API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
+  try {
+    await fetch(`/api/broadcasts/${encodeURIComponent(notification.id)}/track`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${localStorage.getItem(API_TOKEN_KEY)}`
+      },
+      body: JSON.stringify({ action })
+    });
+  } catch {}
+}
+
+function showPendingSiteBroadcast() {
+  if (!db.currentUser || !currentUser() || !document.querySelector("[data-modal]")) return;
+  const notification = (db.siteNotifications || []).find((item) => (
+    sameLogin(item.login, db.currentUser) && !item.closedAt && !item.clickedAt
+  ));
+  if (!notification) return;
+  const isBanner = notification.type === "banner";
+  showModal(`
+    <h2>${esc(notification.title || "Уведомление")}</h2>
+    <p>${esc(notification.body || "")}</p>
+    <button class="primary" data-broadcast-click="${esc(notification.id)}">${isBanner ? "Открыть" : "Понятно"}</button>
+    <button class="ghost-button" data-broadcast-close="${esc(notification.id)}">${tr("close")}</button>
+  `, isBanner ? "broadcast-banner-modal" : "broadcast-popup-modal");
+  document.querySelector("[data-broadcast-click]")?.addEventListener("click", async () => {
+    notification.clickedAt = Date.now();
+    await trackSiteBroadcast(notification, "clicked");
+    document.querySelector("[data-modal]")?.classList.remove("open");
+  });
+  document.querySelector("[data-broadcast-close]")?.addEventListener("click", async () => {
+    notification.closedAt = Date.now();
+    await trackSiteBroadcast(notification, "closed");
+    document.querySelector("[data-modal]")?.classList.remove("open");
+  });
+}
+
 function bindGlobal() {
   bindStoreCards();
   document.querySelectorAll("[data-chat]").forEach((button) => button.onclick = () => renderChat(button.dataset.chat));
@@ -6816,6 +6864,7 @@ async function initApp() {
   await fetchLitecoinUsdRate();
   watchCmsVisualTextOverrides();
   renderCurrent();
+  setTimeout(showPendingSiteBroadcast, 350);
 }
 
 window.addEventListener("hashchange", renderCurrent);

@@ -221,10 +221,23 @@ function renderBroadcasts() {
   return `<section class="split"><article class="split-card"><h2>Новая рассылка</h2><form data-broadcast-form>
     <label class="field">Заголовок<input name="title" required></label>
     <label class="field">Текст<textarea name="body" required></textarea></label>
-    <div class="row"><label class="field">Канал<select name="channel"><option value="site">Сайт</option><option value="telegram">Telegram</option></select></label><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label></div>
+    <div class="row"><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label></div>
+    <label class="field">Кому отправить<select name="audience">
+      <option value="all">Всем пользователям</option>
+      <option value="online">Онлайн пользователям</option>
+      <option value="buyers">Пользователям с покупками</option>
+      <option value="no_purchases">Без покупок</option>
+      <option value="balance">С балансом</option>
+      <option value="custom">По фильтрам ниже</option>
+    </select></label>
+    <div class="row"><label class="field">Мин. сумма покупок<input name="minPurchase" type="number" step="0.01" placeholder="1"></label><label class="field">Макс. сумма покупок<input name="maxPurchase" type="number" step="0.01" placeholder="1000"></label></div>
+    <div class="row"><label class="field">Без покупок N дней<input name="noPurchasesDays" type="number" step="1" placeholder="2"></label><label class="field">Баланс<select name="balanceMode"><option value="">Не важно</option><option value="with">С балансом</option><option value="without">Без баланса</option></select></label></div>
+    <div class="row"><label class="field">Магазин<select name="storeId"><option value="">Любой</option>${data.stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name)}</option>`).join("")}</select></label><label class="field">Товар<input name="product" placeholder="название или ID"></label></div>
+    <label class="field">Категория<input name="category" placeholder="категория товара"></label>
+    <label class="field">Конкретные пользователи<input name="specificLogins" placeholder="login1, login2, login3"></label>
     <button class="primary">Создать</button>
   </form></article><article class="table-card"><table><thead><tr><th>Название</th><th>Канал</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
-    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}</td><td>${esc(b.channel)}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
+    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0}</span></td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
   </tbody></table></article></section>`;
 }
 
@@ -250,7 +263,7 @@ function renderLogs() {
 
 function renderBots() {
   return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <article class="table-card"><table><thead><tr><th>Chat ID</th><th>Login key</th><th>Статус</th><th>Token</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.chatId)}</td><td>${esc(b.loginKey)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "pending"}</td><td>${esc(b.token)}</td></tr>`).join("")}</tbody></table></article>`;
+  <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Login key</th><th>Статус</th><th>Token</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "pending"}</td><td>${esc(b.token)}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function bindActions() {
@@ -294,7 +307,22 @@ function bindActions() {
   root.querySelector("[data-broadcast-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
-    await api("/api/admin/broadcasts", { method: "POST", body: JSON.stringify(Object.fromEntries(fd.entries())) });
+    const body = Object.fromEntries(fd.entries());
+    const filters = {
+      audience: body.audience,
+      minPurchase: body.minPurchase,
+      maxPurchase: body.maxPurchase,
+      noPurchasesDays: body.noPurchasesDays,
+      balanceMode: body.balanceMode,
+      storeId: body.storeId,
+      product: body.product,
+      category: body.category,
+      specificLogins: body.specificLogins
+    };
+    await api("/api/admin/broadcasts", {
+      method: "POST",
+      body: JSON.stringify({ title: body.title, body: body.body, channel: body.channel, type: body.type, filters })
+    });
     data = await api("/api/admin/overview");
     renderShell();
   });
