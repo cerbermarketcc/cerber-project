@@ -1878,10 +1878,6 @@ function layout(content) {
         <div class="divider"></div>
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
-        <button class="account-row" data-route="seller">⚙ <span>Панель магазина</span></button>
-        <button class="account-row" data-route="owner">⚙ <span>Панель владельца</span></button>
-        <button class="account-row" data-route="admin">⚙ <span>${tr("admin")}</span></button>
-        ${(operatorExchangeCards().length || isAdmin()) ? accountMenuButton("exchange", "Панель обменника", `data-route="exchange-admin"`) : ""}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
     </div>
