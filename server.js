@@ -1607,15 +1607,7 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
           delete payload.text;
         }
         if (bot.token) {
-          const response = await fetch(`https://api.telegram.org/bot${bot.token}/${method}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          });
-          if (!response.ok) {
-            const body = await response.json().catch(() => ({}));
-            throw new Error(body.description || `Telegram API error ${response.status}`);
-          }
+          await telegramTokenApi(bot.token, method, payload);
         } else {
           await telegramApi(method, payload);
         }
@@ -2301,6 +2293,22 @@ async function telegramApi(method, payload = {}) {
   return body;
 }
 
+async function telegramTokenApi(token, method, payload = {}) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.description || `Telegram ${method} error`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
 async function botSendMessage(state, chatId, text, replyMarkup = botMainKeyboard()) {
   const payload = {
     chat_id: chatId,
@@ -2601,11 +2609,50 @@ async function handleTelegramCallback(state, callback) {
   await botAnswer(callback);
 }
 
+async function handleBotMirrorCommand(state, chatId, message, text) {
+  const chat = telegramChatState(state, chatId);
+  const token = text.replace(/^\/(?:mirror|addmirror)\s*/i, "").trim();
+  if (!chat.loginKey) {
+    await botSendMessage(state, chatId, "Сначала войдите командой /login ЛОГИН ПАРОЛЬ");
+    return true;
+  }
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
+    await botSendMessage(state, chatId, "Отправьте токен зеркала так: /mirror 123456:ABCDEF...");
+    return true;
+  }
+  try {
+    const info = await telegramTokenApi(token, "getMe");
+    const bot = info?.result || {};
+    state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    const existing = state.mirrorBots.find((item) => String(item.token || "") === token || String(item.chatId || "") === String(chatId));
+    const mirror = existing || {};
+    mirror.chatId = String(chatId);
+    mirror.ownerChatId = String(chatId);
+    mirror.token = token;
+    mirror.loginKey = chat.loginKey;
+    mirror.login = chat.login || "";
+    mirror.username = message.from?.username || chat.username || "";
+    mirror.botUsername = bot.username || "";
+    mirror.botName = bot.first_name || bot.username || "";
+    mirror.verified = true;
+    mirror.blocked = false;
+    mirror.createdAt = mirror.createdAt || Date.now();
+    mirror.updatedAt = Date.now();
+    if (!existing) state.mirrorBots.unshift(mirror);
+    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}`);
+  } catch (error) {
+    await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`);
+  }
+  return true;
+}
+
 async function handleTelegramMessage(state, message) {
   const chatId = message.chat?.id;
   if (!chatId) return;
   const text = String(message.text || "").trim();
   const chat = telegramChatState(state, chatId);
+  chat.username = message.from?.username || chat.username || "";
+  chat.updatedAt = Date.now();
   if (text === "/start") {
     if (chat.verified) await botShowMenu(state, chatId);
     else await botShowCaptcha(state, chatId);
@@ -2617,6 +2664,10 @@ async function handleTelegramMessage(state, message) {
   }
   if (text.startsWith("/login")) {
     await handleBotLogin(state, chatId, text);
+    return;
+  }
+  if (/^\/(?:mirror|addmirror)\b/i.test(text)) {
+    await handleBotMirrorCommand(state, chatId, message, text);
     return;
   }
   if (await handleBotDepositAmount(state, chatId, text)) return;
