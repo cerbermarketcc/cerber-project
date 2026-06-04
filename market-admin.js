@@ -263,7 +263,15 @@ function renderLogs() {
 
 function renderBots() {
   return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Login key</th><th>Статус</th><th>Token</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "pending"}</td><td>${esc(b.token)}</td></tr>`).join("")}</tbody></table></article>`;
+  <section class="split">
+    <article class="split-card"><h2>Добавить зеркало</h2><form data-bot-form>
+      <label class="field">Login пользователя<input name="loginKey" placeholder="login клиента"></label>
+      <label class="field">Telegram chat ID<input name="chatId" placeholder="123456789"></label>
+      <label class="field">Token зеркального бота<input name="token" placeholder="123:ABC..."></label>
+      <button class="primary">Сохранить зеркало</button>
+    </form><p class="muted">Для отправки в Telegram нужен chat ID. Если у зеркала свой bot token, рассылка пойдёт через него.</p></article>
+    <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Login key</th><th>Статус</th><th>Token</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "pending"}</td><td>${esc(b.token)}</td></tr>`).join("")}</tbody></table></article>
+  </section>`;
 }
 
 function bindActions() {
@@ -324,6 +332,12 @@ function bindActions() {
       body: JSON.stringify({ title: body.title, body: body.body, channel: body.channel, type: body.type, filters })
     });
     data = await api("/api/admin/overview");
+    renderShell();
+  });
+  root.querySelector("[data-bot-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    data = await api("/api/admin/bots", { method: "POST", body: JSON.stringify(Object.fromEntries(fd.entries())) });
     renderShell();
   });
   root.querySelector("[data-settings-form]")?.addEventListener("submit", async (event) => {

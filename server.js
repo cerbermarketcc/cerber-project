@@ -784,6 +784,7 @@ app.put("/api/state", async (req, res, next) => {
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
         telegramBot: state.telegramBot || currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
+        mirrorBots: Array.isArray(state.mirrorBots) ? state.mirrorBots : (currentSettingsData.mirrorBots || []),
         siteNotifications: Array.isArray(state.siteNotifications) ? state.siteNotifications : (currentSettingsData.siteNotifications || []),
         broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : (currentSettingsData.broadcasts || []),
         userFilters: Array.isArray(state.userFilters) ? state.userFilters : (currentSettingsData.userFilters || []),
@@ -1067,6 +1068,35 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/bots", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    const chatId = String(req.body.chatId || "").trim();
+    const token = String(req.body.token || "").trim();
+    const loginKeyValue = loginKey(req.body.loginKey || req.body.login || "");
+    if (!chatId && !token) return res.status(400).json({ error: "Укажите chatId или token бота" });
+    const existing = state.mirrorBots.find((bot) => (
+      (chatId && String(bot.chatId || "") === chatId) || (token && String(bot.token || "") === token)
+    ));
+    const bot = existing || {};
+    bot.chatId = chatId || bot.chatId || "";
+    bot.token = token || bot.token || "";
+    bot.loginKey = loginKeyValue || bot.loginKey || "";
+    bot.verified = req.body.verified !== false;
+    bot.blocked = Boolean(req.body.blocked);
+    bot.createdAt = bot.createdAt || Date.now();
+    bot.updatedAt = Date.now();
+    if (!existing) state.mirrorBots.unshift(bot);
+    await saveSettingsState(state);
+    await appendAdminLog("mirror_bot_saved", admin.login, { chatId: bot.chatId, loginKey: bot.loginKey });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/broadcasts/:id/track", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
@@ -1343,12 +1373,22 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
     const bots = adminCollectBots(state).filter((bot) => !bot.blocked && bot.chatId && (!bot.loginKey || recipientKeys.has(loginKey(bot.loginKey))));
     for (const bot of bots) {
       try {
-        await telegramApi("sendMessage", {
+        const payload = {
           chat_id: bot.chatId,
           text: `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(broadcast.body)}`,
           parse_mode: "HTML",
           disable_web_page_preview: true
-        });
+        };
+        if (bot.token) {
+          const response = await fetch(`https://api.telegram.org/bot${bot.token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          if (!response.ok) throw new Error("Mirror bot delivery failed");
+        } else {
+          await telegramApi("sendMessage", payload);
+        }
         telegramSent += 1;
       } catch {
         telegramFailed += 1;
