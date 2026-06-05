@@ -1637,6 +1637,8 @@ function adminCollectBots(state) {
       login: value.login || value.ownerLogin || "",
       username: value.username || value.telegramUsername || value.tgUsername || value.telegram || "",
       botUsername: value.botUsername || value.bot_username || value.name || value.title || "",
+      webhookId: value.webhookId || (token ? mirrorWebhookId(token) : ""),
+      webhookUrl: value.webhookUrl || (token ? mirrorWebhookUrl(token) : ""),
       createdAt: value.createdAt || value.created_at || value.registeredAt || null,
       updatedAt: value.updatedAt || value.lastActivityAt || value.seenAt || value.lastSeenAt || null,
       verified: value.verified !== false,
@@ -2401,6 +2403,26 @@ function botMainKeyboard() {
   };
 }
 
+function botMirrorOnlyKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "Создать зеркало", callback_data: "mirror:help" }]
+    ]
+  };
+}
+
+function botMirrorHelpText() {
+  return [
+    "<b>Создание зеркала CERBER</b>",
+    "1. Создайте нового бота в @BotFather.",
+    "2. Скопируйте API token.",
+    "3. Отправьте сюда команду:",
+    "<code>/mirror 123456:ABCDEF...</code>",
+    "",
+    "После сохранения откройте созданного бота. В зеркале будет полное меню сайта."
+  ].join("\n");
+}
+
 function botBackKeyboard() {
   return { inline_keyboard: [[{ text: "⬅️ В меню", callback_data: "menu:home" }]] };
 }
@@ -2439,13 +2461,26 @@ function botCoinLabel(coinId) {
   return labels[coinId] || String(coinId || "").toUpperCase();
 }
 
-async function telegramApi(method, payload = {}) {
-  if (!telegramBotToken) {
+function telegramTokenFromState(state) {
+  return state?.__telegramToken || telegramBotToken;
+}
+
+function mirrorWebhookId(token) {
+  return crypto.createHmac("sha256", adminSecret()).update(String(token || "")).digest("hex").slice(0, 24);
+}
+
+function mirrorWebhookUrl(token) {
+  return `${publicBaseUrl}/api/telegram/mirror/${mirrorWebhookId(token)}`;
+}
+
+async function telegramApi(method, payload = {}, tokenOverride = "") {
+  const token = tokenOverride || telegramBotToken;
+  if (!token) {
     const error = new Error("TELEGRAM_BOT_TOKEN не настроен");
     error.status = 500;
     throw error;
   }
-  const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/${method}`, {
+  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -2515,7 +2550,7 @@ async function botSendMessage(state, chatId, text, replyMarkup = botMainKeyboard
     disable_web_page_preview: true
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-  const result = await telegramApi("sendMessage", payload);
+  const result = await telegramApi("sendMessage", payload, telegramTokenFromState(state));
   const messageId = result?.result?.message_id;
   if (messageId) {
     const botState = initTelegramBotState(state);
@@ -2539,19 +2574,19 @@ async function botEditOrSend(state, callback, text, replyMarkup = botMainKeyboar
       parse_mode: "HTML",
       disable_web_page_preview: true,
       reply_markup: replyMarkup
-    });
+    }, telegramTokenFromState(state));
   } catch {
     await botSendMessage(state, chatId, text, replyMarkup);
   }
 }
 
-async function botAnswer(callback, text = "") {
+async function botAnswer(callback, text = "", tokenOverride = "") {
   if (!callback?.id) return;
   await telegramApi("answerCallbackQuery", {
     callback_query_id: callback.id,
     text,
     show_alert: false
-  }).catch(() => {});
+  }, tokenOverride || callback.__telegramToken || "").catch(() => {});
 }
 
 async function botProfileByChat(state, chatId) {
@@ -2732,7 +2767,7 @@ async function clearBotHistory(state, chatId) {
   const key = String(chatId);
   const sent = botState.sentMessages[key] || [];
   for (const messageId of sent) {
-    await telegramApi("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+    await telegramApi("deleteMessage", { chat_id: chatId, message_id: messageId }, telegramTokenFromState(state)).catch(() => {});
   }
   delete botState.sentMessages[key];
   delete botState.users[key];
@@ -2741,7 +2776,7 @@ async function clearBotHistory(state, chatId) {
     chat_id: chatId,
     text: "История очищена. Связка с аккаунтом удалена. Для полного удаления самого бота удалите чат в Telegram.",
     disable_web_page_preview: true
-  }).catch(() => {});
+  }, telegramTokenFromState(state)).catch(() => {});
 }
 
 async function handleTelegramCallback(state, callback) {
@@ -2810,12 +2845,12 @@ async function handleTelegramCallback(state, callback) {
 async function handleBotMirrorCommand(state, chatId, message, text) {
   const chat = telegramChatState(state, chatId);
   const token = text.replace(/^\/(?:mirror|addmirror)\s*/i, "").trim();
-  if (!chat.loginKey) {
-    await botSendMessage(state, chatId, "Сначала войдите командой /login ЛОГИН ПАРОЛЬ");
-    return true;
-  }
+  const ownerUsername = message.from?.username || chat.username || "";
+  const ownerName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" ").trim();
+  const ownerLoginKey = chat.loginKey || loginKey(ownerUsername || ownerName || String(chatId));
+  const ownerLogin = chat.login || ownerUsername || ownerName || String(chatId);
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
-    await botSendMessage(state, chatId, "Отправьте токен зеркала так: /mirror 123456:ABCDEF...");
+    await botSendMessage(state, chatId, "Отправьте токен зеркала так:\n<code>/mirror 123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
     return true;
   }
   try {
@@ -2827,53 +2862,62 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     mirror.chatId = String(chatId);
     mirror.ownerChatId = String(chatId);
     mirror.token = token;
-    mirror.loginKey = chat.loginKey;
-    mirror.login = chat.login || "";
-    mirror.username = message.from?.username || chat.username || "";
+    mirror.loginKey = ownerLoginKey;
+    mirror.login = ownerLogin;
+    mirror.username = ownerUsername;
+    mirror.telegramName = ownerName;
     mirror.botUsername = bot.username || "";
     mirror.botName = bot.first_name || bot.username || "";
+    mirror.webhookId = mirrorWebhookId(token);
+    mirror.webhookUrl = mirrorWebhookUrl(token);
     mirror.verified = true;
     mirror.blocked = false;
     mirror.createdAt = mirror.createdAt || Date.now();
     mirror.updatedAt = Date.now();
     if (!existing) state.mirrorBots.unshift(mirror);
+    await telegramTokenApi(token, "setWebhook", {
+      url: mirror.webhookUrl,
+      ...(telegramWebhookSecret ? { secret_token: telegramWebhookSecret } : {})
+    });
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
     state.adminLogs.unshift({
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       action: "mirror_bot_created",
-      actor: chat.login || chat.loginKey || "telegram",
+      actor: ownerLogin || ownerLoginKey || "telegram",
       details: {
         id: mirror.token ? `mirror-${crypto.createHash("sha1").update(mirror.token).digest("hex").slice(0, 10)}` : String(chatId),
-        userId: chat.loginKey,
-        ownerId: chat.loginKey,
+        userId: ownerLoginKey,
+        ownerId: ownerLoginKey,
         chatId: String(chatId),
         username: mirror.username,
         botUsername: mirror.botUsername,
+        webhookId: mirror.webhookId,
         status: "active",
         storage: "app_settings.mirrorBots"
       },
       createdAt: Date.now()
     });
     state.adminLogs = state.adminLogs.slice(0, 500);
-    await appendAdminLog("mirror_bot_created", chat.login || chat.loginKey || "telegram", {
+    await appendAdminLog("mirror_bot_created", ownerLogin || ownerLoginKey || "telegram", {
       id: mirror.token ? `mirror-${crypto.createHash("sha1").update(mirror.token).digest("hex").slice(0, 10)}` : String(chatId),
-      userId: chat.loginKey,
-      ownerId: chat.loginKey,
+      userId: ownerLoginKey,
+      ownerId: ownerLoginKey,
       chatId: String(chatId),
       username: mirror.username,
       botUsername: mirror.botUsername,
+      webhookId: mirror.webhookId,
       status: "active",
       storage: "app_settings.mirrorBots"
     });
-    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}`).catch(() => {});
+    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}\n\nОткройте его в Telegram: там будет полное меню CERBER.`, botMirrorOnlyKeyboard()).catch(() => {});
   } catch (error) {
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
     state.adminLogs.unshift({
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       action: "mirror_bot_error",
-      actor: chat.login || chat.loginKey || "telegram",
+      actor: ownerLogin || ownerLoginKey || "telegram",
       details: {
-        userId: chat.loginKey || "",
+        userId: ownerLoginKey || "",
         chatId: String(chatId),
         error: String(error.message || error).slice(0, 300),
         storage: "app_settings.mirrorBots"
@@ -2881,13 +2925,13 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       createdAt: Date.now()
     });
     state.adminLogs = state.adminLogs.slice(0, 500);
-    await appendAdminLog("mirror_bot_error", chat.login || chat.loginKey || "telegram", {
-      userId: chat.loginKey || "",
+    await appendAdminLog("mirror_bot_error", ownerLogin || ownerLoginKey || "telegram", {
+      userId: ownerLoginKey || "",
       chatId: String(chatId),
       error: String(error.message || error).slice(0, 300),
       storage: "app_settings.mirrorBots"
     }).catch(() => {});
-    await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`).catch(() => {});
+    await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`, botMirrorOnlyKeyboard()).catch(() => {});
   }
   return true;
 }
@@ -2920,6 +2964,35 @@ async function handleTelegramMessage(state, message) {
   await botShowMenu(state, chatId);
 }
 
+async function handleTelegramMirrorOnlyCallback(state, callback) {
+  const chatId = callback.message?.chat?.id;
+  if (!chatId) return;
+  await botAnswer(callback);
+  await botEditOrSend(state, callback, botMirrorHelpText(), botMirrorOnlyKeyboard());
+}
+
+async function handleTelegramMirrorOnlyMessage(state, message) {
+  const chatId = message.chat?.id;
+  if (!chatId) return;
+  const text = String(message.text || "").trim();
+  const chat = telegramChatState(state, chatId);
+  chat.username = message.from?.username || chat.username || "";
+  chat.updatedAt = Date.now();
+  if (/^\/(?:mirror|addmirror)\b/i.test(text)) {
+    await handleBotMirrorCommand(state, chatId, message, text);
+    return;
+  }
+  await botSendMessage(state, chatId, botMirrorHelpText(), botMirrorOnlyKeyboard());
+}
+
+function findMirrorBotByWebhookId(state, webhookId) {
+  const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+  return mirrors.find((mirror) => {
+    const token = String(mirror?.token || "");
+    return String(mirror?.webhookId || "") === String(webhookId) || (token && mirrorWebhookId(token) === String(webhookId));
+  }) || null;
+}
+
 app.get("/api/telegram/webhook", (_req, res) => {
   res.json({
     ok: true,
@@ -2936,8 +3009,34 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
       return res.status(401).json({ error: "Bad Telegram secret" });
     }
     const state = await loadSettingsState();
-    if (req.body.callback_query) await handleTelegramCallback(state, req.body.callback_query);
-    else if (req.body.message) await handleTelegramMessage(state, req.body.message);
+    if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
+    else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
+    await saveSettingsState(state);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
+  try {
+    requireDb();
+    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
+      return res.status(401).json({ error: "Bad Telegram secret" });
+    }
+    const state = await loadSettingsState();
+    const mirror = findMirrorBotByWebhookId(state, req.params.webhookId);
+    if (!mirror?.token || mirror.blocked) return res.status(404).json({ error: "Mirror bot not found" });
+    state.__telegramToken = mirror.token;
+    try {
+      if (req.body.callback_query) {
+        req.body.callback_query.__telegramToken = mirror.token;
+        await handleTelegramCallback(state, req.body.callback_query);
+      }
+      else if (req.body.message) await handleTelegramMessage(state, req.body.message);
+    } finally {
+      delete state.__telegramToken;
+    }
     await saveSettingsState(state);
     res.json({ ok: true });
   } catch (error) {
