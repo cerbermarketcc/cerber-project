@@ -186,7 +186,7 @@ function renderSection() {
   if (section === "Финансы") return renderFinance();
   if (section === "Настройки") return renderSettings();
   if (section === "Логи") return renderLogs();
-  if (section === "Боты") return renderBots();
+  if (section === "Боты") return renderMirrorBots();
   return "";
 }
 
@@ -461,6 +461,18 @@ function renderBots() {
   <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Создатель</th><th>Статус</th><th>Token</th><th>Управление</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey || "-")}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "disabled"}</td><td>${esc(b.token || "-")}</td><td><button class="ghost" data-bot-action="disable" data-bot-id="${esc(b.id)}">Отключить</button> <button class="ghost danger" data-bot-action="block" data-bot-id="${esc(b.id)}">Заблокировать</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>`;
 }
 
+function renderMirrorBots() {
+  const rows = data.bots.items || [];
+  const selected = rows.find((b) => b.id === data.selectedBotId) || rows[0];
+  const detail = selected ? `<article class="split-card">
+    <h3>Зеркало @${esc(selected.botUsername || selected.botName || "-")}</h3>
+    <p class="muted">Токен: <code>${esc(selected.token || "-")}</code><br>Webhook: <code>${esc(selected.webhookUrl || "-")}</code><br>Telegram ID владельца: <strong>${esc(selected.ownerTelegramId || selected.chatId || "-")}</strong><br>Username владельца: <strong>${esc(selected.username || "-")}</strong><br>Дата регистрации: ${fmtDate(selected.createdAt)}<br>Последняя ошибка Telegram API: ${esc(selected.lastTelegramError || "-")}</p>
+    <section class="grid">${statCard("Пользователей", selected.usersCount || 0, "в зеркале")}${statCard("Сообщений", selected.sentMessagesCount || 0, "отправлено")}${statCard("Рассылок", selected.broadcastsCount || 0, "через зеркало")}${statCard("Ошибок API", selected.telegramErrorsCount || 0, "Telegram")}</section>
+  </article>` : `<article class="split-card"><h3>Зеркал пока нет</h3><p class="muted">Зеркала появляются автоматически после подключения токена через основной Telegram-бот.</p></article>`;
+  return `<section class="grid">${statCard("Всего зеркал", data.bots.total, "автоматический реестр")}${statCard("Активные", data.bots.active, "работают")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
+  <article class="table-card"><table><thead><tr><th>ID</th><th>Username пользователя</th><th>Username бота</th><th>Название</th><th>Статус</th><th>Webhook</th><th>Дата</th><th>Активность</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.username || b.loginKey || "-")}</td><td>${esc(b.botUsername || "-")}</td><td>${esc(b.botName || "-")}</td><td>${esc(b.status || (b.blocked ? "blocked" : b.active ? "active" : "disabled"))}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
+}
+
 function bindActions() {
   root.querySelector("[data-create-store-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -648,6 +660,11 @@ function bindActions() {
     } catch (error) {
       toast(error.message, true);
     }
+  });
+  root.querySelectorAll("[data-bot-select]").forEach((row) => row.onclick = (event) => {
+    if (event.target.closest("button")) return;
+    data.selectedBotId = row.dataset.botSelect;
+    renderShell();
   });
   root.querySelector("[data-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
