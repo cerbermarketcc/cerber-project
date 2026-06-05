@@ -1382,8 +1382,14 @@ function storeById(id = activeStoreId) {
   return db.stores.find((store) => store.id === id) || db.stores[0];
 }
 
+function sortedStoreProducts(store, includeDisabled = false) {
+  return [...(store?.products || [])]
+    .filter((product) => includeDisabled || product.status !== "disabled")
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+}
+
 function productById(store, id = activeProductId) {
-  return (store?.products || []).find((product) => product.id === id) || store?.products?.[0] || null;
+  return (store?.products || []).find((product) => product.id === id) || sortedStoreProducts(store)[0] || store?.products?.[0] || null;
 }
 
 function positionById(product, id = activePositionId) {
@@ -1453,6 +1459,26 @@ function districtSelectOptions(country = "moldova", city = "chisinau", selected 
     ...districts.map((district) => (
       `<option value="${esc(district)}" ${district === selected ? "selected" : ""}>${esc(district)}</option>`
     ))
+  ].join("");
+}
+
+function scopedCitySelectOptions(store, country = "moldova", selected = "") {
+  const cities = filterOptions.countries[country]?.cities || filterOptions.countries.moldova.cities;
+  const allowed = Array.isArray(store.cities) && store.cities.length ? store.cities : Object.keys(cities);
+  const fallbackCity = allowed.find((city) => cities[city]) || Object.keys(cities)[0] || "";
+  const value = allowed.includes(selected) && cities[selected] ? selected : fallbackCity;
+  return Object.entries(cities)
+    .filter(([key]) => allowed.includes(key))
+    .map(([key, item]) => `<option value="${esc(key)}" ${key === value ? "selected" : ""}>${esc(item.label || key)}</option>`)
+    .join("");
+}
+
+function scopedDistrictSelectOptions(store, country = "moldova", city = "chisinau", selected = "") {
+  const cityInfo = filterOptions.countries[country]?.cities?.[city] || filterOptions.countries.moldova.cities.chisinau;
+  const allowed = Array.isArray(store.districts) && store.districts.length ? store.districts : (cityInfo?.districts || []);
+  return [
+    `<option value="">Любой район</option>`,
+    ...allowed.map((district) => `<option value="${esc(district)}" ${district === selected ? "selected" : ""}>${esc(district)}</option>`)
   ].join("");
 }
 
@@ -1597,6 +1623,20 @@ function bindLocationSelects(root = document) {
     countrySelect.addEventListener("change", refreshCities);
     citySelect.addEventListener("change", refreshDistricts);
     refreshCities();
+  });
+}
+
+function bindShopLocationSelects(store, root = document) {
+  root.querySelectorAll("[data-location-group]").forEach((group) => {
+    const country = group.querySelector("input[name='country']")?.value || shopDefaultCountry(store);
+    const citySelect = group.querySelector("[data-shop-location-city]");
+    const districtSelect = group.querySelector("[data-shop-location-district]");
+    if (!citySelect || !districtSelect) return;
+    const refreshDistricts = () => {
+      districtSelect.innerHTML = scopedDistrictSelectOptions(store, country, citySelect.value, districtSelect.value);
+    };
+    citySelect.addEventListener("change", refreshDistricts);
+    refreshDistricts();
   });
 }
 
@@ -2468,9 +2508,10 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const coverImage = store.cover || store.banner || store.image || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
+  const publicProducts = sortedStoreProducts(store);
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
-    : (store.products.length ? store.products.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>Позиции пока не добавлены</p></article>`);
+    : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>Позиции пока не добавлены</p></article>`);
   layout(`
     <section class="screen">
       <article class="panel">
@@ -6112,7 +6153,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
     return { title: product.title || "Товар", stock: productStock, value: productStock * Number(product.priceUsd || 0) };
   });
   const txRows = (db.walletTransactions || []).slice(-6).reverse();
-  const navHtml = shopPanelNav(activeTab);
+  const navHtml = shopPanelNavV2(activeTab);
   if (activeTab !== "dashboard") {
     return `
       <article class="seller-dashboard-shell">
@@ -6281,8 +6322,32 @@ function shopPanelNav(activeTab = "dashboard") {
   `).join("");
 }
 
+function shopPanelNavV2(activeTab = "dashboard") {
+  const items = [
+    ["dashboard", "D", "Dashboard"],
+    ["profile", "P", "Профиль"],
+    ["cards", "C", "Карточки"],
+    ["products", "T", "Товары"],
+    ["orders", "O", "Заказы"],
+    ["disputes", "!", "Диспуты"],
+    ["finances", "$", "Финансы"],
+    ["settings", "*", "Настройки"]
+  ];
+  return items.map(([id, icon, label]) => `
+    <button class="${activeTab === id ? "active" : ""}" data-shop-tab="${id}" type="button">
+      <span>${icon}</span>${label}
+    </button>
+  `).join("");
+}
+
 function shopPanelTabContent(tab, data) {
   const { store, orders, products, positions, productRows, districts, recentOrders, txRows, clients, salesUsd, stockTotal } = data;
+  if (tab === "profile") return shopProfileTab(store);
+  if (tab === "cards") return shopCardsTab(store, products);
+  if (tab === "products") return shopProductsTab(store, products);
+  if (tab === "disputes") return shopDisputesTab(store);
+  if (tab === "finances") return shopFinancesTab(store, salesUsd, txRows);
+  if (tab === "settings") return shopSettingsTab(store);
   if (tab === "orders") {
     return `
       <section class="seller-dashboard-hero"><div><h2>Заказы</h2><p>Таблица заявок клиентов, статусы оплат и быстрый контроль выдачи.</p></div></section>
@@ -6360,6 +6425,135 @@ function shopPanelTabContent(tab, data) {
   `;
 }
 
+function shopAllowedCountries(store) {
+  return Array.isArray(store.countries) && store.countries.length ? store.countries : ["moldova"];
+}
+
+function shopDefaultCountry(store) {
+  return shopAllowedCountries(store)[0] || "moldova";
+}
+
+function shopDefaultCity(store) {
+  const country = shopDefaultCountry(store);
+  return (store.cities || [])[0] || Object.keys(filterOptions.countries[country]?.cities || filterOptions.countries.moldova.cities)[0] || "chisinau";
+}
+
+function shopProfileTab(store) {
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Профиль</h2><p>Публичная страница магазина, баннер, аватар, название и описание.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <form class="form" data-shop-profile-form>
+        <div class="row">
+          <label class="field">Название<input name="name" value="${esc(store.name || "")}" required></label>
+          <label class="field">Тег<input name="tag" value="${esc(store.tag || "")}"></label>
+        </div>
+        <label class="field">Короткое описание<input name="short" value="${esc(store.short || "")}"></label>
+        <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
+        <div class="row">
+          <label class="field">Аватар<input name="image" type="file" accept="image/*"></label>
+          <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
+        </div>
+        <button class="primary">Сохранить профиль</button>
+      </form>
+    </section>
+  `;
+}
+
+function shopCardsTab(store, products) {
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Карточки</h2><p>Карточка открывает отдельную страницу товара или категории.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <form class="form" data-shop-card-form>
+        <div class="row">
+          <label class="field">Название<input name="title" required></label>
+          <label class="field">Цена от, $<input name="priceUsd" type="number" min="0" step="0.01" value="10"></label>
+        </div>
+        <label class="field">Описание<textarea name="description"></textarea></label>
+        <div class="row">
+          <label class="field">Главная аватарка<input name="mainImage" type="file" accept="image/*"></label>
+          <label class="field">Дополнительно до 4 фото<input name="images" type="file" accept="image/*" multiple></label>
+        </div>
+        <div class="row">
+          <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${products.length + 1}"></label>
+          <label class="field">Статус<select name="status"><option value="active">active</option><option value="disabled">disabled</option></select></label>
+        </div>
+        <button class="primary">Создать карточку</button>
+      </form>
+    </section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Список карточек</h3><span>${products.length}</span></div>
+      ${sortedStoreProducts(store, true).map((product, index) => `
+        <div class="seller-source">
+          <span>${esc(product.title)} · ${esc(product.status || "active")} · ${Number(product.priceUsd || 0).toFixed(2)} $</span>
+          <strong>
+            <button class="ghost-button" data-shop-card-move="up" data-card-id="${esc(product.id)}" ${index === 0 ? "disabled" : ""}>Вверх</button>
+            <button class="ghost-button" data-shop-card-move="down" data-card-id="${esc(product.id)}" ${index === products.length - 1 ? "disabled" : ""}>Вниз</button>
+            <button class="ghost-button danger" data-shop-card-delete="${esc(product.id)}">Удалить</button>
+          </strong>
+        </div>
+      `).join("") || `<p>Карточек пока нет.</p>`}
+    </section>
+  `;
+}
+
+function shopProductsTab(store, products) {
+  const card = sortedStoreProducts(store, true)[0];
+  const country = shopDefaultCountry(store);
+  const city = shopDefaultCity(store);
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Товары</h2><p>Товары создаются внутри карточек. Каждая строка выдачи равна одной единице остатка.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      ${products.length ? `<form class="form" data-shop-product-form>
+        <label class="field">Карточка<select name="cardId">${sortedStoreProducts(store, true).map((product) => `<option value="${esc(product.id)}">${esc(product.title)}</option>`).join("")}</select></label>
+        <div class="row">
+          <label class="field">Название<input name="title" value="${esc(card?.title || "")}" required></label>
+          <label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(card?.priceUsd || 10)}" required></label>
+        </div>
+        <label class="field">Описание<textarea name="description"></textarea></label>
+        <div class="row">
+          <label class="field">Вес<input name="weight" placeholder="1"></label>
+          <label class="field">Тип<input name="deliveryType" placeholder="Самовывоз / Доставка"></label>
+        </div>
+        <div class="row" data-location-group>
+          <label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>
+          <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
+          <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, "")}</select></label>
+        </div>
+        <label class="field">Описание товара для выдачи<textarea name="deliveryItems" placeholder="Каждая новая строка = отдельный товар"></textarea></label>
+        <button class="primary">Добавить товар в карточку</button>
+      </form>` : `<p>Сначала создайте карточку.</p>`}
+    </section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Товары внутри карточек</h3></div>
+      ${sortedStoreProducts(store, true).map((product) => `
+        <div class="seller-card-head"><h3>${esc(product.title)}</h3><span>${(product.positions || []).reduce((sum, p) => sum + Number(p.stock || 0), 0)} шт.</span></div>
+        ${(product.positions || []).map((position) => `<div class="seller-source"><span>${esc(position.title)} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span><strong><button class="ghost-button danger" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить</button></strong></div>`).join("") || `<p>Товаров внутри карточки пока нет.</p>`}
+      `).join("")}
+    </section>
+  `;
+}
+
+function shopDisputesTab(store) {
+  const disputes = storeDisputes(store.id);
+  return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина.</p></div></section>
+  <section class="seller-dashboard-card seller-wide-card">${disputes.map((order) => `<div class="seller-source"><span>${esc(order.product || order.id)} · ${esc(order.login || "")}</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $</strong></div>`).join("") || `<p>Открытых диспутов нет.</p>`}</section>`;
+}
+
+function shopFinancesTab(store, salesUsd, txRows) {
+  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
+  <section class="seller-dashboard-stats">${sellerDashStat("Баланс", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}${sellerDashStat("Комиссия", `${Number(store.commissionPercent || 0)}%`, "магазин")}</section>
+  <section class="seller-dashboard-card seller-wide-card">${txRows.length ? txRows.map((tx) => `<div class="seller-source"><span>${esc(tx.title || tx.type || "Операция")}</span><strong>${Number(tx.amountUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}</section>`;
+}
+
+function shopSettingsTab(store) {
+  return `<section class="seller-dashboard-hero"><div><h2>Настройки</h2><p>Пароль панели, кошелёк и автозакрытие сделок.</p></div></section>
+  <section class="seller-dashboard-card seller-wide-card"><form class="form" data-shop-settings-form>
+    <div class="row"><label class="field">LTC кошелёк<input name="ltcWallet" value="${esc(store.ltcWallet || "")}"></label><label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || db.ownerSettings?.defaultAutoReleaseHours || 24)}"></label></div>
+    <label class="field">Новый пароль панели<input name="adminPassword" type="password" placeholder="оставить пустым"></label>
+    <button class="primary">Сохранить настройки</button>
+  </form></section>`;
+}
+
 function shopPanelSession() {
   try {
     return localStorage.getItem(SHOP_PANEL_SESSION_KEY) || "";
@@ -6401,12 +6595,26 @@ function renderShopPanelLogin(message = "") {
     </main>
     <div class="toast"></div>
   `;
-  document.querySelector("[data-shop-panel-login]").onsubmit = (event) => {
+  document.querySelector("[data-shop-panel-login]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const login = String(data.get("login") || "").trim();
     const password = String(data.get("password") || "");
-    const store = shopPanelLoginStore(login, password);
+    let store = shopPanelLoginStore(login, password);
+    if (API_ENABLED) {
+      try {
+        const payload = await apiFetch("/api/store-admin/login", {
+          method: "POST",
+          body: JSON.stringify({ storeId: hashStore?.id || shopPanelHashId() || "", login, password })
+        });
+        localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
+        applyRemoteState(payload);
+        store = shopPanelLoginStore(login, password);
+      } catch (error) {
+        renderShopPanelLogin(error.message || "Неверный логин или пароль");
+        return;
+      }
+    }
     if (!store) {
       renderShopPanelLogin("Неверный логин или пароль");
       return;
@@ -6435,8 +6643,131 @@ function renderShopPanel(activeTab = "dashboard") {
   document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", () => {
     try {
       localStorage.removeItem(SHOP_PANEL_SESSION_KEY);
+      localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
     } catch {}
     renderShopPanelLogin();
+  });
+  bindShopPanelActions(store, activeTab);
+}
+
+function shopLines(value) {
+  return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function shopPersistAndRender(tab = "dashboard") {
+  saveDb();
+  showToast("Сохранено");
+  renderShopPanel(tab);
+}
+
+function bindShopPanelActions(store, activeTab) {
+  bindLocationSelects();
+  bindShopLocationSelects(store);
+  document.querySelector("[data-shop-profile-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    store.name = String(data.get("name") || "").trim();
+    store.tag = String(data.get("tag") || "").trim();
+    store.short = String(data.get("short") || "").trim();
+    store.description = String(data.get("description") || "").trim();
+    const image = data.get("image");
+    const cover = data.get("cover");
+    if (image && image.size) store.image = await fileToDataUrl(image);
+    if (cover && cover.size) store.cover = await fileToDataUrl(cover);
+    if (!store.cover) store.cover = store.image || fallbackImage;
+    shopPersistAndRender("profile");
+  });
+
+  document.querySelector("[data-shop-card-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const title = String(data.get("title") || "").trim();
+    if (!title) return;
+    const mainFile = data.get("mainImage");
+    const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
+    const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+    const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image || fallbackImage);
+    const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
+    store.products = Array.isArray(store.products) ? store.products : [];
+    store.products.push(normalizeProduct({
+      id: `card-${Date.now()}`,
+      title,
+      category: title,
+      description: String(data.get("description") || "").trim(),
+      priceUsd: Number(data.get("priceUsd") || 0),
+      price: `от ${Number(data.get("priceUsd") || 0)}$`,
+      image: images[0],
+      images,
+      position: Number(data.get("position") || store.products.length + 1),
+      status: String(data.get("status") || "active"),
+      sellerManaged: true,
+      positions: [],
+      reviewsList: []
+    }, store));
+    shopPersistAndRender("cards");
+  });
+
+  document.querySelectorAll("[data-shop-card-move]").forEach((button) => button.onclick = () => {
+    const ordered = sortedStoreProducts(store, true);
+    const index = ordered.findIndex((product) => product.id === button.dataset.cardId);
+    const delta = button.dataset.shopCardMove === "up" ? -1 : 1;
+    const other = ordered[index + delta];
+    if (!other || index < 0) return;
+    const current = ordered[index];
+    const currentPosition = Number(current.position || index + 1);
+    current.position = Number(other.position || index + delta + 1);
+    other.position = currentPosition;
+    shopPersistAndRender("cards");
+  });
+
+  document.querySelectorAll("[data-shop-card-delete]").forEach((button) => button.onclick = () => {
+    if (!confirm("Удалить карточку и все товары внутри?")) return;
+    store.products = (store.products || []).filter((product) => product.id !== button.dataset.shopCardDelete);
+    shopPersistAndRender("cards");
+  });
+
+  document.querySelector("[data-shop-product-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const product = (store.products || []).find((item) => item.id === data.get("cardId"));
+    if (!product) return;
+    const deliveryItems = shopLines(data.get("deliveryItems"));
+    product.positions = Array.isArray(product.positions) ? product.positions : [];
+    const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
+    product.positions.unshift({
+      id: `position-${Date.now()}`,
+      title: String(data.get("title") || product.title || "").trim(),
+      description: String(data.get("description") || "").trim(),
+      priceUsd,
+      weight: String(data.get("weight") || "").trim(),
+      deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
+      country: String(data.get("country") || shopDefaultCountry(store)),
+      city: String(data.get("city") || shopDefaultCity(store)),
+      district: String(data.get("district") || "").trim(),
+      deliveryItems,
+      stock: deliveryItems.length,
+      status: "ready"
+    });
+    product.priceUsd = product.positions.length ? Math.min(...product.positions.map((p) => Number(p.priceUsd || priceUsd))) : priceUsd;
+    product.price = `от ${Number(product.priceUsd || 0)}$`;
+    shopPersistAndRender("products");
+  });
+
+  document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = () => {
+    const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
+    if (!product) return;
+    product.positions = (product.positions || []).filter((position) => position.id !== button.dataset.shopPositionDelete);
+    shopPersistAndRender("products");
+  });
+
+  document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    store.ltcWallet = String(data.get("ltcWallet") || "").trim();
+    store.autoReleaseHours = Math.max(0, Math.min(72, Number(data.get("autoReleaseHours") || 24)));
+    const nextPassword = String(data.get("adminPassword") || "").trim();
+    if (nextPassword) store.adminPassword = nextPassword;
+    shopPersistAndRender("settings");
   });
 }
 
