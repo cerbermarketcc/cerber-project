@@ -1585,6 +1585,26 @@ function adminNormalizeStorePlacements(input, fallback = "stores") {
   return Array.from(new Set(result.length ? result : ["stores"]));
 }
 
+function storePlacementFlags(placements = []) {
+  const list = Array.isArray(placements) ? placements : [];
+  return {
+    isTop: list.includes("TOP 10"),
+    isFeatured: list.includes("TOP"),
+    isNew: list.includes("NEW"),
+    visibleInCatalog: list.includes("stores")
+  };
+}
+
+function adminLegacyStorePlacements(store = null) {
+  if (!store) return ["stores"];
+  const placements = [];
+  if (store.isTop) placements.push("TOP 10");
+  if (store.isFeatured) placements.push("TOP");
+  if (store.isNew) placements.push("NEW");
+  if (store.visibleInCatalog !== false) placements.push("stores");
+  return placements.length ? placements : ["stores"];
+}
+
 function adminStorePanelLinks(store) {
   return {
     shopPanelUrl: `${publicBaseUrl}/#shop-panel-${store.id}`,
@@ -1622,8 +1642,10 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const name = String(body.name || existing?.name || ownerLogin || "New store").trim();
   const id = existing?.id || adminSlug(body.id || name || ownerLogin, "store");
   const countries = adminNormalizeStoreRegions(body.countries || body.regions || existing?.countries);
-  const placements = adminNormalizeStorePlacements(body.placements || body.placement || existing?.placements || existing?.placement);
+  const placementInput = body.placements ?? body.placement ?? existing?.placements ?? existing?.placement ?? adminLegacyStorePlacements(existing);
+  const placements = adminNormalizeStorePlacements(placementInput);
   const placement = placements[0] || "stores";
+  const flags = storePlacementFlags(placements);
   const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
   const image = String(body.image || body.avatar || existing?.image || "assets/cerber-emblem.png").trim();
   const cover = String(body.cover || body.banner || existing?.cover || image || "assets/market-banner.png").trim();
@@ -1641,7 +1663,10 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     cover,
     banner: cover,
     status: adminNormalizeStoreStatus(body.status || existing?.status || "ACTIVE"),
-    visibleInCatalog: body.visibleInCatalog !== false,
+    visibleInCatalog: body.visibleInCatalog != null ? body.visibleInCatalog !== false : flags.visibleInCatalog,
+    isTop: flags.isTop,
+    isFeatured: flags.isFeatured,
+    isNew: flags.isNew,
     placement,
     placements,
     homepagePosition: position,
@@ -1979,6 +2004,10 @@ function adminBuildOverview(data) {
       cover: store.cover || store.banner || "",
       placement: store.placement || "",
       placements: Array.isArray(store.placements) ? store.placements : [],
+      isTop: store.isTop === true,
+      isFeatured: store.isFeatured === true,
+      isNew: store.isNew === true,
+      visibleInCatalog: store.visibleInCatalog !== false,
       position: Number(store.position || store.homepagePosition || 0),
       countries: Array.isArray(store.countries) ? store.countries : [],
       regions: Array.isArray(store.regions) ? store.regions : (Array.isArray(store.countries) ? store.countries : []),

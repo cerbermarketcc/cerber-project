@@ -256,13 +256,9 @@ function renderStores() {
         </div>
         <div class="row">
           <label class="field">Пароль панели продавца<input name="adminPassword" required></label>
-          <label class="field">Фото магазина 3:4 / URL<input name="image" placeholder="https://..."></label>
-        </div>
-        <label class="field">Описание магазина<textarea name="description"></textarea></label>
-        <div class="row">
-          <label class="field">Размещение<select name="placement"><option value="TOP 10">TOP 10</option><option value="TOP">TOP</option><option value="NEW">NEW</option><option value="stores">Раздел Магазины</option></select></label>
           <label class="field">Позиция<input name="position" type="number" min="1" step="1" value="1"></label>
         </div>
+        <label class="field">Описание магазина<textarea name="description"></textarea></label>
         <div class="checks">
           <label><input name="region_moldova" type="checkbox" checked> Молдова</label>
           <label><input name="region_transnistria" type="checkbox"> Приднестровье</label>
@@ -286,6 +282,15 @@ function storeDetail(id) {
   const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
   const countries = store.countries || store.regions || [];
   const panelUrl = store.panel?.shopPanelUrl || `https://cerber.vip/#shop-panel-${store.id}`;
+  const placements = Array.isArray(store.placements) && store.placements.length
+    ? store.placements
+    : [
+      ...(store.placement ? [store.placement] : []),
+      ...(store.isTop ? ["TOP 10"] : []),
+      ...(store.isFeatured ? ["TOP"] : []),
+      ...(store.isNew ? ["NEW"] : []),
+      ...(store.visibleInCatalog !== false ? ["stores"] : [])
+    ];
   return `
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
@@ -293,10 +298,10 @@ function storeDetail(id) {
       <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
       <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
       <div class="checks">
-        <label><input name="placement_TOP10" type="checkbox" ${(store.placements || [store.placement]).includes("TOP 10") ? "checked" : ""}> TOP 10</label>
-        <label><input name="placement_TOP" type="checkbox" ${(store.placements || [store.placement]).includes("TOP") ? "checked" : ""}> TOP</label>
-        <label><input name="placement_NEW" type="checkbox" ${(store.placements || [store.placement]).includes("NEW") ? "checked" : ""}> NEW</label>
-        <label><input name="placement_stores" type="checkbox" ${(store.placements || [store.placement]).includes("stores") || (store.placements || [store.placement]).includes("STORES") ? "checked" : ""}> Раздел Магазины</label>
+        <label><input name="placement_TOP10" type="checkbox" ${placements.includes("TOP 10") ? "checked" : ""}> TOP 10</label>
+        <label><input name="placement_TOP" type="checkbox" ${placements.includes("TOP") ? "checked" : ""}> TOP</label>
+        <label><input name="placement_NEW" type="checkbox" ${placements.includes("NEW") ? "checked" : ""}> NEW</label>
+        <label><input name="placement_stores" type="checkbox" ${placements.includes("stores") || placements.includes("STORES") ? "checked" : ""}> Раздел Магазины</label>
       </div>
       <label class="field">Название<input name="name" value="${esc(store.name || "")}"></label>
       <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
@@ -306,14 +311,12 @@ function storeDetail(id) {
       </div>
       <div class="row">
         <label class="field">Комиссия 0-20%<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="${esc(store.commissionPercent)}"></label>
-        <label class="field">Размещение<select name="placement"><option value="TOP 10" ${store.placement === "TOP 10" ? "selected" : ""}>TOP 10</option><option value="TOP" ${store.placement === "TOP" ? "selected" : ""}>TOP</option><option value="NEW" ${store.placement === "NEW" ? "selected" : ""}>NEW</option><option value="stores" ${store.placement === "stores" ? "selected" : ""}>Раздел Магазины</option></select></label>
+        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(store.position || store.homepagePosition || 0)}"></label>
       </div>
       <div class="row">
-        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(store.position || store.homepagePosition || 0)}"></label>
         <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
       <div class="row">
-        <label class="field">Фото / аватар URL<input name="image" value="${esc(store.image || "")}"></label>
         <label class="field">Баннер URL<input name="cover" value="${esc(store.cover || "")}"></label>
       </div>
       <label class="field">Пароль панели продавца<input name="adminPassword" placeholder="оставить пустым, если не менять"></label>
@@ -491,7 +494,7 @@ function bindActions() {
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (fd.get("placement_stores")) placements.push("stores");
     try {
-      const image = await formImageValue(fd, "imageFile", "image");
+      const image = await formImageValue(fd, "imageFile");
       const result = await api("/api/admin/stores", {
         method: "POST",
         body: JSON.stringify({
@@ -500,7 +503,7 @@ function bindActions() {
           adminPassword: fd.get("adminPassword"),
           image,
           description: fd.get("description"),
-          placement: placements[0] || fd.get("placement"),
+          placement: placements[0] || "stores",
           placements,
           position: Number(fd.get("position")),
           countries
@@ -534,7 +537,7 @@ function bindActions() {
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (fd.get("placement_stores")) placements.push("stores");
     try {
-      const image = await formImageValue(fd, "imageFile", "image");
+      const image = await formImageValue(fd, "imageFile");
       const cover = await formImageValue(fd, "coverFile", "cover");
       data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
@@ -545,7 +548,7 @@ function bindActions() {
           image,
           cover,
           status: fd.get("status"),
-          placement: placements[0] || fd.get("placement"),
+          placement: placements[0] || "stores",
           placements,
           position: Number(fd.get("position")),
           commissionPercent: Number(fd.get("commissionPercent")),

@@ -1342,17 +1342,31 @@ function filteredStores() {
   }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
 }
 
+function storeInPlacement(store, placement) {
+  const placements = Array.isArray(store.placements) && store.placements.length ? store.placements : [store.placement || ""];
+  if (placement === "TOP 10") return placements.includes("TOP 10") || store.isTop === true;
+  if (placement === "TOP") return placements.includes("TOP") || store.isFeatured === true;
+  if (placement === "NEW") return placements.includes("NEW") || store.isNew === true;
+  if (placement === "stores") return placements.includes("stores") || (store.visibleInCatalog !== false && placements.length === 1 && !placements[0]);
+  return false;
+}
+
+function sortStoresByPosition(stores) {
+  return stores.slice().sort((a, b) => Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+}
+
 function visibleStores(topOnly = false) {
-  return filteredStores().filter((store) => {
-    if (topOnly) return store.isTop;
-    return store.visibleInCatalog !== false;
-  });
+  return sortStoresByPosition(filteredStores().filter((store) => {
+    if (topOnly) return storeInPlacement(store, "TOP 10");
+    return storeInPlacement(store, "stores");
+  }));
 }
 
 function homeStores(tab = "all") {
-  if (tab === "top") return filteredStores().filter((store) => store.isFeatured);
-  if (tab === "new") return filteredStores().filter((store) => store.isNew);
-  return visibleStores(true).slice(0, 10);
+  const stores = filteredStores();
+  if (tab === "top") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP")));
+  if (tab === "new") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "NEW")));
+  return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP 10"))).slice(0, 10);
 }
 
 function userBalance(login = db.currentUser) {
@@ -5561,13 +5575,20 @@ async function handleOwnerCreateStore(event) {
   const adminPassword = String(data.get("adminPassword") || "").trim();
   if (!ownerLogin || !adminPassword) return showToast("Укажите логин владельца и пароль панели магазина");
   const id = uniqueStoreId(name);
+  const placements = ["TOP 10", "stores"];
   const store = {
     id,
     tag: String(data.get("tag") || `@${id}`).trim(),
     ownerLogin,
     adminPassword,
     isTop: true,
+    isFeatured: false,
+    isNew: false,
     visibleInCatalog: true,
+    placement: placements[0],
+    placements,
+    position: 1,
+    homepagePosition: 1,
     countries: [],
     cities: [],
     districts: [],
