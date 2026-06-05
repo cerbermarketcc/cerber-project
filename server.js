@@ -1498,6 +1498,19 @@ function adminNormalizeStoreRegions(input) {
   return Array.from(new Set(result.length ? result : ["moldova"]));
 }
 
+function adminNormalizeStorePlacements(input, fallback = "stores") {
+  const values = Array.isArray(input) ? input : String(input || fallback).split(",");
+  const result = [];
+  values.forEach((item) => {
+    const value = String(item || "").trim().toUpperCase();
+    if (value === "TOP 10" || value === "TOP10") result.push("TOP 10");
+    else if (value === "TOP") result.push("TOP");
+    else if (value === "NEW") result.push("NEW");
+    else if (value === "STORES" || value === "STORE" || value === "MAGAZINES") result.push("stores");
+  });
+  return Array.from(new Set(result.length ? result : ["stores"]));
+}
+
 function adminStorePanelLinks(store) {
   return {
     shopPanelUrl: `${publicBaseUrl}/#shop-panel-${store.id}`,
@@ -1535,7 +1548,8 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const name = String(body.name || existing?.name || ownerLogin || "New store").trim();
   const id = existing?.id || adminSlug(body.id || name || ownerLogin, "store");
   const countries = adminNormalizeStoreRegions(body.countries || body.regions || existing?.countries);
-  const placement = String(body.placement || existing?.placement || "stores").trim().toUpperCase();
+  const placements = adminNormalizeStorePlacements(body.placements || body.placement || existing?.placements || existing?.placement);
+  const placement = placements[0] || "stores";
   const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
   const image = String(body.image || body.avatar || existing?.image || "assets/cerber-emblem.png").trim();
   const cover = String(body.cover || body.banner || existing?.cover || image || "assets/market-banner.png").trim();
@@ -1555,7 +1569,7 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     status: adminNormalizeStoreStatus(body.status || existing?.status || "ACTIVE"),
     visibleInCatalog: body.visibleInCatalog !== false,
     placement,
-    placements: Array.isArray(body.placements) ? body.placements : [placement],
+    placements,
     homepagePosition: position,
     position,
     countries,
@@ -1746,7 +1760,10 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
           payload.caption = payload.text;
           delete payload.text;
         }
-        if (bot.token) {
+        const tokenForDelivery = bot.token || telegramBotToken;
+        if (broadcast.photoUrl && String(broadcast.photoUrl).startsWith("data:")) {
+          await telegramTokenFormApi(tokenForDelivery, method, payload);
+        } else if (bot.token) {
           await telegramTokenApi(bot.token, method, payload);
         } else {
           await telegramApi(method, payload);
@@ -2459,6 +2476,37 @@ async function telegramTokenApi(token, method, payload = {}) {
   return body;
 }
 
+function dataUrlBlob(value = "") {
+  const match = String(value).match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match) return null;
+  return new Blob([Buffer.from(match[2], "base64")], { type: match[1] || "application/octet-stream" });
+}
+
+async function telegramTokenFormApi(token, method, payload = {}) {
+  const form = new FormData();
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value == null) return;
+    if (key === "photo" && String(value).startsWith("data:")) {
+      const blob = dataUrlBlob(value);
+      if (blob) form.append("photo", blob, "photo.png");
+      return;
+    }
+    form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+  });
+  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    body: form,
+    signal: AbortSignal.timeout(15000)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.description || `Telegram ${method} error`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
 async function botSendMessage(state, chatId, text, replyMarkup = botMainKeyboard()) {
   const payload = {
     chat_id: chatId,
@@ -2817,7 +2865,7 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       status: "active",
       storage: "app_settings.mirrorBots"
     });
-    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}`);
+    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}`).catch(() => {});
   } catch (error) {
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
     state.adminLogs.unshift({
@@ -2839,7 +2887,7 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       error: String(error.message || error).slice(0, 300),
       storage: "app_settings.mirrorBots"
     }).catch(() => {});
-    await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`);
+    await botSendMessage(state, chatId, `Не удалось проверить токен зеркала: ${botHtml(error.message || error)}`).catch(() => {});
   }
   return true;
 }

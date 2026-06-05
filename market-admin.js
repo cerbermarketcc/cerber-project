@@ -10,6 +10,11 @@ let query = "";
 let realtimeSocket = null;
 let refreshTimer = null;
 
+function adminIsEditing() {
+  const element = document.activeElement;
+  return Boolean(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+}
+
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
 }
@@ -41,6 +46,22 @@ function toast(message, bad = false) {
   toast.timer = setTimeout(() => box.classList.remove("show"), 2800);
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.size) return resolve("");
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("File read error"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function formImageValue(formData, fileName, fallbackName = "") {
+  const file = formData.get(fileName);
+  if (file && file.size) return fileToDataUrl(file);
+  return String(formData.get(fallbackName || fileName) || "").trim();
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -60,7 +81,7 @@ async function refreshData(silent = false) {
   try {
     data = await api("/api/admin/overview");
     if (!silent) renderShell();
-    else root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), drawCharts());
+    else if (!adminIsEditing()) root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), drawCharts());
   } catch (error) {
     if (!silent) renderLogin("Сессия истекла");
   }
@@ -217,6 +238,13 @@ function renderStores() {
     <article class="split-card">
       <h2>Создать магазин</h2>
       <form data-create-store-form>
+        <label class="field">Фото магазина файлом<input name="imageFile" type="file" accept="image/*"></label>
+        <div class="checks">
+          <label><input name="placement_TOP10" type="checkbox" checked> TOP 10</label>
+          <label><input name="placement_TOP" type="checkbox"> TOP</label>
+          <label><input name="placement_NEW" type="checkbox"> NEW</label>
+          <label><input name="placement_stores" type="checkbox" checked> Раздел Магазины</label>
+        </div>
         <div class="row">
           <label class="field">Название магазина<input name="name" required></label>
           <label class="field">Логин владельца<input name="ownerLogin" required></label>
@@ -257,6 +285,14 @@ function storeDetail(id) {
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
     <form data-store-form="${esc(store.id)}">
+      <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
+      <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
+      <div class="checks">
+        <label><input name="placement_TOP10" type="checkbox" ${(store.placements || [store.placement]).includes("TOP 10") ? "checked" : ""}> TOP 10</label>
+        <label><input name="placement_TOP" type="checkbox" ${(store.placements || [store.placement]).includes("TOP") ? "checked" : ""}> TOP</label>
+        <label><input name="placement_NEW" type="checkbox" ${(store.placements || [store.placement]).includes("NEW") ? "checked" : ""}> NEW</label>
+        <label><input name="placement_stores" type="checkbox" ${(store.placements || [store.placement]).includes("stores") || (store.placements || [store.placement]).includes("STORES") ? "checked" : ""}> Раздел Магазины</label>
+      </div>
       <label class="field">Название<input name="name" value="${esc(store.name || "")}"></label>
       <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
       <div class="row">
@@ -367,6 +403,7 @@ function disputeDetail(payload) {
 
 function renderBroadcasts() {
   return `<section class="split"><article class="split-card"><h2>Новая рассылка</h2><form data-broadcast-form>
+    <label class="field">Фото файлом<input name="photoFile" type="file" accept="image/*"></label>
     <label class="field">Заголовок<input name="title" required></label>
     <label class="field">Текст<textarea name="body" required></textarea></label>
     <div class="row"><label class="field">Фото URL<input name="photoUrl" placeholder="https://..."></label><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label></div>
@@ -431,16 +468,23 @@ function bindActions() {
     const countries = [];
     if (fd.get("region_moldova")) countries.push("moldova");
     if (fd.get("region_transnistria")) countries.push("transnistria");
+    const placements = [];
+    if (fd.get("placement_TOP10")) placements.push("TOP 10");
+    if (fd.get("placement_TOP")) placements.push("TOP");
+    if (fd.get("placement_NEW")) placements.push("NEW");
+    if (fd.get("placement_stores")) placements.push("stores");
     try {
+      const image = await formImageValue(fd, "imageFile", "image");
       const result = await api("/api/admin/stores", {
         method: "POST",
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
           adminPassword: fd.get("adminPassword"),
-          image: fd.get("image"),
+          image,
           description: fd.get("description"),
-          placement: fd.get("placement"),
+          placement: placements[0] || fd.get("placement"),
+          placements,
           position: Number(fd.get("position")),
           countries
         })
@@ -467,17 +511,25 @@ function bindActions() {
     const countries = [];
     if (fd.get("region_moldova")) countries.push("moldova");
     if (fd.get("region_transnistria")) countries.push("transnistria");
+    const placements = [];
+    if (fd.get("placement_TOP10")) placements.push("TOP 10");
+    if (fd.get("placement_TOP")) placements.push("TOP");
+    if (fd.get("placement_NEW")) placements.push("NEW");
+    if (fd.get("placement_stores")) placements.push("stores");
     try {
+      const image = await formImageValue(fd, "imageFile", "image");
+      const cover = await formImageValue(fd, "coverFile", "cover");
       data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
           description: fd.get("description"),
-          image: fd.get("image"),
-          cover: fd.get("cover"),
+          image,
+          cover,
           status: fd.get("status"),
-          placement: fd.get("placement"),
+          placement: placements[0] || fd.get("placement"),
+          placements,
           position: Number(fd.get("position")),
           commissionPercent: Number(fd.get("commissionPercent")),
           homepagePosition: Number(fd.get("position") || fd.get("homepagePosition")),
@@ -562,6 +614,8 @@ function bindActions() {
   root.querySelector("[data-broadcast-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const formData = new FormData(event.currentTarget);
+    const photoUrl = await formImageValue(formData, "photoFile", "photoUrl");
     const filters = {
       audience: body.audience,
       minPurchase: body.minPurchase,
@@ -576,7 +630,7 @@ function bindActions() {
     try {
       const result = await api("/api/admin/broadcasts", {
         method: "POST",
-        body: JSON.stringify({ title: body.title, body: body.body, photoUrl: body.photoUrl, buttonText: body.buttonText, buttonUrl: body.buttonUrl, channel: body.channel, type: body.type, filters })
+        body: JSON.stringify({ title: body.title, body: body.body, photoUrl, buttonText: body.buttonText, buttonUrl: body.buttonUrl, channel: body.channel, type: body.type, filters })
       });
       data = result.overview;
       toast(`Рассылка отправлена: ${result.broadcast.stats.sent}, ошибок: ${result.broadcast.stats.telegramFailed || 0}`);
