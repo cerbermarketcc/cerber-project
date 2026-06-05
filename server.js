@@ -794,6 +794,14 @@ app.get("/api/session", async (req, res, next) => {
   }
 });
 
+app.get("/api/state", async (_req, res, next) => {
+  try {
+    res.json(await stateFor(null));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.put("/api/state", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);

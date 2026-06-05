@@ -1147,6 +1147,17 @@ async function loadRemoteSession() {
   }
 }
 
+async function loadRemoteState() {
+  if (!API_ENABLED) return false;
+  try {
+    const payload = await apiFetch("/api/state");
+    applyRemoteState(payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function loadRemoteConfig() {
   if (!API_ENABLED) return;
   try {
@@ -1296,6 +1307,10 @@ function sellerAdminStore() {
   return db.stores.find((store) => store.id === id) || null;
 }
 
+function storeIsActive(store = {}) {
+  return ["active", "ACTIVE"].includes(String(store.status || "active"));
+}
+
 function storeAdminPassword(store) {
   return store?.adminPassword || "";
 }
@@ -1328,7 +1343,7 @@ function exchangeCardById(id = activeExchangeId) {
 function filteredStores() {
   const filters = db.filters || {};
   return (db.stores || []).filter((store) => {
-    if (store.status && store.status !== "active" && !isAdmin()) return false;
+    if (!storeIsActive(store) && !isAdmin()) return false;
     const products = store.products || [];
     const positions = products.flatMap((product) => product.positions || []);
     const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
@@ -2866,7 +2881,7 @@ function handleProductPurchase(storeId, productId, positionId) {
   const product = productById(store, productId);
   const position = positionById(product, positionId);
   if (!product || !position) return;
-  if (store.status !== "active" || store.salesBlocked) return showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
+  if (!storeIsActive(store) || store.salesBlocked) return showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
   if (userLtcBalance() < ltcAmount) {
@@ -2996,7 +3011,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   const product = productById(store, productId);
   const position = positionById(product, positionId);
   if (!product || !position) return;
-  if (store.status !== "active" || store.salesBlocked) {
+  if (!storeIsActive(store) || store.salesBlocked) {
     showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
     return;
   }
@@ -7283,6 +7298,7 @@ function renderCurrent() {
 async function initApp() {
   await loadRemoteConfig();
   await loadCmsTextOverrides();
+  await loadRemoteState();
   await loadRemoteSession();
   await fetchLitecoinUsdRate();
   watchCmsVisualTextOverrides();
