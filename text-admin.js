@@ -6,6 +6,9 @@ const languageSelect = document.querySelector("[data-language]");
 const searchInput = document.querySelector("[data-search]");
 const saveButton = document.querySelector("[data-save]");
 const statusLine = document.querySelector("[data-status]");
+const PRIMARY_API_ORIGIN = "https://cerber.vip";
+const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
+const API_ORIGIN = LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN;
 
 let adminPassword = sessionStorage.getItem("cerber_text_admin_password") || "";
 let baseTexts = {};
@@ -44,7 +47,7 @@ function extractTextObject(source) {
 async function loadTexts() {
   const [appSource, cmsResponse] = await Promise.all([
     fetch(`/app.js?v=${Date.now()}`).then((response) => response.text()),
-    fetch("/api/cms-texts").then((response) => response.json()).catch(() => ({ texts: {} }))
+    fetch(`${API_ORIGIN}/api/cms-texts`).then((response) => response.json()).catch(() => ({ texts: {} }))
   ]);
   baseTexts = Function(`"use strict"; return (${extractTextObject(appSource)});`)();
   savedTexts = cmsResponse.texts || {};
@@ -92,7 +95,7 @@ async function saveTexts() {
   saveButton.disabled = true;
   setStatus("Сохраняю...");
   try {
-    const response = await fetch("/api/cms-texts", {
+    const response = await fetch(`${API_ORIGIN}/api/cms-texts`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",

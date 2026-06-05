@@ -1,5 +1,8 @@
 const root = document.getElementById("admin-app");
 const TOKEN_KEY = "cerber_market_admin_token";
+const PRIMARY_API_ORIGIN = "https://cerber.vip";
+const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
+const API_ORIGIN = LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN;
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Логи", "Боты"];
 
@@ -63,7 +66,8 @@ async function formImageValue(formData, fileName, fallbackName = "") {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const target = /^https?:\/\//i.test(String(path || "")) ? path : `${API_ORIGIN}${path}`;
+  const response = await fetch(target, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -91,9 +95,10 @@ function connectRealtime() {
   clearInterval(refreshTimer);
   refreshTimer = setInterval(() => refreshData(true), 6000);
   try {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const api = new URL(API_ORIGIN);
+    const protocol = api.protocol === "https:" ? "wss:" : "ws:";
     realtimeSocket?.close();
-    realtimeSocket = new WebSocket(`${protocol}//${location.host}/api/admin/realtime?token=${encodeURIComponent(token)}`);
+    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime?token=${encodeURIComponent(token)}`);
     realtimeSocket.onmessage = () => refreshData(true);
     realtimeSocket.onclose = () => setTimeout(connectRealtime, 5000);
   } catch {}

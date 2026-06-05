@@ -9,7 +9,12 @@ const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
 const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
-const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
+const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
+const PRIMARY_API_ORIGIN = "https://cerber.vip";
+const API_ORIGIN = location.protocol === "file:"
+  ? PRIMARY_API_ORIGIN
+  : (LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN);
+const API_ENABLED = location.protocol !== "file:";
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
 
@@ -641,7 +646,7 @@ function mountCmsVisualEditor() {
     cmsTextOverrides.__visual = cmsVisualTextOverrides;
     setStatus("Сохраняю...");
     try {
-      const response = await fetch("/api/cms-texts", {
+      const response = await fetch(apiUrl("/api/cms-texts"), {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -1090,6 +1095,11 @@ function resetStoreStats(next) {
   }));
 }
 
+function apiUrl(path) {
+  if (/^https?:\/\//i.test(String(path || ""))) return path;
+  return `${API_ORIGIN}${path}`;
+}
+
 async function apiFetch(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -1100,7 +1110,7 @@ async function apiFetch(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || 25000);
   try {
-    const response = await fetch(path, { ...options, headers, signal: controller.signal });
+    const response = await fetch(apiUrl(path), { ...options, headers, signal: controller.signal });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || "API error");
     return payload;
@@ -1151,7 +1161,7 @@ async function loadRemoteConfig() {
 async function loadCmsTextOverrides() {
   if (location.protocol === "file:" || API_ENABLED) return;
   try {
-    const response = await fetch("/api/cms-texts");
+    const response = await fetch(apiUrl("/api/cms-texts"));
     const payload = await response.json().catch(() => ({}));
     if (response.ok) applyCmsTextOverrides(payload.texts || {});
   } catch {}
@@ -1202,7 +1212,7 @@ async function persistSellerAdminStore() {
   const store = sellerAdminStore();
   if (!token || !store) return;
   try {
-    const response = await fetch("/api/store-admin/store", {
+    const response = await fetch(apiUrl("/api/store-admin/store"), {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -2014,7 +2024,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
     const password = new FormData(event.currentTarget).get("password");
     if (API_ENABLED) {
       try {
-        const response = await fetch("/api/store-admin/login", {
+        const response = await fetch(apiUrl("/api/store-admin/login"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ storeId: store.id, password })
@@ -7004,7 +7014,7 @@ function showModal(html, className = "") {
 async function trackSiteBroadcast(notification, action) {
   if (!notification?.id || !API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
   try {
-    await fetch(`/api/broadcasts/${encodeURIComponent(notification.id)}/track`, {
+    await fetch(apiUrl(`/api/broadcasts/${encodeURIComponent(notification.id)}/track`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
