@@ -6,6 +6,7 @@ const API_TOKEN_KEY = "cerber_api_token_v1";
 const SELLER_ADMIN_KEY = "cerber_seller_admin_v1";
 const SELLER_ADMIN_API_TOKEN_KEY = "cerber_seller_admin_token_v1";
 const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
+const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const API_ENABLED = location.protocol !== "file:" && !["127.0.0.1", "localhost"].includes(location.hostname);
@@ -5111,6 +5112,7 @@ function renderOwnerAccess() {
     if (password !== ADMIN_PANEL_PASSWORD) return showToast("Неверный пароль");
     try {
       localStorage.setItem(ADMIN_ACCESS_KEY, "ok");
+      localStorage.setItem(OWNER_ACCESS_PASSWORD_KEY, password);
     } catch {}
     renderOwnerPanel();
   };
@@ -5156,6 +5158,7 @@ function renderOwnerPanel() {
         </form>
       </article>
       ${ownerStoreBuilderPanel()}
+      ${adminCreationNoticeView()}
       <article class="panel owner-store-control-panel">
         <h2>Магазины</h2>
         ${db.stores.map((store) => {
@@ -5283,17 +5286,20 @@ function ownerStoreBuilderPanel() {
   return `
     <article class="panel owner-builder">
       <h2>${hasStores ? "Карточки магазинов" : "Конструктор карточек магазинов"}</h2>
-      ${hasStores ? `<p class="desc">Карточки ниже редактируются и сохраняют уже созданный магазин. Новую карточку добавляет владелец сайта в общей админке.</p>` : `
+      ${hasStores ? `<p class="desc">Карточки ниже редактируются и сохраняют уже созданные магазины. Новую карточку можно добавить здесь.</p>` : ""}
       <form class="form" data-owner-create-store>
         <div class="row">
           <label class="field">Название<input name="name" required placeholder="Market name"></label>
           <label class="field">Тег<input name="tag" placeholder="@market"></label>
         </div>
+        <div class="row">
+          <label class="field">Логин владельца<input name="ownerLogin" required placeholder="seller login"></label>
+          <label class="field">Пароль панели магазина<input name="adminPassword" type="password" required placeholder="пароль"></label>
+        </div>
         <label class="field">Описание карточки<input name="short" placeholder="Короткое описание"></label>
-        <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
+        <label class="field">Фото магазина файлом<input name="image" type="file" accept="image/*"></label>
         <button class="primary">Создать карточку</button>
       </form>
-      `}
     </article>
     ${db.stores.map(ownerStoreManager).join("")}
   `;
@@ -5500,12 +5506,15 @@ async function handleOwnerCreateStore(event) {
   if (!name) return;
   const imageFile = data.get("image");
   const image = imageFile && imageFile.size ? await fileToDataUrl(imageFile) : fallbackImage;
+  const ownerLogin = String(data.get("ownerLogin") || db.currentUser || "").trim();
+  const adminPassword = String(data.get("adminPassword") || "").trim();
+  if (!ownerLogin || !adminPassword) return showToast("Укажите логин владельца и пароль панели магазина");
   const id = uniqueStoreId(name);
-  db.stores.unshift({
+  const store = {
     id,
     tag: String(data.get("tag") || `@${id}`).trim(),
-    ownerLogin: db.currentUser,
-    adminPassword: "",
+    ownerLogin,
+    adminPassword,
     isTop: true,
     visibleInCatalog: true,
     countries: [],
@@ -5524,9 +5533,28 @@ async function handleOwnerCreateStore(event) {
     ...NEW_STORE_STATS,
     products: [],
     reviewsList: []
-  });
+  };
+  if (API_ENABLED) {
+    try {
+      const payload = await apiFetch("/api/owner/stores", {
+        method: "POST",
+        headers: { "x-owner-password": localStorage.getItem(OWNER_ACCESS_PASSWORD_KEY) || ADMIN_PANEL_PASSWORD },
+        body: JSON.stringify(store)
+      });
+      const savedStore = payload.store || store;
+      db.stores = db.stores.filter((item) => item.id !== savedStore.id);
+      db.stores.unshift(savedStore);
+      adminCreationNotice = `<p>Магазин создан: <strong>${esc(savedStore.name)}</strong><br>Панель: <a href="${esc(payload.panel?.shopPanelUrl || `#shop-panel-${savedStore.id}`)}">${esc(payload.panel?.shopPanelUrl || `#shop-panel-${savedStore.id}`)}</a><br>Логин: <strong>${esc(payload.panel?.login || savedStore.ownerLogin)}</strong> · Пароль: <strong>${esc(payload.panel?.password || savedStore.adminPassword)}</strong></p>`;
+    } catch (error) {
+      showToast(error.message || "Магазин не создался");
+      return;
+    }
+  } else {
+    db.stores.unshift(store);
+  }
   saveDb();
-  showToast("Карточка магазина создана");
+  event.currentTarget.reset();
+  showToast("Магазин создан");
   renderOwnerPanel();
 }
 

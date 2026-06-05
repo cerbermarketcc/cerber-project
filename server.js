@@ -83,6 +83,16 @@ function verifyCmsAdmin(req) {
   }
 }
 
+function verifyOwnerPanel(req) {
+  const expected = process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "admincerbercc1212";
+  const password = String(req.headers["x-owner-password"] || req.body?.ownerPassword || "");
+  if (password !== expected) {
+    const error = new Error("Bad owner password");
+    error.status = 401;
+    throw error;
+  }
+}
+
 function adminSecret() {
   return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
 }
@@ -894,6 +904,23 @@ app.get("/api/admin/overview", async (req, res, next) => {
     const admin = requireAdmin(req);
     const data = await adminLoadMarketplace();
     res.json({ admin, ...adminBuildOverview(data) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/owner/stores", async (req, res, next) => {
+  try {
+    requireDb();
+    verifyOwnerPanel(req);
+    const store = adminBuildStoreFromBody(req.body || {});
+    if (!store.name || !store.ownerLogin || !store.adminPassword) {
+      return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
+    }
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
+    await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
+    res.json({ store, panel: adminStorePanelLinks(store), overview: adminBuildOverview(await adminLoadMarketplace()) });
   } catch (error) {
     next(error);
   }
