@@ -230,11 +230,12 @@ function sameLogin(a, b) {
 function storeDeletedByState(state = {}, store = {}) {
   const deletedIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds.map(String) : [];
   const id = String(store.id || "");
+  const status = String(store.status || "").toLowerCase();
   return (
     deletedIds.includes(id) ||
     store.is_deleted === true ||
     store.deleted === true ||
-    ["deleted", "delete", "disabled", "disable"].includes(String(store.status || "").toLowerCase())
+    ["deleted", "delete"].includes(status)
   );
 }
 

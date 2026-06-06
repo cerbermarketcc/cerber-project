@@ -1201,7 +1201,6 @@ async function persistRemoteState() {
         state: {
           theme: db.theme,
           lang: db.lang,
-          stores: db.stores,
           messages: db.messages,
           groupMessages: db.groupMessages,
           groupSettings: db.groupSettings,
