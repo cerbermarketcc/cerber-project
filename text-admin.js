@@ -8,7 +8,7 @@ const saveButton = document.querySelector("[data-save]");
 const statusLine = document.querySelector("[data-status]");
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
-const API_ORIGIN = LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN;
+const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
 
 let adminPassword = sessionStorage.getItem("cerber_text_admin_password") || "";
 let baseTexts = {};

@@ -1184,6 +1184,43 @@ body[data-theme="dark"] .mirror-row {
   font-weight: 900;
 }
 
+.new-store-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #101820;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.stopped-store-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 6px;
+  margin-left: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f1c40f;
+  color: #101820;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.shop-card.is-stopped {
+  opacity: 0.72;
+}
+
+.shop-card.is-stopped .shop-click {
+  cursor: not-allowed;
+}
+
 .desc {
   color: var(--muted);
   font-size: 22px;

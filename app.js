@@ -13,10 +13,13 @@ const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const API_ORIGIN = location.protocol === "file:"
   ? PRIMARY_API_ORIGIN
-  : (LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN);
+  : location.origin;
 const API_ENABLED = location.protocol !== "file:";
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
+let realtimeSocket = null;
+let realtimeReconnectTimer = null;
+let realtimeRefreshTimer = null;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -814,34 +817,7 @@ function normalizeDb(next) {
     decisionAt: application.decisionAt || null,
     decisionBy: application.decisionBy || ""
   }));
-  if (!next.stores.some((store) => store.id === "marketolog")) {
-    next.stores.unshift(marketologSeedStore());
-  } else {
-    const marketolog = next.stores.find((store) => store.id === "marketolog");
-    const product = marketolog?.products?.find((item) => item.id === "marketolog-service");
-    if (product && (!Number(product.priceUsd) || product.title === "Подготовка проекта")) {
-      product.title = "Тестовый товар";
-      product.category = product.category || "Услуги";
-      product.description = product.description || "Тестовая позиция для проверки оплаты и выдачи.";
-      product.price = "10$";
-      product.priceUsd = 10;
-      product.positions = (product.positions || []).map((position) => ({
-        ...position,
-        title: "Тестовый товар",
-        description: position.description || "Тестовая позиция для проверки оплаты и выдачи.",
-        priceUsd: 10,
-        stock: Number(position.stock || 0) > 0 ? Number(position.stock || 0) : 10
-      }));
-    }
-  }
-  if (!next.stores.some((store) => store.id === "test")) {
-    next.stores.unshift(testSellerSeedStore());
-  } else {
-    const testStore = next.stores.find((store) => store.id === "test");
-    testStore.ownerLogin = testStore.ownerLogin || "test";
-    testStore.adminPassword = testStore.adminPassword || "test1";
-    testStore.visibleInCatalog = false;
-  }
+  next.stores = (next.stores || []).filter((store) => !["marketolog", "test"].includes(String(store.id || "")));
   next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
 }
 
@@ -1158,6 +1134,43 @@ async function loadRemoteState() {
   }
 }
 
+function realtimeCanRenderNow() {
+  const element = document.activeElement;
+  return !(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+}
+
+function scheduleRealtimeRefresh() {
+  clearTimeout(realtimeRefreshTimer);
+  realtimeRefreshTimer = setTimeout(async () => {
+    if (!realtimeCanRenderNow()) {
+      scheduleRealtimeRefresh();
+      return;
+    }
+    const ok = await loadRemoteState();
+    if (ok) renderCurrent();
+  }, 250);
+}
+
+function connectRealtime() {
+  if (!API_ENABLED) return;
+  clearTimeout(realtimeReconnectTimer);
+  try {
+    const api = new URL(API_ORIGIN);
+    const protocol = api.protocol === "https:" ? "wss:" : "ws:";
+    realtimeSocket?.close();
+    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/realtime`);
+    realtimeSocket.onmessage = (event) => {
+      const payload = JSON.parse(event.data || "{}");
+      if (payload.type !== "connected") scheduleRealtimeRefresh();
+    };
+    realtimeSocket.onclose = () => {
+      realtimeReconnectTimer = setTimeout(connectRealtime, 5000);
+    };
+  } catch {
+    realtimeReconnectTimer = setTimeout(connectRealtime, 5000);
+  }
+}
+
 async function loadRemoteConfig() {
   if (!API_ENABLED) return;
   try {
@@ -1180,6 +1193,7 @@ async function loadCmsTextOverrides() {
 
 async function persistRemoteState() {
   if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
+  if (localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY) && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
   try {
     await apiFetch("/api/state", {
       method: "PUT",
@@ -1308,7 +1322,16 @@ function sellerAdminStore() {
 }
 
 function storeIsActive(store = {}) {
-  return ["active", "ACTIVE"].includes(String(store.status || "active"));
+  if (store.is_deleted === true || store.deleted === true) return false;
+  return !["deleted", "delete", "disabled", "disable"].includes(String(store.status || "active").toLowerCase());
+}
+
+function storeIsStopped(store = {}) {
+  return store.is_stopped === true || store.stopped === true || store.salesBlocked === true || String(store.status || "").toLowerCase() === "blocked";
+}
+
+function storeIsVisible(store = {}) {
+  return storeIsActive(store);
 }
 
 function storeAdminPassword(store) {
@@ -1357,13 +1380,22 @@ function filteredStores() {
   }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
 }
 
+function storePlacementValues(store = {}) {
+  const raw = Array.isArray(store.placements) && store.placements.length ? store.placements : [store.placement || ""];
+  return raw.map((item) => String(item || "").trim().toUpperCase().replace(/[_-]+/g, " "));
+}
+
 function storeInPlacement(store, placement) {
-  const placements = Array.isArray(store.placements) && store.placements.length ? store.placements : [store.placement || ""];
-  if (placement === "TOP 10") return placements.includes("TOP 10") || store.isTop === true;
+  const placements = storePlacementValues(store);
+  if (placement === "TOP 10") return placements.some((value) => value === "TOP 10" || value === "TOP10") || store.isTop === true || store.is_top === true || Number(store.top_position || store.topPosition || 0) > 0;
   if (placement === "TOP") return placements.includes("TOP") || store.isFeatured === true;
-  if (placement === "NEW") return placements.includes("NEW") || store.isNew === true;
-  if (placement === "stores") return placements.includes("stores") || (store.visibleInCatalog !== false && placements.length === 1 && !placements[0]);
+  if (placement === "NEW") return placements.includes("NEW") || store.isNew === true || store.is_new === true;
+  if (placement === "stores") return storeIsVisible(store);
   return false;
+}
+
+function publicStores() {
+  return (db.stores || []).filter((store) => storeIsVisible(store));
 }
 
 function sortStoresByPosition(stores) {
@@ -1371,17 +1403,17 @@ function sortStoresByPosition(stores) {
 }
 
 function visibleStores(topOnly = false) {
-  return sortStoresByPosition(filteredStores().filter((store) => {
+  return sortStoresByPosition(publicStores().filter((store) => {
     if (topOnly) return storeInPlacement(store, "TOP 10");
     return storeInPlacement(store, "stores");
   }));
 }
 
 function homeStores(tab = "all") {
-  const stores = filteredStores();
-  if (tab === "top") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP")));
+  const stores = publicStores();
+  if (tab === "top") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP 10")));
   if (tab === "new") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "NEW")));
-  return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP 10"))).slice(0, 10);
+  return visibleStores(false);
 }
 
 function userBalance(login = db.currentUser) {
@@ -2189,7 +2221,7 @@ function renderHome() {
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
     document.querySelector("[data-feed]").innerHTML = homeStores(activeHomeTab)
-      .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
+      .filter((store) => `${store.name} ${store.short} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -2239,7 +2271,7 @@ function renderCatalog() {
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
     document.querySelector("[data-feed]").innerHTML = visibleStores(false)
-      .filter((store) => `${store.name} ${store.short} ${store.tag}`.toLowerCase().includes(q))
+      .filter((store) => `${store.name} ${store.short} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -2519,13 +2551,19 @@ function renderFilters() {
 }
 
 function storeCard(store) {
+  const newLabel = db.lang === "en" ? "New" : db.lang === "ro" ? "Nou" : "Новый";
+  const isNewStore = storeInPlacement(store, "NEW");
+  const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "ro" ? "Oprit" : "Остановлен";
+  const isStopped = storeIsStopped(store);
   return `
-    <article class="shop-card">
-      <button class="shop-click" data-store="${esc(store.id)}">
+    <article class="shop-card ${isStopped ? "is-stopped" : ""}">
+      <button class="shop-click" ${isStopped ? "disabled" : `data-store="${esc(store.id)}"`}>
         <div class="shop-inner">
           <div class="shop-head">
             <div>
               <div class="shop-title"><h2>${esc(store.name)}</h2><span class="verify">✓</span></div>
+              ${isNewStore ? `<span class="new-store-badge">${esc(newLabel)}</span>` : ""}
+              ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
               <p class="desc">${esc(store.short)}</p>
             </div>
             <span>✉</span>
@@ -2876,6 +2914,12 @@ function renderProductPaymentView(storeId, productId, positionId) {
   document.querySelector("[data-confirm-product-pay]")?.addEventListener("click", () => handleProductPurchase(store.id, product.id, position.id));
 }
 
+function issueRandomDeliveryItem(items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  const index = Math.floor(Math.random() * items.length);
+  return items.splice(index, 1)[0] || "";
+}
+
 function handleProductPurchase(storeId, productId, positionId) {
   const store = storeById(storeId);
   const product = productById(store, productId);
@@ -2894,7 +2938,7 @@ function handleProductPurchase(storeId, productId, positionId) {
   const issueFromPosition = positionItems.length > 0;
   const issuedItems = issueFromPosition ? positionItems : productItems;
   const requiresIssuedDescription = issuedItems.length > 0;
-  const reservedDescription = issuedItems.shift() || "";
+  const reservedDescription = issueRandomDeliveryItem(issuedItems);
   if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
   db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
@@ -2963,7 +3007,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   const issueFromPosition = positionItems.length > 0;
   const issuedItems = issueFromPosition ? positionItems : productItems;
   const requiresIssuedDescription = issuedItems.length > 0;
-  const reservedDescription = issuedItems.shift() || "";
+  const reservedDescription = issueRandomDeliveryItem(issuedItems);
   if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
   const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
@@ -5376,6 +5420,7 @@ function ownerStoreBuilderPanel() {
           <label class="field">Логин владельца<input name="ownerLogin" required placeholder="seller login"></label>
           <label class="field">Пароль панели магазина<input name="adminPassword" type="password" required placeholder="пароль"></label>
         </div>
+        <label class="field">Регион<select name="regions"><option value="moldova">Молдова</option><option value="transnistria">Приднестровье</option><option value="both">Оба региона</option></select></label>
         <label class="field">Описание карточки<input name="short" placeholder="Короткое описание"></label>
         <label class="field">Фото магазина файлом<input name="image" type="file" accept="image/*"></label>
         <button class="primary">Создать карточку</button>
@@ -5591,6 +5636,8 @@ async function handleOwnerCreateStore(event) {
   if (!ownerLogin || !adminPassword) return showToast("Укажите логин владельца и пароль панели магазина");
   const id = uniqueStoreId(name);
   const placements = ["TOP 10", "stores"];
+  const region = String(data.get("regions") || "moldova");
+  const countries = region === "both" ? ["moldova", "transnistria"] : [region];
   const store = {
     id,
     tag: String(data.get("tag") || `@${id}`).trim(),
@@ -5604,7 +5651,8 @@ async function handleOwnerCreateStore(event) {
     placements,
     position: 1,
     homepagePosition: 1,
-    countries: [],
+    countries,
+    regions: countries,
     cities: [],
     districts: [],
     name,
@@ -7302,6 +7350,7 @@ async function initApp() {
   await loadRemoteSession();
   await fetchLitecoinUsdRate();
   watchCmsVisualTextOverrides();
+  connectRealtime();
   renderCurrent();
   setTimeout(showPendingSiteBroadcast, 350);
 }

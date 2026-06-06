@@ -50,6 +50,7 @@ const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
+let publicRealtimeServer = null;
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
@@ -189,7 +190,8 @@ async function appendAdminLog(action, actor = "admin", details = {}) {
   });
   state.adminLogs = state.adminLogs.slice(0, 500);
   await saveSettingsState(state);
-  notifyAdminRealtime(action, details);
+  console.log(`[admin-log] ${action}`, { actor, ...details });
+  notifyRealtime(action, details);
 }
 
 function notifyAdminRealtime(type = "update", details = {}) {
@@ -198,6 +200,19 @@ function notifyAdminRealtime(type = "update", details = {}) {
   adminRealtimeServer.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) client.send(payload);
   });
+}
+
+function notifyPublicRealtime(type = "state_updated", details = {}) {
+  if (!publicRealtimeServer) return;
+  const payload = JSON.stringify({ type, details, createdAt: Date.now() });
+  publicRealtimeServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  });
+}
+
+function notifyRealtime(type = "state_updated", details = {}) {
+  notifyAdminRealtime(type, details);
+  notifyPublicRealtime(type, details);
 }
 
 function loginKey(value) {
@@ -210,6 +225,17 @@ function publicUser(row) {
 
 function sameLogin(a, b) {
   return loginKey(a) === loginKey(b);
+}
+
+function storeDeletedByState(state = {}, store = {}) {
+  const deletedIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds.map(String) : [];
+  const id = String(store.id || "");
+  return (
+    deletedIds.includes(id) ||
+    store.is_deleted === true ||
+    store.deleted === true ||
+    ["deleted", "delete", "disabled", "disable"].includes(String(store.status || "").toLowerCase())
+  );
 }
 
 function requireDb() {
@@ -287,6 +313,7 @@ async function ensureSeed() {
         users: {},
         sentMessages: {}
       },
+      mirrorBots: [],
       paymentSettings: {
         provider: "nowpayments",
         payBaseUrl: "",
@@ -314,8 +341,11 @@ async function stateFor(user) {
     supabase.from("profiles").select("login,name,role")
   ]);
   const settingsData = settings?.data || {};
+  const mirrorBots = adminCollectMirrorBots(settingsData);
   const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
-  const visibleStores = (stores || []).map((row) => row.data).filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")));
+  const visibleStores = (stores || [])
+    .map((row) => row.data)
+    .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
   const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
   return {
@@ -339,6 +369,13 @@ async function stateFor(user) {
       ltcBalances: settingsData.ltcBalances || {},
       walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
       walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
+      mirrorBots,
+      bots: {
+        total: mirrorBots.length,
+        active: mirrorBots.filter((bot) => bot.active && !bot.blocked).length,
+        blocked: mirrorBots.filter((bot) => bot.blocked).length,
+        items: mirrorBots
+      },
       siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
       broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
       userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
@@ -777,7 +814,45 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     if (!token || !token.storeId || store.id !== token.storeId) {
       return res.status(401).json({ error: "Нет доступа к этой админке" });
     }
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    const { data: row } = await supabase.from("stores").select("data").eq("id", token.storeId).maybeSingle();
+    const existing = row?.data || {};
+    const existingPlacements = Array.isArray(existing.placements) && existing.placements.length
+      ? existing.placements
+      : adminLegacyStorePlacements(existing);
+    const mergedStore = {
+      ...existing,
+      ...store,
+      id: existing.id || store.id,
+      ownerLogin: existing.ownerLogin || store.ownerLogin || "",
+      status: existing.status || store.status || "active",
+      salesBlocked: Boolean(existing.salesBlocked),
+      is_active: existing.is_active !== false,
+      is_deleted: existing.is_deleted === true || existing.deleted === true,
+      is_stopped: existing.is_stopped === true || existing.salesBlocked === true,
+      published: existing.published !== false,
+      visibility: existing.visibility || "public",
+      visibleInCatalog: existing.visibleInCatalog !== false,
+      isTop: existing.isTop === true,
+      is_top: existing.isTop === true || existing.is_top === true,
+      isFeatured: existing.isFeatured === true,
+      isNew: existing.isNew === true,
+      placement: existing.placement || existingPlacements[0] || "stores",
+      placements: existingPlacements.includes("stores") ? existingPlacements : [...existingPlacements, "stores"],
+      position: Number(existing.position ?? existing.homepagePosition ?? store.position ?? 0),
+      homepagePosition: Number(existing.homepagePosition ?? existing.position ?? store.homepagePosition ?? 0),
+      top_position: Number(existing.top_position ?? existing.topPosition ?? existing.position ?? existing.homepagePosition ?? store.position ?? 0),
+      topPosition: Number(existing.topPosition ?? existing.top_position ?? existing.position ?? existing.homepagePosition ?? store.position ?? 0),
+      domains: Array.isArray(existing.domains) ? existing.domains : ["*"],
+      domain_id: existing.domain_id || "*",
+      commissionPercent: Number(existing.commissionPercent ?? store.commissionPercent ?? 0),
+      countries: Array.isArray(existing.countries) && existing.countries.length ? existing.countries : (Array.isArray(store.countries) ? store.countries : []),
+      regions: Array.isArray(existing.regions) && existing.regions.length ? existing.regions : (Array.isArray(existing.countries) ? existing.countries : (Array.isArray(store.regions) ? store.regions : [])),
+      createdAt: existing.createdAt || store.createdAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
+    console.log("[store-admin] store saved", { storeId: mergedStore.id, ownerLogin: mergedStore.ownerLogin || "", products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0 });
+    notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
     res.json(await stateFor(null));
   } catch (error) {
     next(error);
@@ -812,6 +887,7 @@ app.put("/api/state", async (req, res, next) => {
     const currentSettingsData = currentSettings?.data || {};
     if (Array.isArray(state.stores)) {
       for (const store of state.stores.filter((item) => item && item.id)) {
+        if (storeDeletedByState(currentSettingsData, store)) continue;
         await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
       }
     }
@@ -848,6 +924,7 @@ app.put("/api/state", async (req, res, next) => {
 
     if (Array.isArray(state.stores)) {
       for (const store of state.stores) {
+        if (storeDeletedByState(currentSettingsData, store)) continue;
         await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
         const ownerKey = loginKey(store.ownerLogin);
         if (ownerKey) {
@@ -889,6 +966,13 @@ app.put("/api/state", async (req, res, next) => {
       }
     }
 
+    console.log("[state] saved", {
+      user: user.login,
+      stores: Array.isArray(state.stores) ? state.stores.length : 0,
+      orders: Array.isArray(state.orders) ? state.orders.length : 0,
+      mirrorBots: Array.isArray(state.mirrorBots) ? state.mirrorBots.length : (currentSettingsData.mirrorBots || []).length
+    });
+    notifyRealtime("state_updated", { source: "api-state", user: user.login });
     res.json(await stateFor(user));
   } catch (error) {
     next(error);
@@ -936,6 +1020,8 @@ app.post("/api/owner/stores", async (req, res, next) => {
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
+    console.log("[owner-store] created", { storeId: store.id, ownerLogin: store.ownerLogin });
+    notifyRealtime("store_created", { storeId: store.id, ownerLogin: store.ownerLogin, source: "owner-panel" });
     res.json({ store, panel: adminStorePanelLinks(store), overview: adminBuildOverview(await adminLoadMarketplace()) });
   } catch (error) {
     next(error);
@@ -1135,6 +1221,8 @@ app.post("/api/admin/stores", async (req, res, next) => {
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     const panel = adminStorePanelLinks(store);
     await appendAdminLog("store_created", admin.login, { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
+    console.log("[admin-store] created", { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
+    notifyRealtime("store_created", { storeId: store.id, ownerLogin: store.ownerLogin, source: "market-admin" });
     res.json({ store, panel, overview: adminBuildOverview(await adminLoadMarketplace()) });
   } catch (error) {
     next(error);
@@ -1150,6 +1238,8 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (store.ownerLogin) await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
+    console.log("[admin-store] updated", { storeId: store.id, fields: Object.keys(req.body || {}) });
+    notifyRealtime("store_updated", { storeId: store.id, source: "market-admin" });
     res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(store) });
     return;
     const allowed = ["status", "commissionPercent", "homepagePosition", "adminPassword", "salesBlocked", "autoReleaseHours", "enabledCoins", "name", "short", "description"];
@@ -1176,11 +1266,15 @@ app.delete("/api/admin/stores/:id", async (req, res, next) => {
     if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
     const state = await loadSettingsState();
     const storeId = req.params.id;
+    state.deletedStoreIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds : [];
+    if (!state.deletedStoreIds.includes(storeId)) state.deletedStoreIds.push(storeId);
     state.orders = (state.orders || []).filter((order) => order.storeId !== storeId);
     state.storeApplications = (state.storeApplications || []).filter((item) => item.storeId !== storeId && item.id !== storeId);
     await saveSettingsState(state);
     await supabase.from("stores").delete().eq("id", storeId);
     await appendAdminLog("store_deleted", admin.login, { storeId, name: row.data.name || "" });
+    console.log("[admin-store] deleted", { storeId, name: row.data.name || "" });
+    notifyRealtime("store_deleted", { storeId, source: "market-admin" });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -1200,6 +1294,8 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
     });
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await appendAdminLog("product_updated", admin.login, { storeId: store.id, productId: product.id });
+    console.log("[product] updated", { storeId: store.id, productId: product.id });
+    notifyRealtime("product_updated", { storeId: store.id, productId: product.id });
     res.json({ store });
   } catch (error) {
     next(error);
@@ -1215,6 +1311,8 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
     store.products = (store.products || []).filter((item) => item.id !== req.params.productId);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await appendAdminLog("product_deleted", admin.login, { storeId: store.id, productId: req.params.productId });
+    console.log("[product] deleted", { storeId: store.id, productId: req.params.productId });
+    notifyRealtime("product_deleted", { storeId: store.id, productId: req.params.productId });
     res.json({ store });
   } catch (error) {
     next(error);
@@ -1404,6 +1502,8 @@ app.patch("/api/admin/bots", async (req, res, next) => {
     if (action !== "delete" && state.mirrorBots[target.index]) state.mirrorBots[target.index].updatedAt = Date.now();
     await saveSettingsState(state);
     await appendAdminLog(`mirror_bot_${action}`, admin.login, { id, chatId: target.chatId, loginKey: target.loginKey });
+    console.log("[mirror-bot] action", { action, id, chatId: target.chatId, loginKey: target.loginKey });
+    notifyRealtime(`mirror_bot_${action}`, { id, chatId: target.chatId, loginKey: target.loginKey });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -1493,8 +1593,13 @@ function verifyNowpaymentsSignature(req) {
 }
 
 async function saveSettingsState(state) {
-  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
-  notifyAdminRealtime("state_updated");
+  const next = {
+    ...(state || {}),
+    telegramBot: state?.telegramBot || { users: {}, sentMessages: {} },
+    mirrorBots: Array.isArray(state?.mirrorBots) ? state.mirrorBots : []
+  };
+  await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
+  notifyRealtime("state_updated");
 }
 
 async function loadSettingsState() {
@@ -1504,6 +1609,7 @@ async function loadSettingsState() {
   state.telegramBot = state.telegramBot || { users: {}, sentMessages: {} };
   state.telegramBot.users = state.telegramBot.users || {};
   state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
+  state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
   return state;
 }
 
@@ -1603,6 +1709,15 @@ function storePlacementFlags(placements = []) {
   };
 }
 
+function adminStoreVisible(body = {}, existing = null, flags = {}) {
+  if (body.is_deleted === true || body.deleted === true) return false;
+  if (body.published === false || body.is_active === false) return false;
+  if (body.visibility === "hidden" || body.visibility === "private") return false;
+  if (body.visibleInCatalog != null) return body.visibleInCatalog !== false;
+  if (existing?.visibleInCatalog != null) return existing.visibleInCatalog !== false;
+  return flags.visibleInCatalog !== false;
+}
+
 function adminLegacyStorePlacements(store = null) {
   if (!store) return ["stores"];
   const placements = [];
@@ -1653,10 +1768,17 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const placementInput = body.placements ?? body.placement ?? existing?.placements ?? existing?.placement ?? adminLegacyStorePlacements(existing);
   const placements = adminNormalizeStorePlacements(placementInput);
   const placement = placements[0] || "stores";
-  const flags = storePlacementFlags(placements);
+  let flags = storePlacementFlags(placements);
+  if (body.is_top === true && !placements.includes("TOP 10")) placements.unshift("TOP 10");
+  if (body.isNew === true && !placements.includes("NEW")) placements.push("NEW");
+  if (body.isFeatured === true && !placements.includes("TOP")) placements.push("TOP");
+  flags = storePlacementFlags(placements);
   const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
+  const topPosition = Math.max(0, Number(body.top_position ?? body.topPosition ?? existing?.top_position ?? position));
   const image = String(body.image || body.avatar || existing?.image || "assets/cerber-emblem.png").trim();
   const cover = String(body.cover || body.banner || existing?.cover || image || "assets/market-banner.png").trim();
+  const visibleInCatalog = adminStoreVisible(body, existing, flags);
+  const isStopped = body.is_stopped === true || body.stopped === true || body.salesBlocked === true || existing?.salesBlocked === true || existing?.is_stopped === true;
   return {
     ...(existing || {}),
     id,
@@ -1671,14 +1793,24 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     cover,
     banner: cover,
     status: adminNormalizeStoreStatus(body.status || existing?.status || "ACTIVE"),
-    visibleInCatalog: body.visibleInCatalog != null ? body.visibleInCatalog !== false : flags.visibleInCatalog,
-    isTop: flags.isTop,
+    is_active: body.is_active !== false,
+    is_deleted: body.is_deleted === true || body.deleted === true,
+    is_stopped: isStopped,
+    published: body.published !== false,
+    visibility: String(body.visibility || existing?.visibility || "public"),
+    visibleInCatalog,
+    isTop: flags.isTop || body.is_top === true,
+    is_top: flags.isTop || body.is_top === true,
     isFeatured: flags.isFeatured,
     isNew: flags.isNew,
     placement,
     placements,
     homepagePosition: position,
     position,
+    top_position: topPosition,
+    topPosition,
+    domains: Array.isArray(body.domains) ? body.domains : (Array.isArray(existing?.domains) ? existing.domains : ["*"]),
+    domain_id: body.domain_id || existing?.domain_id || "*",
     countries,
     regions: countries,
     cities: Array.isArray(body.cities) ? body.cities : (existing?.cities || []),
@@ -3061,6 +3193,14 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       lastSeenAt: Date.now()
     };
     if (!existing) state.mirrorBots.unshift(mirror);
+    console.log("[mirror-bot] created", {
+      id: mirror.id,
+      userId: ownerLoginKey,
+      chatId: String(chatId),
+      botUsername: mirror.botUsername,
+      webhookId: mirror.webhookId,
+      webhookOk: mirror.webhookOk
+    });
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
     state.adminLogs.unshift({
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3097,6 +3237,11 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     });
     await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}\n\nОткройте его в Telegram: там будет полное меню CERBER.`, botMirrorOnlyKeyboard()).catch(() => {});
   } catch (error) {
+    console.error("[mirror-bot] create failed", {
+      userId: ownerLoginKey || "",
+      chatId: String(chatId),
+      error: String(error.message || error).slice(0, 300)
+    });
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
     state.adminLogs.unshift({
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3305,5 +3450,10 @@ adminRealtimeServer.on("connection", (socket, req) => {
     socket.close(1008, "Unauthorized");
     return;
   }
+  socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
+});
+
+publicRealtimeServer = new WebSocketServer({ server, path: "/api/realtime" });
+publicRealtimeServer.on("connection", (socket) => {
   socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
 });

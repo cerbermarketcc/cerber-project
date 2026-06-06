@@ -2,7 +2,7 @@ const root = document.getElementById("admin-app");
 const TOKEN_KEY = "cerber_market_admin_token";
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
-const API_ORIGIN = LOCAL_API_HOSTS.includes(location.hostname) || location.hostname === "cerber.vip" ? location.origin : PRIMARY_API_ORIGIN;
+const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Логи", "Боты"];
 
