@@ -247,8 +247,8 @@ function requireDb() {
 }
 
 async function verifyCaptcha(token, req) {
-  if (!turnstileSecretKey) {
-    console.warn("[captcha] TURNSTILE_SECRET_KEY is not configured; captcha verification skipped");
+  if (!turnstileSiteKey || !turnstileSecretKey) {
+    console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
     return;
   }
   if (!token) {
