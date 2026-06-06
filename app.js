@@ -2040,9 +2040,11 @@ function renderAuth(message = "") {
           <label class="field">${tr("username")}<input name="login" required autocomplete="username"></label>
           <label class="field">${tr("password")}<input name="password" type="password" required autocomplete="current-password"></label>
           ${API_ENABLED ? `
-            <div class="captcha-box">
-              ${TURNSTILE_SITE_KEY ? `<div id="turnstile-widget"></div>` : `<p class="notice">Captcha is not configured</p>`}
-            </div>
+            ${TURNSTILE_SITE_KEY ? `
+              <div class="captcha-box">
+                <div id="turnstile-widget"></div>
+              </div>
+            ` : ""}
           ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit">${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
@@ -2126,7 +2128,7 @@ function mountTurnstile() {
 }
 
 function captchaToken() {
-  if (!API_ENABLED) return "";
+  if (!API_ENABLED || !TURNSTILE_SITE_KEY) return "";
   if (!window.turnstile || turnstileWidgetId === null) return "";
   return window.turnstile.getResponse(turnstileWidgetId);
 }
@@ -2141,7 +2143,7 @@ async function handleAuth(event) {
   const login = data.get("login").trim();
   const password = data.get("password");
   const captcha = API_ENABLED ? captchaToken() : data.get("captcha");
-  if (!captcha) return renderAuth(tr("needCaptcha"));
+  if ((API_ENABLED && TURNSTILE_SITE_KEY && !captcha) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
 
   if (authMode === "register") {
     if (API_ENABLED) {

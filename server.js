@@ -248,9 +248,8 @@ function requireDb() {
 
 async function verifyCaptcha(token, req) {
   if (!turnstileSecretKey) {
-    const error = new Error("Captcha is not configured");
-    error.status = 500;
-    throw error;
+    console.warn("[captcha] TURNSTILE_SECRET_KEY is not configured; captcha verification skipped");
+    return;
   }
   if (!token) {
     const error = new Error("Подтвердите, что вы не робот");
