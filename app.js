@@ -2680,6 +2680,7 @@ function renderProductView(storeId, productId) {
   activeStoreId = storeId;
   activeProductId = productId;
   const store = storeById(storeId);
+  if (!store) return renderCatalog();
   const product = productById(store, productId);
   if (!product) return renderStore(store.id, "positions");
   const positions = productPositions(product);
@@ -3247,6 +3248,7 @@ function renderChat(storeId) {
   route = "chat";
   activeStoreId = storeId;
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
+  if (!store) return renderCatalog();
   layout(`
     <section class="screen">
       <article class="panel">
@@ -7337,24 +7339,63 @@ function renderCurrent() {
   if (route === "owner") return renderOwnerPanel();
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
-  if (route === "product") return renderProductView(activeStoreId || db.stores[0].id, activeProductId);
-  if (route === "store") return renderStore(activeStoreId || db.stores[0].id, activeStoreTab);
-  if (route === "chat") return renderChat(activeStoreId || db.stores[0].id);
+  if (route === "product") return renderProductView(activeStoreId || db.stores[0]?.id || "", activeProductId);
+  if (route === "store") return renderStore(activeStoreId || db.stores[0]?.id || "", activeStoreTab);
+  if (route === "chat") return renderChat(activeStoreId || db.stores[0]?.id || "");
   renderHome();
 }
 
+function renderFallbackScreen() {
+  document.body.dataset.theme = db.theme || "light";
+  root.innerHTML = `
+    <main class="auth-wrap">
+      <section class="auth-card">
+        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <h1>CERBER</h1>
+        <p>Сайт загружается. Обновите страницу через несколько секунд.</p>
+        <button class="primary" data-reload-page>Обновить</button>
+      </section>
+    </main>
+    <div class="toast"></div>
+  `;
+  document.querySelector("[data-reload-page]")?.addEventListener("click", () => location.reload());
+}
+
+function safeRenderCurrent() {
+  try {
+    return renderCurrent();
+  } catch (error) {
+    console.error("[render] failed", error);
+    route = "home";
+    activeStoreId = "";
+    activeProductId = "";
+    activePositionId = "";
+    try {
+      return renderHome();
+    } catch (fallbackError) {
+      console.error("[render] fallback failed", fallbackError);
+      return renderFallbackScreen();
+    }
+  }
+}
+
 async function initApp() {
-  await loadRemoteConfig();
-  await loadCmsTextOverrides();
-  await loadRemoteState();
-  await loadRemoteSession();
-  await fetchLitecoinUsdRate();
+  safeRenderCurrent();
   watchCmsVisualTextOverrides();
   connectRealtime();
-  renderCurrent();
+  try {
+    await loadRemoteConfig();
+    await loadCmsTextOverrides();
+    await loadRemoteState();
+    await loadRemoteSession();
+    await fetchLitecoinUsdRate();
+  } catch (error) {
+    console.error("[init] remote bootstrap failed", error);
+  }
+  safeRenderCurrent();
   setTimeout(showPendingSiteBroadcast, 350);
 }
 
-window.addEventListener("hashchange", renderCurrent);
+window.addEventListener("hashchange", safeRenderCurrent);
 
 initApp();
