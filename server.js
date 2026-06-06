@@ -777,6 +777,28 @@ app.put("/api/cms-texts", async (req, res, next) => {
   }
 });
 
+function sellerStorePatch(existing = {}, input = {}) {
+  const image = input.image || input.avatar || existing.image || existing.avatar || "";
+  const cover = input.cover || input.banner || existing.cover || existing.banner || image;
+  return {
+    ...existing,
+    name: String(input.name ?? existing.name ?? "").trim(),
+    short: String(input.short ?? existing.short ?? "").trim(),
+    description: String(input.description ?? existing.description ?? "").trim(),
+    image,
+    avatar: image,
+    cover,
+    banner: cover,
+    gallery: Array.isArray(input.gallery) ? input.gallery.slice(0, 5) : (Array.isArray(existing.gallery) ? existing.gallery : []),
+    products: Array.isArray(input.products) ? input.products : (Array.isArray(existing.products) ? existing.products : []),
+    reviewsList: Array.isArray(input.reviewsList) ? input.reviewsList : (Array.isArray(existing.reviewsList) ? existing.reviewsList : []),
+    enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
+    autoReleaseHours: Math.min(72, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
+    ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
+    updatedAt: Date.now()
+  };
+}
+
 app.post("/api/store-admin/login", async (req, res, next) => {
   try {
     requireDb();
@@ -815,40 +837,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     }
     const { data: row } = await supabase.from("stores").select("data").eq("id", token.storeId).maybeSingle();
     const existing = row?.data || {};
-    const existingPlacements = Array.isArray(existing.placements) && existing.placements.length
-      ? existing.placements
-      : adminLegacyStorePlacements(existing);
-    const mergedStore = {
-      ...existing,
-      ...store,
-      id: existing.id || store.id,
-      ownerLogin: existing.ownerLogin || store.ownerLogin || "",
-      status: existing.status || store.status || "active",
-      salesBlocked: Boolean(existing.salesBlocked),
-      is_active: existing.is_active !== false,
-      is_deleted: existing.is_deleted === true || existing.deleted === true,
-      is_stopped: existing.is_stopped === true || existing.salesBlocked === true,
-      published: existing.published !== false,
-      visibility: existing.visibility || "public",
-      visibleInCatalog: existing.visibleInCatalog !== false,
-      isTop: existing.isTop === true,
-      is_top: existing.isTop === true || existing.is_top === true,
-      isFeatured: existing.isFeatured === true,
-      isNew: existing.isNew === true,
-      placement: existing.placement || existingPlacements[0] || "stores",
-      placements: existingPlacements.includes("stores") ? existingPlacements : [...existingPlacements, "stores"],
-      position: Number(existing.position ?? existing.homepagePosition ?? store.position ?? 0),
-      homepagePosition: Number(existing.homepagePosition ?? existing.position ?? store.homepagePosition ?? 0),
-      top_position: Number(existing.top_position ?? existing.topPosition ?? existing.position ?? existing.homepagePosition ?? store.position ?? 0),
-      topPosition: Number(existing.topPosition ?? existing.top_position ?? existing.position ?? existing.homepagePosition ?? store.position ?? 0),
-      domains: Array.isArray(existing.domains) ? existing.domains : ["*"],
-      domain_id: existing.domain_id || "*",
-      commissionPercent: Number(existing.commissionPercent ?? store.commissionPercent ?? 0),
-      countries: Array.isArray(existing.countries) && existing.countries.length ? existing.countries : (Array.isArray(store.countries) ? store.countries : []),
-      regions: Array.isArray(existing.regions) && existing.regions.length ? existing.regions : (Array.isArray(existing.countries) ? existing.countries : (Array.isArray(store.regions) ? store.regions : [])),
-      createdAt: existing.createdAt || store.createdAt || Date.now(),
-      updatedAt: Date.now()
-    };
+    const mergedStore = sellerStorePatch(existing, store);
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
     console.log("[store-admin] store saved", { storeId: mergedStore.id, ownerLogin: mergedStore.ownerLogin || "", products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0 });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
@@ -884,19 +873,14 @@ app.put("/api/state", async (req, res, next) => {
     const state = req.body.state || {};
     const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const currentSettingsData = currentSettings?.data || {};
-    if (Array.isArray(state.stores)) {
-      for (const store of state.stores.filter((item) => item && item.id)) {
-        if (storeDeletedByState(currentSettingsData, store)) continue;
-        await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
-      }
-    }
     await supabase.from("app_settings").upsert({
       id: "main",
       data: {
+        ...currentSettingsData,
         theme: state.theme || "light",
         lang: state.lang || "ru",
         orders: Array.isArray(state.orders) ? state.orders : [],
-        exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards : defaultExchangeCards,
+        exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
         exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
         groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
         groupSettings: state.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
@@ -907,39 +891,19 @@ app.put("/api/state", async (req, res, next) => {
         ltcBalances: state.ltcBalances || {},
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
-        telegramBot: state.telegramBot || currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
-        mirrorBots: Array.isArray(state.mirrorBots) ? state.mirrorBots : (currentSettingsData.mirrorBots || []),
-        siteNotifications: Array.isArray(state.siteNotifications) ? state.siteNotifications : (currentSettingsData.siteNotifications || []),
-        broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : (currentSettingsData.broadcasts || []),
-        userFilters: Array.isArray(state.userFilters) ? state.userFilters : (currentSettingsData.userFilters || []),
-        blockedUsers: state.blockedUsers || currentSettingsData.blockedUsers || {},
+        telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
+        mirrorBots: currentSettingsData.mirrorBots || [],
+        siteNotifications: currentSettingsData.siteNotifications || [],
+        broadcasts: currentSettingsData.broadcasts || [],
+        userFilters: currentSettingsData.userFilters || [],
+        blockedUsers: currentSettingsData.blockedUsers || {},
         storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
-        ownerSettings: state.ownerSettings || {},
-        paymentSettings: state.paymentSettings || {},
+        ownerSettings: currentSettingsData.ownerSettings || {},
+        paymentSettings: currentSettingsData.paymentSettings || {},
         referralPeriod: state.referralPeriod || {},
         filters: state.filters || {}
       }
     }, { onConflict: "id" });
-
-    if (Array.isArray(state.stores)) {
-      for (const store of state.stores) {
-        if (storeDeletedByState(currentSettingsData, store)) continue;
-        await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
-        const ownerKey = loginKey(store.ownerLogin);
-        if (ownerKey) {
-          const { data: owner } = await supabase.from("profiles").select("login_key").eq("login_key", ownerKey).maybeSingle();
-          if (!owner) {
-            await supabase.from("profiles").insert({
-              login: store.ownerLogin,
-              login_key: ownerKey,
-              password_hash: await bcrypt.hash("123", 12),
-              name: store.ownerLogin,
-              role: "seller"
-            });
-          }
-        }
-      }
-    }
 
     if (Array.isArray(state.exchangeCards)) {
       for (const card of state.exchangeCards) {
@@ -967,9 +931,9 @@ app.put("/api/state", async (req, res, next) => {
 
     console.log("[state] saved", {
       user: user.login,
-      stores: Array.isArray(state.stores) ? state.stores.length : 0,
+      ignoredStores: Array.isArray(state.stores) ? state.stores.length : 0,
       orders: Array.isArray(state.orders) ? state.orders.length : 0,
-      mirrorBots: Array.isArray(state.mirrorBots) ? state.mirrorBots.length : (currentSettingsData.mirrorBots || []).length
+      mirrorBots: (currentSettingsData.mirrorBots || []).length
     });
     notifyRealtime("state_updated", { source: "api-state", user: user.login });
     res.json(await stateFor(user));

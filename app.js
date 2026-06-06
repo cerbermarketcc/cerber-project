@@ -1321,17 +1321,31 @@ function sellerAdminStore() {
   return db.stores.find((store) => store.id === id) || null;
 }
 
-function storeIsActive(store = {}) {
-  if (store.is_deleted === true || store.deleted === true) return false;
-  return !["deleted", "delete", "disabled", "disable"].includes(String(store.status || "active").toLowerCase());
+function storeIsDeleted(store = {}) {
+  const status = String(store.status || "").toLowerCase();
+  return store.is_deleted === true
+    || store.deleted === true
+    || ["deleted", "delete"].includes(status);
 }
 
 function storeIsStopped(store = {}) {
-  return store.is_stopped === true || store.stopped === true || store.salesBlocked === true || String(store.status || "").toLowerCase() === "blocked";
+  const status = String(store.status || "").toLowerCase();
+  return store.is_stopped === true
+    || store.stopped === true
+    || store.salesBlocked === true
+    || ["disabled", "disable", "stopped", "blocked"].includes(status);
+}
+
+function storeIsActive(store = {}) {
+  return storeIsVisible(store) && !storeIsStopped(store);
 }
 
 function storeIsVisible(store = {}) {
-  return storeIsActive(store);
+  if (storeIsDeleted(store)) return false;
+  if (store.published === false) return false;
+  if (store.is_active === false && !storeIsStopped(store)) return false;
+  if (["hidden", "private"].includes(String(store.visibility || "").toLowerCase())) return false;
+  return true;
 }
 
 function storeAdminPassword(store) {
@@ -1366,7 +1380,7 @@ function exchangeCardById(id = activeExchangeId) {
 function filteredStores() {
   const filters = db.filters || {};
   return (db.stores || []).filter((store) => {
-    if (!storeIsActive(store) && !isAdmin()) return false;
+    if (!storeIsVisible(store) && !isAdmin()) return false;
     const products = store.products || [];
     const positions = products.flatMap((product) => product.positions || []);
     const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
@@ -2223,7 +2237,7 @@ function renderHome() {
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
     document.querySelector("[data-feed]").innerHTML = homeStores(activeHomeTab)
-      .filter((store) => `${store.name} ${store.short} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
+      .filter((store) => `${store.name} ${store.short} ${store.description} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -2273,7 +2287,7 @@ function renderCatalog() {
   document.querySelector("[data-search]").oninput = (event) => {
     const q = event.target.value.toLowerCase();
     document.querySelector("[data-feed]").innerHTML = visibleStores(false)
-      .filter((store) => `${store.name} ${store.short} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
+      .filter((store) => `${store.name} ${store.short} ${store.description} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -2584,6 +2598,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   activeStoreTab = tab;
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
   if (!store) return renderCatalog();
+  if (storeIsStopped(store) && !isAdmin() && !sameLogin(store.ownerLogin, db.currentUser)) return renderCatalog();
   const coverImage = store.cover || store.banner || store.image || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
