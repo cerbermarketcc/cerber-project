@@ -2113,8 +2113,8 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
     event.preventDefault();
     const password = new FormData(event.currentTarget).get("password");
-    if (API_ENABLED) {
-         try {
+        if (API_ENABLED) {
+      try {
         const payload = await apiFetch("/api/store-admin/login", {
           method: "POST",
           timeoutMs: 12000,
@@ -2126,6 +2126,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
         return;
       }
+    }
     if (password !== storeAdminPassword(store)) {
       renderSellerAdminLogin(store.id, "Неверный пароль");
       return;
