@@ -239,6 +239,17 @@ function storeDeletedByState(state = {}, store = {}) {
   );
 }
 
+function mergeStoreSources(primaryStores = [], fallbackStores = []) {
+  const map = new Map();
+  (fallbackStores || []).forEach((store) => {
+    if (store?.id) map.set(String(store.id), store);
+  });
+  (primaryStores || []).forEach((store) => {
+    if (store?.id) map.set(String(store.id), store);
+  });
+  return Array.from(map.values());
+}
+
 function requireDb() {
   if (!supabase) {
     const error = new Error("Supabase is not configured");
@@ -343,8 +354,8 @@ async function stateFor(user) {
   const settingsData = settings?.data || {};
   const mirrorBots = adminCollectMirrorBots(settingsData);
   const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
-  const visibleStores = (stores || [])
-    .map((row) => row.data)
+  const allStores = mergeStoreSources((stores || []).map((row) => row.data), settingsData.ownerStores || []);
+  const visibleStores = allStores
     .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
   const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
@@ -998,6 +1009,7 @@ app.post("/api/owner/stores", async (req, res, next) => {
       error.status = 500;
       throw error;
     }
+    await saveOwnerStoreFallback(readBack.data);
     await clearDeletedStoreTombstone(savedStore.id);
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
     res.json({ store: readBack.data, panel: adminStorePanelLinks(readBack.data), verifiedSaved: Boolean(savedRow?.id), verifiedReadBack: true });
@@ -1219,7 +1231,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
-    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = adminBuildStoreFromBody(req.body || {}, row.data);
     if (store.ownerLogin) await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
@@ -1250,17 +1262,21 @@ app.delete("/api/admin/stores/:id", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
-    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    // Fallback stores are stored in app_settings.ownerStores, so load settings before deciding 404.
     const state = await loadSettingsState();
     const storeId = req.params.id;
+    const fallbackStore = (state.ownerStores || []).find((item) => String(item?.id || "") === String(storeId));
+    const storeData = row?.data || fallbackStore;
+    if (!storeData) return res.status(404).json({ error: "Store not found" });
     state.deletedStoreIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds : [];
     if (!state.deletedStoreIds.includes(storeId)) state.deletedStoreIds.push(storeId);
     state.orders = (state.orders || []).filter((order) => order.storeId !== storeId);
     state.storeApplications = (state.storeApplications || []).filter((item) => item.storeId !== storeId && item.id !== storeId);
     await saveSettingsState(state);
     await supabase.from("stores").delete().eq("id", storeId);
-    await appendAdminLog("store_deleted", admin.login, { storeId, name: row.data.name || "" });
-    console.log("[admin-store] deleted", { storeId, name: row.data.name || "" });
+    await removeOwnerStoreFallback(storeId);
+    await appendAdminLog("store_deleted", admin.login, { storeId, name: storeData.name || "" });
+    console.log("[admin-store] deleted", { storeId, name: storeData.name || "" });
     notifyRealtime("store_deleted", { storeId, source: "market-admin" });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
@@ -1272,7 +1288,7 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
   try {
     const admin = requireAdmin(req);
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
-    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = row.data;
     const product = (store.products || []).find((item) => item.id === req.params.productId);
     if (!product) return res.status(404).json({ error: "Товар не найден" });
@@ -1293,7 +1309,7 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
   try {
     const admin = requireAdmin(req);
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
-    if (!row?.data) return res.status(404).json({ error: "Магазин не найден" });
+    if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = row.data;
     store.products = (store.products || []).filter((item) => item.id !== req.params.productId);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
@@ -1601,6 +1617,25 @@ async function clearDeletedStoreTombstone(storeId) {
   console.log("[store] tombstone cleared", { storeId: id });
 }
 
+async function saveOwnerStoreFallback(store = {}) {
+  if (!store.id) return;
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
+  state.ownerStores = [store, ...ownerStores.filter((item) => String(item?.id || "") !== String(store.id))];
+  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
+async function removeOwnerStoreFallback(storeId) {
+  const id = String(storeId || "");
+  if (!id) return;
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
+  state.ownerStores = ownerStores.filter((item) => String(item?.id || "") !== id);
+  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
 async function loadSettingsState() {
   await ensureSeed();
   const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
@@ -1622,9 +1657,10 @@ async function adminLoadMarketplace() {
     supabase.from("sessions").select("login_key,created_at")
   ]);
   const state = settings?.data || {};
+  const mergedStores = mergeStoreSources((stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), state.ownerStores || []);
   return {
     state,
-    stores: (stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })),
+    stores: mergedStores,
     messages: (messages || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })),
     profiles: profiles || [],
     sessions: sessions || []
