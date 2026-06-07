@@ -982,6 +982,7 @@ app.post("/api/owner/stores", async (req, res, next) => {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await clearDeletedStoreTombstone(store.id);
     await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
     console.log("[owner-store] created", { storeId: store.id, ownerLogin: store.ownerLogin });
@@ -1183,6 +1184,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     if (existing) return res.status(409).json({ error: "Магазин с таким ID уже существует" });
     await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await clearDeletedStoreTombstone(store.id);
     const panel = adminStorePanelLinks(store);
     await appendAdminLog("store_created", admin.login, { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
     console.log("[admin-store] created", { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
@@ -1201,6 +1203,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     const store = adminBuildStoreFromBody(req.body || {}, row.data);
     if (store.ownerLogin) await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await clearDeletedStoreTombstone(store.id);
     await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
     console.log("[admin-store] updated", { storeId: store.id, fields: Object.keys(req.body || {}) });
     notifyRealtime("store_updated", { storeId: store.id, source: "market-admin" });
@@ -1564,6 +1567,17 @@ async function saveSettingsState(state) {
   };
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
+}
+
+async function clearDeletedStoreTombstone(storeId) {
+  const id = String(storeId || "");
+  if (!id) return;
+  const state = await loadSettingsState();
+  const deletedIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds.map(String) : [];
+  if (!deletedIds.includes(id)) return;
+  state.deletedStoreIds = deletedIds.filter((item) => item !== id);
+  await saveSettingsState(state);
+  console.log("[store] tombstone cleared", { storeId: id });
 }
 
 async function loadSettingsState() {

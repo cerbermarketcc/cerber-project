@@ -14,6 +14,7 @@ const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const API_ORIGIN = location.protocol === "file:"
   ? PRIMARY_API_ORIGIN
   : location.origin;
+const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const API_ENABLED = location.protocol !== "file:";
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
@@ -1071,12 +1072,12 @@ function resetStoreStats(next) {
   }));
 }
 
-function apiUrl(path) {
+function apiUrl(path, origin = API_ORIGIN) {
   if (/^https?:\/\//i.test(String(path || ""))) return path;
-  return `${API_ORIGIN}${path}`;
+  return `${origin}${path}`;
 }
 
-async function apiFetch(path, options = {}) {
+async function apiFetchOnce(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
     ...(options.headers || {})
@@ -1096,6 +1097,20 @@ async function apiFetch(path, options = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function apiFetch(path, options = {}) {
+  let lastError = null;
+  for (const origin of API_ORIGINS) {
+    try {
+      return await apiFetchOnce(apiUrl(path, origin), options);
+    } catch (error) {
+      lastError = error;
+      const canRetry = origin !== PRIMARY_API_ORIGIN && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|РЎРµСЂРІРµСЂ/i.test(String(error.message || error));
+      if (!canRetry) throw error;
+    }
+  }
+  throw lastError || new Error("API error");
 }
 
 function applyRemoteState(payload) {
