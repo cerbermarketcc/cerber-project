@@ -1596,10 +1596,14 @@ function verifyNowpaymentsSignature(req) {
 }
 
 async function saveSettingsState(state) {
+  const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const currentData = currentSettings?.data || {};
   const next = {
+    ...currentData,
     ...(state || {}),
     telegramBot: state?.telegramBot || { users: {}, sentMessages: {} },
-    mirrorBots: Array.isArray(state?.mirrorBots) ? state.mirrorBots : []
+    mirrorBots: Array.isArray(state?.mirrorBots) ? state.mirrorBots : (currentData.mirrorBots || []),
+    ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores : (currentData.ownerStores || [])
   };
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
@@ -1624,6 +1628,7 @@ async function saveOwnerStoreFallback(store = {}) {
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
   state.ownerStores = [store, ...ownerStores.filter((item) => String(item?.id || "") !== String(store.id))];
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  console.log("[owner-store] fallback saved", { storeId: store.id, ownerStores: state.ownerStores.length });
 }
 
 async function removeOwnerStoreFallback(storeId) {
