@@ -981,13 +981,21 @@ app.post("/api/owner/stores", async (req, res, next) => {
     if (!store.name || !store.ownerLogin || !store.adminPassword) {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    const { error: storeError } = await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    if (storeError) {
+      console.error("[owner-store] db save failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: storeError.message });
+      throw storeError;
+    }
     await clearDeletedStoreTombstone(store.id);
-    await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
-    await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
-    console.log("[owner-store] created", { storeId: store.id, ownerLogin: store.ownerLogin });
     notifyRealtime("store_created", { storeId: store.id, ownerLogin: store.ownerLogin, source: "owner-panel" });
-    res.json({ store, panel: adminStorePanelLinks(store), overview: adminBuildOverview(await adminLoadMarketplace()) });
+    res.json({ store, panel: adminStorePanelLinks(store) });
+    Promise.resolve().then(async () => {
+      await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
+      await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
+      console.log("[owner-store] created", { storeId: store.id, ownerLogin: store.ownerLogin });
+    }).catch((error) => {
+      console.error("[owner-store] post-create task failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: error.message });
+    });
   } catch (error) {
     next(error);
   }
@@ -1572,11 +1580,12 @@ async function saveSettingsState(state) {
 async function clearDeletedStoreTombstone(storeId) {
   const id = String(storeId || "");
   if (!id) return;
-  const state = await loadSettingsState();
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
   const deletedIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds.map(String) : [];
   if (!deletedIds.includes(id)) return;
   state.deletedStoreIds = deletedIds.filter((item) => item !== id);
-  await saveSettingsState(state);
+  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
   console.log("[store] tombstone cleared", { storeId: id });
 }
 
