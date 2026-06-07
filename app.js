@@ -2114,18 +2114,18 @@ function renderSellerAdminLogin(storeId = "", message = "") {
     event.preventDefault();
     const password = new FormData(event.currentTarget).get("password");
     if (API_ENABLED) {
-      try {
-               const payload = await apiFetch("/api/store-admin/login", {
+         try {
+        const payload = await apiFetch("/api/store-admin/login", {
           method: "POST",
           timeoutMs: 12000,
           body: JSON.stringify({ storeId: store.id, password })
         });
         localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
+      } catch (error) {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
         return;
       }
-    }
     if (password !== storeAdminPassword(store)) {
       renderSellerAdminLogin(store.id, "Неверный пароль");
       return;
