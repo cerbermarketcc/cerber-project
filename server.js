@@ -981,20 +981,25 @@ app.post("/api/owner/stores", async (req, res, next) => {
     if (!store.name || !store.ownerLogin || !store.adminPassword) {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
-    const { error: storeError } = await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    const { data: savedRow, error: storeError } = await supabase
+      .from("stores")
+      .upsert({ id: store.id, data: store }, { onConflict: "id" })
+      .select("id,data")
+      .single();
     if (storeError) {
       console.error("[owner-store] db save failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: storeError.message });
       throw storeError;
     }
-    await clearDeletedStoreTombstone(store.id);
-    notifyRealtime("store_created", { storeId: store.id, ownerLogin: store.ownerLogin, source: "owner-panel" });
-    res.json({ store, panel: adminStorePanelLinks(store) });
+    const savedStore = savedRow?.data || store;
+    await clearDeletedStoreTombstone(savedStore.id);
+    notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
+    res.json({ store: savedStore, panel: adminStorePanelLinks(savedStore), verifiedSaved: Boolean(savedRow?.id) });
     Promise.resolve().then(async () => {
-      await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
-      await appendAdminLog("owner_store_created", "owner-panel", { storeId: store.id, ownerLogin: store.ownerLogin });
-      console.log("[owner-store] created", { storeId: store.id, ownerLogin: store.ownerLogin });
+      await adminEnsureSellerProfile(savedStore.ownerLogin, savedStore.adminPassword, savedStore.ownerLogin);
+      await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
+      console.log("[owner-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
     }).catch((error) => {
-      console.error("[owner-store] post-create task failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: error.message });
+      console.error("[owner-store] post-create task failed", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, error: error.message });
     });
   } catch (error) {
     next(error);
