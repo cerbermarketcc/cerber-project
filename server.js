@@ -991,9 +991,16 @@ app.post("/api/owner/stores", async (req, res, next) => {
       throw storeError;
     }
     const savedStore = savedRow?.data || store;
+    const { data: readBack, error: readBackError } = await supabase.from("stores").select("id,data").eq("id", savedStore.id).maybeSingle();
+    if (readBackError || !readBack?.data) {
+      console.error("[owner-store] db readback failed", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, error: readBackError?.message || "missing row" });
+      const error = new Error("Store was not saved in database");
+      error.status = 500;
+      throw error;
+    }
     await clearDeletedStoreTombstone(savedStore.id);
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
-    res.json({ store: savedStore, panel: adminStorePanelLinks(savedStore), verifiedSaved: Boolean(savedRow?.id) });
+    res.json({ store: readBack.data, panel: adminStorePanelLinks(readBack.data), verifiedSaved: Boolean(savedRow?.id), verifiedReadBack: true });
     Promise.resolve().then(async () => {
       await adminEnsureSellerProfile(savedStore.ownerLogin, savedStore.adminPassword, savedStore.ownerLogin);
       await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
