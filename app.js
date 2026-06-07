@@ -5280,6 +5280,23 @@ function ownerStatCard(label, value) {
 }
 
 function renderOwnerPanel() {
+  try {
+    return renderOwnerPanelContent();
+  } catch (error) {
+    console.error("[owner-panel] render failed", error);
+    layout(`
+      <section class="screen">
+        <article class="panel">
+          <h2>Панель владельца</h2>
+          <p class="notice">Панель временно не загрузилась. Данные магазина сохранены, обновите страницу.</p>
+          <button class="primary" data-route="owner">Обновить</button>
+        </article>
+      </section>
+    `);
+  }
+}
+
+function renderOwnerPanelContent() {
   if (!isAdmin()) return renderOwnerAccess();
   route = "owner";
   const stats = marketStats();
@@ -7340,7 +7357,7 @@ function routeTo(next) {
   if (next === "rules") return openRulesModal();
   if (next === "messages" && route !== "messages") activePrivateLogin = "";
   route = next;
-  renderCurrent();
+  safeRenderCurrent();
 }
 
 function renderCurrent() {
@@ -7351,9 +7368,10 @@ function renderCurrent() {
     if (sellerAdminSessionId() === hashStoreId) return renderSeller();
     return renderSellerAdminLogin(hashStoreId);
   }
-  if (!db.currentUser || !currentUser()) return renderAuth();
   const directRoute = hashRoute();
   if (directRoute) route = directRoute;
+  if (route === "owner") return renderOwnerPanel();
+  if (!db.currentUser || !currentUser()) return renderAuth();
   if (route === "home") return renderHome();
   if (route === "catalog") return renderCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);
@@ -7367,7 +7385,6 @@ function renderCurrent() {
   if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
   if (route === "exchange-admin") return renderExchangeOperator();
   if (route === "wallet") return renderWallet();
-  if (route === "owner") return renderOwnerPanel();
   if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "product") return renderProductView(activeStoreId || db.stores[0]?.id || "", activeProductId);
