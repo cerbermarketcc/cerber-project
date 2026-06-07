@@ -10,7 +10,7 @@ const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
-const PRIMARY_API_ORIGIN = "https://cerber.vip";
+const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const API_ORIGIN = location.protocol === "file:"
   ? PRIMARY_API_ORIGIN
   : location.origin;
@@ -1092,7 +1092,7 @@ async function apiFetchOnce(path, options = {}) {
     if (!response.ok) throw new Error(payload.error || "API error");
     return payload;
   } catch (error) {
-    if (error.name === "AbortError") throw new Error("Сервер оплаты долго не отвечает. Попробуйте ещё раз.");
+   if (error.name === "AbortError") throw new Error("Сервер долго не отвечает. Проверьте backend/API и попробуйте ещё раз.");
     throw error;
   } finally {
     clearTimeout(timer);
