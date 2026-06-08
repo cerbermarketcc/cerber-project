@@ -1149,6 +1149,12 @@ async function loadRemoteState() {
   }
 }
 
+async function refreshRemoteState() {
+  if (!API_ENABLED) return;
+  const payload = await apiFetch("/api/state", { timeoutMs: 15000 });
+  applyRemoteState(payload);
+}
+
 function realtimeCanRenderNow() {
   const element = document.activeElement;
   return !(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
@@ -1246,22 +1252,24 @@ async function persistRemoteState() {
 }
 
 async function persistSellerAdminStore() {
-  if (!API_ENABLED) return;
+  if (!API_ENABLED) return false;
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = sellerAdminStore();
-  if (!token || !store) return;
+  if (!token || !store) return false;
   try {
-    const response = await fetch(apiUrl("/api/store-admin/store"), {
+    const payload = await apiFetch("/api/store-admin/store", {
       method: "PUT",
+      timeoutMs: 15000,
       headers: {
-        "Content-Type": "application/json",
         Authorization: `Bearer ${token}`
       },
       body: JSON.stringify({ store })
     });
-    if (!response.ok) throw new Error("Store admin save failed");
-  } catch {
-    showToast("Админка магазина временно не сохранила изменения в базе");
+    applyRemoteState(payload);
+    return true;
+  } catch (error) {
+    showToast(error.message || "Админка магазина временно не сохранила изменения в базе");
+    return false;
   }
 }
 
@@ -1274,7 +1282,6 @@ function saveDb() {
     showToast("LocalStorage недоступен");
   }
   persistRemoteState();
-  persistSellerAdminStore();
 }
 
 function clearSession() {
@@ -6175,6 +6182,14 @@ function bindAdminProductForms() {
       position.weight = data.get("weight").trim();
       position.stock = product.deliveryItems.length;
       saveDb();
+      if (route === "seller") {
+        const saved = await persistSellerAdminStore();
+        if (!saved) return;
+        await refreshRemoteState();
+        showToast("Товар сохранён");
+        renderSeller();
+        return;
+      }
       showToast("Товар сохранён");
       renderAdmin();
     };
@@ -6808,8 +6823,11 @@ function shopLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
-function shopPersistAndRender(tab = "dashboard") {
+async function shopPersistAndRender(tab = "dashboard") {
   saveDb();
+  const saved = await persistSellerAdminStore();
+  if (!saved) return;
+  await refreshRemoteState();
   showToast("Сохранено");
   renderShopPanel(tab);
 }
@@ -6829,7 +6847,7 @@ function bindShopPanelActions(store, activeTab) {
     if (image && image.size) store.image = await fileToDataUrl(image);
     if (cover && cover.size) store.cover = await fileToDataUrl(cover);
     if (!store.cover) store.cover = store.image || fallbackImage;
-    shopPersistAndRender("profile");
+    await shopPersistAndRender("profile");
   });
 
   document.querySelector("[data-shop-card-form]")?.addEventListener("submit", async (event) => {
@@ -6858,10 +6876,10 @@ function bindShopPanelActions(store, activeTab) {
       positions: [],
       reviewsList: []
     }, store));
-    shopPersistAndRender("cards");
+    await shopPersistAndRender("cards");
   });
 
-  document.querySelectorAll("[data-shop-card-move]").forEach((button) => button.onclick = () => {
+  document.querySelectorAll("[data-shop-card-move]").forEach((button) => button.onclick = async () => {
     const ordered = sortedStoreProducts(store, true);
     const index = ordered.findIndex((product) => product.id === button.dataset.cardId);
     const delta = button.dataset.shopCardMove === "up" ? -1 : 1;
@@ -6871,16 +6889,16 @@ function bindShopPanelActions(store, activeTab) {
     const currentPosition = Number(current.position || index + 1);
     current.position = Number(other.position || index + delta + 1);
     other.position = currentPosition;
-    shopPersistAndRender("cards");
+    await shopPersistAndRender("cards");
   });
 
-  document.querySelectorAll("[data-shop-card-delete]").forEach((button) => button.onclick = () => {
+  document.querySelectorAll("[data-shop-card-delete]").forEach((button) => button.onclick = async () => {
     if (!confirm("Удалить карточку и все товары внутри?")) return;
     store.products = (store.products || []).filter((product) => product.id !== button.dataset.shopCardDelete);
-    shopPersistAndRender("cards");
+    await shopPersistAndRender("cards");
   });
 
-  document.querySelector("[data-shop-product-form]")?.addEventListener("submit", (event) => {
+  document.querySelector("[data-shop-product-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const product = (store.products || []).find((item) => item.id === data.get("cardId"));
@@ -6904,24 +6922,24 @@ function bindShopPanelActions(store, activeTab) {
     });
     product.priceUsd = product.positions.length ? Math.min(...product.positions.map((p) => Number(p.priceUsd || priceUsd))) : priceUsd;
     product.price = `от ${Number(product.priceUsd || 0)}$`;
-    shopPersistAndRender("products");
+    await shopPersistAndRender("products");
   });
 
-  document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = () => {
+  document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
     const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
     if (!product) return;
     product.positions = (product.positions || []).filter((position) => position.id !== button.dataset.shopPositionDelete);
-    shopPersistAndRender("products");
+    await shopPersistAndRender("products");
   });
 
-  document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", (event) => {
+  document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     store.ltcWallet = String(data.get("ltcWallet") || "").trim();
     store.autoReleaseHours = Math.max(0, Math.min(72, Number(data.get("autoReleaseHours") || 24)));
     const nextPassword = String(data.get("adminPassword") || "").trim();
     if (nextPassword) store.adminPassword = nextPassword;
-    shopPersistAndRender("settings");
+    await shopPersistAndRender("settings");
   });
 }
 
@@ -7012,6 +7030,9 @@ function renderSeller() {
       store.cover = image;
     }
     saveDb();
+    const saved = await persistSellerAdminStore();
+    if (!saved) return;
+    await refreshRemoteState();
     showToast("Страница магазина сохранена");
     renderSeller();
   };
@@ -7063,6 +7084,10 @@ function renderSeller() {
       reviewsList: []
     });
     saveDb();
+    const saved = await persistSellerAdminStore();
+    if (!saved) return;
+    await refreshRemoteState();
+    showToast("Товар сохранён");
     renderSeller();
   };
   bindAdminProductForms();

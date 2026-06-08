@@ -1025,7 +1025,12 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     const mergedStore = sellerStorePatch(existing, store);
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
     await saveOwnerStoreFallback(mergedStore);
-    console.log("[store-admin] store saved", { storeId: mergedStore.id, ownerLogin: mergedStore.ownerLogin || "", products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0 });
+    console.log("[store-admin] store saved", {
+      storeId: mergedStore.id,
+      ownerLogin: mergedStore.ownerLogin || "",
+      products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
+      productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
+    });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
     res.json(await stateFor(null));
   } catch (error) {
