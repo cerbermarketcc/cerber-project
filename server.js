@@ -490,10 +490,18 @@ async function stateFor(user) {
     const settingsData = settings?.data || {};
     const mirrorBots = adminCollectMirrorBots(settingsData);
     const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
-    const allStores = mergeStoreSources((stores || []).map((row) => row.data), settingsData.ownerStores || []);
+    const fallbackStores = Array.isArray(settingsData.publicStoresCache) && settingsData.publicStoresCache.length
+      ? settingsData.publicStoresCache
+      : (settingsData.ownerStores || []);
+    const allStores = mergeStoreSources((stores || []).map((row) => row.data), fallbackStores);
     const visibleStores = allStores
       .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
       .map(publicStoreForState);
+    if ((stores || []).length && visibleStores.length) {
+      savePublicStoresCache(visibleStores).catch((error) => {
+        console.error("[stateFor] public stores cache save failed", { message: error.message });
+      });
+    }
     const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
     return {
@@ -1762,10 +1770,20 @@ async function saveSettingsState(state) {
     ...(state || {}),
     telegramBot: state?.telegramBot || { users: {}, sentMessages: {} },
     mirrorBots: Array.isArray(state?.mirrorBots) ? state.mirrorBots : (currentData.mirrorBots || []),
-    ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores : (currentData.ownerStores || [])
+    ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores : (currentData.ownerStores || []),
+    publicStoresCache: Array.isArray(state?.publicStoresCache) ? state.publicStoresCache : (currentData.publicStoresCache || [])
   };
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
+}
+
+async function savePublicStoresCache(stores = []) {
+  if (!Array.isArray(stores) || !stores.length) return;
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  const state = settings?.data || {};
+  state.publicStoresCache = stores.map(publicStoreForState);
+  state.publicStoresCacheAt = Date.now();
+  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
 }
 
 async function clearDeletedStoreTombstone(storeId) {
@@ -1786,6 +1804,9 @@ async function saveOwnerStoreFallback(store = {}) {
   const state = settings?.data || {};
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
   state.ownerStores = [store, ...ownerStores.filter((item) => String(item?.id || "") !== String(store.id))];
+  const publicStoresCache = Array.isArray(state.publicStoresCache) ? state.publicStoresCache : [];
+  state.publicStoresCache = [publicStoreForState(store), ...publicStoresCache.filter((item) => String(item?.id || "") !== String(store.id))];
+  state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
   console.log("[owner-store] fallback saved", { storeId: store.id, ownerStores: state.ownerStores.length });
 }
@@ -1797,6 +1818,9 @@ async function removeOwnerStoreFallback(storeId) {
   const state = settings?.data || {};
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
   state.ownerStores = ownerStores.filter((item) => String(item?.id || "") !== id);
+  const publicStoresCache = Array.isArray(state.publicStoresCache) ? state.publicStoresCache : [];
+  state.publicStoresCache = publicStoresCache.filter((item) => String(item?.id || "") !== id);
+  state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
 }
 
