@@ -282,6 +282,25 @@ function publicStoreForState(store = {}) {
   return item;
 }
 
+function sellerImagePatch(existingValue = "", inputValue = "") {
+  const existing = String(existingValue || "");
+  const incoming = String(inputValue || "");
+  if (incoming === "assets/cerber-emblem.png" && /^data:/i.test(existing) && existing.length > 500000) return existing;
+  return incoming || existing;
+}
+
+function sellerProductPatch(existing = {}, input = {}) {
+  const item = { ...existing, ...input };
+  item.image = sellerImagePatch(existing.image, input.image);
+  if (Array.isArray(input.images) && input.images.length) {
+    const hasOnlyPlaceholder = input.images.every((image) => image === "assets/cerber-emblem.png");
+    item.images = hasOnlyPlaceholder && Array.isArray(existing.images) && existing.images.length ? existing.images : input.images;
+  } else if (Array.isArray(existing.images)) {
+    item.images = existing.images;
+  }
+  return item;
+}
+
 function requireDb() {
   if (!supabase) {
     const error = new Error("Supabase is not configured");
@@ -867,8 +886,9 @@ app.put("/api/cms-texts", async (req, res, next) => {
 });
 
 function sellerStorePatch(existing = {}, input = {}) {
-  const image = input.image || input.avatar || existing.image || existing.avatar || "";
-  const cover = input.cover || input.banner || existing.cover || existing.banner || image;
+  const image = sellerImagePatch(existing.image || existing.avatar, input.image || input.avatar);
+  const cover = sellerImagePatch(existing.cover || existing.banner, input.cover || input.banner) || image;
+  const existingProducts = Array.isArray(existing.products) ? existing.products : [];
   return {
     ...existing,
     name: String(input.name ?? existing.name ?? "").trim(),
@@ -879,7 +899,7 @@ function sellerStorePatch(existing = {}, input = {}) {
     cover,
     banner: cover,
     gallery: Array.isArray(input.gallery) ? input.gallery.slice(0, 5) : (Array.isArray(existing.gallery) ? existing.gallery : []),
-    products: Array.isArray(input.products) ? input.products : (Array.isArray(existing.products) ? existing.products : []),
+    products: Array.isArray(input.products) ? input.products.map((product) => sellerProductPatch(existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {}, product)) : existingProducts,
     reviewsList: Array.isArray(input.reviewsList) ? input.reviewsList : (Array.isArray(existing.reviewsList) ? existing.reviewsList : []),
     enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
     autoReleaseHours: Math.min(72, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
