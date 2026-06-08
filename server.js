@@ -437,18 +437,6 @@ async function stateFor(user) {
     await withTimeout(ensureSeed(), "ensureSeed", 8000);
     const seedMs = Date.now() - seedStartedAt;
     const queriesStartedAt = Date.now();
-    const storesQuery = withTimeout(
-      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(100),
-      "stores query",
-      8000
-    ).catch((error) => {
-      console.error("[stateFor] stores query failed; using ownerStores fallback", {
-        message: error.message,
-        status: error.status || 500,
-        ms: Date.now() - queriesStartedAt
-      });
-      return { data: [], error: null };
-    });
     const messagesQuery = withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
       "messages query",
@@ -464,12 +452,26 @@ async function stateFor(user) {
       "profiles query",
       8000
     );
-    const [storesResult, messagesResult, settingsResult, profilesResult] = await Promise.all([
-      storesQuery,
+    const [messagesResult, settingsResult, profilesResult] = await Promise.all([
       messagesQuery,
       settingsQuery,
       profilesQuery
     ]);
+    const cachedStores = Array.isArray(settingsResult.data?.data?.publicStoresCache) ? settingsResult.data.data.publicStoresCache : [];
+    const storesResult = cachedStores.length
+      ? { data: [], error: null, skipped: true }
+      : await withTimeout(
+        supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(100),
+        "stores query",
+        8000
+      ).catch((error) => {
+        console.error("[stateFor] stores query failed; using ownerStores fallback", {
+          message: error.message,
+          status: error.status || 500,
+          ms: Date.now() - queriesStartedAt
+        });
+        return { data: [], error: null };
+      });
     const queriesMs = Date.now() - queriesStartedAt;
     const { data: stores, error: storesError } = storesResult;
     const { data: messages, error: messagesError } = messagesResult;
