@@ -441,7 +441,14 @@ async function stateFor(user) {
       supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(100),
       "stores query",
       8000
-    );
+    ).catch((error) => {
+      console.error("[stateFor] stores query failed; using ownerStores fallback", {
+        message: error.message,
+        status: error.status || 500,
+        ms: Date.now() - queriesStartedAt
+      });
+      return { data: [], error: null };
+    });
     const messagesQuery = withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
       "messages query",
