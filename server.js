@@ -258,26 +258,29 @@ function publicProductForState(product = {}, store = {}) {
     item.image = item.image || item.images[0] || store.image || "";
     delete item.images;
   }
-  item.image = publicImageForState(item.image || store.image || "");
+  item.image = publicImageForState(item.image || store.image || "", "assets/cerber-emblem.png");
+  item.gallery = Array.isArray(item.gallery)
+    ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 8)
+    : [];
   return item;
 }
 
-function publicImageForState(value = "") {
-  const image = String(value || "");
-  if (/^data:/i.test(image) && image.length > 500000) return "assets/cerber-emblem.png";
+function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
+  const image = String(value || "").trim();
+  if (!image) return fallback;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 5000) return fallback;
   return image;
 }
 
 function publicStoreForState(store = {}) {
   const item = { ...store };
-  item.image = publicImageForState(item.image);
-  item.avatar = publicImageForState(item.avatar);
-  item.cover = publicImageForState(item.cover);
-  item.banner = publicImageForState(item.banner);
-  if (item.avatar === item.image) delete item.avatar;
-  if (item.banner === item.cover) delete item.banner;
-  if (item.cover === item.image) delete item.cover;
-  if (Array.isArray(item.gallery) && item.gallery.length) delete item.gallery;
+  item.image = publicImageForState(item.image || item.avatar, "assets/cerber-emblem.png");
+  item.avatar = item.image;
+  item.cover = publicImageForState(item.cover || item.banner || item.image, "assets/market-banner.png");
+  item.banner = item.cover;
+  item.gallery = Array.isArray(item.gallery)
+    ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 12)
+    : [];
   item.products = Array.isArray(item.products) ? item.products.map((product) => publicProductForState(product, item)) : [];
   return item;
 }
@@ -285,7 +288,7 @@ function publicStoreForState(store = {}) {
 function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
-  if (incoming === "assets/cerber-emblem.png" && /^data:/i.test(existing) && existing.length > 500000) return existing;
+  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 5000) return existing;
   return incoming || existing;
 }
 
