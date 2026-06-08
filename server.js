@@ -18,7 +18,7 @@ const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
-const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
+const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber-project.onrender.com";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
@@ -1154,6 +1154,43 @@ app.get("/api/admin/overview", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.delete("/api/admin/marketplace-data", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const { error: storesError } = await supabase.from("stores").delete().neq("id", "__never__");
+    if (storesError) throw storesError;
+    const state = await loadSettingsState();
+    Object.assign(state, {
+      stores: [],
+      ownerStores: [],
+      publicStoresCache: [],
+      publicStoresCacheAt: Date.now(),
+      deletedStoreIds: [],
+      exchangeCards: [],
+      exchangers: [],
+      exchangeRequests: [],
+      storeApplications: []
+    });
+    await saveSettingsState(state);
+    await appendAdminLog("marketplace_data_cleared", admin.login, {
+      stores: "deleted",
+      exchangeCards: "cleared",
+      exchangeRequests: "cleared",
+      storeApplications: "cleared"
+    });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use("/api/owner", (_req, res) => {
+  res.status(410).json({
+    error: "Legacy owner API is disabled. Use /market-admin.html and /api/admin endpoints."
+  });
 });
 
 app.post("/api/owner/stores", async (req, res, next) => {

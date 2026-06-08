@@ -1312,6 +1312,18 @@ function hashRoute() {
   return routes.has(hash) ? hash : "";
 }
 
+function renderLegacyAdminDisabled() {
+  layout(`
+    <section class="screen">
+      <article class="panel">
+        <h2>Админка отключена</h2>
+        <p>Эта админка отключена. Используйте /market-admin.html</p>
+        <a class="primary" href="/market-admin.html">Открыть market-admin.html</a>
+      </article>
+    </section>
+  `);
+}
+
 function isShopPanelHash() {
   const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
   return hash === "shop-panel" || hash === "shop-admin" || /^shop-panel-[a-z0-9_-]+$/i.test(hash);
@@ -1367,12 +1379,12 @@ function storeAdminPassword(store) {
 }
 
 function sellerAdminLink(store) {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
   return `${base}/#seller-${store.id}`;
 }
 
 function shopPanelLink(store) {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
   return `${base}/#shop-panel-${store.id}`;
 }
 
@@ -1762,7 +1774,7 @@ function referralCodeFor(login = db.currentUser) {
 }
 
 function referralLinkFor(login = db.currentUser) {
-  const origin = location.protocol === "file:" ? "https://cerber.vip" : location.origin;
+  const origin = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
   return `${origin}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
 }
 
@@ -5664,7 +5676,7 @@ function uniqueExchangeId(name) {
 }
 
 function exchangeAdminLink() {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : "https://cerber.vip";
+  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
   return `${base}/#exchange-admin`;
 }
 
@@ -7368,7 +7380,7 @@ function renderCurrent() {
   }
   const directRoute = hashRoute();
   if (directRoute) route = directRoute;
-  if (route === "owner") return renderOwnerPanel();
+  if (route === "owner" || route === "admin") return renderLegacyAdminDisabled();
   if (!db.currentUser || !currentUser()) return renderAuth();
   if (route === "home") return renderHome();
   if (route === "catalog") return renderCatalog();
@@ -7383,7 +7395,6 @@ function renderCurrent() {
   if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
   if (route === "exchange-admin") return renderExchangeOperator();
   if (route === "wallet") return renderWallet();
-  if (route === "admin") return renderAdmin();
   if (route === "seller") return renderSeller();
   if (route === "product") return renderProductView(activeStoreId || db.stores[0]?.id || "", activeProductId);
   if (route === "store") return renderStore(activeStoreId || db.stores[0]?.id || "", activeStoreTab);

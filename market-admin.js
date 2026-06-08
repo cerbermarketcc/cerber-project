@@ -1,8 +1,9 @@
 const root = document.getElementById("admin-app");
 const TOKEN_KEY = "cerber_market_admin_token";
-const PRIMARY_API_ORIGIN = "https://cerber.vip";
+const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
+const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Логи", "Боты"];
 
@@ -66,18 +67,39 @@ async function formImageValue(formData, fileName, fallbackName = "") {
 }
 
 async function api(path, options = {}) {
-  const target = /^https?:\/\//i.test(String(path || "")) ? path : `${API_ORIGIN}${path}`;
-  const response = await fetch(target, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {})
+  if (/^https?:\/\//i.test(String(path || ""))) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {})
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "API error");
+    return payload;
+  }
+  let lastError = null;
+  for (const origin of API_ORIGINS) {
+    try {
+      const response = await fetch(`${origin}${path}`, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(options.headers || {})
+        }
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "API error");
+      return payload;
+    } catch (error) {
+      lastError = error;
+      if (origin === PRIMARY_API_ORIGIN) break;
     }
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || "API error");
-  return payload;
+  }
+  throw lastError || new Error("API error");
 }
 
 async function refreshData(silent = false) {
@@ -281,7 +303,7 @@ function storeDetail(id) {
   if (!store) return "";
   const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
   const countries = store.countries || store.regions || [];
-  const panelUrl = store.panel?.shopPanelUrl || `https://cerber.vip/#shop-panel-${store.id}`;
+  const panelUrl = store.panel?.shopPanelUrl || `${PRIMARY_API_ORIGIN}/#shop-panel-${store.id}`;
   const placements = Array.isArray(store.placements) && store.placements.length
     ? store.placements
     : [
@@ -444,7 +466,7 @@ function renderSettings() {
     <div class="row"><label class="field">Комиссия вывода, %<input name="walletServiceFeePercent" type="number" step="0.1" value="${esc(owner.walletServiceFeePercent || 0)}"></label><label class="field">Автозакрытие сделок, часов<input name="defaultAutoReleaseHours" type="number" min="0" max="72" value="${esc(owner.defaultAutoReleaseHours || 24)}"></label></div>
     <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
     <button class="primary">Сохранить настройки</button>
-  </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form></article>`;
+  </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
 }
 
 function renderLogs() {
@@ -691,6 +713,16 @@ function bindActions() {
       await api("/api/admin/password", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
       event.currentTarget.reset();
       toast("Пароль обновлен");
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelector("[data-clear-marketplace]")?.addEventListener("click", async () => {
+    if (!confirm("Удалить все магазины и очистить обменники? Admin-пользователь останется.")) return;
+    try {
+      data = await api("/api/admin/marketplace-data", { method: "DELETE" });
+      toast("Магазины и обменники очищены");
+      renderShell();
     } catch (error) {
       toast(error.message, true);
     }
