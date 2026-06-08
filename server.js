@@ -438,7 +438,7 @@ async function stateFor(user) {
     const seedMs = Date.now() - seedStartedAt;
     const queriesStartedAt = Date.now();
     const storesQuery = withTimeout(
-      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(100),
       "stores query",
       8000
     );
