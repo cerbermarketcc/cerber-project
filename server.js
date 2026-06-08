@@ -252,6 +252,25 @@ function mergeStoreSources(primaryStores = [], fallbackStores = []) {
   return Array.from(map.values());
 }
 
+function publicProductForState(product = {}, store = {}) {
+  const item = { ...product };
+  if (Array.isArray(item.images) && item.images.length) {
+    item.image = item.image || item.images[0] || store.image || "";
+    delete item.images;
+  }
+  return item;
+}
+
+function publicStoreForState(store = {}) {
+  const item = { ...store };
+  if (item.avatar === item.image) delete item.avatar;
+  if (item.banner === item.cover) delete item.banner;
+  if (item.cover === item.image) delete item.cover;
+  if (Array.isArray(item.gallery) && item.gallery.length) delete item.gallery;
+  item.products = Array.isArray(item.products) ? item.products.map((product) => publicProductForState(product, item)) : [];
+  return item;
+}
+
 function requireDb() {
   if (!supabase) {
     const error = new Error("Supabase is not configured");
@@ -402,7 +421,8 @@ async function stateFor(user) {
   const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
   const allStores = mergeStoreSources((stores || []).map((row) => row.data), settingsData.ownerStores || []);
   const visibleStores = allStores
-    .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
+    .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
+    .map(publicStoreForState);
   const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
   return {
