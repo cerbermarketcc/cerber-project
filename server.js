@@ -460,21 +460,18 @@ async function stateFor(user) {
       settingsQuery,
       profilesQuery
     ]);
-    const cachedStores = Array.isArray(settingsResult.data?.data?.publicStoresCache) ? settingsResult.data.data.publicStoresCache : [];
-    const storesResult = cachedStores.length
-      ? { data: [], error: null, skipped: true }
-      : await withTimeout(
-        supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(100),
-        "stores query",
-        8000
-      ).catch((error) => {
-        console.error("[stateFor] stores query failed; using ownerStores fallback", {
-          message: error.message,
-          status: error.status || 500,
-          ms: Date.now() - queriesStartedAt
-        });
-        return { data: [], error: null };
+    const storesResult = await withTimeout(
+      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+      "stores query",
+      8000
+    ).catch((error) => {
+      console.error("[stateFor] stores query failed; using publicStoresCache fallback", {
+        message: error.message,
+        status: error.status || 500,
+        ms: Date.now() - queriesStartedAt
       });
+      return { data: null, error: null, failed: true };
+    });
     const queriesMs = Date.now() - queriesStartedAt;
     const { data: stores, error: storesError } = storesResult;
     const { data: messages, error: messagesError } = messagesResult;
@@ -495,14 +492,19 @@ async function stateFor(user) {
     const settingsData = settings?.data || {};
     const mirrorBots = adminCollectMirrorBots(settingsData);
     const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
-    const fallbackStores = Array.isArray(settingsData.publicStoresCache) && settingsData.publicStoresCache.length
+    const storesFromDb = Array.isArray(storesResult.data)
+      ? storesResult.data.map((row) => row.data)
+      : null;
+    const fallbackStores = Array.isArray(settingsData.publicStoresCache)
       ? settingsData.publicStoresCache
-      : (settingsData.ownerStores || []);
-    const allStores = mergeStoreSources((stores || []).map((row) => row.data), fallbackStores);
+      : [];
+    const allStores = storesFromDb
+      ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
+      : fallbackStores;
     const visibleStores = allStores
       .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
       .map(publicStoreForState);
-    if ((stores || []).length && visibleStores.length) {
+    if (storesFromDb) {
       savePublicStoresCache(visibleStores).catch((error) => {
         console.error("[stateFor] public stores cache save failed", { message: error.message });
       });
@@ -1182,6 +1184,30 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
       storeApplications: "cleared"
     });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/public-stores-cache", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const { data: settings, error: settingsError } = await supabase
+      .from("app_settings")
+      .select("data")
+      .eq("id", "main")
+      .maybeSingle();
+    if (settingsError) throw settingsError;
+    const state = settings?.data || {};
+    delete state.publicStoresCache;
+    delete state.publicStoresCacheAt;
+    const { error: saveError } = await supabase
+      .from("app_settings")
+      .upsert({ id: "main", data: state }, { onConflict: "id" });
+    if (saveError) throw saveError;
+    await appendAdminLog("public_stores_cache_cleared", admin.login, {});
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
