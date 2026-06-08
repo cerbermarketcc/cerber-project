@@ -51,6 +51,8 @@ const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
 let publicRealtimeServer = null;
+let seedReady = false;
+let seedPromise = null;
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
@@ -288,19 +290,30 @@ async function verifyCaptcha(token, req) {
 }
 
 async function ensureSeed() {
-  if (!supabase) return;
-  const adminPassword = process.env.ADMIN_PASSWORD || "admincerbercc1212";
-  const adminHash = await bcrypt.hash(adminPassword, 12);
-  await supabase.from("profiles").upsert([
-    { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
-  ], { onConflict: "login_key" });
+  if (!supabase || seedReady) return;
+  if (seedPromise) return seedPromise;
+  seedPromise = (async () => {
+    const startedAt = Date.now();
+    const [{ data: existingSettings, error: settingsError }, { data: existingAdmin, error: adminError }] = await Promise.all([
+      supabase.from("app_settings").select("id").eq("id", "main").maybeSingle(),
+      supabase.from("profiles").select("login_key").eq("login_key", "admin").maybeSingle()
+    ]);
+    if (settingsError) throw settingsError;
+    if (adminError) throw adminError;
 
-  const { data: existingSettings } = await supabase.from("app_settings").select("id").eq("id", "main").maybeSingle();
-  if (existingSettings) return;
+    if (!existingAdmin) {
+      const adminPassword = process.env.ADMIN_PASSWORD || "admincerbercc1212";
+      const adminHash = await bcrypt.hash(adminPassword, 12);
+      const { error } = await supabase.from("profiles").upsert([
+        { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
+      ], { onConflict: "login_key" });
+      if (error) throw error;
+    }
 
-  await supabase.from("app_settings").upsert({
-    id: "main",
-    data: {
+    if (!existingSettings) {
+      const { error } = await supabase.from("app_settings").upsert({
+        id: "main",
+        data: {
       theme: "light",
       lang: "ru",
       orders: [],
@@ -340,17 +353,50 @@ async function ensureSeed() {
         sort: "relevance"
       }
     }
-  }, { onConflict: "id" });
+
+      }, { onConflict: "id" });
+      if (error) throw error;
+    }
+
+    seedReady = true;
+    console.log("[ensureSeed] ready", { ms: Date.now() - startedAt, createdAdmin: !existingAdmin, createdSettings: !existingSettings });
+  })();
+  try {
+    await seedPromise;
+  } finally {
+    seedPromise = null;
+  }
 }
 
 async function stateFor(user) {
+  const totalStartedAt = Date.now();
+  const seedStartedAt = Date.now();
   await ensureSeed();
-  const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }] = await Promise.all([
-    supabase.from("stores").select("data").order("created_at", { ascending: true }),
-    supabase.from("messages").select("data").order("created_at", { ascending: false }),
+  const seedMs = Date.now() - seedStartedAt;
+  const queriesStartedAt = Date.now();
+  const [storesResult, messagesResult, settingsResult, profilesResult] = await Promise.all([
+    supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+    supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
     supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-    supabase.from("profiles").select("login,name,role")
+    supabase.from("profiles").select("login,name,role").limit(500)
   ]);
+  const queriesMs = Date.now() - queriesStartedAt;
+  const { data: stores, error: storesError } = storesResult;
+  const { data: messages, error: messagesError } = messagesResult;
+  const { data: settings, error: settingsError } = settingsResult;
+  const { data: profiles, error: profilesError } = profilesResult;
+  if (storesError) throw storesError;
+  if (messagesError) throw messagesError;
+  if (settingsError) throw settingsError;
+  if (profilesError) throw profilesError;
+  console.log("[stateFor] timings", {
+    seedMs,
+    queriesMs,
+    totalMs: Date.now() - totalStartedAt,
+    stores: stores?.length || 0,
+    messages: messages?.length || 0,
+    profiles: profiles?.length || 0
+  });
   const settingsData = settings?.data || {};
   const mirrorBots = adminCollectMirrorBots(settingsData);
   const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
@@ -811,6 +857,28 @@ function sellerStorePatch(existing = {}, input = {}) {
   };
 }
 
+async function loadStoreWithFallback(storeId) {
+  const id = String(storeId || "").trim();
+  if (!id) return null;
+  const { data: row } = await supabase.from("stores").select("data").eq("id", id).maybeSingle();
+  if (row?.data) return row.data;
+  const state = await loadSettingsState();
+  return (state.ownerStores || []).find((item) => String(item?.id || "") === id) || null;
+}
+
+async function findSellerAdminStore(storeId, login) {
+  if (storeId) return loadStoreWithFallback(storeId);
+  const key = loginKey(login);
+  if (!key) return null;
+  const [{ data: rows }, state] = await Promise.all([
+    supabase.from("stores").select("data").limit(500),
+    loadSettingsState()
+  ]);
+  return mergeStoreSources((rows || []).map((row) => row.data), state.ownerStores || []).find((item) => (
+    item && (loginKey(item.ownerLogin) === key || loginKey(item.id) === key)
+  )) || null;
+}
+
 app.post("/api/store-admin/login", async (req, res, next) => {
   try {
     requireDb();
@@ -818,17 +886,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
-    let store = null;
-    if (storeId) {
-      const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
-      store = row?.data || null;
-    }
-    if (!store && login) {
-      const { data: rows } = await supabase.from("stores").select("data");
-      store = (rows || []).map((row) => row.data).find((item) => (
-        item && (loginKey(item.ownerLogin) === loginKey(login) || loginKey(item.id) === loginKey(login))
-      ));
-    }
+    const store = await findSellerAdminStore(storeId, login);
     const loginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     if (!store || !loginOk || password !== (store.adminPassword || "")) {
       return res.status(401).json({ error: "Неверный пароль" });
@@ -847,10 +905,10 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     if (!token || !token.storeId || store.id !== token.storeId) {
       return res.status(401).json({ error: "Нет доступа к этой админке" });
     }
-    const { data: row } = await supabase.from("stores").select("data").eq("id", token.storeId).maybeSingle();
-    const existing = row?.data || {};
+    const existing = await loadStoreWithFallback(token.storeId) || {};
     const mergedStore = sellerStorePatch(existing, store);
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
+    await saveOwnerStoreFallback(mergedStore);
     console.log("[store-admin] store saved", { storeId: mergedStore.id, ownerLogin: mergedStore.ownerLogin || "", products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0 });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
     res.json(await stateFor(null));
