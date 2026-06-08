@@ -309,6 +309,19 @@ function requireDb() {
   }
 }
 
+function withTimeout(promise, label, timeoutMs = 8000) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timeout after ${timeoutMs}ms`);
+      error.status = 504;
+      reject(error);
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function verifyCaptcha(token, req) {
   if (!turnstileSiteKey || !turnstileSecretKey) {
     console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
@@ -419,81 +432,111 @@ async function ensureSeed() {
 
 async function stateFor(user) {
   const totalStartedAt = Date.now();
-  const seedStartedAt = Date.now();
-  await ensureSeed();
-  const seedMs = Date.now() - seedStartedAt;
-  const queriesStartedAt = Date.now();
-  const [storesResult, messagesResult, settingsResult, profilesResult] = await Promise.all([
-    supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
-    supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
-    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-    supabase.from("profiles").select("login,name,role").limit(500)
-  ]);
-  const queriesMs = Date.now() - queriesStartedAt;
-  const { data: stores, error: storesError } = storesResult;
-  const { data: messages, error: messagesError } = messagesResult;
-  const { data: settings, error: settingsError } = settingsResult;
-  const { data: profiles, error: profilesError } = profilesResult;
-  if (storesError) throw storesError;
-  if (messagesError) throw messagesError;
-  if (settingsError) throw settingsError;
-  if (profilesError) throw profilesError;
-  console.log("[stateFor] timings", {
-    seedMs,
-    queriesMs,
-    totalMs: Date.now() - totalStartedAt,
-    stores: stores?.length || 0,
-    messages: messages?.length || 0,
-    profiles: profiles?.length || 0
-  });
-  const settingsData = settings?.data || {};
-  const mirrorBots = adminCollectMirrorBots(settingsData);
-  const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
-  const allStores = mergeStoreSources((stores || []).map((row) => row.data), settingsData.ownerStores || []);
-  const visibleStores = allStores
-    .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
-    .map(publicStoreForState);
-  const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+  try {
+    const seedStartedAt = Date.now();
+    await withTimeout(ensureSeed(), "ensureSeed", 8000);
+    const seedMs = Date.now() - seedStartedAt;
+    const queriesStartedAt = Date.now();
+    const storesQuery = withTimeout(
+      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+      "stores query",
+      8000
+    );
+    const messagesQuery = withTimeout(
+      supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
+      "messages query",
+      8000
+    );
+    const settingsQuery = withTimeout(
+      supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+      "app_settings query",
+      8000
+    );
+    const profilesQuery = withTimeout(
+      supabase.from("profiles").select("login,name,role").limit(500),
+      "profiles query",
+      8000
+    );
+    const [storesResult, messagesResult, settingsResult, profilesResult] = await Promise.all([
+      storesQuery,
+      messagesQuery,
+      settingsQuery,
+      profilesQuery
+    ]);
+    const queriesMs = Date.now() - queriesStartedAt;
+    const { data: stores, error: storesError } = storesResult;
+    const { data: messages, error: messagesError } = messagesResult;
+    const { data: settings, error: settingsError } = settingsResult;
+    const { data: profiles, error: profilesError } = profilesResult;
+    if (storesError) throw storesError;
+    if (messagesError) throw messagesError;
+    if (settingsError) throw settingsError;
+    if (profilesError) throw profilesError;
+    console.log("[stateFor] timings", {
+      seedMs,
+      queriesMs,
+      totalMs: Date.now() - totalStartedAt,
+      stores: stores?.length || 0,
+      messages: messages?.length || 0,
+      profiles: profiles?.length || 0
+    });
+    const settingsData = settings?.data || {};
+    const mirrorBots = adminCollectMirrorBots(settingsData);
+    const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
+    const allStores = mergeStoreSources((stores || []).map((row) => row.data), settingsData.ownerStores || []);
+    const visibleStores = allStores
+      .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
+      .map(publicStoreForState);
+    const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
 
-  return {
-    user: publicUser(user),
-    state: {
-      currentUser: user?.login || "",
-      theme: settingsData.theme || "light",
-      lang: settingsData.lang || "ru",
-      users: profiles || [],
-      stores: visibleStores,
-      messages: (messages || []).map((row) => row.data),
-      orders,
-      exchangeCards: visibleExchangeCards,
-      exchangeRequests: settingsData.exchangeRequests || [],
-      groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
-      groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
-      referrals: settingsData.referrals || [],
-      referralPayments: settingsData.referralPayments || [],
-      referralCodes: settingsData.referralCodes || {},
-      balances: settingsData.balances || {},
-      ltcBalances: settingsData.ltcBalances || {},
-      walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
-      walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
-      mirrorBots,
-      bots: {
-        total: mirrorBots.length,
-        active: mirrorBots.filter((bot) => bot.active && !bot.blocked).length,
-        blocked: mirrorBots.filter((bot) => bot.blocked).length,
-        items: mirrorBots
-      },
-      siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
-      broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
-      userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
-      blockedUsers: settingsData.blockedUsers || {},
-      storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
-      ownerSettings: settingsData.ownerSettings || {},
-      paymentSettings: settingsData.paymentSettings || {},
-      referralPeriod: settingsData.referralPeriod || {},
-      filters: settingsData.filters || {}
-    }
-  };
+    return {
+      user: publicUser(user),
+      state: {
+        currentUser: user?.login || "",
+        theme: settingsData.theme || "light",
+        lang: settingsData.lang || "ru",
+        users: profiles || [],
+        stores: visibleStores,
+        messages: (messages || []).map((row) => row.data),
+        orders,
+        exchangeCards: visibleExchangeCards,
+        exchangeRequests: settingsData.exchangeRequests || [],
+        groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
+        groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
+        referrals: settingsData.referrals || [],
+        referralPayments: settingsData.referralPayments || [],
+        referralCodes: settingsData.referralCodes || {},
+        balances: settingsData.balances || {},
+        ltcBalances: settingsData.ltcBalances || {},
+        walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
+        walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
+        mirrorBots,
+        bots: {
+          total: mirrorBots.length,
+          active: mirrorBots.filter((bot) => bot.active && !bot.blocked).length,
+          blocked: mirrorBots.filter((bot) => bot.blocked).length,
+          items: mirrorBots
+        },
+        siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
+        broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
+        userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
+        blockedUsers: settingsData.blockedUsers || {},
+        storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
+        ownerSettings: settingsData.ownerSettings || {},
+        paymentSettings: settingsData.paymentSettings || {},
+        referralPeriod: settingsData.referralPeriod || {},
+        filters: settingsData.filters || {}
+      }
+    };
+
+  } catch (error) {
+    console.error("[stateFor] failed", {
+      message: error.message,
+      status: error.status || 500,
+      ms: Date.now() - totalStartedAt
+    });
+    throw error;
+  }
 }
 
 async function userFromRequest(req) {
