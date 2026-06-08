@@ -6920,9 +6920,9 @@ function bindShopPanelActions(store, activeTab) {
       stock: deliveryItems.length,
       status: "ready"
     });
-    product.priceUsd = product.positions.length ? Math.min(...product.positions.map((p) => Number(p.priceUsd || priceUsd))) : priceUsd;
-    product.price = `от ${Number(product.priceUsd || 0)}$`;
-    await shopPersistAndRender("products");
+if (!product.priceUsd) product.priceUsd = priceUsd;
+if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
+await shopPersistAndRender("products");
   });
 
   document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
