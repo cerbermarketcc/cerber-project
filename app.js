@@ -6634,8 +6634,8 @@ function shopCardsTab(store, products) {
     <section class="seller-dashboard-card seller-wide-card">
       <form class="form" data-shop-card-form>
         <div class="row">
-          <label class="field">Название<input name="title" required></label>
-          <label class="field">Цена от, $<input name="priceUsd" type="number" min="0" step="0.01" value="10"></label>
+         <label class="field">Название<input name="title" value="" placeholder="Название товара" required></label>
+<label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="" placeholder="Цена товара" required></label>
         </div>
         <label class="field">Описание<textarea name="description"></textarea></label>
         <div class="row">
