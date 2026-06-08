@@ -258,11 +258,22 @@ function publicProductForState(product = {}, store = {}) {
     item.image = item.image || item.images[0] || store.image || "";
     delete item.images;
   }
+  item.image = publicImageForState(item.image || store.image || "");
   return item;
+}
+
+function publicImageForState(value = "") {
+  const image = String(value || "");
+  if (/^data:/i.test(image) && image.length > 500000) return "assets/cerber-emblem.png";
+  return image;
 }
 
 function publicStoreForState(store = {}) {
   const item = { ...store };
+  item.image = publicImageForState(item.image);
+  item.avatar = publicImageForState(item.avatar);
+  item.cover = publicImageForState(item.cover);
+  item.banner = publicImageForState(item.banner);
   if (item.avatar === item.image) delete item.avatar;
   if (item.banner === item.cover) delete item.banner;
   if (item.cover === item.image) delete item.cover;
