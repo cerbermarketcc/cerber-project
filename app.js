@@ -6675,8 +6675,8 @@ function shopProductsTab(store, products) {
       ${products.length ? `<form class="form" data-shop-product-form>
         <label class="field">Карточка<select name="cardId">${sortedStoreProducts(store, true).map((product) => `<option value="${esc(product.id)}">${esc(product.title)}</option>`).join("")}</select></label>
         <div class="row">
-          <label class="field">Название<input name="title" value="${esc(card?.title || "")}" required></label>
-          <label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(card?.priceUsd || 10)}" required></label>
+        <label class="field">Название<input name="title" value="" placeholder="Название товара" required></label>
+<label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="" placeholder="Цена товара" required></label>
         </div>
         <label class="field">Описание<textarea name="description"></textarea></label>
         <div class="row">
@@ -6916,10 +6916,25 @@ function bindShopPanelActions(store, activeTab) {
       country: String(data.get("country") || shopDefaultCountry(store)),
       city: String(data.get("city") || shopDefaultCity(store)),
       district: String(data.get("district") || "").trim(),
-      deliveryItems,
-      stock: deliveryItems.length,
-      status: "ready"
-    });
+      const rawDeliveryItems = shopLines(data.get("deliveryItems"));
+const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
+const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
+product.positions = Array.isArray(product.positions) ? product.positions : [];
+const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
+product.positions.unshift({
+  id: `position-${Date.now()}`,
+  title: String(data.get("title") || product.title || "").trim(),
+  description: String(data.get("description") || "").trim(),
+  priceUsd,
+  weight: String(data.get("weight") || "").trim(),
+  deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
+  country: String(data.get("country") || shopDefaultCountry(store)),
+  city: String(data.get("city") || shopDefaultCity(store)),
+  district: String(data.get("district") || "").trim(),
+  deliveryItems,
+  stock: Math.max(1, deliveryItems.length),
+  status: "ready"
+});
 if (!product.priceUsd) product.priceUsd = priceUsd;
 if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
 await shopPersistAndRender("products");
