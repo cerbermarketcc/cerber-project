@@ -6903,7 +6903,9 @@ function bindShopPanelActions(store, activeTab) {
     const data = new FormData(event.currentTarget);
     const product = (store.products || []).find((item) => item.id === data.get("cardId"));
     if (!product) return;
-    const deliveryItems = shopLines(data.get("deliveryItems"));
+    const rawDeliveryItems = shopLines(data.get("deliveryItems"));
+    const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
+    const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
     product.positions = Array.isArray(product.positions) ? product.positions : [];
     const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
     product.positions.unshift({
@@ -6916,30 +6918,14 @@ function bindShopPanelActions(store, activeTab) {
       country: String(data.get("country") || shopDefaultCountry(store)),
       city: String(data.get("city") || shopDefaultCity(store)),
       district: String(data.get("district") || "").trim(),
-      const rawDeliveryItems = shopLines(data.get("deliveryItems"));
-const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
-const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
-product.positions = Array.isArray(product.positions) ? product.positions : [];
-const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
-product.positions.unshift({
-  id: `position-${Date.now()}`,
-  title: String(data.get("title") || product.title || "").trim(),
-  description: String(data.get("description") || "").trim(),
-  priceUsd,
-  weight: String(data.get("weight") || "").trim(),
-  deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
-  country: String(data.get("country") || shopDefaultCountry(store)),
-  city: String(data.get("city") || shopDefaultCity(store)),
-  district: String(data.get("district") || "").trim(),
-  deliveryItems,
-  stock: Math.max(1, deliveryItems.length),
-  status: "ready"
-});
-if (!product.priceUsd) product.priceUsd = priceUsd;
-if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
-await shopPersistAndRender("products");
+      deliveryItems,
+      stock: Math.max(1, deliveryItems.length),
+      status: "ready"
+    });
+    if (!product.priceUsd) product.priceUsd = priceUsd;
+    if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
+    await shopPersistAndRender("products");
   });
-
   document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
     const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
     if (!product) return;
@@ -7068,7 +7054,9 @@ function renderSeller() {
     const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
     const priceUsd = Number(data.get("priceUsd") || 0);
     const productId = `product-${Date.now()}`;
-    const deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    const rawDeliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    const fallbackDeliveryText = String(data.get("description") || data.get("title") || "Товар").trim();
+    const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
     store.products.unshift({
       id: productId,
       title: data.get("title").trim(),
@@ -7093,7 +7081,7 @@ function renderSeller() {
         district: String(data.get("district") || "").trim(),
         deliveryType: data.get("deliveryType").trim() || "Курьер",
         deliveryItems,
-        stock: deliveryItems.length,
+        stock: Math.max(1, deliveryItems.length),
         status: "ready"
       }],
       reviewsList: []

@@ -268,7 +268,7 @@ function publicProductForState(product = {}, store = {}) {
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
   if (!image) return fallback;
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 5000) return fallback;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 1000000) return fallback;
   return image;
 }
 
@@ -288,7 +288,7 @@ function publicStoreForState(store = {}) {
 function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
-  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 5000) return existing;
+  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 1000000) return existing;
   return incoming || existing;
 }
 
