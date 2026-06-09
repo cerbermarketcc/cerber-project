@@ -254,20 +254,26 @@ function mergeStoreSources(primaryStores = [], fallbackStores = []) {
 
 function publicProductForState(product = {}, store = {}) {
   const item = { ...product };
-  if (Array.isArray(item.images) && item.images.length) {
-    item.image = item.image || item.images[0] || store.image || "";
-    delete item.images;
-  }
+  const images = Array.isArray(item.images) ? item.images : [];
+  if (images.length) item.image = item.image || images[0] || store.image || "";
   item.image = publicImageForState(item.image || store.image || "", "assets/cerber-emblem.png");
+  item.images = images.length
+    ? images.map((image) => publicImageForState(image, item.image)).slice(0, 5)
+    : [item.image];
   item.gallery = Array.isArray(item.gallery)
     ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 8)
     : [];
   return item;
 }
 
+function isBrokenImageValue(value = "") {
+  const image = String(value || "").trim();
+  return !image || image === "[object File]" || image === "[object Blob]" || image === "undefined" || image === "null";
+}
+
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
-  if (!image) return fallback;
+  if (isBrokenImageValue(image)) return fallback;
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 1000000) return fallback;
   return image;
 }
@@ -288,6 +294,7 @@ function publicStoreForState(store = {}) {
 function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
+  if (isBrokenImageValue(incoming)) return isBrokenImageValue(existing) ? "" : existing;
   if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 1000000) return existing;
   return incoming || existing;
 }
@@ -2074,8 +2081,8 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   flags = storePlacementFlags(placements);
   const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
   const topPosition = Math.max(0, Number(body.top_position ?? body.topPosition ?? existing?.top_position ?? position));
-  const image = String(body.image || body.avatar || existing?.image || "assets/cerber-emblem.png").trim();
-  const cover = String(body.cover || body.banner || existing?.cover || image || "assets/market-banner.png").trim();
+  const image = sellerImagePatch(existing?.image || existing?.avatar, body.image || body.avatar) || "assets/cerber-emblem.png";
+  const cover = sellerImagePatch(existing?.cover || existing?.banner, body.cover || body.banner) || image || "assets/market-banner.png";
   const visibleInCatalog = adminStoreVisible(body, existing, flags);
   const isStopped = body.is_stopped === true || body.stopped === true || body.salesBlocked === true || existing?.salesBlocked === true || existing?.is_stopped === true;
   return {
