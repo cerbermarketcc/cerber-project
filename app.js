@@ -1155,6 +1155,29 @@ async function refreshRemoteState() {
   applyRemoteState(payload);
 }
 
+function rememberShopPanelStore(store) {
+  if (!store?.id) return null;
+  try {
+    return structuredClone(store);
+  } catch {
+    return JSON.parse(JSON.stringify(store));
+  }
+}
+
+function restoreShopPanelStore(store) {
+  if (!store?.id) return;
+  const index = db.stores.findIndex((item) => item.id === store.id);
+  if (index >= 0) {
+    db.stores[index] = { ...db.stores[index], ...store };
+  } else {
+    db.stores.push(store);
+  }
+  normalizeDb(db);
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(db));
+  } catch {}
+}
+
 function realtimeCanRenderNow() {
   const element = document.activeElement;
   return !(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
@@ -1256,6 +1279,7 @@ async function persistSellerAdminStore() {
 
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = shopPanelStore() || sellerAdminStore();
+  const localStore = rememberShopPanelStore(store);
 
   console.log("[store-admin] persist store selected", {
     storeId: store?.id,
@@ -1291,6 +1315,7 @@ async function persistSellerAdminStore() {
     });
 
     applyRemoteState(payload);
+    restoreShopPanelStore(localStore);
     return true;
   } catch (error) {
     console.error("[store-admin] persist failed", error);
@@ -6862,6 +6887,7 @@ function shopLines(value) {
 
 async function shopPersistAndRender(tab = "dashboard") {
   const store = shopPanelStore() || sellerAdminStore();
+  const localStore = rememberShopPanelStore(store);
   console.log("[shop-admin] before persist", {
     storeId: store?.id,
     products: store?.products?.length,
@@ -6881,11 +6907,14 @@ async function shopPersistAndRender(tab = "dashboard") {
   if (savedRemote) {
     try {
       await refreshRemoteState();
+      restoreShopPanelStore(localStore);
     } catch (error) {
       console.error("[shop-admin] refresh after save failed", error);
+      restoreShopPanelStore(localStore);
     }
     showToast("Сохранено");
   } else {
+    restoreShopPanelStore(localStore);
     showToast("Сохранено локально, сервер не принял изменения. Проверьте вход в Shop Admin.");
   }
 
@@ -7225,12 +7254,40 @@ function renderExchangeOperator() {
   });
 }
 
-function fileToDataUrl(file) {
+function readFileDataUrl(file) {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.readAsDataURL(file);
   });
+}
+
+function imageElementFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+}
+
+async function fileToDataUrl(file) {
+  if (!file || !file.size) return "";
+  const original = String(await readFileDataUrl(file) || "");
+  if (!String(file.type || "").startsWith("image/") || original.length < 1200000) return original;
+  try {
+    const image = await imageElementFromDataUrl(original);
+    const maxSide = 1400;
+    const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
+    canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    const compressed = canvas.toDataURL("image/jpeg", 0.82);
+    return compressed && compressed.length < original.length ? compressed : original;
+  } catch {
+    return original;
+  }
 }
 
 function blobToDataUrl(blob) {

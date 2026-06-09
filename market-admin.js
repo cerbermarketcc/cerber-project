@@ -50,7 +50,7 @@ function toast(message, bad = false) {
   toast.timer = setTimeout(() => box.classList.remove("show"), 2800);
 }
 
-function fileToDataUrl(file) {
+function readFileDataUrl(file) {
   return new Promise((resolve, reject) => {
     if (!file || !file.size) return resolve("");
     const reader = new FileReader();
@@ -58,6 +58,33 @@ function fileToDataUrl(file) {
     reader.onerror = () => reject(reader.error || new Error("File read error"));
     reader.readAsDataURL(file);
   });
+}
+
+function imageElementFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+}
+
+async function fileToDataUrl(file) {
+  const original = String(await readFileDataUrl(file) || "");
+  if (!file || !file.size || !String(file.type || "").startsWith("image/") || original.length < 1200000) return original;
+  try {
+    const image = await imageElementFromDataUrl(original);
+    const maxSide = 1400;
+    const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
+    canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    const compressed = canvas.toDataURL("image/jpeg", 0.82);
+    return compressed && compressed.length < original.length ? compressed : original;
+  } catch {
+    return original;
+  }
 }
 
 async function formImageValue(formData, fileName, fallbackName = "") {

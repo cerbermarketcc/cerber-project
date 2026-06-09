@@ -274,7 +274,7 @@ function isBrokenImageValue(value = "") {
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
   if (isBrokenImageValue(image)) return fallback;
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 1000000) return fallback;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 5000000) return fallback;
   return image;
 }
 
@@ -295,7 +295,7 @@ function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
   if (isBrokenImageValue(incoming)) return isBrokenImageValue(existing) ? "" : existing;
-  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 1000000) return existing;
+  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 5000000) return existing;
   return incoming || existing;
 }
 
@@ -976,6 +976,7 @@ function sellerStorePatch(existing = {}, input = {}) {
     enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
     autoReleaseHours: Math.min(72, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
     ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
+    adminPassword: String(input.adminPassword ?? existing.adminPassword ?? "").trim(),
     updatedAt: Date.now()
   };
 }
