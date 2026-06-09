@@ -1257,6 +1257,15 @@ async function persistSellerAdminStore() {
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = shopPanelStore() || sellerAdminStore();
 
+  console.log("[store-admin] persist store selected", {
+    storeId: store?.id,
+    products: Array.isArray(store?.products) ? store.products.length : null,
+    positions: Array.isArray(store?.products)
+      ? store.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
+      : null,
+    hasToken: Boolean(token)
+  });
+
   if (!token || !store) {
     console.error("[store-admin] cannot persist store", {
       hasToken: Boolean(token),
@@ -6795,7 +6804,10 @@ function renderShopPanelLogin(message = "") {
         });
         localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
-        store = shopPanelLoginStore(login, password);
+        store = db.stores.find((item) => item.id === (hashStore?.id || shopPanelHashId() || payload.store?.id))
+          || shopPanelLoginStore(login, password)
+          || payload.store
+          || null;
       } catch (error) {
         renderShopPanelLogin(error.message || "Неверный логин или пароль");
         return;
@@ -6804,6 +6816,12 @@ function renderShopPanelLogin(message = "") {
     if (!store) {
       renderShopPanelLogin("Неверный логин или пароль");
       return;
+    }
+    const existingStoreIndex = db.stores.findIndex((item) => item.id === store.id);
+    if (existingStoreIndex >= 0) {
+      db.stores[existingStoreIndex] = { ...db.stores[existingStoreIndex], ...store };
+    } else {
+      db.stores.push(store);
     }
     try {
       localStorage.setItem(SHOP_PANEL_SESSION_KEY, store.id);
@@ -6843,18 +6861,39 @@ function shopLines(value) {
 }
 
 async function shopPersistAndRender(tab = "dashboard") {
+  const store = shopPanelStore() || sellerAdminStore();
+  console.log("[shop-admin] before persist", {
+    storeId: store?.id,
+    products: store?.products?.length,
+    token: Boolean(localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY))
+  });
   saveDb();
-  const saved = await persistSellerAdminStore();
-  if (!saved) {
-    showToast("Не удалось сохранить. Проверьте вход в Shop Admin.");
-    return;
+
+  let savedRemote = false;
+
+  try {
+    savedRemote = await persistSellerAdminStore();
+  } catch (error) {
+    console.error("[shop-admin] persist exception", error);
+    savedRemote = false;
   }
-  await refreshRemoteState();
-  showToast("Сохранено");
+
+  if (savedRemote) {
+    try {
+      await refreshRemoteState();
+    } catch (error) {
+      console.error("[shop-admin] refresh after save failed", error);
+    }
+    showToast("Сохранено");
+  } else {
+    showToast("Сохранено локально, сервер не принял изменения. Проверьте вход в Shop Admin.");
+  }
+
   renderShopPanel(tab);
 }
 
 function bindShopPanelActions(store, activeTab) {
+  console.log("[shop-admin] bind actions", { storeId: store?.id, activeTab });
   bindLocationSelects();
   bindShopLocationSelects(store);
   document.querySelector("[data-shop-profile-form]")?.addEventListener("submit", async (event) => {
@@ -6874,6 +6913,7 @@ function bindShopPanelActions(store, activeTab) {
 
   document.querySelector("[data-shop-card-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    console.log("[shop-admin] card submit");
     const data = new FormData(event.currentTarget);
     const title = String(data.get("title") || "").trim();
     if (!title) return;
@@ -6922,6 +6962,7 @@ function bindShopPanelActions(store, activeTab) {
 
   document.querySelector("[data-shop-product-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    console.log("[shop-admin] product submit");
     const data = new FormData(event.currentTarget);
     const product = (store.products || []).find((item) => item.id === data.get("cardId"));
     if (!product) return;

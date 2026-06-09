@@ -1029,6 +1029,9 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       storeId: mergedStore.id,
       ownerLogin: mergedStore.ownerLogin || "",
       products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
+      positions: Array.isArray(mergedStore.products)
+        ? mergedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
+        : 0,
       productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
