@@ -1253,9 +1253,24 @@ async function persistRemoteState() {
 
 async function persistSellerAdminStore() {
   if (!API_ENABLED) return false;
+
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
-  const store = sellerAdminStore();
-  if (!token || !store) return false;
+  const store = shopPanelStore() || sellerAdminStore();
+
+  if (!token || !store) {
+    console.error("[store-admin] cannot persist store", {
+      hasToken: Boolean(token),
+      shopPanelHashId: typeof shopPanelHashId === "function" ? shopPanelHashId() : "",
+      shopPanelSession: typeof shopPanelSession === "function" ? shopPanelSession() : "",
+      sellerAdminHashId: typeof sellerAdminHashId === "function" ? sellerAdminHashId() : "",
+      sellerAdminSessionId: typeof sellerAdminSessionId === "function" ? sellerAdminSessionId() : "",
+      hasShopPanelStore: Boolean(typeof shopPanelStore === "function" ? shopPanelStore() : null),
+      hasSellerAdminStore: Boolean(typeof sellerAdminStore === "function" ? sellerAdminStore() : null)
+    });
+    showToast("Админка магазина не нашла магазин или токен входа. Выйдите и войдите снова.");
+    return false;
+  }
+
   try {
     const payload = await apiFetch("/api/store-admin/store", {
       method: "PUT",
@@ -1265,9 +1280,11 @@ async function persistSellerAdminStore() {
       },
       body: JSON.stringify({ store })
     });
+
     applyRemoteState(payload);
     return true;
   } catch (error) {
+    console.error("[store-admin] persist failed", error);
     showToast(error.message || "Админка магазина временно не сохранила изменения в базе");
     return false;
   }
@@ -6790,7 +6807,9 @@ function renderShopPanelLogin(message = "") {
     }
     try {
       localStorage.setItem(SHOP_PANEL_SESSION_KEY, store.id);
+      localStorage.setItem(SELLER_ADMIN_KEY, store.id);
     } catch {}
+    sellerAdminStoreId = store.id;
     renderShopPanel("dashboard");
   };
 }
@@ -6826,7 +6845,10 @@ function shopLines(value) {
 async function shopPersistAndRender(tab = "dashboard") {
   saveDb();
   const saved = await persistSellerAdminStore();
-  if (!saved) return;
+  if (!saved) {
+    showToast("Не удалось сохранить. Проверьте вход в Shop Admin.");
+    return;
+  }
   await refreshRemoteState();
   showToast("Сохранено");
   renderShopPanel(tab);
