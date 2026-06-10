@@ -2717,7 +2717,14 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   `);
 }
 
+function productStockSummary(product = {}) {
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const stock = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
+  return { positions, stock };
+}
+
 function productCard(product, store) {
+  const summary = productStockSummary(product);
   return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
@@ -2725,9 +2732,10 @@ function productCard(product, store) {
       <div class="product-body">
         <h3>${esc(product.title)}</h3>
         <p>${esc(product.category)}</p>
-        <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
-        <p class="price">${esc(product.price || `от ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
-        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} покупок</p>
+        <p><strong>${esc(store.name)}</strong> <span class="verify">ok</span></p>
+        <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
+        ${summary.positions.length ? `<p>${summary.positions.length} позиций · ${summary.stock} шт.</p>` : ""}
+        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} purchases</p>
         </div>
       </button>
     </article>
@@ -2737,20 +2745,22 @@ function productCard(product, store) {
 function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
   const ltcAmount = usdToLtc(minPrice);
+  const summary = productStockSummary(product);
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
         <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
         <div class="product-body mega-product-body">
           <div class="product-icon-row">
-            <span>▦</span><span>⌂</span><span>●</span><span>◌</span><span>⌁</span>
-            <i></i><span>☻</span><span>❄</span><span>◎</span>
+            <span>#</span><span>*</span><span>+</span><span>-</span><span>/</span>
+            <i></i><span>ok</span><span>*</span><span>#</span>
           </div>
           <h3>${esc(product.title)}</h3>
           <p class="desc">${esc(product.category)}</p>
-          <p><strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
+          <p><strong>${esc(store.name)}</strong> <span class="verify">ok</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
-          <p class="rating-line"><span class="ok-dot">✓</span><span class="time-dot">◔</span><span class="star-dot">★</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
+          ${summary.positions.length ? `<p>${summary.positions.length} позиций · ${summary.stock} шт.</p>` : ""}
+          <p class="rating-line"><span class="ok-dot">ok</span><span class="time-dot">*</span><span class="star-dot">*</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
         </div>
       </button>
     </article>
@@ -2759,14 +2769,15 @@ function productCardView(product, store) {
 
 function productPositions(product) {
   const filters = db.filters || {};
-  return (product.positions || []).filter((position) => {
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const filtered = positions.filter((position) => {
     if (filters.country && position.country && filters.country !== position.country) return false;
     if (filters.city && position.city && filters.city !== position.city) return false;
     if (filters.district && position.district && filters.district !== position.district) return false;
     return true;
   });
+  return filtered.length ? filtered : positions;
 }
-
 function currentLocationFilterLabel() {
   const filters = db.filters || {};
   const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
