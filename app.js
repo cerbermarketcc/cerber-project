@@ -1083,7 +1083,8 @@ async function apiFetchOnce(path, options = {}) {
     ...(options.headers || {})
   };
   const token = localStorage.getItem(API_TOKEN_KEY);
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const hasAuthorization = Object.keys(headers).some((key) => key.toLowerCase() === "authorization");
+  if (token && !hasAuthorization) headers.Authorization = `Bearer ${token}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || 25000);
   try {
