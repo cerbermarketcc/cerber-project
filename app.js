@@ -1316,7 +1316,7 @@ async function persistSellerAdminStore() {
     });
 
     applyRemoteState(payload);
-    restoreShopPanelStore(localStore);
+    restoreShopPanelStore(payload.store || localStore);
     return true;
   } catch (error) {
     console.error("[store-admin] persist failed", error);

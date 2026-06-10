@@ -1015,7 +1015,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     if (!store || !loginOk || password !== (store.adminPassword || "")) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
-    res.json({ token: signSellerAdminToken(store.id), ...(await stateFor(null)) });
+    res.json({ token: signSellerAdminToken(store.id), store, ...(await stateFor(null)) });
   } catch (error) {
     next(error);
   }
@@ -1043,7 +1043,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
-    res.json(await stateFor(null));
+    res.json({ store: mergedStore, ...(await stateFor(null)) });
   } catch (error) {
     next(error);
   }
