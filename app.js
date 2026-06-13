@@ -46,6 +46,7 @@ const officialOnionMirrors = [
 ];
 const officialClearDomains = ["cerber.to", "cerber.love", "cerber.vip"];
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
+let siteEmojiAssets = [];
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
@@ -1225,6 +1226,37 @@ async function loadRemoteConfig() {
   } catch {
     TURNSTILE_SITE_KEY = "";
   }
+}
+
+async function loadSiteEmojis() {
+  if (!API_ENABLED) return;
+  try {
+    const payload = await apiFetch("/api/site-emojis", { timeoutMs: 12000 });
+    siteEmojiAssets = Array.isArray(payload.emojis) ? payload.emojis.filter((item) => item?.url).slice(0, 180) : [];
+  } catch {
+    siteEmojiAssets = [];
+  }
+}
+
+function siteEmojiPickerHtml(scope) {
+  if (siteEmojiAssets.length) {
+    return siteEmojiAssets.map((emoji) => `
+      <button type="button" class="site-emoji-button" data-${scope}-site-emoji="${esc(emoji.url)}" title="${esc(emoji.name || "emoji")}">
+        <img src="${esc(emoji.url)}" alt="">
+      </button>
+    `).join("");
+  }
+  return TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-${scope}-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("");
+}
+
+function siteEmojiAttachment(url = "") {
+  const cleanUrl = String(url || "").trim();
+  if (!cleanUrl) return null;
+  return {
+    name: cleanUrl.split("/").pop() || "site-emoji.png",
+    type: "image/png",
+    url: cleanUrl
+  };
 }
 
 async function loadCmsTextOverrides() {
@@ -3440,7 +3472,7 @@ function renderMessages() {
                 <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
                 <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="Смайлики">◔</button>
                 <div class="group-sticker-row" data-private-sticker-row hidden>
-                  ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-private-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
+                  ${siteEmojiPickerHtml("private")}
                 </div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-private-attachment>
@@ -3497,6 +3529,27 @@ function renderMessages() {
       textarea.value = `${textarea.value}${button.dataset.privateEmoji}`;
       textarea.focus();
       syncPrivateComposer();
+    };
+  });
+  document.querySelectorAll("[data-private-site-emoji]").forEach((button) => {
+    button.onclick = () => {
+      const attachment = siteEmojiAttachment(button.dataset.privateSiteEmoji);
+      if (!attachment || !activePrivateLogin) return;
+      db.messages.unshift({
+        id: `private-${Date.now()}`,
+        storeId: "",
+        storeTag: activePrivateLogin,
+        toLogin: activePrivateLogin,
+        fromLogin: db.currentUser,
+        subject: "",
+        body: "",
+        attachments: [attachment],
+        likes: [],
+        createdAt: Date.now(),
+        date: new Date().toLocaleString()
+      });
+      saveDb();
+      renderMessages();
     };
   });
   syncPrivateComposer();
@@ -3944,7 +3997,7 @@ function renderGroupChat() {
                 <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
                 <button type="button" class="group-emoji-toggle" data-group-emoji-toggle title="Смайлики">◔</button>
                 <div class="group-sticker-row" data-group-sticker-row hidden>
-                  ${TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-group-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("")}
+                  ${siteEmojiPickerHtml("group")}
                 </div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-attachment>
@@ -3989,6 +4042,24 @@ function renderGroupChat() {
       textarea.value = `${textarea.value}${button.dataset.groupEmoji}`;
       textarea.focus();
       syncGroupComposer();
+    };
+  });
+  document.querySelectorAll("[data-group-site-emoji]").forEach((button) => {
+    button.onclick = () => {
+      const user = currentUser();
+      const attachment = siteEmojiAttachment(button.dataset.groupSiteEmoji);
+      if (!user || !attachment) return;
+      db.groupMessages.push({
+        id: `group-${Date.now()}`,
+        fromLogin: user.login,
+        body: "",
+        attachments: [attachment],
+        likes: [],
+        createdAt: Date.now(),
+        date: new Date().toLocaleString()
+      });
+      saveDb();
+      renderGroupChat();
     };
   });
   syncGroupComposer();
@@ -7602,6 +7673,7 @@ async function initApp() {
   connectRealtime();
   try {
     await loadRemoteConfig();
+    await loadSiteEmojis();
     await loadCmsTextOverrides();
     await loadRemoteState();
     await loadRemoteSession();
