@@ -46,11 +46,7 @@ const officialOnionMirrors = [
 ];
 const officialClearDomains = ["cerber.to", "cerber.love", "cerber.vip"];
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
-const SITE_EMOJI_ASSETS = Array.from({ length: 104 }, (_, index) => {
-  const id = String(index + 1).padStart(3, "0");
-  return { name: `telegram-${id}`, url: `assets/site-emojis/telegram-${id}.png` };
-});
-let siteEmojiAssets = SITE_EMOJI_ASSETS;
+let siteEmojiAssets = [];
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
@@ -1233,7 +1229,13 @@ async function loadRemoteConfig() {
 }
 
 async function loadSiteEmojis() {
-  siteEmojiAssets = SITE_EMOJI_ASSETS;
+  if (!API_ENABLED) return;
+  try {
+    const payload = await apiFetch("/api/site-emojis", { timeoutMs: 12000 });
+    siteEmojiAssets = Array.isArray(payload.emojis) ? payload.emojis.filter((item) => item?.url).slice(0, 180) : [];
+  } catch {
+    siteEmojiAssets = [];
+  }
 }
 
 function siteEmojiPickerHtml(scope) {

@@ -47,6 +47,7 @@ const supabase = supabaseUrl && supabaseServiceKey
 
 const defaultExchangeCards = [];
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
+const siteEmojiDir = path.join(__dirname, "assets", "site-emojis");
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
@@ -71,6 +72,22 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.static(__dirname));
+
+app.get("/api/site-emojis", async (req, res) => {
+  try {
+    const files = await fs.readdir(siteEmojiDir);
+    const emojis = files
+      .filter((file) => /\.(?:png|webp|gif|jpe?g)$/i.test(file))
+      .sort((a, b) => a.localeCompare(b, "en", { numeric: true }))
+      .map((file) => ({
+        name: file.replace(/\.[^.]+$/, ""),
+        url: `/assets/site-emojis/${encodeURIComponent(file)}`
+      }));
+    res.json({ emojis });
+  } catch {
+    res.json({ emojis: [] });
+  }
+});
 
 async function readCmsTexts() {
   try {
