@@ -788,6 +788,8 @@ body[data-theme="dark"] .mirror-row {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 6px;
   padding: 10px;
+  max-height: 260px;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 18px;
   background: rgba(255, 255, 255, .96);
@@ -814,7 +816,17 @@ body[data-theme="dark"] .mirror-row {
   width: 100%;
   aspect-ratio: 1;
   font-size: 20px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
   transition: transform 120ms ease, background 120ms ease;
+}
+
+.group-sticker-row button img {
+  width: 84%;
+  height: 84%;
+  object-fit: contain;
+  pointer-events: none;
 }
 
 .group-sticker-row button:active {
