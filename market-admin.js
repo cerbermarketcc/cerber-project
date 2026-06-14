@@ -5,7 +5,7 @@ const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
-const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Логи", "Боты"];
+const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Боты"];
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 let data = null;
@@ -239,6 +239,7 @@ function renderSection() {
   if (section === "Рассылки") return renderBroadcasts();
   if (section === "Финансы") return renderFinance();
   if (section === "Настройки") return renderSettings();
+  if (section === "Разное") return renderMisc();
   if (section === "Логи") return renderLogs();
   if (section === "Боты") return renderMirrorBots();
   return "";
@@ -496,6 +497,60 @@ function renderSettings() {
   </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
 }
 
+function renderMisc() {
+  const supportSettings = data.settings?.supportSettings || { recipients: [] };
+  const recipients = Array.isArray(supportSettings.recipients) ? supportSettings.recipients : [];
+  const tickets = Array.isArray(data.supportTickets) ? data.supportTickets : [];
+  const openCount = tickets.filter((ticket) => ticket.status !== "closed").length;
+  return `
+    <section class="split">
+      <article class="split-card">
+        <h2>Разное</h2>
+        <h3>Логины поддержки</h3>
+        <p class="muted">Каждая строка: название раздела | логин. Пользователь выберет раздел на сайте, обращение уйдет в этот логин и появится ниже как тикет.</p>
+        <form data-support-settings-form>
+          <label class="field">Разделы поддержки<textarea name="recipients" rows="7">${esc(recipients.map((item) => `${item.title} | ${item.login}`).join("\n"))}</textarea></label>
+          <button class="primary">Сохранить разделы поддержки</button>
+        </form>
+      </article>
+      <article class="split-card">
+        <h2>Обращения</h2>
+        <section class="grid">
+          ${statCard("Открытые", openCount, "ожидают ответа")}
+          ${statCard("Всего", tickets.length, "все тикеты")}
+        </section>
+      </article>
+    </section>
+    <section class="support-ticket-list">
+      ${tickets.map(supportTicketCard).join("") || `<article class="split-card"><p class="muted">Обращений пока нет.</p></article>`}
+    </section>
+  `;
+}
+
+function supportTicketCard(ticket) {
+  const closed = ticket.status === "closed";
+  return `
+    <article class="split-card support-ticket-card">
+      <div class="ticket-head">
+        <div>
+          <h3>${esc(ticket.subject || ticket.id)}</h3>
+          <p class="muted">#${esc(ticket.id)} · от ${esc(ticket.fromLogin || "-")} · кому ${esc(ticket.recipientLogin || "-")} · ${fmtDate(ticket.createdAt)}</p>
+        </div>
+        <span class="status ${closed ? "off" : ""}">${closed ? "closed" : "open"}</span>
+      </div>
+      <p>${esc(ticket.body || "").replace(/\n/g, "<br>")}</p>
+      ${(ticket.replies || []).length ? `<h4>Ответы</h4>${ticket.replies.map((reply) => `<p class="notice"><strong>${esc(reply.fromLogin || "admin")}</strong> · ${fmtDate(reply.createdAt)}<br>${esc(reply.body || "").replace(/\n/g, "<br>")}</p>`).join("")}` : ""}
+      ${closed ? `<p class="muted">Обращение закрыто ${fmtDate(ticket.closedAt)}. Ответы заблокированы.</p>` : `
+        <form data-support-reply-form="${esc(ticket.id)}">
+          <label class="field">Ответ пользователю<textarea name="body" required></textarea></label>
+          <button class="primary">Ответить</button>
+          <button class="ghost danger" type="button" data-support-close="${esc(ticket.id)}">Закрыть обращение</button>
+        </form>
+      `}
+    </article>
+  `;
+}
+
 function renderLogs() {
   const rows = filterRows(data.logs, ["action", "actor"]);
   const label = (action) => ({
@@ -733,6 +788,58 @@ function bindActions() {
     } catch (error) {
       toast(error.message, true);
     }
+  });
+  root.querySelector("[data-support-settings-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    const recipients = String(fd.get("recipients") || "")
+      .split(/\n+/)
+      .map((line, index) => {
+        const parts = line.split("|").map((part) => part.trim()).filter(Boolean);
+        const title = parts.length > 1 ? parts[0] : (parts[0] || `Раздел ${index + 1}`);
+        const login = parts.length > 1 ? parts[1] : parts[0];
+        return login ? { id: title.toLowerCase().replace(/[^a-z0-9а-яё_-]+/gi, "-").replace(/^-+|-+$/g, "") || `support-${index + 1}`, title, login } : null;
+      })
+      .filter(Boolean);
+    try {
+      data = await api("/api/admin/support-settings", {
+        method: "PUT",
+        body: JSON.stringify({ supportSettings: { recipients } })
+      });
+      toast("Разделы поддержки сохранены");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-support-reply-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = String(new FormData(form).get("body") || "").trim();
+      if (!body) return;
+      try {
+        data = await api(`/api/admin/support-tickets/${encodeURIComponent(form.dataset.supportReplyForm)}/reply`, {
+          method: "POST",
+          body: JSON.stringify({ body })
+        });
+        toast("Ответ отправлен");
+        renderShell();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    });
+  });
+  root.querySelectorAll("[data-support-close]").forEach((button) => {
+    button.onclick = async () => {
+      if (!confirm("Закрыть обращение? После закрытия отвечать по нему нельзя.")) return;
+      try {
+        data = await api(`/api/admin/support-tickets/${encodeURIComponent(button.dataset.supportClose)}/close`, { method: "POST" });
+        toast("Обращение закрыто");
+        renderShell();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
   });
   root.querySelector("[data-password-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();

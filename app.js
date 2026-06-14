@@ -205,6 +205,12 @@ const defaults = {
   broadcasts: [],
   userFilters: [],
   storeApplications: [],
+  supportSettings: {
+    recipients: [
+      { id: "general", title: "Общая поддержка", login: "support" }
+    ]
+  },
+  supportTickets: [],
   ownerSettings: {
     defaultAutoReleaseHours: 24,
     platformCommissionPercent: 0,
@@ -745,6 +751,9 @@ function normalizeDb(next) {
   if (!Array.isArray(next.broadcasts)) next.broadcasts = [];
   if (!Array.isArray(next.userFilters)) next.userFilters = [];
   if (!Array.isArray(next.storeApplications)) next.storeApplications = [];
+  if (!next.supportSettings || typeof next.supportSettings !== "object") next.supportSettings = structuredClone(defaults.supportSettings);
+  if (!Array.isArray(next.supportSettings.recipients)) next.supportSettings.recipients = structuredClone(defaults.supportSettings.recipients);
+  if (!Array.isArray(next.supportTickets)) next.supportTickets = [];
   if (!next.ownerSettings) next.ownerSettings = structuredClone(defaults.ownerSettings);
   next.ownerSettings = {
     ...structuredClone(defaults.ownerSettings),
@@ -2162,6 +2171,13 @@ const supportTopics = [
   "Сообщить о баге (предлагается вознаграждение)",
   "Открытие магазина"
 ];
+
+function supportRecipients() {
+  const recipients = db.supportSettings?.recipients;
+  return Array.isArray(recipients) && recipients.length
+    ? recipients.filter((item) => item?.id && item?.login)
+    : defaults.supportSettings.recipients;
+}
 
 function layout(content) {
   document.body.dataset.theme = db.theme;
@@ -4492,11 +4508,17 @@ function messageActions(msg) {
 
 function renderSupport() {
   route = "support";
+  const recipients = supportRecipients();
   layout(`
     <section class="screen support-screen">
       <article class="support-card">
         <h1>Новый тикет в поддержку</h1>
         <form class="form" data-support-form>
+          <label class="field">Кому отправить
+            <select name="recipientId" required>
+              ${recipients.map((item) => `<option value="${esc(item.id)}">${esc(item.title || item.login)} · ${esc(item.login)}</option>`).join("")}
+            </select>
+          </label>
           <label class="field">Тема
             <select name="subject" required>
               <option value="" disabled selected>Выберите тему</option>
@@ -4514,19 +4536,36 @@ function renderSupport() {
       </article>
     </section>
   `);
-  document.querySelector("[data-support-form]").onsubmit = (event) => {
+  document.querySelector("[data-support-form]").onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const subject = data.get("subject");
-    const body = data.get("body");
+    const recipientId = String(data.get("recipientId") || "");
+    const subject = String(data.get("subject") || "");
+    const body = String(data.get("body") || "");
+    const recipient = recipients.find((item) => item.id === recipientId) || recipients[0];
+    if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+      try {
+        const payload = await apiFetch("/api/support/tickets", {
+          method: "POST",
+          body: JSON.stringify({ recipientId, subject, body })
+        });
+        applyRemoteState(payload);
+        showToast("Обращение отправлено");
+        renderMessages();
+        return;
+      } catch (error) {
+        showToast(error.message || "Поддержка временно не приняла обращение");
+      }
+    }
     db.messages.unshift({
       id: `support-${Date.now()}`,
       storeId: "support",
       storeTag: "supportcerber",
-      toLogin: "support",
+      toLogin: recipient?.login || "support",
       fromLogin: db.currentUser,
-      subject,
+      subject: `[${recipient?.title || "Поддержка"}] ${subject}`,
       body,
+      createdAt: Date.now(),
       date: new Date().toLocaleString(),
       system: "support"
     });

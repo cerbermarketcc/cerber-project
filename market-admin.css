@@ -340,6 +340,28 @@ tr:hover td {
   transform: translateY(0);
 }
 
+.support-ticket-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.support-ticket-card {
+  display: grid;
+  gap: 12px;
+}
+
+.ticket-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.ticket-head h3 {
+  margin: 0 0 4px;
+}
+
 .admin-toast.bad {
   border-color: rgba(239, 91, 91, 0.5);
   color: var(--red);

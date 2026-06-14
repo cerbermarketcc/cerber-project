@@ -548,6 +548,10 @@ async function stateFor(user) {
         },
         siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
         broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
+        supportSettings: normalizeSupportSettings(settingsData.supportSettings),
+        supportTickets: Array.isArray(settingsData.supportTickets) && user
+          ? settingsData.supportTickets.filter((ticket) => sameLogin(ticket.fromLogin, user.login) || sameLogin(ticket.recipientLogin, user.login)).map(supportTicketPublic)
+          : [],
         userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
         blockedUsers: settingsData.blockedUsers || {},
         storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
@@ -1059,6 +1063,52 @@ app.get("/api/session", async (req, res, next) => {
   }
 });
 
+app.post("/api/support/tickets", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const settings = normalizeSupportSettings(state.supportSettings);
+    const recipientId = String(req.body.recipientId || "").trim();
+    const recipient = settings.recipients.find((item) => item.id === recipientId) || settings.recipients[0];
+    const subject = String(req.body.subject || recipient.title || "Обращение").trim();
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Введите текст обращения" });
+    const ticket = {
+      id: `support-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      subject,
+      body,
+      fromLogin: user.login,
+      recipientLogin: recipient.login,
+      recipientTitle: recipient.title,
+      status: "open",
+      createdAt: Date.now(),
+      replies: []
+    };
+    state.supportSettings = settings;
+    state.supportTickets = [ticket, ...(Array.isArray(state.supportTickets) ? state.supportTickets : [])];
+    await saveSettingsState(state);
+    await upsertPrivateMessage({
+      id: `${ticket.id}-message`,
+      storeId: "support",
+      storeTag: "support",
+      toLogin: ticket.recipientLogin,
+      fromLogin: user.login,
+      subject: `[${ticket.recipientTitle}] ${ticket.subject}`,
+      body: `${ticket.body}\n\nТикет: ${ticket.id}`,
+      createdAt: ticket.createdAt,
+      date: new Date(ticket.createdAt).toLocaleString("ru-RU"),
+      system: "support",
+      supportTicketId: ticket.id
+    });
+    notifyRealtime("support_ticket_created", { ticketId: ticket.id, recipientLogin: ticket.recipientLogin });
+    res.json({ ticket: supportTicketPublic(ticket), ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/state", async (_req, res, next) => {
   try {
     res.json(await stateFor(null));
@@ -1188,6 +1238,83 @@ app.get("/api/admin/overview", async (req, res, next) => {
     const admin = requireAdmin(req);
     const data = await adminLoadMarketplace();
     res.json({ admin, ...adminBuildOverview(data) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/admin/support-settings", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.supportSettings = normalizeSupportSettings(req.body.supportSettings || req.body);
+    await saveSettingsState(state);
+    await appendAdminLog("support_settings_updated", admin.login, { recipients: state.supportSettings.recipients.length });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/support-tickets/:id/reply", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    const ticket = (state.supportTickets || []).find((item) => String(item.id) === String(req.params.id));
+    if (!ticket) return res.status(404).json({ error: "Обращение не найдено" });
+    if (ticket.status === "closed") return res.status(409).json({ error: "Обращение уже закрыто" });
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Введите ответ" });
+    const reply = { id: `reply-${Date.now()}`, fromLogin: admin.login, body, createdAt: Date.now() };
+    ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
+    ticket.replies.push(reply);
+    ticket.updatedAt = Date.now();
+    await saveSettingsState(state);
+    await upsertPrivateMessage({
+      id: `${ticket.id}-${reply.id}`,
+      storeId: "support",
+      storeTag: "support",
+      toLogin: ticket.fromLogin,
+      fromLogin: ticket.recipientLogin || admin.login,
+      subject: `Ответ по тикету ${ticket.id}`,
+      body,
+      createdAt: reply.createdAt,
+      date: new Date(reply.createdAt).toLocaleString("ru-RU"),
+      system: "support_reply",
+      supportTicketId: ticket.id
+    });
+    notifyRealtime("support_ticket_replied", { ticketId: ticket.id });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    const ticket = (state.supportTickets || []).find((item) => String(item.id) === String(req.params.id));
+    if (!ticket) return res.status(404).json({ error: "Обращение не найдено" });
+    ticket.status = "closed";
+    ticket.closedAt = Date.now();
+    ticket.closedBy = admin.login;
+    await saveSettingsState(state);
+    await upsertPrivateMessage({
+      id: `${ticket.id}-closed`,
+      storeId: "support",
+      storeTag: "support",
+      toLogin: ticket.fromLogin,
+      fromLogin: ticket.recipientLogin || admin.login,
+      subject: `Тикет ${ticket.id} закрыт`,
+      body: "Обращение закрыто.",
+      createdAt: ticket.closedAt,
+      date: new Date(ticket.closedAt).toLocaleString("ru-RU"),
+      system: "support_closed",
+      supportTicketId: ticket.id
+    });
+    notifyRealtime("support_ticket_closed", { ticketId: ticket.id });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
   }
@@ -1935,7 +2062,45 @@ async function loadSettingsState() {
   state.telegramBot.users = state.telegramBot.users || {};
   state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
   state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+  state.supportSettings = normalizeSupportSettings(state.supportSettings);
+  state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
   return state;
+}
+
+function normalizeSupportSettings(settings = {}) {
+  const recipients = Array.isArray(settings.recipients) ? settings.recipients : [];
+  const normalized = recipients.map((item, index) => {
+    const login = String(item?.login || item?.recipientLogin || "").trim();
+    const title = String(item?.title || item?.name || login || `Раздел ${index + 1}`).trim();
+    const id = String(item?.id || title || login || `support-${index + 1}`)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return login ? { id: id || `support-${index + 1}`, title, login } : null;
+  }).filter(Boolean);
+  return {
+    recipients: normalized.length ? normalized : [{ id: "general", title: "Общая поддержка", login: "support" }]
+  };
+}
+
+function supportTicketPublic(ticket = {}) {
+  return {
+    id: ticket.id,
+    subject: ticket.subject,
+    body: ticket.body,
+    fromLogin: ticket.fromLogin,
+    recipientLogin: ticket.recipientLogin,
+    recipientTitle: ticket.recipientTitle,
+    status: ticket.status || "open",
+    createdAt: ticket.createdAt,
+    closedAt: ticket.closedAt || 0,
+    replies: Array.isArray(ticket.replies) ? ticket.replies : []
+  };
+}
+
+async function upsertPrivateMessage(message) {
+  await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
 }
 
 async function adminLoadMarketplace() {
@@ -2550,8 +2715,10 @@ function adminBuildOverview(data) {
     settings: {
       ownerSettings: state.ownerSettings || {},
       paymentSettings: state.paymentSettings || {},
-      adminSecurity: { login: state.adminSecurity?.login || "admin", hasPassword: Boolean(state.adminSecurity?.passwordHash) }
+      adminSecurity: { login: state.adminSecurity?.login || "admin", hasPassword: Boolean(state.adminSecurity?.passwordHash) },
+      supportSettings: normalizeSupportSettings(state.supportSettings)
     },
+    supportTickets: Array.isArray(state.supportTickets) ? state.supportTickets.map(supportTicketPublic) : [],
     broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : [],
     userFilters: Array.isArray(state.userFilters) ? state.userFilters : [],
     bots: {
