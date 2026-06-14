@@ -689,6 +689,28 @@ body[data-theme="dark"] .mirror-row {
   box-shadow: none;
 }
 
+.group-message.sticker-message {
+  width: max-content;
+  max-width: min(92%, 220px);
+  grid-template-columns: 40px max-content;
+  align-items: start;
+}
+
+.group-message.sticker-message.own {
+  grid-template-columns: max-content 40px;
+}
+
+.group-message.sticker-message .group-meta {
+  justify-content: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.group-message.sticker-message .group-meta span {
+  white-space: nowrap;
+}
+
 .chat-sticker {
   display: block;
   width: 64px;
