@@ -1314,13 +1314,23 @@ function messageReactionsHtml(msg, scope) {
 }
 
 function messageReactionPickerHtml(msg, scope) {
+  const groupActions = scope === "group" && msg.fromLogin !== "cerber-market" ? `
+    <div class="message-action-menu">
+      ${!sameLogin(msg.fromLogin, db.currentUser) ? `<button type="button" data-group-user="${esc(msg.fromLogin)}">Перейти в личку</button>` : ""}
+      ${isGroupModerator() ? `<button type="button" data-group-pin="${esc(msg.id)}">Закрепить сообщение</button>` : ""}
+      ${isGroupModerator() ? `<button type="button" data-group-delete="${esc(msg.id)}">Удалить у всех</button>` : ""}
+    </div>
+  ` : "";
   return `
     <div class="message-reaction-picker" data-reaction-picker-for="${esc(msg.id)}" hidden>
-      ${SITE_EMOJI_ASSETS.slice(0, 24).map((emoji) => `
-        <button type="button" data-${scope}-react-emoji="${esc(emoji.url)}" data-${scope}-react-message="${esc(msg.id)}">
-          <img src="${esc(emoji.url)}" alt="">
-        </button>
-      `).join("")}
+      <div class="message-reaction-grid">
+        ${SITE_EMOJI_ASSETS.slice(0, 24).map((emoji) => `
+          <button type="button" data-${scope}-react-emoji="${esc(emoji.url)}" data-${scope}-react-message="${esc(msg.id)}">
+            <img src="${esc(emoji.url)}" alt="">
+          </button>
+        `).join("")}
+      </div>
+      ${groupActions}
     </div>
   `;
 }
@@ -4332,7 +4342,7 @@ function groupMessageView(msg) {
         ${likes.length ? `<button class="group-like-badge" data-group-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
         ${messageReactionsHtml(msg, "group")}
         ${messageReactionPickerHtml(msg, "group")}
-        ${moderator ? `
+        ${false && moderator ? `
           <div class="group-actions">
             <button data-group-pin="${esc(msg.id)}">Закрепить</button>
             <button data-group-user="${esc(msg.fromLogin)}">ЛС</button>

@@ -729,9 +729,7 @@ body[data-theme="dark"] .mirror-row {
   position: absolute;
   left: 8px;
   bottom: calc(100% + 8px);
-  display: grid;
-  grid-template-columns: repeat(6, 34px);
-  gap: 5px;
+  display: block;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -749,7 +747,13 @@ body[data-theme="dark"] .mirror-row {
   display: none;
 }
 
-.message-reaction-picker button {
+.message-reaction-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 34px);
+  gap: 5px;
+}
+
+.message-reaction-grid button {
   display: grid;
   place-items: center;
   width: 34px;
@@ -759,10 +763,31 @@ body[data-theme="dark"] .mirror-row {
   background: rgba(244, 238, 234, .94);
 }
 
-.message-reaction-picker img {
+.message-reaction-grid img {
   width: 26px;
   height: 26px;
   object-fit: contain;
+}
+
+.message-action-menu {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, .35);
+}
+
+.message-action-menu button {
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, .06);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 9px 10px;
+  text-align: left;
 }
 
 .group-system-message {
