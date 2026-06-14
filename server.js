@@ -1075,6 +1075,25 @@ app.put("/api/state", async (req, res, next) => {
     const state = req.body.state || {};
     const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const currentSettingsData = currentSettings?.data || {};
+    const currentGroupSettings = currentSettingsData.groupSettings || {};
+    const incomingGroupSettings = state.groupSettings || {};
+    const mergedGroupMembers = [
+      ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
+      ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
+    ].reduce((items, login) => {
+      const cleanLogin = String(login || "").trim();
+      if (cleanLogin && !items.some((item) => loginKey(item) === loginKey(cleanLogin))) items.push(cleanLogin);
+      return items;
+    }, []);
+    const mergedGroupSettings = {
+      ...currentGroupSettings,
+      ...incomingGroupSettings,
+      members: mergedGroupMembers,
+      presence: {
+        ...(currentGroupSettings.presence || {}),
+        ...(incomingGroupSettings.presence || {})
+      }
+    };
     await supabase.from("app_settings").upsert({
       id: "main",
       data: {
@@ -1085,7 +1104,7 @@ app.put("/api/state", async (req, res, next) => {
         exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
         exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
         groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
-        groupSettings: state.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
+        groupSettings: mergedGroupSettings,
         referrals: Array.isArray(state.referrals) ? state.referrals : [],
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},

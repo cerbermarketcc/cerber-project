@@ -9,6 +9,7 @@ const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
 const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
+const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const API_ORIGIN = location.protocol === "file:"
@@ -729,6 +730,8 @@ function normalizeDb(next) {
   if (!next.groupSettings) next.groupSettings = structuredClone(defaults.groupSettings);
   if (!next.groupSettings.mutedUntil) next.groupSettings.mutedUntil = {};
   if (!Array.isArray(next.groupSettings.rollTimers)) next.groupSettings.rollTimers = [];
+  if (!Array.isArray(next.groupSettings.members)) next.groupSettings.members = [];
+  if (!next.groupSettings.presence) next.groupSettings.presence = {};
   if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
@@ -1120,9 +1123,12 @@ async function apiFetch(path, options = {}) {
 
 function applyRemoteState(payload) {
   if (!payload) return;
+  const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
   db = merge(db, payload.state || {});
   if (payload.user) db.currentUser = payload.user.login;
   normalizeDb(db);
+  db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, rememberedGroupMembers);
+  writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
@@ -3733,11 +3739,45 @@ function ensureGroupSettings() {
   db.groupSettings.members = Array.isArray(db.groupSettings.members) ? db.groupSettings.members : [];
   db.groupSettings.presence = db.groupSettings.presence || {};
   db.groupSettings.widgetSeenAt = db.groupSettings.widgetSeenAt || {};
+  db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, readStoredGroupMembers());
+}
+
+function mergeGroupMembers(...lists) {
+  const result = [];
+  lists.flat().filter(Boolean).forEach((login) => {
+    const cleanLogin = String(login || "").trim();
+    if (cleanLogin && !result.some((item) => sameLogin(item, cleanLogin))) result.push(cleanLogin);
+  });
+  return result;
+}
+
+function readStoredGroupMembers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GROUP_MEMBERS_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredGroupMembers(members) {
+  try {
+    localStorage.setItem(GROUP_MEMBERS_KEY, JSON.stringify(mergeGroupMembers(members)));
+  } catch {
+    // Chat membership still remains in the in-memory database for this session.
+  }
+}
+
+function rememberGroupMember(login) {
+  if (!login) return;
+  ensureGroupSettings();
+  db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, [login]);
+  writeStoredGroupMembers(db.groupSettings.members);
 }
 
 function groupMemberLogins() {
   ensureGroupSettings();
-  return db.groupSettings.members.filter(Boolean);
+  return mergeGroupMembers(db.groupSettings.members, readStoredGroupMembers());
 }
 
 function isGroupMember(login = db.currentUser) {
@@ -3771,9 +3811,10 @@ function joinGroupChat() {
   const user = currentUser();
   if (!user) return renderAuth();
   ensureGroupSettings();
-  if (!isGroupMember(user.login)) db.groupSettings.members.push(user.login);
+  const wasMember = isGroupMember(user.login);
+  rememberGroupMember(user.login);
   markGroupPresence(user.login);
-  pushGroupSystemMessage(`${user.login} вступил в общий чат.`);
+  if (!wasMember) pushGroupSystemMessage(`${user.login} вступил в общий чат.`);
   saveDb();
   renderGroupChat();
 }
@@ -7514,7 +7555,7 @@ async function handleGroupWidgetSend(event) {
   const user = currentUser();
   if (!user) return renderAuth();
   ensureGroupSettings();
-  if (!isGroupMember(user.login)) db.groupSettings.members.push(user.login);
+  rememberGroupMember(user.login);
   markGroupPresence(user.login);
   const form = event.currentTarget;
   const body = String(new FormData(form).get("body") || "").trim();
