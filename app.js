@@ -1124,15 +1124,45 @@ async function apiFetch(path, options = {}) {
 function applyRemoteState(payload) {
   if (!payload) return;
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
+  const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
+  const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
   db = merge(db, payload.state || {});
   if (payload.user) db.currentUser = payload.user.login;
   normalizeDb(db);
+  db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
+  db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
   db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, rememberedGroupMembers);
   writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
   } catch {}
+}
+
+function mergeMessageLists(remoteMessages = [], localMessages = []) {
+  const merged = new Map();
+  const keepLocalAfter = Date.now() - 30 * 60 * 1000;
+  (Array.isArray(remoteMessages) ? remoteMessages : []).forEach((message) => {
+    if (message?.id) merged.set(message.id, message);
+  });
+  (Array.isArray(localMessages) ? localMessages : []).forEach((message) => {
+    if (!message?.id) return;
+    const existing = merged.get(message.id);
+    if (existing) {
+      merged.set(message.id, {
+        ...existing,
+        ...message,
+        deleted: Boolean(existing.deleted || message.deleted),
+        reactions: {
+          ...(existing.reactions || {}),
+          ...(message.reactions || {})
+        }
+      });
+      return;
+    }
+    if (Number(message.createdAt || 0) >= keepLocalAfter) merged.set(message.id, message);
+  });
+  return [...merged.values()];
 }
 
 async function loadRemoteSession() {
@@ -1253,6 +1283,46 @@ function siteEmojiAttachment(url = "") {
     type: "image/png",
     url: cleanUrl
   };
+}
+
+function siteEmojiUrl(url = "") {
+  const cleanUrl = String(url || "").trim();
+  return SITE_EMOJI_ASSETS.some((emoji) => emoji.url === cleanUrl) ? cleanUrl : "";
+}
+
+function siteEmojiMessageFields(url = "") {
+  const cleanUrl = siteEmojiUrl(url);
+  return cleanUrl ? { stickerUrl: cleanUrl, attachments: [] } : null;
+}
+
+function messageReactionsHtml(msg, scope) {
+  const reactions = msg?.reactions && typeof msg.reactions === "object" ? msg.reactions : {};
+  const rows = Object.entries(reactions)
+    .map(([url, logins]) => ({ url: siteEmojiUrl(url), count: Array.isArray(logins) ? logins.length : 0 }))
+    .filter((item) => item.url && item.count > 0);
+  if (!rows.length) return "";
+  return `
+    <div class="message-reactions">
+      ${rows.map((item) => `
+        <button type="button" data-${scope}-reaction="${esc(item.url)}" data-${scope}-reaction-message="${esc(msg.id)}">
+          <img src="${esc(item.url)}" alt="">
+          <span>${item.count}</span>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function messageReactionPickerHtml(msg, scope) {
+  return `
+    <div class="message-reaction-picker" data-reaction-picker-for="${esc(msg.id)}" hidden>
+      ${SITE_EMOJI_ASSETS.slice(0, 24).map((emoji) => `
+        <button type="button" data-${scope}-react-emoji="${esc(emoji.url)}" data-${scope}-react-message="${esc(msg.id)}">
+          <img src="${esc(emoji.url)}" alt="">
+        </button>
+      `).join("")}
+    </div>
+  `;
 }
 
 async function loadCmsTextOverrides() {
@@ -3529,8 +3599,8 @@ function renderMessages() {
   });
   document.querySelectorAll("[data-private-site-emoji]").forEach((button) => {
     button.onclick = () => {
-      const attachment = siteEmojiAttachment(button.dataset.privateSiteEmoji);
-      if (!attachment || !activePrivateLogin) return;
+      const sticker = siteEmojiMessageFields(button.dataset.privateSiteEmoji);
+      if (!sticker || !activePrivateLogin) return;
       db.messages.unshift({
         id: `private-${Date.now()}`,
         storeId: "",
@@ -3539,8 +3609,9 @@ function renderMessages() {
         fromLogin: db.currentUser,
         subject: "",
         body: "",
-        attachments: [attachment],
+        ...sticker,
         likes: [],
+        reactions: {},
         createdAt: Date.now(),
         date: new Date().toLocaleString()
       });
@@ -3552,6 +3623,7 @@ function renderMessages() {
   document.querySelectorAll("[data-private-message]").forEach((message) => {
     message.ondblclick = () => togglePrivateLike(message.dataset.privateMessage);
   });
+  bindMessageReactionPickers("private");
   document.querySelectorAll("[data-close-exchange]").forEach((button) => {
     button.onclick = () => closeExchangeOrder(button.dataset.closeExchange, "closed");
   });
@@ -3567,10 +3639,10 @@ function startPrivateMessagesRefresh() {
     const form = document.querySelector("[data-private-chat-form]");
     const text = form?.querySelector("textarea")?.value || "";
     if (text.trim() || privateVoiceRecorder?.state === "recording" || privateVoiceDraft) return;
-    const before = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body]).slice(-60));
+    const before = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-60));
     const ok = await loadRemoteSession();
     if (!ok || route !== "messages") return;
-    const after = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body]).slice(-60));
+    const after = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-60));
     if (before !== after) renderMessages();
   }, 6000);
 }
@@ -3610,7 +3682,7 @@ function privateMessageView(msg) {
   const likes = Array.isArray(msg.likes) ? msg.likes : [];
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
   return `
-    <article class="group-message private-message ${own ? "own" : ""}" data-private-message="${esc(msg.id)}">
+    <article class="group-message private-message ${own ? "own" : ""} ${msg.stickerUrl ? "sticker-message" : ""}" data-private-message="${esc(msg.id)}">
       <button class="group-avatar">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
       <div>
         <div class="group-meta">
@@ -3618,9 +3690,12 @@ function privateMessageView(msg) {
           <span>${esc(msg.date)}</span>
         </div>
         ${msg.subject ? `<strong>${esc(msg.subject)}</strong>` : ""}
-        <p>${esc(msg.body || "").replace(/\n/g, "<br>")}</p>
+        ${msg.body ? `<p>${esc(msg.body || "").replace(/\n/g, "<br>")}</p>` : ""}
+        ${msg.stickerUrl ? `<img class="chat-sticker" src="${esc(msg.stickerUrl)}" alt="">` : ""}
         ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
         ${likes.length ? `<button class="group-like-badge" data-private-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
+        ${messageReactionsHtml(msg, "private")}
+        ${messageReactionPickerHtml(msg, "private")}
         ${messageActions(msg)}
       </div>
     </article>
@@ -3718,6 +3793,74 @@ function togglePrivateLike(messageId) {
   else msg.likes.push(db.currentUser);
   saveDb();
   renderMessages();
+}
+
+function messageListForScope(scope) {
+  return scope === "private" ? db.messages : db.groupMessages;
+}
+
+function renderMessageScope(scope) {
+  if (scope === "private") renderMessages();
+  else renderGroupChat();
+}
+
+function toggleMessageReaction(scope, messageId, emojiUrl) {
+  const cleanUrl = siteEmojiUrl(emojiUrl);
+  if (!cleanUrl || !db.currentUser) return;
+  const msg = (messageListForScope(scope) || []).find((item) => item.id === messageId);
+  if (!msg) return;
+  msg.reactions = msg.reactions && typeof msg.reactions === "object" ? msg.reactions : {};
+  msg.reactions[cleanUrl] = Array.isArray(msg.reactions[cleanUrl]) ? msg.reactions[cleanUrl] : [];
+  const index = msg.reactions[cleanUrl].findIndex((login) => sameLogin(login, db.currentUser));
+  if (index >= 0) msg.reactions[cleanUrl].splice(index, 1);
+  else msg.reactions[cleanUrl].push(db.currentUser);
+  if (!msg.reactions[cleanUrl].length) delete msg.reactions[cleanUrl];
+  saveDb();
+  renderMessageScope(scope);
+}
+
+function hideReactionPickers() {
+  document.querySelectorAll("[data-reaction-picker-for]").forEach((picker) => picker.hidden = true);
+}
+
+function showReactionPicker(scope, messageId) {
+  hideReactionPickers();
+  const picker = [...document.querySelectorAll("[data-reaction-picker-for]")]
+    .find((item) => item.dataset.reactionPickerFor === messageId);
+  if (picker) picker.hidden = false;
+}
+
+function bindMessageReactionPickers(scope) {
+  const messageSelector = scope === "private" ? "[data-private-message]" : "[data-group-message]";
+  const idName = scope === "private" ? "privateMessage" : "groupMessage";
+  document.querySelectorAll(messageSelector).forEach((message) => {
+    let holdTimer = null;
+    const messageId = message.dataset[idName];
+    message.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      showReactionPicker(scope, messageId);
+    });
+    message.addEventListener("touchstart", () => {
+      holdTimer = setTimeout(() => showReactionPicker(scope, messageId), 520);
+    }, { passive: true });
+    ["touchend", "touchmove", "touchcancel"].forEach((eventName) => {
+      message.addEventListener(eventName, () => {
+        if (holdTimer) clearTimeout(holdTimer);
+      }, { passive: true });
+    });
+  });
+  document.querySelectorAll(`[data-${scope}-react-emoji]`).forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      toggleMessageReaction(scope, button.dataset[`${scope}ReactMessage`], button.dataset[`${scope}ReactEmoji`]);
+    };
+  });
+  document.querySelectorAll(`[data-${scope}-reaction]`).forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      toggleMessageReaction(scope, button.dataset[`${scope}ReactionMessage`], button.dataset[`${scope}Reaction`]);
+    };
+  });
 }
 
 function isGroupModerator(login = db.currentUser) {
@@ -3931,13 +4074,13 @@ function startGroupChatRefresh() {
     const text = form?.querySelector("textarea")?.value || "";
     if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft) return;
     const before = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body]).slice(-40),
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     const ok = await loadRemoteSession();
     if (!ok || route !== "group-chat") return;
     const after = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body]).slice(-40),
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     if (before !== after) renderGroupChat();
@@ -4078,14 +4221,15 @@ function renderGroupChat() {
   document.querySelectorAll("[data-group-site-emoji]").forEach((button) => {
     button.onclick = () => {
       const user = currentUser();
-      const attachment = siteEmojiAttachment(button.dataset.groupSiteEmoji);
-      if (!user || !attachment) return;
+      const sticker = siteEmojiMessageFields(button.dataset.groupSiteEmoji);
+      if (!user || !sticker) return;
       db.groupMessages.push({
         id: `group-${Date.now()}`,
         fromLogin: user.login,
         body: "",
-        attachments: [attachment],
+        ...sticker,
         likes: [],
+        reactions: {},
         createdAt: Date.now(),
         date: new Date().toLocaleString()
       });
@@ -4118,6 +4262,7 @@ function renderGroupChat() {
   document.querySelectorAll("[data-group-message]").forEach((message) => {
     message.ondblclick = () => toggleGroupLike(message.dataset.groupMessage);
   });
+  bindMessageReactionPickers("group");
 }
 
 async function toggleGroupVoiceRecord(event) {
@@ -4174,16 +4319,19 @@ function groupMessageView(msg) {
     `;
   }
   return `
-    <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""}" data-group-message="${esc(msg.id)}">
+    <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""} ${msg.stickerUrl ? "sticker-message" : ""}" data-group-message="${esc(msg.id)}">
       <button class="group-avatar" data-group-user="${esc(msg.fromLogin)}">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
       <div>
         <div class="group-meta">
           <button class="link-button" data-group-user="${esc(msg.fromLogin)}">${esc(groupMessageAuthor(msg.fromLogin))}</button>
           <span>${esc(msg.date)}</span>
         </div>
-        <p>${esc(msg.body).replace(/\n/g, "<br>")}</p>
+        ${msg.body ? `<p>${esc(msg.body).replace(/\n/g, "<br>")}</p>` : ""}
+        ${msg.stickerUrl ? `<img class="chat-sticker" src="${esc(msg.stickerUrl)}" alt="">` : ""}
         ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
         ${likes.length ? `<button class="group-like-badge" data-group-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
+        ${messageReactionsHtml(msg, "group")}
+        ${messageReactionPickerHtml(msg, "group")}
         ${moderator ? `
           <div class="group-actions">
             <button data-group-pin="${esc(msg.id)}">Закрепить</button>

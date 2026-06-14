@@ -642,6 +642,7 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .group-message > div {
+  position: relative;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 16px 16px 16px 5px;
@@ -677,6 +678,91 @@ body[data-theme="dark"] .mirror-row {
   margin: 7px 0 0;
   line-height: 1.42;
   overflow-wrap: anywhere;
+}
+
+.group-message.sticker-message > div {
+  width: max-content;
+  max-width: 160px;
+  padding: 8px;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.chat-sticker {
+  display: block;
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  margin-top: 4px;
+}
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.message-reactions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid rgba(148, 163, 184, .45);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .86);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.message-reactions img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.message-reaction-picker {
+  position: absolute;
+  left: 8px;
+  bottom: calc(100% + 8px);
+  display: grid;
+  grid-template-columns: repeat(6, 34px);
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .98);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, .2);
+  z-index: 12;
+}
+
+.group-message.own .message-reaction-picker {
+  right: 8px;
+  left: auto;
+}
+
+.message-reaction-picker[hidden] {
+  display: none;
+}
+
+.message-reaction-picker button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(244, 238, 234, .94);
+}
+
+.message-reaction-picker img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
 }
 
 .group-system-message {
