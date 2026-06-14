@@ -6,6 +6,17 @@ const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Боты"];
+const supportTopics = [
+  "Общие вопросы",
+  "Ввод/вывод средств",
+  "Настройка магазина",
+  "Сотрудничество",
+  "Восстановление доступа",
+  "Добавление города/района",
+  "Аукцион",
+  "Сообщить о баге (предлагается вознаграждение)",
+  "Открытие магазина"
+];
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 let data = null;
@@ -500,6 +511,7 @@ function renderSettings() {
 function renderMisc() {
   const supportSettings = data.settings?.supportSettings || { recipients: [] };
   const recipients = Array.isArray(supportSettings.recipients) ? supportSettings.recipients : [];
+  const recipientByTitle = new Map(recipients.map((item) => [String(item.title || "").toLowerCase(), item]));
   const tickets = Array.isArray(data.supportTickets) ? data.supportTickets : [];
   const openCount = tickets.filter((ticket) => ticket.status !== "closed").length;
   return `
@@ -507,9 +519,20 @@ function renderMisc() {
       <article class="split-card">
         <h2>Разное</h2>
         <h3>Логины поддержки</h3>
-        <p class="muted">Каждая строка: название раздела | логин. Пользователь выберет раздел на сайте, обращение уйдет в этот логин и появится ниже как тикет.</p>
+        <p class="muted">Включи нужные разделы и впиши логин аккаунта поддержки. На сайте пользователь увидит только включённые разделы.</p>
         <form data-support-settings-form>
-          <label class="field">Разделы поддержки<textarea name="recipients" rows="7">${esc(recipients.map((item) => `${item.title} | ${item.login}`).join("\n"))}</textarea></label>
+          <div class="support-topic-grid">
+            ${supportTopics.map((topic, index) => {
+              const existing = recipientByTitle.get(topic.toLowerCase()) || recipients.find((item) => item.id === `support-topic-${index}`);
+              return `
+                <label class="support-topic-row">
+                  <input type="checkbox" data-support-topic-enabled="${index}" ${existing ? "checked" : ""}>
+                  <span>${esc(topic)}</span>
+                  <input data-support-topic-login="${index}" data-support-topic-title="${esc(topic)}" data-support-topic-id="support-topic-${index}" placeholder="логин поддержки" value="${esc(existing?.login || "")}">
+                </label>
+              `;
+            }).join("")}
+          </div>
           <button class="primary">Сохранить разделы поддержки</button>
         </form>
       </article>
@@ -791,20 +814,20 @@ function bindActions() {
   });
   root.querySelector("[data-support-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const fd = new FormData(event.currentTarget);
-    const recipients = String(fd.get("recipients") || "")
-      .split(/\n+/)
-      .map((line, index) => {
-        const parts = line.split("|").map((part) => part.trim()).filter(Boolean);
-        const title = parts.length > 1 ? parts[0] : (parts[0] || `Раздел ${index + 1}`);
-        const login = parts.length > 1 ? parts[1] : parts[0];
-        return login ? { id: title.toLowerCase().replace(/[^a-z0-9а-яё_-]+/gi, "-").replace(/^-+|-+$/g, "") || `support-${index + 1}`, title, login } : null;
+    const selectedRecipients = [...event.currentTarget.querySelectorAll("[data-support-topic-login]")]
+      .map((input) => {
+        const index = input.dataset.supportTopicLogin;
+        const enabled = event.currentTarget.querySelector(`[data-support-topic-enabled="${index}"]`)?.checked;
+        const login = String(input.value || "").trim();
+        const title = input.dataset.supportTopicTitle || `Раздел ${Number(index) + 1}`;
+        const id = input.dataset.supportTopicId || `support-topic-${index}`;
+        return enabled && login ? { id, title, login } : null;
       })
       .filter(Boolean);
     try {
       data = await api("/api/admin/support-settings", {
         method: "PUT",
-        body: JSON.stringify({ supportSettings: { recipients } })
+        body: JSON.stringify({ supportSettings: { recipients: selectedRecipients } })
       });
       toast("Разделы поддержки сохранены");
       renderShell();

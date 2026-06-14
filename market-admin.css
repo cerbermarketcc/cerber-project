@@ -346,6 +346,32 @@ tr:hover td {
   margin-top: 16px;
 }
 
+.support-topic-grid {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.support-topic-row {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) minmax(180px, 260px);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.support-topic-row > span {
+  font-weight: 700;
+}
+
+.support-topic-row input[type="text"],
+.support-topic-row input:not([type]) {
+  width: 100%;
+}
+
 .support-ticket-card {
   display: grid;
   gap: 12px;
