@@ -497,6 +497,11 @@ async function stateFor(user) {
       profiles: profiles?.length || 0
     });
     const settingsData = settings?.data || {};
+    if (normalizeServerOrders(settingsData)) {
+      saveSettingsState(settingsData).catch((error) => {
+        console.error("[stateFor] order normalization save failed", { message: error.message });
+      });
+    }
     const mirrorBots = adminCollectMirrorBots(settingsData);
     const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
     const storesFromDb = Array.isArray(storesResult.data)
@@ -1050,6 +1055,35 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
     res.json({ store: mergedStore, ...(await stateFor(null)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
+  try {
+    requireDb();
+    const admin = verifyAdminToken(req);
+    const sellerToken = admin ? null : verifySellerAdminToken(req);
+    if (!admin && !sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    if (!order) return res.status(404).json({ error: "Заказ не найден" });
+    if (sellerToken && String(order.storeId || "") !== String(sellerToken.storeId || "")) {
+      return res.status(403).json({ error: "Нет доступа к спору этого магазина" });
+    }
+    const now = Date.now();
+    order.status = "completed";
+    order.paymentStatus = order.paymentStatus || "paid";
+    order.disputeOpen = false;
+    order.disputeChatClosed = true;
+    order.disputeClosedAt = now;
+    order.closedAt = now;
+    order.closeReason = "Спор закрыт";
+    await saveSettingsState({ ...state, orders });
+    notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
+    res.json({ order, ...(await stateFor(null)) });
   } catch (error) {
     next(error);
   }
@@ -2056,6 +2090,37 @@ async function removeOwnerStoreFallback(storeId) {
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
 }
 
+function normalizeServerOrders(state = {}) {
+  const now = Date.now();
+  let changed = false;
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  state.orders = orders.map((order) => {
+    if (!order || order.type !== "product") return order;
+    const status = String(order.status || "").toLowerCase();
+    const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+    if (status === "active" && paymentStatus === "paid" && !order.disputeOpen) {
+      const paidAt = Number(order.paidAt || order.createdAt || now);
+      const hours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
+      const autoReleaseAt = Number(order.autoReleaseAt || (paidAt + hours * 60 * 60 * 1000));
+      if (!order.autoReleaseAt) {
+        order.autoReleaseAt = autoReleaseAt;
+        changed = true;
+      }
+      if (autoReleaseAt && now >= autoReleaseAt) {
+        changed = true;
+        return {
+          ...order,
+          status: "completed",
+          closedAt: now,
+          closeReason: "Автозакрытие сделки"
+        };
+      }
+    }
+    return order;
+  });
+  return changed;
+}
+
 async function loadSettingsState() {
   await ensureSeed();
   const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
@@ -2066,6 +2131,9 @@ async function loadSettingsState() {
   state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
+  if (normalizeServerOrders(state)) {
+    await saveSettingsState(state);
+  }
   return state;
 }
 
@@ -2815,13 +2883,14 @@ async function createWalletDepositRecord(user, options = {}) {
 }
 
 async function completeProductOrder(order, state, providerPayload = {}) {
-  order.status = "completed";
+  const paidAt = Date.now();
+  order.status = "active";
   order.paymentStatus = "paid";
-  order.paidAt = Date.now();
-  order.completedAt = Date.now();
+  order.paidAt = paidAt;
+  order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
+  order.autoReleaseAt = paidAt + order.autoReleaseHours * 60 * 60 * 1000;
+  delete order.completedAt;
   order.paymentProviderPayload = providerPayload;
-
-  await saveSettingsState(state);
 
   if (order.storeId) {
     const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
@@ -2831,10 +2900,29 @@ async function completeProductOrder(order, state, providerPayload = {}) {
       const product = (store.products || []).find((item) => item.id === order.productId);
       if (product) {
         product.purchases = Number(product.purchases || 0) + 1;
+        const position = (product.positions || []).find((item) => item.id === order.positionId);
+        if (!order.reservedDescription) {
+          const positionItems = Array.isArray(position?.deliveryItems) ? position.deliveryItems : [];
+          const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+          const fromPosition = positionItems.length > 0;
+          const sourceItems = fromPosition ? positionItems : productItems;
+          const reservedDescription = sourceItems.shift() || "";
+          if (reservedDescription) {
+            order.reservedDescription = reservedDescription;
+            order.reservedFromPosition = fromPosition;
+            order.reservedStock = true;
+          }
+        }
+        if (position && Number(position.stock || 0) > 0 && !order.reservedStock && !order.stockReleasedAt) {
+          position.stock = Math.max(0, Number(position.stock || 0) - 1);
+          order.stockReleasedAt = Date.now();
+        }
       }
       await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     }
   }
+
+  await saveSettingsState(state);
 }
 
 async function completeWalletDeposit(deposit, state, providerPayload = {}) {

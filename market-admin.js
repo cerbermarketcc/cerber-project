@@ -466,6 +466,7 @@ function disputeDetail(payload) {
     <p><strong>Сумма:</strong> ${fmtMoney(payload.amount)}</p>
     <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
     <button class="primary" data-join-dispute="${esc(d.id)}">Войти в диспут</button>
+    ${d.disputeOpen !== false ? `<button class="ghost" data-close-dispute="${esc(d.id)}">Закрыть спор</button>` : ""}
     <h3>Переписка</h3>
     <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], payload.messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
 }
@@ -753,6 +754,15 @@ function bindActions() {
     try {
       await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.joinDispute)}/join`, { method: "POST" });
       toast("Администратор вошел в диспут");
+      await refreshData(true);
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-close-dispute]").forEach((button) => button.onclick = async () => {
+    try {
+      await api(`/api/orders/${encodeURIComponent(button.dataset.closeDispute)}/dispute/close`, { method: "POST" });
+      toast("Спор закрыт");
       await refreshData(true);
     } catch (error) {
       toast(error.message, true);

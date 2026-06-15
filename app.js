@@ -970,17 +970,17 @@ function normalizeOrders(next) {
         restoreReservedProductItem(order, next);
         return { ...order, status: "canceled", paymentStatus: "expired", canceledAt: now, cancelReason: "Бронь 40 минут истекла" };
       }
-      if (order.disputeOpen && order.disputeUntil && now >= Number(order.disputeUntil)) {
-        return { ...order, status: "completed", disputeOpen: false, closedAt: now, closeReason: "Спор автоматически закрыт по истечении 12 часов" };
-      }
       const store = (next.stores || []).find((item) => item.id === order.storeId);
       const autoReleaseHours = Math.min(72, Math.max(0, Number(store?.autoReleaseHours ?? next.ownerSettings?.defaultAutoReleaseHours ?? 24)));
-      if (order.status === "active" && order.paymentStatus === "paid" && !order.disputeOpen && age >= autoReleaseHours * 60 * 60 * 1000) {
+      const paidAt = Number(order.paidAt || createdAt);
+      const autoReleaseAt = Number(order.autoReleaseAt || (order.status === "active" && order.paymentStatus === "paid" ? paidAt + autoReleaseHours * 60 * 60 * 1000 : 0));
+      if (order.status === "active" && order.paymentStatus === "paid" && !order.disputeOpen && autoReleaseAt && now >= autoReleaseAt) {
         return { ...order, status: "completed", closedAt: now, closeReason: "\u0410\u0432\u0442\u043e\u0437\u0430\u043a\u0440\u044b\u0442\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438" };
       }
       return {
         ...order,
         createdAt,
+        autoReleaseAt: autoReleaseAt || order.autoReleaseAt || null,
         paymentStatus: order.paymentStatus || (order.status === "completed" ? "paid" : "waiting"),
         paymentExpiresAt: order.paymentExpiresAt || (order.status === "pending_payment" ? Number(createdAt) + 40 * 60 * 1000 : null)
       };
@@ -1975,9 +1975,10 @@ function bindShopLocationSelects(store, root = document) {
 }
 
 function orderCanDispute(order) {
-  if (!order || order.type !== "product" || order.status !== "completed") return false;
-  const paidAt = Number(order.paidAt || order.completedAt || 0);
-  return paidAt > 0 && Date.now() - paidAt <= 12 * 60 * 60 * 1000;
+  if (!order || order.type !== "product" || order.paymentStatus !== "paid") return false;
+  if (order.disputeOpen || ["completed", "closed", "canceled"].includes(String(order.status || "").toLowerCase())) return false;
+  const autoReleaseAt = Number(order.autoReleaseAt || 0);
+  return !autoReleaseAt || Date.now() < autoReleaseAt;
 }
 
 function productPaymentUrl(order) {
@@ -2169,7 +2170,7 @@ function pendingOrdersCount() {
     const status = String(order.status || "").toLowerCase();
     const paymentStatus = String(order.paymentStatus || "").toLowerCase();
     return !order.disputeOpen && (
-      ["active", "pending_payment"].includes(status) ||
+      ["pending_payment"].includes(status) ||
       ["pending", "waiting", "processing"].includes(paymentStatus)
     );
   }).length;
@@ -2576,7 +2577,7 @@ function renderOrders(tab = activeOrdersTab) {
   route = "orders";
   activeOrdersTab = tab;
   const orders = userOrders();
-  const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status) && !order.disputeOpen);
+  const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status));
   const completed = orders.filter((order) => ["completed", "closed"].includes(order.status) && !order.disputeOpen);
   const canceled = orders.filter((order) => order.status === "canceled");
   const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
@@ -2635,7 +2636,7 @@ function orderCard(order) {
         <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
-        ${order.status === "completed" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
+        ${order.paymentStatus === "paid" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -2672,8 +2673,8 @@ function showProductOrder(orderId) {
     <p>${esc(order.location || "")}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
     <p>Статус: ${productOrderStatus(order)}</p>
-    ${order.status === "completed" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
-    ${order.status === "completed" && !order.reviewLeft ? `
+    ${order.paymentStatus === "paid" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
+    ${["completed", "closed"].includes(order.status) && !order.reviewLeft ? `
       <form class="form" data-review-form="${esc(order.id)}">
         <label class="field">Оценка
           <select name="rating">
@@ -3222,6 +3223,29 @@ function issueRandomDeliveryItem(items) {
   return items.splice(index, 1)[0] || "";
 }
 
+function productOrderAutoReleaseAt(order, store = null) {
+  const paidAt = Number(order?.paidAt || Date.now());
+  const hours = Math.max(0, Number(order?.autoReleaseHours ?? store?.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24));
+  return paidAt + hours * 60 * 60 * 1000;
+}
+
+function activateProductOrderAfterPayment(order, providerPayload = {}) {
+  if (!order || order.status !== "pending_payment") return false;
+  const store = storeById(order.storeId);
+  const product = productById(store, order.productId);
+  const paidAt = Date.now();
+  order.status = "active";
+  order.paymentStatus = "paid";
+  order.paidAt = paidAt;
+  order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? store?.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24));
+  order.autoReleaseAt = productOrderAutoReleaseAt(order, store);
+  order.paymentProviderPayload = providerPayload;
+  delete order.completedAt;
+  if (product) product.purchases = Number(product.purchases || 0) + 1;
+  if (store) store.orders = Number(store.orders || 0) + 1;
+  return true;
+}
+
 function handleProductPurchase(storeId, productId, positionId) {
   if (!currentUser() || (API_ENABLED && !hasApiSession())) {
     authMode = "login";
@@ -3257,11 +3281,12 @@ function handleProductPurchase(storeId, productId, positionId) {
     positionId,
     product: product.title,
     storeName: store.name,
-    status: "completed",
+    status: "active",
     paymentStatus: "paid",
     createdAt: Date.now(),
     paidAt: Date.now(),
-    completedAt: Date.now(),
+    autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)),
+    autoReleaseAt: null,
     amountUsd: priceUsd,
     ltcAmount,
     location: locationLabel(position),
@@ -3270,6 +3295,7 @@ function handleProductPurchase(storeId, productId, positionId) {
     reservedFromPosition: issueFromPosition,
     reservedStock: true
   };
+  order.autoReleaseAt = productOrderAutoReleaseAt(order, store);
   db.orders.unshift(order);
   addWalletTransaction({
     type: "purchase",
@@ -3278,7 +3304,7 @@ function handleProductPurchase(storeId, productId, positionId) {
     amountUsd: -priceUsd
   });
   saveDb();
-  renderOrders("completed");
+  renderOrders("active");
 }
 
 function payProductOrderFromBalance(orderId) {
@@ -3298,7 +3324,7 @@ function payProductOrderFromBalance(orderId) {
     amountUsd: -Number(order.amountUsd || 0)
   });
   saveDb();
-  renderOrders("completed");
+  renderOrders("active");
 }
 
 function handleProductReservation(storeId, productId, positionId, options = {}) {
@@ -3477,15 +3503,7 @@ async function createGatewayInvoice(orderId, button = null) {
 function markProductOrderPaid(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.status !== "pending_payment") return;
-  const store = storeById(order.storeId);
-  const product = productById(store, order.productId);
-  const position = positionById(product, order.positionId);
-  order.status = "completed";
-  order.paymentStatus = "paid";
-  order.paidAt = Date.now();
-  order.completedAt = Date.now();
-  if (product) product.purchases = Number(product.purchases || 0) + 1;
-  if (store) store.orders = Number(store.orders || 0) + 1;
+  activateProductOrderAfterPayment(order);
   saveDb();
   showModal(`
     <h2>Оплата успешна</h2>
@@ -3516,9 +3534,11 @@ function openProductDispute(orderId) {
     showToast("Спор можно открыть только в течение 12 часов после оплаты");
     return;
   }
-  order.status = "dispute";
+  order.status = "active";
   order.disputeOpen = true;
-  order.disputeUntil = Date.now() + 12 * 60 * 60 * 1000;
+  order.disputeOpenedAt = Date.now();
+  order.disputeUntil = null;
+  order.disputeChatClosed = false;
   const store = storeById(order.storeId);
   if (store?.ownerLogin) {
     db.messages.unshift({
@@ -7152,7 +7172,7 @@ function shopProductsTab(store, products) {
 function shopDisputesTab(store) {
   const disputes = storeDisputes(store.id);
   return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина.</p></div></section>
-  <section class="seller-dashboard-card seller-wide-card">${disputes.map((order) => `<div class="seller-source"><span>${esc(order.product || order.id)} · ${esc(order.login || "")}</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $</strong></div>`).join("") || `<p>Открытых диспутов нет.</p>`}</section>`;
+  <section class="seller-dashboard-card seller-wide-card">${disputes.map((order) => `<div class="seller-source"><span>${esc(order.product || order.id)} · ${esc(order.login || "")}</span><strong><button class="ghost-button" data-shop-dispute-close="${esc(order.id)}">Закрыть спор</button></strong></div>`).join("") || `<p>Открытых диспутов нет.</p>`}</section>`;
 }
 
 function shopFinancesTab(store, salesUsd, txRows) {
@@ -7418,6 +7438,27 @@ function bindShopPanelActions(store, activeTab) {
     const nextPassword = String(data.get("adminPassword") || "").trim();
     if (nextPassword) store.adminPassword = nextPassword;
     await shopPersistAndRender("settings");
+  });
+
+  document.querySelectorAll("[data-shop-dispute-close]").forEach((button) => {
+    button.onclick = async () => {
+      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+      if (!token) return showToast("Войдите в Shop Admin заново");
+      try {
+        const payload = await apiFetch(`/api/orders/${encodeURIComponent(button.dataset.shopDisputeClose)}/dispute/close`, {
+          method: "POST",
+          timeoutMs: 15000,
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+        applyRemoteState(payload);
+        showToast("Спор закрыт");
+        renderShopPanel("disputes");
+      } catch (error) {
+        showToast(error.message || "Не удалось закрыть спор");
+      }
+    };
   });
 }
 
