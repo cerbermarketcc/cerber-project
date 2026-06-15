@@ -2157,9 +2157,27 @@ function navIcon(name) {
   return icons[name] || "";
 }
 
-function navButton(name, label, attrs = "") {
+function menuCountBadge(count) {
+  const value = Number(count || 0);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return `<span class="menu-count-badge">${value > 99 ? "99+" : value}</span>`;
+}
+
+function pendingOrdersCount() {
+  if (!currentUser()) return 0;
+  return userOrders().filter((order) => {
+    const status = String(order.status || "").toLowerCase();
+    const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+    return !order.disputeOpen && (
+      ["active", "pending_payment"].includes(status) ||
+      ["pending", "waiting", "processing"].includes(paymentStatus)
+    );
+  }).length;
+}
+
+function navButton(name, label, attrs = "", extra = "") {
   const active = route === name || (name === "stores" && route === "catalog");
-  return `<button class="nav-icon ${active ? "active" : ""}" aria-label="${label}" title="${label}" ${attrs}>${navIcon(name)}</button>`;
+  return `<button class="nav-icon ${active ? "active" : ""}" aria-label="${label}" title="${label}" ${attrs}>${navIcon(name)}${extra}</button>`;
 }
 
 function accountMenuButton(icon, label, attrs = "", extra = "") {
@@ -2230,6 +2248,7 @@ function layout(content) {
   document.body.dataset.theme = db.theme;
   const ltcBalance = userLtcBalance();
   const ltcUsd = userLtcUsdBalance();
+  const pendingOrders = pendingOrdersCount();
   root.innerHTML = `
     <main class="app">
       <header class="topbar">
@@ -2259,7 +2278,7 @@ function layout(content) {
       <div class="nav-card">
         ${navButton("home", "Главная", `data-route="home"`)}
         ${navButton("stores", "Магазины", `data-route="catalog"`)}
-        ${navButton("orders", "Заказы", `data-route="orders"`)}
+        ${navButton("orders", "Заказы", `data-route="orders"`, menuCountBadge(pendingOrders))}
         <button class="nav-icon ${route === "messages" ? "active" : ""}" aria-label="${tr("messages")}" title="${tr("messages")}" data-route="messages">${navIcon("messages")}<i></i></button>
         ${navButton("filters", "Фильтры", `data-filters`)}
         <button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button>
@@ -2276,7 +2295,7 @@ function layout(content) {
         ${accountMenuButton("wallet", "Кошелек", `data-route="wallet"`)}
         ${accountMenuButton("filters", "Каталог", `data-filters`)}
         ${accountMenuButton("stores", "Магазины", `data-route="catalog"`)}
-        ${accountMenuButton("orders", "Заказы", `data-route="orders"`)}
+        ${accountMenuButton("orders", "Заказы", `data-route="orders"`, menuCountBadge(pendingOrders))}
         ${accountMenuButton("messages", tr("messages"), `data-route="messages"`)}
         ${accountMenuButton("messages", "Общий чат", `data-route="group-chat"`)}
         ${accountMenuButton("referrals", "Реферальная программа", `data-route="referrals"`, `<b>NEW</b>`)}

@@ -2481,6 +2481,33 @@ body[data-theme="dark"] .mirror-row {
   background: #ff5a68;
 }
 
+.menu-count-badge {
+  justify-self: end;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ff2b2b;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 8px 18px rgba(255, 43, 43, .28);
+}
+
+.nav-icon .menu-count-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 10px;
+}
+
 .nav-close {
   margin-left: 8px;
   color: #171717;
