@@ -7128,18 +7128,18 @@ function shopPanelLoginStore(login, password) {
 }
 
 function renderShopPanelLogin(message = "") {
-  const hashStore = db.stores.find((store) => store.id === shopPanelHashId());
+  const storeId = shopPanelHashId() || shopPanelSession();
+  const hashStore = db.stores.find((store) => store.id === storeId);
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap shop-panel-login">
       <section class="auth-card">
         <img src="assets/logo1-transparent.png" alt="CERBER">
         <h1>Shop Admin</h1>
-        <p>Отдельная панель управления магазином.</p>
-        ${hashStore ? `<p>${esc(hashStore.name)} · ${esc(hashStore.ownerLogin || hashStore.id)}</p>` : ""}
+        <p>Панель управления магазином.</p>
+        ${hashStore ? `<p>${esc(hashStore.name)}</p>` : ""}
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <form class="form" data-shop-panel-login>
-          <label class="field">Логин<input name="login" required autocomplete="username" value="${esc(hashStore?.ownerLogin || "")}"></label>
           <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
           <button class="primary" type="submit">Войти</button>
         </form>
@@ -7149,49 +7149,38 @@ function renderShopPanelLogin(message = "") {
   `;
   document.querySelector("[data-shop-panel-login]").onsubmit = async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const login = String(data.get("login") || "").trim();
-    const password = String(data.get("password") || "");
-    let store = shopPanelLoginStore(login, password);
-    if (API_ENABLED) {
-      try {
-        const payload = await apiFetch("/api/store-admin/login", {
-          method: "POST",
-          body: JSON.stringify({ storeId: hashStore?.id || shopPanelHashId() || "", login, password })
-        });
-        localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
-        applyRemoteState(payload);
-        store = db.stores.find((item) => item.id === (hashStore?.id || shopPanelHashId() || payload.store?.id))
-          || shopPanelLoginStore(login, password)
-          || payload.store
-          || null;
-      } catch (error) {
-        renderShopPanelLogin(error.message || "Неверный логин или пароль");
-        return;
-      }
-    }
-    if (!store) {
-      renderShopPanelLogin("Неверный логин или пароль");
+    const password = String(new FormData(event.currentTarget).get("password") || "");
+    const loginStoreId = shopPanelHashId() || shopPanelSession() || hashStore?.id || "";
+    if (!loginStoreId) {
+      renderShopPanelLogin("Магазин не найден в ссылке");
       return;
     }
-    const existingStoreIndex = db.stores.findIndex((item) => item.id === store.id);
-    if (existingStoreIndex >= 0) {
-      db.stores[existingStoreIndex] = { ...db.stores[existingStoreIndex], ...store };
-    } else {
-      db.stores.push(store);
-    }
     try {
-      localStorage.setItem(SHOP_PANEL_SESSION_KEY, store.id);
-      localStorage.setItem(SELLER_ADMIN_KEY, store.id);
-    } catch {}
-    sellerAdminStoreId = store.id;
-    renderShopPanel("dashboard");
+      const payload = await apiFetch("/api/store-admin/login", {
+        method: "POST",
+        body: JSON.stringify({ storeId: loginStoreId, password })
+      });
+      const nextStoreId = payload.store?.id || loginStoreId;
+      localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
+      localStorage.setItem(SHOP_PANEL_SESSION_KEY, nextStoreId);
+      localStorage.setItem(SELLER_ADMIN_KEY, nextStoreId);
+      sellerAdminStoreId = nextStoreId;
+      applyRemoteState(payload);
+      const store = db.stores.find((item) => item.id === nextStoreId) || payload.store || null;
+      if (store) restoreShopPanelStore(store);
+      renderShopPanel("dashboard");
+    } catch (error) {
+      renderShopPanelLogin(error.message || "Неверный пароль");
+    }
   };
 }
 
 function renderShopPanel(activeTab = "dashboard") {
+  const storeId = shopPanelHashId() || shopPanelSession();
+  const sessionId = shopPanelSession();
+  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = shopPanelStore();
-  if (!store) return renderShopPanelLogin();
+  if (!store || !token || sessionId !== storeId) return renderShopPanelLogin();
   const html = sellerDashboardShell(store, false, activeTab);
   document.body.dataset.theme = db.theme;
   root.innerHTML = `

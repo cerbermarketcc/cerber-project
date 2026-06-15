@@ -295,7 +295,7 @@ function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
   if (isBrokenImageValue(incoming)) return isBrokenImageValue(existing) ? "" : existing;
-  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing) && existing.length > 5000000) return existing;
+  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing)) return existing;
   return incoming || existing;
 }
 
@@ -1040,6 +1040,8 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     console.log("[store-admin] store saved", {
       storeId: mergedStore.id,
       ownerLogin: mergedStore.ownerLogin || "",
+      image: Boolean(mergedStore.image),
+      cover: Boolean(mergedStore.cover),
       products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
       positions: Array.isArray(mergedStore.products)
         ? mergedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
