@@ -1135,11 +1135,13 @@ function applyRemoteState(payload) {
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
   const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
   const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
+  const rememberedOrders = Array.isArray(db?.orders) ? db.orders : [];
   db = merge(db, payload.state || {});
   if (payload.user) db.currentUser = payload.user.login;
   normalizeDb(db);
   db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
   db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
+  db.orders = mergeOrderLists(db.orders, rememberedOrders);
   db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, rememberedGroupMembers);
   writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
@@ -1172,6 +1174,26 @@ function mergeMessageLists(remoteMessages = [], localMessages = []) {
     if (Number(message.createdAt || 0) >= keepLocalAfter) merged.set(message.id, message);
   });
   return [...merged.values()];
+}
+
+function mergeOrderLists(remoteOrders = [], localOrders = []) {
+  const merged = new Map();
+  const keepLocalAfter = Date.now() - 2 * 60 * 60 * 1000;
+  (Array.isArray(remoteOrders) ? remoteOrders : []).forEach((order) => {
+    if (order?.id) merged.set(order.id, order);
+  });
+  (Array.isArray(localOrders) ? localOrders : []).forEach((order) => {
+    if (!order?.id) return;
+    const existing = merged.get(order.id);
+    if (existing) {
+      merged.set(order.id, { ...existing, ...order });
+      return;
+    }
+    const freshLocal = Number(order.createdAt || 0) >= keepLocalAfter;
+    const activeLocal = ["active", "pending_payment", "dispute"].includes(String(order.status || ""));
+    if (freshLocal || activeLocal) merged.set(order.id, order);
+  });
+  return [...merged.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 async function loadRemoteSession() {
@@ -3345,7 +3367,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       return;
     }
     try {
-      const deposit = await createWalletDepositRequest(priceUsd, `Пополнение для заказа: ${product.title}`);
+      const deposit = await createWalletDepositRequest(priceUsd, "ltc", `Пополнение для заказа: ${product.title}`);
       order.walletDepositId = deposit.id;
       order.walletDepositAmountUsd = priceUsd;
       order.walletDepositAmountLtc = deposit.payAmount || usdToLtc(priceUsd);
@@ -5510,6 +5532,7 @@ async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "П
   });
   applyRemoteState(payload);
   const deposit = payload.deposit || {};
+  if (!deposit.payAddress && !deposit.paymentUrl) throw new Error("Платежный шлюз не вернул адрес оплаты");
   const tx = (db.walletTransactions || []).find((item) => item.id === `tx-${deposit.id}` || item.paymentId === deposit.paymentId);
   if (tx && title) tx.title = title;
   saveDb();
