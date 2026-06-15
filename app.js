@@ -1491,6 +1491,14 @@ function currentUser() {
   return db.users.find((user) => sameLogin(user.login, db.currentUser)) || null;
 }
 
+function hasApiSession() {
+  try {
+    return Boolean(localStorage.getItem(API_TOKEN_KEY));
+  } catch {
+    return false;
+  }
+}
+
 function isAdmin() {
   try {
     return currentUser()?.role === "admin" || localStorage.getItem(ADMIN_ACCESS_KEY) === "ok";
@@ -3196,6 +3204,10 @@ function issueRandomDeliveryItem(items) {
 }
 
 function handleProductPurchase(storeId, productId, positionId) {
+  if (!currentUser() || (API_ENABLED && !hasApiSession())) {
+    authMode = "login";
+    return renderAuth("Войдите или зарегистрируйтесь, чтобы купить товар");
+  }
   const store = storeById(storeId);
   const product = productById(store, productId);
   const position = positionById(product, positionId);
@@ -3326,6 +3338,10 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
 }
 
 function openProductCheckoutModal(storeId, productId, positionId) {
+  if (!currentUser() || (API_ENABLED && !hasApiSession())) {
+    authMode = "login";
+    return renderAuth("Войдите или зарегистрируйтесь, чтобы купить товар");
+  }
   const store = storeById(storeId);
   const product = productById(store, productId);
   const position = positionById(product, positionId);
@@ -3378,6 +3394,12 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       showProductOrder(order.id);
     } catch (error) {
       cancelProductOrder(order.id, { silent: true });
+      if (/Сессия не найдена|session/i.test(String(error.message || ""))) {
+        clearSession();
+        authMode = "login";
+        renderAuth("Сессия истекла. Войдите снова, чтобы создать счёт.");
+        return;
+      }
       showToast(error.message || "Не удалось создать счет LTC");
       setButtonLoading(button, false);
     }
