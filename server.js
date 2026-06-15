@@ -2205,6 +2205,7 @@ function adminStoreVisible(body = {}, existing = null, flags = {}) {
   if (body.published === false || body.is_active === false) return false;
   if (body.visibility === "hidden" || body.visibility === "private") return false;
   if (body.visibleInCatalog != null) return body.visibleInCatalog !== false;
+  if (body.placements != null || body.placement != null) return flags.visibleInCatalog !== false;
   if (existing?.visibleInCatalog != null) return existing.visibleInCatalog !== false;
   return flags.visibleInCatalog !== false;
 }

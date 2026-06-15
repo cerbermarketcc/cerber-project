@@ -1601,12 +1601,20 @@ function storePlacementValues(store = {}) {
   return raw.map((item) => String(item || "").trim().toUpperCase().replace(/[_-]+/g, " "));
 }
 
+function storeHasExplicitPlacements(store = {}) {
+  return (Array.isArray(store.placements) && store.placements.length) || Boolean(store.placement);
+}
+
 function storeInPlacement(store, placement) {
   const placements = storePlacementValues(store);
   if (placement === "TOP 10") return placements.some((value) => value === "TOP 10" || value === "TOP10") || store.isTop === true || store.is_top === true || Number(store.top_position || store.topPosition || 0) > 0;
   if (placement === "TOP") return placements.includes("TOP") || store.isFeatured === true;
   if (placement === "NEW") return placements.includes("NEW") || store.isNew === true || store.is_new === true;
-  if (placement === "stores") return storeIsVisible(store);
+  if (placement === "stores") {
+    if (!storeIsVisible(store)) return false;
+    if (storeHasExplicitPlacements(store)) return placements.includes("STORES");
+    return store.visibleInCatalog !== false;
+  }
   return false;
 }
 
@@ -1915,15 +1923,24 @@ function bindLocationSelects(root = document) {
 
 function bindShopLocationSelects(store, root = document) {
   root.querySelectorAll("[data-location-group]").forEach((group) => {
-    const country = group.querySelector("input[name='country']")?.value || shopDefaultCountry(store);
+    const countrySelect = group.querySelector("[data-shop-location-country]");
+    const country = countrySelect?.value || group.querySelector("input[name='country']")?.value || shopDefaultCountry(store);
     const citySelect = group.querySelector("[data-shop-location-city]");
     const districtSelect = group.querySelector("[data-shop-location-district]");
     if (!citySelect || !districtSelect) return;
     const refreshDistricts = () => {
-      districtSelect.innerHTML = scopedDistrictSelectOptions(store, country, citySelect.value, districtSelect.value);
+      const selectedCountry = countrySelect?.value || country;
+      districtSelect.innerHTML = scopedDistrictSelectOptions(store, selectedCountry, citySelect.value, districtSelect.value);
     };
+    const refreshCities = () => {
+      const selectedCountry = countrySelect?.value || country;
+      citySelect.innerHTML = scopedCitySelectOptions(store, selectedCountry, citySelect.value);
+      refreshDistricts();
+    };
+    countrySelect?.addEventListener("change", refreshCities);
     citySelect.addEventListener("change", refreshDistricts);
-    refreshDistricts();
+    if (countrySelect) refreshCities();
+    else refreshDistricts();
   });
 }
 
@@ -7031,6 +7048,10 @@ function shopProductsTab(store, products) {
   const card = sortedStoreProducts(store, true)[0];
   const country = shopDefaultCountry(store);
   const city = shopDefaultCity(store);
+  const allowedCountries = shopAllowedCountries(store);
+  const countryField = allowedCountries.length > 1
+    ? `<label class="field">Страна<select name="country" data-shop-location-country>${scopedCountrySelectOptions(allowedCountries, country)}</select></label>`
+    : `<label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>`;
   return `
     <section class="seller-dashboard-hero"><div><h2>Товары</h2><p>Товары создаются внутри карточек. Каждая строка выдачи равна одной единице остатка.</p></div></section>
     <section class="seller-dashboard-card seller-wide-card">
@@ -7046,7 +7067,7 @@ function shopProductsTab(store, products) {
           <label class="field">Тип<input name="deliveryType" placeholder="Самовывоз / Доставка"></label>
         </div>
         <div class="row" data-location-group>
-          <label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>
+          ${countryField}
           <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
           <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, "")}</select></label>
         </div>
