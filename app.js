@@ -5687,6 +5687,69 @@ function storeBalanceUsd(storeId) {
   return paidStoreOrders(storeId).reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
 }
 
+function storeOrderNetUsd(order, store = null) {
+  const amount = Number(order?.amountUsd || 0);
+  const commissionUsd = Number(order?.platformCommissionUsd || 0);
+  const commissionPercent = Number(order?.platformCommissionPercent ?? store?.commissionPercent ?? 0);
+  if (commissionUsd > 0) return Math.max(0, amount - commissionUsd);
+  return Math.max(0, amount - amount * commissionPercent / 100);
+}
+
+function storeClientRows(storeId) {
+  const rows = new Map();
+  (db.orders || [])
+    .filter((order) => order.type === "product" && order.storeId === storeId && order.login)
+    .forEach((order) => {
+      const key = loginKey(order.login);
+      const current = rows.get(key) || {
+        login: order.login,
+        orders: 0,
+        paid: 0,
+        disputes: 0,
+        amountUsd: 0,
+        lastAt: 0
+      };
+      current.orders += 1;
+      if (order.paymentStatus === "paid") {
+        current.paid += 1;
+        current.amountUsd += Number(order.amountUsd || 0);
+      }
+      if (order.disputeOpen || order.status === "dispute") current.disputes += 1;
+      current.lastAt = Math.max(current.lastAt, Number(order.paidAt || order.createdAt || 0));
+      rows.set(key, current);
+    });
+  return [...rows.values()].sort((a, b) => b.lastAt - a.lastAt);
+}
+
+function storeFinanceRows(storeId, store = null) {
+  return paidStoreOrders(storeId)
+    .slice()
+    .sort((a, b) => Number(b.paidAt || b.createdAt || 0) - Number(a.paidAt || a.createdAt || 0))
+    .map((order) => ({
+      id: order.id,
+      title: `Заказ: ${order.product || order.id}`,
+      login: order.login || "",
+      grossUsd: Number(order.amountUsd || 0),
+      netUsd: storeOrderNetUsd(order, store),
+      commissionUsd: Math.max(0, Number(order.amountUsd || 0) - storeOrderNetUsd(order, store)),
+      status: order.status || "",
+      createdAt: Number(order.paidAt || order.createdAt || 0)
+    }));
+}
+
+function storeMessageRows(store) {
+  const owner = store?.ownerLogin || "";
+  const storeId = store?.id || "";
+  return (db.messages || [])
+    .filter((message) => (
+      message.storeId === storeId ||
+      sameLogin(message.toLogin, owner) ||
+      sameLogin(message.fromLogin, owner)
+    ))
+    .slice()
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
 function storeTodaySalesUsd(storeId) {
   const today = new Date().toDateString();
   return paidStoreOrders(storeId)
@@ -6768,9 +6831,11 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
   const products = Array.isArray(store.products) ? store.products : [];
   const positions = products.flatMap((product) => product.positions || []);
   const stockTotal = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
-  const clients = new Set(paidOrders.map((order) => order.login).filter(Boolean));
+  const clients = storeClientRows(store.id);
   const salesUsd = storeBalanceUsd(store.id);
   const todaySalesUsd = storeTodaySalesUsd(store.id);
+  const financeRows = storeFinanceRows(store.id, store);
+  const messageRows = storeMessageRows(store);
   const recentOrders = orders.slice().sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).slice(0, 6);
   const districts = new Map();
   positions.forEach((position) => {
@@ -6784,7 +6849,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
     const productStock = (product.positions || []).reduce((sum, position) => sum + Number(position.stock || 0), 0);
     return { title: product.title || "Товар", stock: productStock, value: productStock * Number(product.priceUsd || 0) };
   });
-  const txRows = (db.walletTransactions || []).slice(-6).reverse();
+  const txRows = financeRows.slice(0, 6);
   const navHtml = shopPanelNavV2(activeTab);
   if (activeTab !== "dashboard") {
     return `
@@ -6810,7 +6875,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
             <button class="ghost-button" data-shop-panel-logout>Выйти</button>
           </header>
-          ${shopPanelTabContent(activeTab, { store, orders, products, positions, productRows, districts, recentOrders, txRows, clients, salesUsd, stockTotal })}
+          ${shopPanelTabContent(activeTab, { store, orders, paidOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal })}
         </div>
       </article>
     `;
@@ -6851,7 +6916,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           ${sellerDashStat("Оплачено сегодня", todayOrders.length, "Продажи за день")}
           ${sellerDashStat("Доход сегодня", `${todaySalesUsd.toFixed(2)} $`, "Зачислено за день")}
           ${sellerDashStat("Общий доход", `${salesUsd.toFixed(2)} $`, "Баланс магазина")}
-          ${sellerDashStat("Клиентов", clients.size, "Всего покупателей")}
+          ${sellerDashStat("Клиентов", clients.length, "Всего покупателей")}
           ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
           ${sellerDashStat("Диспуты", storeDisputes(store.id).length, "Открытые обращения")}
         </section>
@@ -6917,7 +6982,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
               <h3>Последние транзакции</h3>
             </div>
             ${txRows.length ? txRows.map((tx) => `
-              <div class="seller-source"><span>${esc(tx.title || tx.type || "Операция")}</span><strong>${Number(tx.amountUsd || 0).toFixed(2)} $</strong></div>
+              <div class="seller-source"><span>${esc(tx.title || "Операция")}</span><strong>${Number(tx.netUsd || tx.grossUsd || 0).toFixed(2)} $</strong></div>
             `).join("") : `<p>Транзакций пока нет.</p>`}
           </div>
         </section>
@@ -6961,8 +7026,12 @@ function shopPanelNavV2(activeTab = "dashboard") {
     ["cards", "C", "Карточки"],
     ["products", "T", "Товары"],
     ["orders", "O", "Заказы"],
+    ["storage", "S", "Склад"],
+    ["clients", "U", "Клиенты"],
     ["disputes", "!", "Диспуты"],
     ["finances", "$", "Финансы"],
+    ["connect", "M", "Связь"],
+    ["staff", "A", "Персонал"],
     ["settings", "*", "Настройки"]
   ];
   return items.map(([id, icon, label]) => `
@@ -6973,12 +7042,12 @@ function shopPanelNavV2(activeTab = "dashboard") {
 }
 
 function shopPanelTabContent(tab, data) {
-  const { store, orders, products, positions, productRows, districts, recentOrders, txRows, clients, salesUsd, stockTotal } = data;
+  const { store, orders, paidOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal } = data;
   if (tab === "profile") return shopProfileTab(store);
   if (tab === "cards") return shopCardsTab(store, products);
   if (tab === "products") return shopProductsTab(store, products);
   if (tab === "disputes") return shopDisputesTab(store);
-  if (tab === "finances") return shopFinancesTab(store, salesUsd, txRows);
+  if (tab === "finances") return shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows);
   if (tab === "settings") return shopSettingsTab(store);
   if (tab === "orders") {
     return `
@@ -7028,8 +7097,8 @@ function shopPanelTabContent(tab, data) {
     return `
       <section class="seller-dashboard-hero"><div><h2>Клиенты</h2><p>Покупатели, последние активности и быстрый доступ к переписке.</p></div></section>
       <section class="seller-dashboard-card seller-wide-card">
-        <div class="seller-card-head"><h3>Клиенты магазина</h3><span>${clients.size} всего</span></div>
-        ${clientRows.length ? clientRows.map((login) => `<div class="seller-source"><span>${esc(login)}</span><strong>${orders.filter((order) => sameLogin(order.login, login)).length} заказов</strong></div>`).join("") : `<p>Клиентов пока нет.</p>`}
+        <div class="seller-card-head"><h3>Клиенты магазина</h3><span>${clients.length} всего</span></div>
+        ${clientRows.length ? clientRows.map((client) => `<div class="seller-source"><span>${esc(client.login)} · ${client.paid}/${client.orders} заказов · ${client.amountUsd.toFixed(2)} $</span><strong>${client.disputes ? `${client.disputes} спор` : "OK"}</strong></div>`).join("") : `<p>Клиентов пока нет.</p>`}
       </section>
     `;
   }
@@ -7037,8 +7106,8 @@ function shopPanelTabContent(tab, data) {
     return `
       <section class="seller-dashboard-hero"><div><h2>Связь</h2><p>Сообщения, поддержка, рассылки и уведомления магазина.</p></div></section>
       <section class="seller-dashboard-grid">
-        <div class="seller-dashboard-card"><div class="seller-card-head"><h3>Сообщения</h3><span>0 новых</span></div><p>Здесь будет лента обращений и переписок с клиентами.</p></div>
-        <div class="seller-dashboard-card"><div class="seller-card-head"><h3>Рассылки</h3><span>готово к подключению</span></div><p>Блок для новостей, акций и массовых сообщений.</p></div>
+        <div class="seller-dashboard-card seller-wide-card"><div class="seller-card-head"><h3>Сообщения</h3><span>${messageRows.length}</span></div>${messageRows.slice(0, 12).map((message) => `<div class="seller-source"><span>${esc(message.subject || message.body || message.text || "Сообщение")} · ${esc(message.fromLogin || "system")}</span><strong>${new Date(Number(message.createdAt || Date.now())).toLocaleDateString()}</strong></div>`).join("") || `<p>Сообщений пока нет.</p>`}</div>
+        <div class="seller-dashboard-card"><div class="seller-card-head"><h3>Клиенты</h3><span>${clients.length}</span></div><p>Пишите клиентам через личные сообщения сайта и диспуты по заказам.</p></div>
       </section>
     `;
   }
@@ -7175,10 +7244,20 @@ function shopDisputesTab(store) {
   <section class="seller-dashboard-card seller-wide-card">${disputes.map((order) => `<div class="seller-source"><span>${esc(order.product || order.id)} · ${esc(order.login || "")}</span><strong><button class="ghost-button" data-shop-dispute-close="${esc(order.id)}">Закрыть спор</button></strong></div>`).join("") || `<p>Открытых диспутов нет.</p>`}</section>`;
 }
 
-function shopFinancesTab(store, salesUsd, txRows) {
+function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
+  const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
+  const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
-  <section class="seller-dashboard-stats">${sellerDashStat("Баланс", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}${sellerDashStat("Комиссия", `${Number(store.commissionPercent || 0)}%`, "магазин")}</section>
-  <section class="seller-dashboard-card seller-wide-card">${txRows.length ? txRows.map((tx) => `<div class="seller-source"><span>${esc(tx.title || tx.type || "Операция")}</span><strong>${Number(tx.amountUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}</section>`;
+  <section class="seller-dashboard-stats">
+    ${sellerDashStat("Баланс", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}
+    ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
+    ${sellerDashStat("Валовый оборот", `${grossUsd.toFixed(2)} $`, "до комиссии")}
+    ${sellerDashStat("Комиссия", `${commissionUsd.toFixed(2)} $`, `${Number(store.commissionPercent || 0)}%`)}
+  </section>
+  <section class="seller-dashboard-card seller-wide-card">
+    <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
+    ${financeRows.length ? financeRows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title)} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${Number(tx.netUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
+  </section>`;
 }
 
 function shopSettingsTab(store) {
