@@ -324,6 +324,7 @@ function renderStores() {
           <label><input name="region_moldova" type="checkbox" checked> Молдова</label>
           <label><input name="region_transnistria" type="checkbox"> Приднестровье</label>
         </div>
+        <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${coin === "ltc" ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
         <button class="primary">Создать магазин</button>
       </form>
       <div data-created-store></div>
@@ -375,7 +376,7 @@ function storeDetail(id) {
         <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(store.position || store.homepagePosition || 0)}"></label>
       </div>
       <div class="row">
-        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || 24)}"></label>
+        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
       <div class="row">
         <label class="field">Баннер URL<input name="cover" value="${esc(store.cover || "")}"></label>
@@ -398,7 +399,7 @@ function storeDetail(id) {
       </div>
       <div class="row">
         <label class="field">Позиция на главной<input name="homepagePosition" type="number" min="0" step="1" value="${esc(store.homepagePosition)}"></label>
-        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || 24)}"></label>
+        <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
       <label class="field">Пароль панели магазина<input name="adminPassword" placeholder="новый пароль магазина"></label>
       <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
@@ -503,7 +504,7 @@ function renderSettings() {
   return `<article class="split-card"><h2>Глобальные комиссии</h2><form data-settings-form>
     <p class="muted">Комиссия анонимизации — комиссия за смешивание и защиту криптовалютных переводов.</p>
     <div class="row"><label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.1" value="${esc(owner.platformCommissionPercent || 0)}"></label><label class="field">Комиссия анонимизации, %<input name="swapCommissionPercent" type="number" step="0.1" value="${esc(owner.swapCommissionPercent || 0)}"></label></div>
-    <div class="row"><label class="field">Комиссия вывода, %<input name="walletServiceFeePercent" type="number" step="0.1" value="${esc(owner.walletServiceFeePercent || 0)}"></label><label class="field">Автозакрытие сделок, часов<input name="defaultAutoReleaseHours" type="number" min="0" max="72" value="${esc(owner.defaultAutoReleaseHours || 24)}"></label></div>
+    <div class="row"><label class="field">Комиссия вывода, %<input name="walletServiceFeePercent" type="number" step="0.1" value="${esc(owner.walletServiceFeePercent || 0)}"></label><label class="field">Автозакрытие сделок, часов<input name="defaultAutoReleaseHours" type="number" min="0" max="168" value="${esc(owner.defaultAutoReleaseHours || 24)}"></label></div>
     <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
     <button class="primary">Сохранить настройки</button>
   </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
@@ -621,6 +622,7 @@ function bindActions() {
     if (fd.get("placement_TOP")) placements.push("TOP");
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (fd.get("placement_stores")) placements.push("stores");
+    const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
     try {
       const image = await formImageValue(fd, "imageFile");
       const result = await api("/api/admin/stores", {
@@ -634,7 +636,8 @@ function bindActions() {
           placement: placements[0] || "stores",
           placements,
           position: Number(fd.get("position")),
-          countries
+          countries,
+          enabledCoins
         })
       });
       data = result.overview;

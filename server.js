@@ -983,7 +983,8 @@ function sellerStorePatch(existing = {}, input = {}) {
     products: Array.isArray(input.products) ? input.products.map((product) => sellerProductPatch(existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {}, product)) : existingProducts,
     reviewsList: Array.isArray(input.reviewsList) ? input.reviewsList : (Array.isArray(existing.reviewsList) ? existing.reviewsList : []),
     enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
-    autoReleaseHours: Math.min(72, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
+    wallets: input.wallets && typeof input.wallets === "object" ? input.wallets : (existing.wallets || {}),
+    autoReleaseHours: Math.min(168, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
     ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
     adminPassword: String(input.adminPassword ?? existing.adminPassword ?? "").trim(),
     updatedAt: Date.now()
@@ -1673,19 +1674,6 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     console.log("[admin-store] updated", { storeId: store.id, fields: Object.keys(req.body || {}) });
     notifyRealtime("store_updated", { storeId: store.id, source: "market-admin" });
     res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(store) });
-    return;
-    const allowed = ["status", "commissionPercent", "homepagePosition", "adminPassword", "salesBlocked", "autoReleaseHours", "enabledCoins", "name", "short", "description"];
-    allowed.forEach((key) => {
-      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) store[key] = req.body[key];
-    });
-    if (store.status === "ACTIVE") store.status = "active";
-    if (store.status === "DISABLE") store.status = "disabled";
-    store.commissionPercent = Math.min(20, Math.max(0, Number(store.commissionPercent || 0)));
-    store.homepagePosition = Math.max(0, Number(store.homepagePosition || 0));
-    store.autoReleaseHours = Math.min(72, Math.max(0, Number(store.autoReleaseHours || 24)));
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
-    await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
   }
@@ -2378,8 +2366,9 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     cities: Array.isArray(body.cities) ? body.cities : (existing?.cities || []),
     districts: Array.isArray(body.districts) ? body.districts : (existing?.districts || []),
     commissionPercent: Math.min(20, Math.max(0, Number(body.commissionPercent ?? existing?.commissionPercent ?? 0))),
-    autoReleaseHours: Math.min(72, Math.max(0, Number(body.autoReleaseHours ?? existing?.autoReleaseHours ?? 24))),
+    autoReleaseHours: Math.min(168, Math.max(0, Number(body.autoReleaseHours ?? existing?.autoReleaseHours ?? 24))),
     enabledCoins: body.enabledCoins || existing?.enabledCoins || {},
+    wallets: body.wallets && typeof body.wallets === "object" ? body.wallets : (existing?.wallets || {}),
     products: Array.isArray(existing?.products) ? existing.products : [],
     reviewsList: Array.isArray(existing?.reviewsList) ? existing.reviewsList : [],
     createdAt: existing?.createdAt || Date.now(),
@@ -3004,10 +2993,11 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
 
     if (order.paymentUrl) return res.json({ paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
 
+    const coin = walletCoinFromRequest({ coinId: order.coinId || "ltc", payCurrency: order.payCurrency || "" });
     const invoicePayload = {
       price_amount: Number(order.amountUsd || 0),
       price_currency: "usd",
-      pay_currency: "ltc",
+      pay_currency: coin.payCurrency,
       order_id: order.id,
       order_description: `${order.product || "CERBER order"} / ${order.storeName || ""}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
@@ -3028,6 +3018,8 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
 
     order.paymentInvoiceId = invoice.id || invoice.invoice_id || "";
     order.paymentUrl = invoice.invoice_url || invoice.payment_url || "";
+    order.coinId = coin.id;
+    order.payCurrency = coin.payCurrency;
     order.nowpaymentsPublicKey = nowpaymentsPublicKey ? "configured" : "";
     order.paymentProviderPayload = { invoiceId: order.paymentInvoiceId };
     await saveSettingsState({ ...state, orders });

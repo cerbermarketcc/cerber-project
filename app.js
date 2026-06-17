@@ -1735,6 +1735,32 @@ function walletCoinLabel(id) {
   return `${coin.symbol}${coin.network && coin.network !== coin.symbol ? ` ${coin.network}` : ""}`;
 }
 
+function storeEnabledCoinIds(store = {}) {
+  const enabled = store.enabledCoins && typeof store.enabledCoins === "object" ? store.enabledCoins : {};
+  const explicit = WALLET_COINS.filter((coin) => enabled[coin.id] === true).map((coin) => coin.id);
+  if (explicit.length) return explicit;
+  const hasAnyFlag = Object.keys(enabled).length > 0;
+  if (hasAnyFlag) {
+    const allowed = WALLET_COINS.filter((coin) => enabled[coin.id] !== false).map((coin) => coin.id);
+    return allowed.length ? allowed : ["ltc"];
+  }
+  return ["ltc"];
+}
+
+function storeEnabledCoins(store = {}) {
+  const ids = new Set(storeEnabledCoinIds(store));
+  return WALLET_COINS.filter((coin) => ids.has(coin.id));
+}
+
+function storeWallets(store = {}) {
+  return store.wallets && typeof store.wallets === "object" ? store.wallets : {};
+}
+
+function storeWalletForCoin(store = {}, coinId = "ltc") {
+  if (coinId === "ltc") return String(store.ltcWallet || storeWallets(store).ltc || "").trim();
+  return String(storeWallets(store)[coinId] || "").trim();
+}
+
 function walletDepositPayCurrency(deposit) {
   return String(deposit.payCurrency || deposit.coinId || "ltc").toLowerCase();
 }
@@ -2663,8 +2689,9 @@ function showProductOrder(orderId) {
   if (!order) return;
   const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
   const linkedDeposit = order.walletDepositId ? (db.walletDeposits || []).find((item) => item.id === order.walletDepositId) : null;
+  const orderCoin = walletCoinById(linkedDeposit?.coinId || order.coinId || "ltc");
   const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || (order.status === "pending_payment" ? MAIN_LTC_WALLET : "");
-  const orderDepositLtc = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
+  const orderDepositPayAmount = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
   const orderDepositUsd = Number(linkedDeposit?.amountUsd || order.walletDepositAmountUsd || order.amountUsd || 0);
   const orderPaymentUrl = linkedDeposit?.paymentUrl || order.walletDepositPaymentUrl || order.paymentUrl || "";
   showModal(`
@@ -2691,28 +2718,30 @@ function showProductOrder(orderId) {
     ` : ""}
     ${order.status === "pending_payment" ? `
       <div class="payment-instructions">
-        <h3>Оплата LTC</h3>
+        <h3>Оплата ${esc(walletCoinLabel(orderCoin.id))}</h3>
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p>Истекает через ${Math.max(0, Math.ceil((Number(order.paymentExpiresAt || 0) - Date.now()) / 60000))} минут</p>
-        <p><span>Сумма:</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
+        <p><span>Сумма:</span><strong>${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
         ${orderDepositAddress ? `
-          <p><span>Счет пополнения:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${orderDepositLtc.toFixed(8)} LTC</strong></p>
+          <p><span>Счет пополнения:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
           <p><span>Куда оплатить:</span><strong class="mono-line">${esc(orderDepositAddress)}</strong></p>
           <button class="ghost-button" data-copy="${esc(walletDepositCopyText(linkedDeposit || {
             amountUsd: orderDepositUsd,
-            payAmount: orderDepositLtc,
-            payAddress: orderDepositAddress
+            payAmount: orderDepositPayAmount,
+            payAddress: orderDepositAddress,
+            coinId: orderCoin.id,
+            payCurrency: orderCoin.payCurrency
           }))}">Скопировать счет пополнения</button>
         ` : ""}
         ${orderPaymentUrl ? `<a class="primary link-button" href="${esc(orderPaymentUrl)}" target="_blank" rel="noopener">Открыть основную ссылку оплаты</a>` : ""}
         ${userLtcBalance() >= ltcAmount ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
-        ${order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerLtcWallet)}</strong></p>` : ""}
+        ${order.sellerWallet || order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerWallet || order.sellerLtcWallet)}</strong></p>` : ""}
         <div class="row">
-          <button class="ghost-button" data-copy="${esc(`Адрес LTC: ${order.sellerLtcWallet || ""}\nСумма: ${ltcAmount.toFixed(6)} LTC`)}">Скопировать всё</button>
-          <button class="ghost-button" data-copy="${esc(order.sellerLtcWallet || "")}">Скопировать кошелек</button>
-          <button class="ghost-button" data-copy="${ltcAmount.toFixed(6)}">Скопировать сумму</button>
+          <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || ""}\nСумма: ${orderDepositPayAmount.toFixed(8)} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать всё</button>
+          <button class="ghost-button" data-copy="${esc(orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || "")}">Скопировать кошелек</button>
+          <button class="ghost-button" data-copy="${orderDepositPayAmount.toFixed(8)}">Скопировать сумму</button>
         </div>
-        ${order.sellerLtcWallet ? `<a class="primary link-button" href="litecoin:${esc(order.sellerLtcWallet)}?amount=${ltcAmount.toFixed(6)}">Открыть LTC-ссылку</a>` : ""}
+        ${orderCoin.id === "ltc" && (order.sellerWallet || order.sellerLtcWallet) ? `<a class="primary link-button" href="litecoin:${esc(order.sellerWallet || order.sellerLtcWallet)}?amount=${orderDepositPayAmount.toFixed(8)}">Открыть LTC-ссылку</a>` : ""}
         <p class="desc">После подтверждения оплаты заказ станет завершенным, и здесь появится описание товара.</p>
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </div>
@@ -3345,6 +3374,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
   const commissionUsd = priceUsd * commissionPercent / 100;
   const ltcAmount = usdToLtc(priceUsd);
+  const coin = walletCoinById(options.coinId || storeEnabledCoins(store)[0]?.id || "ltc");
   const order = {
     id: `order-${Date.now()}`,
     type: "product",
@@ -3358,10 +3388,13 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     paymentStatus: "waiting",
     createdAt: Date.now(),
     paymentExpiresAt: Date.now() + 40 * 60 * 1000,
-    autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || db.ownerSettings?.defaultAutoReleaseHours || 24)),
+    autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)),
     autoReleaseAt: null,
     amountUsd: priceUsd,
     ltcAmount,
+    coinId: coin.id,
+    payCurrency: coin.payCurrency,
+    sellerWallet: storeWalletForCoin(store, coin.id),
     location: locationLabel(position),
     productDescription: product.description || "",
     reservedDescription,
@@ -3398,6 +3431,8 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
   const enough = userLtcBalance() >= ltcAmount && ltcAmount > 0;
+  const allowedCoins = storeEnabledCoins(store);
+  const defaultCoin = allowedCoins[0] || walletCoinById("ltc");
   showModal(`
     <h2>Покупка товара</h2>
     <article class="checkout-mini">
@@ -3405,6 +3440,13 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       <span>${esc(store.name)} · ${esc(locationLabel(position))}</span>
       <b>${priceUsd.toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</b>
     </article>
+    ${allowedCoins.length > 1 ? `
+      <label class="field">Монета и сеть
+        <select data-checkout-coin>
+          ${allowedCoins.map((coin) => `<option value="${esc(coin.id)}">${esc(walletCoinLabel(coin.id))}</option>`).join("")}
+        </select>
+      </label>
+    ` : `<p class="desc">Оплата через ${esc(walletCoinLabel(defaultCoin.id))}</p>`}
     <div class="checkout-actions">
       <button class="primary" data-checkout-balance ${enough ? "" : "disabled"}>Оплатить с баланса</button>
       <button class="primary" data-checkout-deposit>Пополнить и оплатить</button>
@@ -3422,19 +3464,23 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   document.querySelector("[data-checkout-deposit]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     setButtonLoading(button, true, "Создаём счет");
-    const order = handleProductReservation(storeId, productId, positionId, { silent: true });
+    const selectedCoinId = document.querySelector("[data-checkout-coin]")?.value || defaultCoin.id;
+    const selectedCoin = walletCoinById(selectedCoinId);
+    const order = handleProductReservation(storeId, productId, positionId, { silent: true, coinId: selectedCoin.id });
     if (!order) {
       setButtonLoading(button, false);
       return;
     }
     try {
-      const deposit = await createWalletDepositRequest(priceUsd, "ltc", `Пополнение для заказа: ${product.title}`);
+      const deposit = await createWalletDepositRequest(priceUsd, selectedCoin.id, `Пополнение для заказа: ${product.title}`);
       order.walletDepositId = deposit.id;
       order.walletDepositAmountUsd = priceUsd;
       order.walletDepositAmountLtc = deposit.payAmount || usdToLtc(priceUsd);
       order.walletDepositAddress = deposit.payAddress || "";
       order.walletDepositPaymentUrl = deposit.paymentUrl || "";
       order.paymentUrl = deposit.paymentUrl || order.paymentUrl || "";
+      order.coinId = selectedCoin.id;
+      order.payCurrency = selectedCoin.payCurrency;
       saveDb();
       showProductOrder(order.id);
     } catch (error) {
@@ -7261,9 +7307,16 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
 }
 
 function shopSettingsTab(store) {
+  const wallets = storeWallets(store);
+  const coinFields = storeEnabledCoins(store).map((coin) => `
+    <label class="field">${esc(walletCoinLabel(coin.id))} кошелек
+      <input name="wallet_${esc(coin.id)}" value="${esc(coin.id === "ltc" ? (store.ltcWallet || wallets.ltc || "") : (wallets[coin.id] || ""))}" placeholder="${esc(coin.payCurrency)} address">
+    </label>
+  `).join("");
   return `<section class="seller-dashboard-hero"><div><h2>Настройки</h2><p>Пароль панели, кошелёк и автозакрытие сделок.</p></div></section>
   <section class="seller-dashboard-card seller-wide-card"><form class="form" data-shop-settings-form>
-    <div class="row"><label class="field">LTC кошелёк<input name="ltcWallet" value="${esc(store.ltcWallet || "")}"></label><label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="72" value="${esc(store.autoReleaseHours || db.ownerSettings?.defaultAutoReleaseHours || 24)}"></label></div>
+    <div class="row"><label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)}"></label></div>
+    <div class="row">${coinFields}</div>
     <label class="field">Новый пароль панели<input name="adminPassword" type="password" placeholder="оставить пустым"></label>
     <button class="primary">Сохранить настройки</button>
   </form></section>`;
@@ -7512,8 +7565,13 @@ function bindShopPanelActions(store, activeTab) {
   document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    store.ltcWallet = String(data.get("ltcWallet") || "").trim();
-    store.autoReleaseHours = Math.max(0, Math.min(72, Number(data.get("autoReleaseHours") || 24)));
+    store.wallets = storeWallets(store);
+    storeEnabledCoins(store).forEach((coin) => {
+      const value = String(data.get(`wallet_${coin.id}`) || "").trim();
+      store.wallets[coin.id] = value;
+      if (coin.id === "ltc") store.ltcWallet = value;
+    });
+    store.autoReleaseHours = Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24)));
     const nextPassword = String(data.get("adminPassword") || "").trim();
     if (nextPassword) store.adminPassword = nextPassword;
     await shopPersistAndRender("settings");
