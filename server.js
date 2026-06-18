@@ -1023,9 +1023,13 @@ function sellerStoreInputForToken(existing = {}, input = {}, token = {}) {
 async function loadStoreWithFallback(storeId) {
   const id = String(storeId || "").trim();
   if (!id) return null;
-  const { data: row } = await supabase.from("stores").select("data").eq("id", id).maybeSingle();
+  const { data: row } = await withTimeout(
+    supabase.from("stores").select("data").eq("id", id).maybeSingle(),
+    "store-admin load store",
+    5000
+  );
   if (row?.data) return row.data;
-  const state = await loadSettingsState();
+  const state = await withTimeout(loadSettingsState(), "store-admin fallback state", 5000);
   return (state.ownerStores || []).find((item) => String(item?.id || "") === id) || null;
 }
 
@@ -1045,7 +1049,9 @@ async function findSellerAdminStore(storeId, login) {
 app.post("/api/store-admin/login", async (req, res, next) => {
   try {
     requireDb();
-    await ensureSeed();
+    await withTimeout(ensureSeed(), "store-admin ensureSeed", 5000).catch((error) => {
+      console.error("[store-admin] login seed skipped", { message: error.message });
+    });
     const storeId = String(req.body.storeId || "").trim();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
@@ -1055,7 +1061,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     if (ownerLoginOk && password === (store.adminPassword || "")) {
-      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null }, ...(await stateFor(null)) });
+      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null } });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || password !== String(staff.password || "")) {
@@ -1065,8 +1071,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     res.json({
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
       store,
-      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
-      ...(await stateFor(null))
+      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions }
     });
   } catch (error) {
     next(error);
