@@ -4159,6 +4159,24 @@ body[data-theme="dark"] .seller-dashboard-top {
   border-bottom: 0;
 }
 
+details[data-shop-storage-item] {
+  display: block;
+  padding: 10px 0;
+}
+
+details[data-shop-storage-item] summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+details[data-shop-storage-item] .form {
+  margin-top: 14px;
+}
+
 .seller-stock-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 42px 92px;

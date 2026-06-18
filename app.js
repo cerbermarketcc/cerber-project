@@ -7124,19 +7124,7 @@ function shopPanelTabContent(tab, data) {
     `;
   }
   if (tab === "storage") {
-    return `
-      <section class="seller-dashboard-hero"><div><h2>Склад</h2><p>Остатки по товарам, районам и позициям.</p></div></section>
-      <section class="seller-dashboard-grid">
-        <div class="seller-dashboard-card">
-          <div class="seller-card-head"><h3>Товары</h3><span>${stockTotal} шт.</span></div>
-          ${productRows.length ? productRows.map((row) => `<div class="seller-stock-row"><span>${esc(row.title)}</span><strong>${row.stock}</strong><progress max="100" value="${Math.min(100, row.stock * 10)}"></progress></div>`).join("") : `<p>Склад пока пуст.</p>`}
-        </div>
-        <div class="seller-dashboard-card">
-          <div class="seller-card-head"><h3>Районы</h3><span>${positions.length} позиций</span></div>
-          ${[...districts.entries()].map(([name, item]) => `<div class="seller-tree-row"><span>${esc(name)}</span><strong>${item.count} шт.</strong></div>`).join("") || `<p>Районов пока нет.</p>`}
-        </div>
-      </section>
-    `;
+    return shopStorageTab(store, products, { productRows, districts, positions, stockTotal });
   }
   if (tab === "clients") {
     const clientRows = [...clients].slice(0, 12);
@@ -7239,6 +7227,78 @@ function shopCardsTab(store, products) {
           </strong>
         </div>
       `).join("") || `<p>Карточек пока нет.</p>`}
+    </section>
+  `;
+}
+
+function shopStorageTab(store, products, stats = {}) {
+  const orderedProducts = sortedStoreProducts(store, true);
+  const allowedCountries = shopAllowedCountries(store);
+  const positionTotal = orderedProducts.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0);
+  const stockTotal = Number(stats.stockTotal || orderedProducts.reduce((sum, product) => {
+    return sum + (product.positions || []).reduce((innerSum, position) => innerSum + Number(position.stock || 0), 0);
+  }, 0));
+  const districtTotal = Array.isArray(stats.districts) ? stats.districts.length : 0;
+
+  const countryFieldFor = (country) => allowedCountries.length > 1
+    ? `<label class="field">Страна<select name="country" data-shop-location-country>${scopedCountrySelectOptions(allowedCountries, country)}</select></label>`
+    : `<label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>`;
+
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Склад</h2><p>Все субтовары магазина в одном месте: редактирование выдачи, цены, локации, остатка и статуса.</p></div></section>
+    <section class="seller-dashboard-stats">
+      ${sellerDashStat("Остаток", `${stockTotal} шт.`, "доступно к продаже")}
+      ${sellerDashStat("Карточки", `${products.length}`, "товарные карточки")}
+      ${sellerDashStat("Субтовары", `${positionTotal}`, `${districtTotal} районов`)}
+    </section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Склад товаров</h3><span>${positionTotal} позиций</span></div>
+      ${orderedProducts.length ? orderedProducts.map((product) => {
+        const positions = Array.isArray(product.positions) ? product.positions : [];
+        return `
+          <div class="seller-card-head"><h3>${esc(product.title || "Карточка")}</h3><span>${positions.reduce((sum, position) => sum + Number(position.stock || 0), 0)} шт.</span></div>
+          ${positions.length ? positions.map((position) => {
+            const country = String(position.country || shopDefaultCountry(store));
+            const city = String(position.city || shopDefaultCity(store));
+            const district = String(position.district || "");
+            const deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems.join("\n") : "";
+            return `
+              <details class="seller-source" data-shop-storage-item>
+                <summary>
+                  <span>${esc(position.title || product.title || "Товар")} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span>
+                  <strong>${esc(position.status || "ready")}</strong>
+                </summary>
+                <form class="form" data-shop-position-edit data-card-id="${esc(product.id)}" data-position-id="${esc(position.id)}">
+                  <div class="row">
+                    <label class="field">Название<input name="title" value="${esc(position.title || product.title || "")}" required></label>
+                    <label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(position.priceUsd || 0)}" required></label>
+                    <label class="field">Остаток<input name="stock" type="number" min="0" step="1" value="${esc(position.stock || 0)}"></label>
+                  </div>
+                  <label class="field">Описание<textarea name="description">${esc(position.description || "")}</textarea></label>
+                  <div class="row">
+                    <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
+                    <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
+                    <label class="field">Статус<select name="status">
+                      <option value="ready" ${String(position.status || "ready") === "ready" ? "selected" : ""}>ready</option>
+                      <option value="disabled" ${String(position.status || "") === "disabled" ? "selected" : ""}>disabled</option>
+                    </select></label>
+                  </div>
+                  <div class="row" data-location-group>
+                    ${countryFieldFor(country)}
+                    <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
+                    <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, district)}</select></label>
+                  </div>
+                  <label class="field">Описание товара для выдачи<textarea name="deliveryItems" placeholder="Каждая новая строка = отдельная единица товара">${esc(deliveryItems)}</textarea></label>
+                  <div class="row">
+                    <button class="primary">Сохранить субтовар</button>
+                    <button class="ghost-button danger" type="button" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить субтовар</button>
+                  </div>
+                </form>
+              </details>
+            `;
+          }).join("") : `<p>Субтоваров внутри этой карточки пока нет.</p>`}
+        `;
+      }).join("") : `<p>Сначала создайте карточку и добавьте товар во вкладке “Товары”.</p>`}
     </section>
   `;
 }
@@ -7559,7 +7619,36 @@ function bindShopPanelActions(store, activeTab) {
     const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
     if (!product) return;
     product.positions = (product.positions || []).filter((position) => position.id !== button.dataset.shopPositionDelete);
-    await shopPersistAndRender("products");
+    await shopPersistAndRender(activeTab === "storage" ? "storage" : "products");
+  });
+
+  document.querySelectorAll("[data-shop-position-edit]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      const product = (store.products || []).find((item) => item.id === form.dataset.cardId);
+      const position = (product?.positions || []).find((item) => item.id === form.dataset.positionId);
+
+      if (!product || !position) return;
+
+      const data = new FormData(form);
+      const deliveryItems = shopLines(data.get("deliveryItems"));
+      const stockValue = Number(data.get("stock"));
+
+      position.title = String(data.get("title") || product.title || "").trim();
+      position.description = String(data.get("description") || "").trim();
+      position.priceUsd = Number(data.get("priceUsd") || 0);
+      position.weight = String(data.get("weight") || "").trim();
+      position.deliveryType = String(data.get("deliveryType") || "").trim() || "Товар";
+      position.country = String(data.get("country") || shopDefaultCountry(store));
+      position.city = String(data.get("city") || shopDefaultCity(store));
+      position.district = String(data.get("district") || "").trim();
+      position.deliveryItems = deliveryItems;
+      position.stock = Math.max(deliveryItems.length, Number.isFinite(stockValue) ? stockValue : deliveryItems.length);
+      position.status = String(data.get("status") || position.status || "ready");
+
+      await shopPersistAndRender("storage");
+    });
   });
 
   document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
