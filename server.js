@@ -777,8 +777,8 @@ function sellerAdminSecret() {
   return supabaseServiceKey || process.env.SELLER_ADMIN_SECRET || "cerber-local-seller-admin";
 }
 
-function signSellerAdminToken(storeId) {
-  const payload = Buffer.from(JSON.stringify({ storeId, createdAt: Date.now() })).toString("base64url");
+function signSellerAdminToken(storeId, meta = {}) {
+  const payload = Buffer.from(JSON.stringify({ storeId, ...meta, createdAt: Date.now() })).toString("base64url");
   const signature = crypto.createHmac("sha256", sellerAdminSecret()).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
@@ -970,6 +970,16 @@ function sellerStorePatch(existing = {}, input = {}) {
   const image = sellerImagePatch(existing.image || existing.avatar, input.image || input.avatar);
   const cover = sellerImagePatch(existing.cover || existing.banner, input.cover || input.banner) || image;
   const existingProducts = Array.isArray(existing.products) ? existing.products : [];
+  const staff = Array.isArray(input.staff)
+    ? input.staff.map((member) => ({
+      login: String(member?.login || "").trim(),
+      password: String(member?.password || "").trim(),
+      name: String(member?.name || "").trim(),
+      permissions: Array.isArray(member?.permissions) ? member.permissions.map(String).filter(Boolean) : [],
+      createdAt: Number(member?.createdAt || Date.now()),
+      updatedAt: Number(member?.updatedAt || Date.now())
+    })).filter((member) => member.login && member.password)
+    : (Array.isArray(existing.staff) ? existing.staff : []);
   return {
     ...existing,
     name: String(input.name ?? existing.name ?? "").trim(),
@@ -987,8 +997,27 @@ function sellerStorePatch(existing = {}, input = {}) {
     autoReleaseHours: Math.min(168, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
     ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
     adminPassword: String(input.adminPassword ?? existing.adminPassword ?? "").trim(),
+    staff,
     updatedAt: Date.now()
   };
+}
+
+function sellerStoreInputForToken(existing = {}, input = {}, token = {}) {
+  if (token.role !== "staff") return input;
+  const permissions = Array.isArray(token.permissions) ? token.permissions.map(String) : [];
+  const allowed = {};
+  if (permissions.includes("profile")) {
+    ["name", "short", "description", "image", "avatar", "cover", "banner", "gallery"].forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(input, key)) allowed[key] = input[key];
+    });
+  }
+  if (permissions.some((key) => ["cards", "products", "storage"].includes(key)) && Array.isArray(input.products)) {
+    allowed.products = input.products;
+  }
+  if (permissions.includes("connect") && Array.isArray(input.reviewsList)) {
+    allowed.reviewsList = input.reviewsList;
+  }
+  return { ...existing, ...allowed, id: existing.id || input.id };
 }
 
 async function loadStoreWithFallback(storeId) {
@@ -1021,11 +1050,24 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
     const store = await findSellerAdminStore(storeId, login);
-    const loginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
-    if (!store || !loginOk || password !== (store.adminPassword || "")) {
+    if (!store) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
-    res.json({ token: signSellerAdminToken(store.id), store, ...(await stateFor(null)) });
+    const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
+    if (ownerLoginOk && password === (store.adminPassword || "")) {
+      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null }, ...(await stateFor(null)) });
+    }
+    const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
+    if (!staff || password !== String(staff.password || "")) {
+      return res.status(401).json({ error: "Неверный пароль" });
+    }
+    const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
+    res.json({
+      token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
+      store,
+      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
+      ...(await stateFor(null))
+    });
   } catch (error) {
     next(error);
   }
@@ -1040,7 +1082,12 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       return res.status(401).json({ error: "Нет доступа к этой админке" });
     }
     const existing = await loadStoreWithFallback(token.storeId) || {};
-    const mergedStore = sellerStorePatch(existing, store);
+    if (token.role === "staff") {
+      const staff = (Array.isArray(existing.staff) ? existing.staff : []).find((member) => loginKey(member?.login) === loginKey(token.staffLogin));
+      if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
+      token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
+    }
+    const mergedStore = sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token));
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
     await saveOwnerStoreFallback(mergedStore);
     console.log("[store-admin] store saved", {

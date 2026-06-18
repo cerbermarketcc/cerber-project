@@ -9,6 +9,7 @@ const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
 const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
+const SHOP_PANEL_STAFF_SESSION_KEY = "cerber_shop_panel_staff_v1";
 const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
@@ -7048,6 +7049,48 @@ function sellerDashStat(label, value, hint) {
   `;
 }
 
+const SHOP_PANEL_TABS = [
+  ["dashboard", "D", "Dashboard"],
+  ["profile", "P", "Профиль"],
+  ["cards", "C", "Карточки"],
+  ["products", "T", "Товары"],
+  ["orders", "O", "Заказы"],
+  ["storage", "S", "Склад"],
+  ["clients", "U", "Клиенты"],
+  ["disputes", "!", "Диспуты"],
+  ["finances", "$", "Финансы"],
+  ["connect", "M", "Связь"],
+  ["staff", "A", "Персонал"],
+  ["settings", "*", "Настройки"]
+];
+
+const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "staff", "settings"].includes(id));
+
+function shopStaffSession() {
+  try {
+    const raw = localStorage.getItem(SHOP_PANEL_STAFF_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function shopStaffPermissions() {
+  const session = shopStaffSession();
+  return session?.role === "staff" && Array.isArray(session.permissions) ? session.permissions : null;
+}
+
+function canAccessShopTab(tab) {
+  const permissions = shopStaffPermissions();
+  if (!permissions) return true;
+  return permissions.includes(tab);
+}
+
+function firstAllowedShopTab() {
+  const permissions = shopStaffPermissions();
+  return permissions?.[0] || "dashboard";
+}
+
 function shopPanelNav(activeTab = "dashboard") {
   const items = [
     ["dashboard", "⌂", "Dashboard"],
@@ -7080,7 +7123,7 @@ function shopPanelNavV2(activeTab = "dashboard") {
     ["staff", "A", "Персонал"],
     ["settings", "*", "Настройки"]
   ];
-  return items.map(([id, icon, label]) => `
+  return SHOP_PANEL_TABS.filter(([id]) => canAccessShopTab(id)).map(([id, icon, label]) => `
     <button class="${activeTab === id ? "active" : ""}" data-shop-tab="${id}" type="button">
       <span>${icon}</span>${label}
     </button>
@@ -7145,6 +7188,7 @@ function shopPanelTabContent(tab, data) {
       </section>
     `;
   }
+  if (tab === "staff") return shopStaffTab(store);
   if (tab === "staff") {
     return `
       <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Доступы сотрудников, роли и права внутри магазина.</p></div></section>
@@ -7413,6 +7457,42 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   </section>`;
 }
 
+function shopStaffTab(store) {
+  const staff = Array.isArray(store.staff) ? store.staff : [];
+  const accessOptions = SHOP_STAFF_ACCESS_TABS.map(([id, , label]) => `
+    <label class="check-pill"><input name="permissions" type="checkbox" value="${esc(id)}"> ${esc(label)}</label>
+  `).join("");
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Создавайте сотрудников магазина и выбирайте, какие разделы панели они могут менять.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <form class="form" data-shop-staff-form>
+        <div class="row">
+          <label class="field">Логин сотрудника<input name="login" required placeholder="operator1"></label>
+          <label class="field">Пароль<input name="password" type="password" required placeholder="пароль для входа"></label>
+        </div>
+        <label class="field">Имя / заметка<input name="name" placeholder="Оператор склада"></label>
+        <div class="seller-card-head"><h3>Доступные разделы</h3><span>выберите права</span></div>
+        <div class="staff-access-grid">${accessOptions}</div>
+        <button class="primary">Добавить / обновить сотрудника</button>
+      </form>
+    </section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Команда</h3><span>${staff.length + 1} доступов</span></div>
+      <div class="seller-source"><span>${esc(store.ownerLogin || "owner")}</span><strong>Владелец · все разделы</strong></div>
+      ${staff.length ? staff.map((member) => {
+        const permissions = Array.isArray(member.permissions) ? member.permissions : [];
+        const labels = permissions.map((id) => SHOP_STAFF_ACCESS_TABS.find(([tab]) => tab === id)?.[2] || id).join(", ");
+        return `
+          <div class="seller-source">
+            <span>${esc(member.login || "")}${member.name ? ` · ${esc(member.name)}` : ""}<br><small>${esc(labels || "нет прав")}</small></span>
+            <strong><button class="ghost-button danger" data-shop-staff-delete="${esc(member.login || "")}">Удалить</button></strong>
+          </div>
+        `;
+      }).join("") : `<p>Сотрудников пока нет.</p>`}
+    </section>
+  `;
+}
+
 function shopSettingsTab(store) {
   const wallets = storeWallets(store);
   const coinFields = storeEnabledCoins(store).map((coin) => `
@@ -7463,6 +7543,7 @@ function renderShopPanelLogin(message = "") {
         ${hashStore ? `<p>${esc(hashStore.name)}</p>` : ""}
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <form class="form" data-shop-panel-login>
+          <label class="field">Логин сотрудника<input name="login" autocomplete="username" placeholder="оставьте пустым для владельца"></label>
           <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
           <button class="primary" type="submit">Войти</button>
         </form>
@@ -7472,7 +7553,9 @@ function renderShopPanelLogin(message = "") {
   `;
   document.querySelector("[data-shop-panel-login]").onsubmit = async (event) => {
     event.preventDefault();
-    const password = String(new FormData(event.currentTarget).get("password") || "");
+    const loginData = new FormData(event.currentTarget);
+    const login = String(loginData.get("login") || "").trim();
+    const password = String(loginData.get("password") || "");
     const loginStoreId = shopPanelHashId() || shopPanelSession() || hashStore?.id || "";
     if (!loginStoreId) {
       renderShopPanelLogin("Магазин не найден в ссылке");
@@ -7481,17 +7564,22 @@ function renderShopPanelLogin(message = "") {
     try {
       const payload = await apiFetch("/api/store-admin/login", {
         method: "POST",
-        body: JSON.stringify({ storeId: loginStoreId, password })
+        body: JSON.stringify({ storeId: loginStoreId, login, password })
       });
       const nextStoreId = payload.store?.id || loginStoreId;
       localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
       localStorage.setItem(SHOP_PANEL_SESSION_KEY, nextStoreId);
       localStorage.setItem(SELLER_ADMIN_KEY, nextStoreId);
+      if (payload.staff?.role === "staff") {
+        localStorage.setItem(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
+      } else {
+        localStorage.removeItem(SHOP_PANEL_STAFF_SESSION_KEY);
+      }
       sellerAdminStoreId = nextStoreId;
       applyRemoteState(payload);
       const store = db.stores.find((item) => item.id === nextStoreId) || payload.store || null;
       if (store) restoreShopPanelStore(store);
-      renderShopPanel("dashboard");
+      renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
     } catch (error) {
       renderShopPanelLogin(error.message || "Неверный пароль");
     }
@@ -7504,6 +7592,11 @@ function renderShopPanel(activeTab = "dashboard") {
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = shopPanelStore();
   if (!store || !token || sessionId !== storeId) return renderShopPanelLogin();
+  if (!canAccessShopTab(activeTab)) {
+    const fallbackTab = firstAllowedShopTab();
+    if (fallbackTab === activeTab) return renderShopPanelLogin("Для этого сотрудника не выбраны разделы доступа");
+    return renderShopPanel(fallbackTab);
+  }
   const html = sellerDashboardShell(store, false, activeTab);
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
@@ -7519,6 +7612,7 @@ function renderShopPanel(activeTab = "dashboard") {
     try {
       localStorage.removeItem(SHOP_PANEL_SESSION_KEY);
       localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
+      localStorage.removeItem(SHOP_PANEL_STAFF_SESSION_KEY);
     } catch {}
     renderShopPanelLogin();
   });
@@ -7696,6 +7790,43 @@ function bindShopPanelActions(store, activeTab) {
 
       await shopPersistAndRender("storage");
     });
+  });
+
+  document.querySelector("[data-shop-staff-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const data = new FormData(event.currentTarget);
+    const login = String(data.get("login") || "").trim();
+    const password = String(data.get("password") || "").trim();
+    const permissions = data.getAll("permissions").map(String).filter((id) => SHOP_STAFF_ACCESS_TABS.some(([tab]) => tab === id));
+
+    if (!login || !password) return showToast("Укажите логин и пароль сотрудника");
+    if (!permissions.length) return showToast("Выберите хотя бы один раздел для сотрудника");
+
+    store.staff = Array.isArray(store.staff) ? store.staff : [];
+    const member = {
+      login,
+      password,
+      name: String(data.get("name") || "").trim(),
+      permissions,
+      updatedAt: Date.now()
+    };
+    const index = store.staff.findIndex((item) => sameLogin(item.login, login));
+    if (index >= 0) {
+      store.staff[index] = { ...store.staff[index], ...member };
+    } else {
+      store.staff.unshift({ ...member, createdAt: Date.now() });
+    }
+
+    await shopPersistAndRender("staff");
+  });
+
+  document.querySelectorAll("[data-shop-staff-delete]").forEach((button) => {
+    button.onclick = async () => {
+      if (!confirm("Удалить доступ сотрудника?")) return;
+      store.staff = (store.staff || []).filter((member) => !sameLogin(member.login, button.dataset.shopStaffDelete));
+      await shopPersistAndRender("staff");
+    };
   });
 
   document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
