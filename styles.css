@@ -4159,12 +4159,14 @@ body[data-theme="dark"] .seller-dashboard-top {
   border-bottom: 0;
 }
 
-details[data-shop-storage-item] {
+details[data-shop-storage-item],
+details[data-shop-sale-item] {
   display: block;
   padding: 10px 0;
 }
 
-details[data-shop-storage-item] summary {
+details[data-shop-storage-item] summary,
+details[data-shop-sale-item] summary {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -4175,6 +4177,31 @@ details[data-shop-storage-item] summary {
 
 details[data-shop-storage-item] .form {
   margin-top: 14px;
+}
+
+.seller-sale-details {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--soft);
+}
+
+.seller-sale-details p {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+}
+
+.seller-sale-details span {
+  color: var(--muted);
+}
+
+.seller-sale-details strong {
+  text-align: right;
 }
 
 .seller-stock-row {

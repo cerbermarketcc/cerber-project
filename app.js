@@ -6921,7 +6921,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
             <button class="ghost-button" data-shop-panel-logout>Выйти</button>
           </header>
-          ${shopPanelTabContent(activeTab, { store, orders, paidOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal })}
+          ${shopPanelTabContent(activeTab, { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal })}
         </div>
       </article>
     `;
@@ -7088,7 +7088,7 @@ function shopPanelNavV2(activeTab = "dashboard") {
 }
 
 function shopPanelTabContent(tab, data) {
-  const { store, orders, paidOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal } = data;
+  const { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal } = data;
   if (tab === "profile") return shopProfileTab(store);
   if (tab === "cards") return shopCardsTab(store, products);
   if (tab === "products") return shopProductsTab(store, products);
@@ -7124,7 +7124,7 @@ function shopPanelTabContent(tab, data) {
     `;
   }
   if (tab === "storage") {
-    return shopStorageTab(store, products, { productRows, districts, positions, stockTotal });
+    return shopStorageTab(store, products, { productRows, districts, positions, stockTotal, paidOrders, todayOrders });
   }
   if (tab === "clients") {
     const clientRows = [...clients].slice(0, 12);
@@ -7231,14 +7231,57 @@ function shopCardsTab(store, products) {
   `;
 }
 
+function shopSaleHistoryList(store, orders, title, emptyText) {
+  const rows = orders
+    .slice()
+    .sort((a, b) => Number(b.paidAt || b.completedAt || b.closedAt || b.createdAt || 0) - Number(a.paidAt || a.completedAt || a.closedAt || a.createdAt || 0));
+
+  return `
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>${esc(title)}</h3><span>${rows.length}</span></div>
+      ${rows.length ? rows.map((order) => {
+        const product = (store.products || []).find((item) => item.id === order.productId);
+        const position = (product?.positions || []).find((item) => item.id === order.positionId);
+        const soldAt = Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0);
+        const productTitle = order.product || position?.title || product?.title || order.id || "Товар";
+        const description = order.productDescription || position?.description || product?.description || "";
+        const issued = order.reservedDescription || "";
+        return `
+          <details class="seller-source" data-shop-sale-item>
+            <summary>
+              <span>${esc(productTitle)} · ${esc(order.login || "client")} · ${Number(order.amountUsd || 0).toFixed(2)} $</span>
+              <strong>${soldAt ? esc(new Date(soldAt).toLocaleString()) : "—"}</strong>
+            </summary>
+            <div class="seller-sale-details">
+              <p><span>Покупатель</span><strong>${esc(order.login || "client")}</strong></p>
+              <p><span>Заказ</span><strong>${esc(order.id || "-")}</strong></p>
+              <p><span>Карточка</span><strong>${esc(product?.title || order.product || "-")}</strong></p>
+              <p><span>Субтовар</span><strong>${esc(position?.title || order.positionTitle || order.product || "-")}</strong></p>
+              <p><span>Цена</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC</strong></p>
+              <p><span>Локация</span><strong>${esc(order.location || locationLabel(position || {}))}</strong></p>
+              <p><span>Статус</span><strong>${esc(order.status || "")} / ${esc(order.paymentStatus || "")}</strong></p>
+              ${description ? `<p><span>Описание</span><strong>${esc(description)}</strong></p>` : ""}
+              ${issued ? `<p><span>Выдано</span><strong>${esc(issued)}</strong></p>` : ""}
+            </div>
+          </details>
+        `;
+      }).join("") : `<p>${esc(emptyText)}</p>`}
+    </section>
+  `;
+}
+
 function shopStorageTab(store, products, stats = {}) {
   const orderedProducts = sortedStoreProducts(store, true);
   const allowedCountries = shopAllowedCountries(store);
+  const paidOrders = Array.isArray(stats.paidOrders) ? stats.paidOrders : [];
+  const todayOrders = Array.isArray(stats.todayOrders) ? stats.todayOrders : [];
   const positionTotal = orderedProducts.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0);
   const stockTotal = Number(stats.stockTotal || orderedProducts.reduce((sum, product) => {
     return sum + (product.positions || []).reduce((innerSum, position) => innerSum + Number(position.stock || 0), 0);
   }, 0));
   const districtTotal = Array.isArray(stats.districts) ? stats.districts.length : 0;
+  const todaySalesUsd = todayOrders.reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+  const allSalesUsd = paidOrders.reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
 
   const countryFieldFor = (country) => allowedCountries.length > 1
     ? `<label class="field">Страна<select name="country" data-shop-location-country>${scopedCountrySelectOptions(allowedCountries, country)}</select></label>`
@@ -7250,6 +7293,8 @@ function shopStorageTab(store, products, stats = {}) {
       ${sellerDashStat("Остаток", `${stockTotal} шт.`, "доступно к продаже")}
       ${sellerDashStat("Карточки", `${products.length}`, "товарные карточки")}
       ${sellerDashStat("Субтовары", `${positionTotal}`, `${districtTotal} районов`)}
+      ${sellerDashStat("Сегодня продано", `${todayOrders.length}`, `${todaySalesUsd.toFixed(2)} $`)}
+      ${sellerDashStat("Всего продано", `${paidOrders.length}`, `${allSalesUsd.toFixed(2)} $`)}
     </section>
     <section class="seller-dashboard-card seller-wide-card">
       <div class="seller-card-head"><h3>Склад товаров</h3><span>${positionTotal} позиций</span></div>
@@ -7300,6 +7345,8 @@ function shopStorageTab(store, products, stats = {}) {
         `;
       }).join("") : `<p>Сначала создайте карточку и добавьте товар во вкладке “Товары”.</p>`}
     </section>
+    ${shopSaleHistoryList(store, todayOrders, "Продано сегодня", "Сегодня продаж ещё нет.")}
+    ${shopSaleHistoryList(store, paidOrders, "История проданных товаров", "Проданных товаров пока нет.")}
   `;
 }
 
