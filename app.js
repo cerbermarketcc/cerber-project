@@ -3381,7 +3381,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   const reservedDescription = issueRandomDeliveryItem(issuedItems);
   if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
-  const commissionPercent = Number(db.paymentSettings?.platformCommissionPercent || 0);
+  const commissionPercent = storeCommissionPercent(store);
   const commissionUsd = priceUsd * commissionPercent / 100;
   const ltcAmount = usdToLtc(priceUsd);
   const coin = walletCoinById(options.coinId || storeEnabledCoins(store)[0]?.id || "ltc");
@@ -5731,6 +5731,10 @@ function storeSalesUsd(storeId) {
     .reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
 }
 
+function storeCommissionPercent(store = null) {
+  return Math.max(0, Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? db.ownerSettings?.platformCommissionPercent ?? db.paymentSettings?.platformCommissionPercent ?? 0));
+}
+
 function paidStoreOrders(storeId) {
   return (db.orders || []).filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
@@ -5740,15 +5744,29 @@ function paidStoreOrders(storeId) {
 }
 
 function storeBalanceUsd(storeId) {
-  return paidStoreOrders(storeId).reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+  const store = storeById(storeId);
+  return paidStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
 }
 
 function storeOrderNetUsd(order, store = null) {
   const amount = Number(order?.amountUsd || 0);
   const commissionUsd = Number(order?.platformCommissionUsd || 0);
-  const commissionPercent = Number(order?.platformCommissionPercent ?? store?.commissionPercent ?? 0);
+  const commissionPercent = Number(order?.platformCommissionPercent ?? storeCommissionPercent(store));
   if (commissionUsd > 0) return Math.max(0, amount - commissionUsd);
   return Math.max(0, amount - amount * commissionPercent / 100);
+}
+
+function storeOrderCommissionUsd(order, store = null) {
+  const amount = Number(order?.amountUsd || 0);
+  const fixed = Number(order?.platformCommissionUsd || 0);
+  if (fixed > 0) return fixed;
+  return Math.max(0, amount - storeOrderNetUsd(order, store));
+}
+
+function ownerPendingCommissionUsd() {
+  return (db.stores || []).reduce((sum, store) => {
+    return sum + paidStoreOrders(store.id).reduce((innerSum, order) => innerSum + storeOrderCommissionUsd(order, store), 0);
+  }, 0);
 }
 
 function storeClientRows(storeId) {
@@ -5900,6 +5918,7 @@ function renderOwnerPanelContent() {
   route = "owner";
   const stats = marketStats();
   const settings = db.ownerSettings || structuredClone(defaults.ownerSettings);
+  const ownerCommissionBalance = ownerPendingCommissionUsd();
   const disputes = (db.orders || []).filter((order) => order.type === "product" && (order.disputeOpen || order.status === "dispute"));
   layout(`
     <section class="screen">
@@ -5912,6 +5931,7 @@ function renderOwnerPanelContent() {
           ${ownerStatCard("заказов", stats.orders)}
           ${ownerStatCard("диспутов", stats.disputes)}
           ${ownerStatCard("оборот, $", stats.salesUsd.toFixed(2))}
+          ${ownerStatCard("к выводу, $", ownerCommissionBalance.toFixed(2))}
         </div>
       </article>
       <article class="panel owner-market-settings-panel">
@@ -7453,12 +7473,13 @@ function shopDisputesTab(store) {
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
   const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
+  const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
   <section class="seller-dashboard-stats">
-    ${sellerDashStat("Баланс", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}
+    ${sellerDashStat("К выводу магазину", `${netUsd.toFixed(2)} $`, `${usdToLtc(netUsd).toFixed(8)} LTC`)}
     ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
     ${sellerDashStat("Валовый оборот", `${grossUsd.toFixed(2)} $`, "до комиссии")}
-    ${sellerDashStat("Комиссия", `${commissionUsd.toFixed(2)} $`, `${Number(store.commissionPercent || 0)}%`)}
+    ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>

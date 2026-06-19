@@ -1533,7 +1533,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
       const name = order.product || order.productName || order.productId || "Товар";
       products.set(name, (products.get(name) || 0) + 1);
     });
-    const completed = orders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const completed = orders.filter(adminIsPaidProductOrder);
     const dates = completed.map(adminTimestamp).filter(Boolean).sort((a, b) => a - b);
     const purchaseTotal = completed.reduce((sum, item) => sum + adminOrderAmount(item), 0);
     const successfulDeposits = deposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase()));
@@ -2250,6 +2250,16 @@ function adminOrderAmount(order) {
   return adminMoney(order.amountUsd || order.priceUsd || order.totalUsd || order.total || order.price);
 }
 
+function adminIsPaidProductOrder(order) {
+  const status = String(order.status || "").toLowerCase();
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  return paymentStatus === "paid" || ["active", "completed", "closed", "paid"].includes(status);
+}
+
+function adminStoreNetAmount(order, state, store) {
+  return Math.max(0, adminOrderAmount(order) - adminPlatformCommission(order, state, store));
+}
+
 function adminIsUserBlocked(state, login) {
   const key = loginKey(login);
   const record = state.blockedUsers?.[key];
@@ -2429,8 +2439,22 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
 }
 
 function adminPlatformCommission(order, state, store) {
+  const fixed = Number(order?.platformCommissionUsd || 0);
+  if (fixed > 0) return fixed;
   const storeCommission = Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0);
   return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
+}
+
+function applyProductOrderCommission(order, state = {}, store = null) {
+  if (!order) return order;
+  const amount = adminOrderAmount(order);
+  const percent = Math.max(0, Number(order.platformCommissionPercent ?? store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0));
+  const fixedCommission = Number(order.platformCommissionUsd || 0);
+  const commission = fixedCommission > 0 ? fixedCommission : amount * percent / 100;
+  order.platformCommissionPercent = percent;
+  order.platformCommissionUsd = Math.max(0, commission);
+  order.sellerAmountUsd = Math.max(0, amount - order.platformCommissionUsd);
+  return order;
 }
 
 function adminPeriods() {
@@ -2558,7 +2582,7 @@ function adminCollectMirrorBots(state) {
 
 function adminAudienceUsers({ state, profiles, sessions }, filters = {}) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
-  const completed = orders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+  const completed = orders.filter(adminIsPaidProductOrder);
   const onlineKeys = new Set(sessions.filter((session) => Date.now() - Date.parse(session.created_at) < 30 * 60 * 1000).map((session) => session.login_key));
   const specific = String(filters.specificLogins || "").split(",").map((item) => loginKey(item)).filter(Boolean);
   const minPurchase = filters.minPurchase === "" || filters.minPurchase == null ? null : Number(filters.minPurchase);
@@ -2691,7 +2715,7 @@ function adminBuildOverview(data) {
   const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
-  const completedOrders = productOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+  const completedOrders = productOrders.filter(adminIsPaidProductOrder);
   const activeOrders = productOrders.filter((order) => ["active", "pending_payment", "processing"].includes(String(order.status || "").toLowerCase()));
   const disputes = [
     ...orders.filter((order) => order.disputeOpen || order.status === "dispute"),
@@ -2722,18 +2746,21 @@ function adminBuildOverview(data) {
 
   const storeRows = stores.map((store) => {
     const storeOrders = productOrders.filter((order) => order.storeId === store.id);
-    const storeCompleted = storeOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const storeCompleted = storeOrders.filter(adminIsPaidProductOrder);
     const storeDisputes = storeOrders.filter((order) => order.disputeOpen || order.status === "dispute");
     const clients = new Set(storeOrders.map((order) => loginKey(order.login)).filter(Boolean));
-    const revenue = storeCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+    const grossRevenue = storeCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+    const commission = storeCompleted.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0);
+    const revenue = storeCompleted.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
     return {
       id: store.id,
       name: store.name || store.tag || store.id,
       status: store.status || "active",
       ownerLogin: store.ownerLogin || "",
       sales: storeCompleted.length,
+      grossRevenue,
       revenue,
-      commission: storeCompleted.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0),
+      commission,
       clients: clients.size,
       products: Array.isArray(store.products) ? store.products.length : 0,
       disputes: storeDisputes.length,
@@ -2762,7 +2789,7 @@ function adminBuildOverview(data) {
   const userRows = profiles.map((user, index) => {
     const login = user.login;
     const userOrders = productOrders.filter((order) => sameLogin(order.login, login));
-    const userCompleted = userOrders.filter((order) => ["completed", "closed", "paid"].includes(String(order.status || order.paymentStatus || "").toLowerCase()));
+    const userCompleted = userOrders.filter(adminIsPaidProductOrder);
     const userDisputes = userOrders.filter((order) => order.disputeOpen || order.status === "dispute");
     const deposits = walletDeposits.filter((deposit) => sameLogin(deposit.login, login));
     return {
@@ -2790,6 +2817,8 @@ function adminBuildOverview(data) {
       totalSales: completedOrders.length,
       totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       totalCommission: completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0),
+      ownerWithdrawableUsd: completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0),
+      storesWithdrawableUsd: completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0),
       newUsers: periods.find((period) => period.id === "day")?.newUsers || 0,
       totalUsers: profiles.length,
       usersWithPurchase: buyers.size,
@@ -2925,42 +2954,58 @@ async function createWalletDepositRecord(user, options = {}) {
 
 async function completeProductOrder(order, state, providerPayload = {}) {
   const paidAt = Date.now();
-  order.status = "active";
+  const wasAlreadyPaid = String(order.paymentStatus || "").toLowerCase() === "paid" || ["active", "completed", "closed", "paid"].includes(String(order.status || "").toLowerCase());
   order.paymentStatus = "paid";
-  order.paidAt = paidAt;
-  order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
-  order.autoReleaseAt = paidAt + order.autoReleaseHours * 60 * 60 * 1000;
-  delete order.completedAt;
+  if (!wasAlreadyPaid) {
+    order.status = "active";
+    order.paidAt = paidAt;
+    order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
+    order.autoReleaseAt = paidAt + order.autoReleaseHours * 60 * 60 * 1000;
+    delete order.completedAt;
+  } else {
+    order.paidAt = order.paidAt || paidAt;
+    order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
+    if (String(order.status || "").toLowerCase() === "active" && !order.autoReleaseAt) {
+      order.autoReleaseAt = Number(order.paidAt || paidAt) + order.autoReleaseHours * 60 * 60 * 1000;
+    }
+  }
   order.paymentProviderPayload = providerPayload;
 
   if (order.storeId) {
     const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
     const store = row?.data;
     if (store) {
-      store.orders = Number(store.orders || 0) + 1;
-      const product = (store.products || []).find((item) => item.id === order.productId);
-      if (product) {
-        product.purchases = Number(product.purchases || 0) + 1;
-        const position = (product.positions || []).find((item) => item.id === order.positionId);
-        if (!order.reservedDescription) {
-          const positionItems = Array.isArray(position?.deliveryItems) ? position.deliveryItems : [];
-          const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
-          const fromPosition = positionItems.length > 0;
-          const sourceItems = fromPosition ? positionItems : productItems;
-          const reservedDescription = sourceItems.shift() || "";
-          if (reservedDescription) {
-            order.reservedDescription = reservedDescription;
-            order.reservedFromPosition = fromPosition;
-            order.reservedStock = true;
+      applyProductOrderCommission(order, state, store);
+      if (!wasAlreadyPaid) {
+        store.orders = Number(store.orders || 0) + 1;
+        const product = (store.products || []).find((item) => item.id === order.productId);
+        if (product) {
+          product.purchases = Number(product.purchases || 0) + 1;
+          const position = (product.positions || []).find((item) => item.id === order.positionId);
+          if (!order.reservedDescription) {
+            const positionItems = Array.isArray(position?.deliveryItems) ? position.deliveryItems : [];
+            const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+            const fromPosition = positionItems.length > 0;
+            const sourceItems = fromPosition ? positionItems : productItems;
+            const reservedDescription = sourceItems.shift() || "";
+            if (reservedDescription) {
+              order.reservedDescription = reservedDescription;
+              order.reservedFromPosition = fromPosition;
+              order.reservedStock = true;
+            }
+          }
+          if (position && Number(position.stock || 0) > 0 && !order.reservedStock && !order.stockReleasedAt) {
+            position.stock = Math.max(0, Number(position.stock || 0) - 1);
+            order.stockReleasedAt = Date.now();
           }
         }
-        if (position && Number(position.stock || 0) > 0 && !order.reservedStock && !order.stockReleasedAt) {
-          position.stock = Math.max(0, Number(position.stock || 0) - 1);
-          order.stockReleasedAt = Date.now();
-        }
+        await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
       }
-      await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    } else {
+      applyProductOrderCommission(order, state, null);
     }
+  } else {
+    applyProductOrderCommission(order, state, null);
   }
 
   await saveSettingsState(state);

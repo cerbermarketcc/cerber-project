@@ -272,6 +272,8 @@ function renderDashboard() {
       ${statCard("Продажи", s.totalSales, "закрытые сделки")}
       ${statCard("Оборот", fmtMoney(s.totalTurnover), "всё время")}
       ${statCard("Комиссия", fmtMoney(s.totalCommission), "доход площадки")}
+      ${statCard("К выводу владельцу", fmtMoney(s.ownerWithdrawableUsd || s.totalCommission || 0), "комиссии магазинов")}
+      ${statCard("К выводу магазинам", fmtMoney(s.storesWithdrawableUsd || 0), "чистый доход продавцов")}
       ${statCard("Новые пользователи", s.newUsers, "за сутки")}
       ${statCard("Всего пользователей", s.totalUsers, `${s.usersWithPurchase} с покупкой`)}
       ${statCard("Диспуты", s.disputes, "открытые")}
@@ -319,6 +321,9 @@ function renderStores() {
           <label class="field">Пароль панели продавца<input name="adminPassword" required></label>
           <label class="field">Позиция<input name="position" type="number" min="1" step="1" value="1"></label>
         </div>
+        <div class="row">
+          <label class="field">Процент владельца сайта с продаж<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="3"></label>
+        </div>
         <label class="field">Описание магазина<textarea name="description"></textarea></label>
         <div class="checks">
           <label><input name="region_moldova" type="checkbox" checked> Молдова</label>
@@ -330,7 +335,7 @@ function renderStores() {
       <div data-created-store></div>
     </article>
     <section class="split">
-      <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход</th><th>Комиссия</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
+      <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход магазина</th><th>Комиссия владельца</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
         ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
       </tbody></table></article>
       <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления статусом, комиссией, позицией, автозакрытием и монетами.</p></article>
@@ -344,6 +349,9 @@ function storeDetail(id) {
   const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
   const countries = store.countries || store.regions || [];
   const panelUrl = store.panel?.shopPanelUrl || `${PRIMARY_API_ORIGIN}/#shop-panel-${store.id}`;
+  const grossRevenue = Number(store.grossRevenue || 0);
+  const storeRevenue = Number(store.revenue || 0);
+  const ownerCommission = Number(store.commission || 0);
   const placements = Array.isArray(store.placements) && store.placements.length
     ? store.placements
     : [
@@ -356,6 +364,7 @@ function storeDetail(id) {
   return `
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
+    <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)}</strong> · К выводу магазину: <strong>${fmtMoney(storeRevenue)}</strong> · Комиссия владельца: <strong>${fmtMoney(ownerCommission)}</strong></p>
     <form data-store-form="${esc(store.id)}">
       <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
       <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
@@ -636,6 +645,7 @@ function bindActions() {
           placement: placements[0] || "stores",
           placements,
           position: Number(fd.get("position")),
+          commissionPercent: Number(fd.get("commissionPercent") || 0),
           countries,
           enabledCoins
         })
