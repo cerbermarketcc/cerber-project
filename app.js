@@ -4782,7 +4782,6 @@ function renderSupportLegacy() {
 
 function renderSupport() {
   route = "support";
-  const recipients = supportRecipients();
   const tickets = (db.supportTickets || [])
     .filter((ticket) => sameLogin(ticket.fromLogin, db.currentUser) || sameLogin(ticket.recipientLogin, db.currentUser))
     .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
@@ -4791,11 +4790,6 @@ function renderSupport() {
       <article class="support-card">
         <h1>Новый тикет в поддержку</h1>
         <form class="form" data-support-form>
-          <label class="field">Кому отправить
-            <select name="recipientId" required>
-              ${recipients.map((item) => `<option value="${esc(item.id)}">${esc(item.title || item.login)} · ${esc(item.login)}</option>`).join("")}
-            </select>
-          </label>
           <label class="field">Тема
             <select name="subject" required>
               <option value="" disabled selected>Выберите тему</option>
@@ -4830,17 +4824,15 @@ function renderSupport() {
   form.onsubmit = async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const recipientId = String(data.get("recipientId") || "");
     const subject = String(data.get("subject") || "");
     const body = String(data.get("body") || "").trim();
-    const recipient = recipients.find((item) => item.id === recipientId) || recipients[0];
     const attachments = await supportAttachmentsFromInput(fileInput);
     if (!body && !attachments.length) return showToast("Введите сообщение или прикрепите фото");
     if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
       try {
         const payload = await apiFetch("/api/support/tickets", {
           method: "POST",
-          body: JSON.stringify({ recipientId, subject, body, attachments })
+          body: JSON.stringify({ subject, body, attachments })
         });
         applyRemoteState(payload);
         showToast("Обращение отправлено");
@@ -4854,9 +4846,9 @@ function renderSupport() {
       id: `support-${Date.now()}`,
       storeId: "support",
       storeTag: "supportcerber",
-      toLogin: recipient?.login || "support",
+      toLogin: "admin",
       fromLogin: db.currentUser,
-      subject: `[${recipient?.title || "Поддержка"}] ${subject}`,
+      subject: `[Поддержка] ${subject}`,
       body,
       attachments,
       createdAt: Date.now(),

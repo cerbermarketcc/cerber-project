@@ -528,10 +528,7 @@ function renderSettings() {
   </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
 }
 
-function renderMisc() {
-  const supportSettings = data.settings?.supportSettings || { recipients: [] };
-  const recipients = Array.isArray(supportSettings.recipients) ? supportSettings.recipients : [];
-  const recipientByTitle = new Map(recipients.map((item) => [String(item.title || "").toLowerCase(), item]));
+function renderMiscLegacy() {
   const tickets = Array.isArray(data.supportTickets) ? data.supportTickets : [];
   const openCount = tickets.filter((ticket) => ticket.status !== "closed").length;
   return `
@@ -555,6 +552,29 @@ function renderMisc() {
           </div>
           <button class="primary">Сохранить разделы поддержки</button>
         </form>
+      </article>
+      <article class="split-card">
+        <h2>Обращения</h2>
+        <section class="grid">
+          ${statCard("Открытые", openCount, "ожидают ответа")}
+          ${statCard("Всего", tickets.length, "все тикеты")}
+        </section>
+      </article>
+    </section>
+    <section class="support-ticket-list">
+      ${supportTicketGroups(tickets)}
+    </section>
+  `;
+}
+
+function renderMisc() {
+  const tickets = Array.isArray(data.supportTickets) ? data.supportTickets : [];
+  const openCount = tickets.filter((ticket) => ticket.status !== "closed").length;
+  return `
+    <section class="split">
+      <article class="split-card">
+        <h2>Разное</h2>
+        <p class="muted">Все обращения клиентов из поддержки приходят сюда. Открой логин ниже, чтобы посмотреть переписку, фото и ответить.</p>
       </article>
       <article class="split-card">
         <h2>Обращения</h2>
@@ -599,7 +619,7 @@ function supportAttachmentsHtml(attachments = []) {
   return `<div class="support-attachments">${items.map((file) => `<a href="${esc(file.url)}" target="_blank" rel="noopener"><img src="${esc(file.url)}" alt="${esc(file.name || "photo")}"></a>`).join("")}</div>`;
 }
 
-function supportTicketCard(ticket) {
+function supportTicketCardLegacy(ticket) {
   const closed = ticket.status === "closed";
   return `
     <article class="support-ticket-card">
@@ -607,6 +627,32 @@ function supportTicketCard(ticket) {
         <div>
           <h3>${esc(ticket.subject || ticket.id)}</h3>
           <p class="muted">#${esc(ticket.id)} · от ${esc(ticket.fromLogin || "-")} · кому ${esc(ticket.recipientLogin || "-")} · ${fmtDate(ticket.createdAt)}</p>
+        </div>
+        <span class="status ${closed ? "off" : ""}">${closed ? "closed" : "open"}</span>
+      </div>
+      <p>${esc(ticket.body || (ticket.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}</p>
+      ${supportAttachmentsHtml(ticket.attachments)}
+      ${(ticket.replies || []).length ? `<h4>Ответы</h4>${ticket.replies.map((reply) => `<div class="notice"><strong>${esc(reply.fromLogin || "admin")}</strong> · ${fmtDate(reply.createdAt)}<br>${esc(reply.body || (reply.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}${supportAttachmentsHtml(reply.attachments)}</div>`).join("")}` : ""}
+      ${closed ? `<p class="muted">Обращение закрыто ${fmtDate(ticket.closedAt)}. Ответы заблокированы.</p>` : `
+        <form data-support-reply-form="${esc(ticket.id)}">
+          <label class="field">Ответ пользователю<textarea name="body"></textarea></label>
+          <label class="field">Фото<input name="attachments" type="file" accept="image/*" multiple></label>
+          <button class="primary">Ответить</button>
+          <button class="ghost danger" type="button" data-support-close="${esc(ticket.id)}">Закрыть обращение</button>
+        </form>
+      `}
+    </article>
+  `;
+}
+
+function supportTicketCard(ticket) {
+  const closed = ticket.status === "closed";
+  return `
+    <article class="support-ticket-card">
+      <div class="ticket-head">
+        <div>
+          <h3>${esc(ticket.subject || ticket.id)}</h3>
+          <p class="muted">#${esc(ticket.id)} · от ${esc(ticket.fromLogin || "-")} · ${fmtDate(ticket.createdAt)}</p>
         </div>
         <span class="status ${closed ? "off" : ""}">${closed ? "closed" : "open"}</span>
       </div>

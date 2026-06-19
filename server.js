@@ -1158,10 +1158,7 @@ app.post("/api/support/tickets", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
-    const settings = normalizeSupportSettings(state.supportSettings);
-    const recipientId = String(req.body.recipientId || "").trim();
-    const recipient = settings.recipients.find((item) => item.id === recipientId) || settings.recipients[0];
-    const subject = String(req.body.subject || recipient.title || "Обращение").trim();
+    const subject = String(req.body.subject || "Обращение").trim();
     const body = String(req.body.body || "").trim();
     const attachments = normalizeSupportAttachments(req.body.attachments);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите текст или прикрепите фото" });
@@ -1171,14 +1168,13 @@ app.post("/api/support/tickets", async (req, res, next) => {
       body,
       attachments,
       fromLogin: user.login,
-      recipientLogin: recipient.login,
-      recipientTitle: recipient.title,
+      recipientLogin: "admin",
+      recipientTitle: "Поддержка",
       status: "open",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       replies: []
     };
-    state.supportSettings = settings;
     state.supportTickets = [ticket, ...(Array.isArray(state.supportTickets) ? state.supportTickets : [])];
     await saveSettingsState(state);
     await upsertPrivateMessage({
