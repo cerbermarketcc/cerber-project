@@ -53,20 +53,13 @@ const SITE_EMOJI_ASSETS = Array.from({ length: 104 }, (_, index) => {
   return { name: `telegram-${id}`, url: `assets/site-emojis/telegram-${id}.png` };
 });
 const GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS = new Set([
-  "024",
-  "025",
-  "026",
-  "027",
-  "028",
-  "029",
   "030",
   "031",
   "032",
   "033",
   "034",
-  "036",
-  "037",
-  "038"
+  "035",
+  "036"
 ]);
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
