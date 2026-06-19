@@ -535,9 +535,9 @@ function renderMiscLegacy() {
     <section class="split">
       <article class="split-card">
         <h2>Разное</h2>
-        <h3>Логины поддержки</h3>
+        <h3>Legacy support routing</h3>
         <p class="muted">Включи нужные разделы и впиши логин аккаунта поддержки. На сайте пользователь увидит только включённые разделы.</p>
-        <form data-support-settings-form>
+        <form data-disabled-support-routing>
           <div class="support-topic-grid">
             ${supportTopics.map((topic, index) => {
               const existing = recipientByTitle.get(topic.toLowerCase()) || recipients.find((item) => item.id === `support-topic-${index}`);
@@ -921,7 +921,7 @@ function bindActions() {
       toast(error.message, true);
     }
   });
-  root.querySelector("[data-support-settings-form]")?.addEventListener("submit", async (event) => {
+  root.querySelector("[data-disabled-support-routing-handler]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedRecipients = [...event.currentTarget.querySelectorAll("[data-support-topic-login]")]
       .map((input) => {

@@ -4719,8 +4719,8 @@ function renderSupportLegacy() {
       <article class="support-card">
         <h1>Новый тикет в поддержку</h1>
         <form class="form" data-support-form>
-          <label class="field">Кому отправить
-            <select name="recipientId" required>
+          <label class="field">Старый получатель
+            <select name="legacyRecipientId" required>
               ${recipients.map((item) => `<option value="${esc(item.id)}">${esc(item.title || item.login)} · ${esc(item.login)}</option>`).join("")}
             </select>
           </label>
