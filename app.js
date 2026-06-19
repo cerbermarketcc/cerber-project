@@ -52,6 +52,22 @@ const SITE_EMOJI_ASSETS = Array.from({ length: 104 }, (_, index) => {
   const id = String(index + 1).padStart(3, "0");
   return { name: `telegram-${id}`, url: `assets/site-emojis/telegram-${id}.png` };
 });
+const GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS = new Set([
+  "004",
+  "005",
+  "006",
+  "007",
+  "008",
+  "009",
+  "010",
+  "011",
+  "012",
+  "013",
+  "014",
+  "016",
+  "017",
+  "018"
+]);
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
@@ -1301,11 +1317,19 @@ async function loadRemoteConfig() {
 }
 
 function siteEmojiPickerHtml(scope) {
-  return SITE_EMOJI_ASSETS.map((emoji) => `
+  const emojis = scope === "group"
+    ? SITE_EMOJI_ASSETS.filter((emoji) => !GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS.has(String(emoji.name || "").replace(/^telegram-/, "")))
+    : SITE_EMOJI_ASSETS;
+  return emojis.map((emoji) => `
     <button type="button" class="site-emoji-button" data-${scope}-site-emoji="${esc(emoji.url)}" title="${esc(emoji.name)}">
       <img src="${esc(emoji.url)}" alt="">
     </button>
   `).join("") || TELEGRAM_EMOJIS.map((emoji) => `<button type="button" data-${scope}-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join("");
+}
+
+function groupChatSiteEmojiAllowed(url = "") {
+  const match = String(url || "").match(/telegram-(\d{3})\.png$/i);
+  return !match || !GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS.has(match[1]);
 }
 
 function siteEmojiAttachment(url = "") {
@@ -4431,6 +4455,7 @@ function renderGroupChat() {
       const user = currentUser();
       const sticker = siteEmojiMessageFields(button.dataset.groupSiteEmoji);
       if (!user || !sticker) return;
+      if (!groupChatSiteEmojiAllowed(sticker.stickerUrl)) return showToast("Этот стикер убран из общего чата");
       const message = {
         id: `group-${Date.now()}`,
         fromLogin: user.login,

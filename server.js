@@ -24,6 +24,7 @@ const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
+const groupChatHiddenSiteEmojiIds = new Set(["004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "016", "017", "018"]);
 const walletCoins = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC" },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT" },
@@ -1353,6 +1354,12 @@ app.put("/api/state", async (req, res, next) => {
 function sanitizeGroupMessagePayload(payload = {}) {
   const body = String(payload.body || "").trim();
   const stickerUrl = String(payload.stickerUrl || "").trim();
+  const stickerMatch = stickerUrl.match(/telegram-(\d{3})\.png$/i);
+  if (stickerMatch && groupChatHiddenSiteEmojiIds.has(stickerMatch[1])) {
+    const error = new Error("Стикер убран из общего чата");
+    error.status = 400;
+    throw error;
+  }
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 4).map((file, index) => {
     const url = String(file?.url || "").trim();
     if (!url || url.length > 1600000) return null;
