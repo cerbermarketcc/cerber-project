@@ -1265,14 +1265,22 @@ body[data-theme="dark"] .mirror-row {
     position: fixed;
     left: 12px;
     right: 12px;
-    bottom: calc(78px + env(safe-area-inset-bottom));
+    bottom: calc(92px + env(safe-area-inset-bottom));
     width: auto;
-    grid-template-columns: repeat(4, minmax(58px, 1fr));
+    grid-template-columns: repeat(4, minmax(64px, 1fr));
     gap: 10px;
-    max-height: min(430px, 54dvh);
+    max-height: min(460px, 58dvh);
     padding: 12px;
     border-radius: 22px;
-    z-index: 120;
+    z-index: 1000;
+    overflow-y: auto;
+    overflow-x: hidden;
+    transform: translateZ(0);
+  }
+
+  .group-sticker-row button {
+    min-height: 64px;
+    border-radius: 18px;
   }
 
   .group-widget {

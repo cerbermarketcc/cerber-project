@@ -4148,6 +4148,27 @@ function visibleGroupMessages() {
   return (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
+async function sendGroupMessageRemote(message) {
+  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return false;
+  try {
+    const payload = await apiFetch("/api/group/messages", {
+      method: "POST",
+      timeoutMs: 15000,
+      body: JSON.stringify({
+        body: message.body || "",
+        stickerUrl: message.stickerUrl || "",
+        attachments: Array.isArray(message.attachments) ? message.attachments : []
+      })
+    });
+    applyRemoteState(payload);
+    return true;
+  } catch (error) {
+    console.error("[group-chat] message save failed", error);
+    showToast(error.message || "Сообщение сохранено локально, сервер не ответил");
+    return false;
+  }
+}
+
 function groupWidgetUnreadCount() {
   if (route === "group-chat") return 0;
   const lastSeen = Number(db.groupSettings?.widgetSeenAt?.[db.currentUser] || 0);
@@ -4304,6 +4325,11 @@ function renderGroupChat() {
   const onlineCount = groupOnlineCount();
   const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted);
   const messages = (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  if (!messages.length && API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+    loadRemoteSession().then((ok) => {
+      if (ok && route === "group-chat" && (db.groupMessages || []).some((msg) => !msg.deleted)) renderGroupChat();
+    }).catch(() => {});
+  }
   const lastRoll = (settings.rollTimers || []).filter((timer) => !timer.done).sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))[0];
   const rollLeft = lastRoll ? Math.max(0, Math.ceil((Number(lastRoll.expiresAt || 0) - Date.now()) / 1000)) : 0;
   layout(`
@@ -4401,11 +4427,11 @@ function renderGroupChat() {
     };
   });
   document.querySelectorAll("[data-group-site-emoji]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
       const user = currentUser();
       const sticker = siteEmojiMessageFields(button.dataset.groupSiteEmoji);
       if (!user || !sticker) return;
-      db.groupMessages.push({
+      const message = {
         id: `group-${Date.now()}`,
         fromLogin: user.login,
         body: "",
@@ -4414,8 +4440,12 @@ function renderGroupChat() {
         reactions: {},
         createdAt: Date.now(),
         date: new Date().toLocaleString()
-      });
-      saveDb();
+      };
+      const savedRemote = await sendGroupMessageRemote(message);
+      if (!savedRemote) {
+        db.groupMessages.push(message);
+        saveDb();
+      }
       renderGroupChat();
     };
   });
@@ -4578,7 +4608,7 @@ async function handleGroupMessageSend(event) {
     type: file.type,
     url: await fileToDataUrl(file)
   }] : (groupVoiceDraft ? [groupVoiceDraft] : []);
-  db.groupMessages.push({
+  const message = {
     id: `group-${Date.now()}`,
     fromLogin: user.login,
     body,
@@ -4586,9 +4616,13 @@ async function handleGroupMessageSend(event) {
     likes: [],
     createdAt: Date.now(),
     date: new Date().toLocaleString()
-  });
+  };
   groupVoiceDraft = null;
-  saveDb();
+  const savedRemote = await sendGroupMessageRemote(message);
+  if (!savedRemote) {
+    db.groupMessages.push(message);
+    saveDb();
+  }
   renderGroupChat();
 }
 

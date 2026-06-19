@@ -1254,6 +1254,16 @@ app.put("/api/state", async (req, res, next) => {
     const currentSettingsData = currentSettings?.data || {};
     const currentGroupSettings = currentSettingsData.groupSettings || {};
     const incomingGroupSettings = state.groupSettings || {};
+    const mergedGroupMessages = [
+      ...(Array.isArray(currentSettingsData.groupMessages) ? currentSettingsData.groupMessages : []),
+      ...(Array.isArray(state.groupMessages) ? state.groupMessages : [])
+    ].reduce((items, message) => {
+      if (!message?.id) return items;
+      const index = items.findIndex((item) => String(item?.id || "") === String(message.id));
+      if (index >= 0) items[index] = { ...items[index], ...message };
+      else items.push(message);
+      return items;
+    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
     const mergedGroupMembers = [
       ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
       ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
@@ -1280,7 +1290,7 @@ app.put("/api/state", async (req, res, next) => {
         orders: Array.isArray(state.orders) ? state.orders : [],
         exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
         exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
-        groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
+        groupMessages: mergedGroupMessages,
         groupSettings: mergedGroupSettings,
         referrals: Array.isArray(state.referrals) ? state.referrals : [],
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
@@ -1335,6 +1345,55 @@ app.put("/api/state", async (req, res, next) => {
     });
     notifyRealtime("state_updated", { source: "api-state", user: user.login });
     res.json(await stateFor(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+function sanitizeGroupMessagePayload(payload = {}) {
+  const body = String(payload.body || "").trim();
+  const stickerUrl = String(payload.stickerUrl || "").trim();
+  const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 4).map((file, index) => {
+    const url = String(file?.url || "").trim();
+    if (!url || url.length > 1600000) return null;
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
+    return {
+      name: String(file?.name || `file-${index + 1}`).slice(0, 120),
+      type: String(file?.type || "image/png").slice(0, 80),
+      url
+    };
+  }).filter(Boolean) : [];
+  if (!body && !stickerUrl && !attachments.length) {
+    const error = new Error("Сообщение пустое");
+    error.status = 400;
+    throw error;
+  }
+  return { body, stickerUrl, attachments };
+}
+
+app.post("/api/group/messages", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const payload = sanitizeGroupMessagePayload(req.body || {});
+    const message = {
+      id: `group-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      fromLogin: user.login,
+      body: payload.body,
+      attachments: payload.attachments,
+      likes: [],
+      reactions: {},
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU")
+    };
+    if (payload.stickerUrl) message.stickerUrl = payload.stickerUrl;
+    state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
+    state.groupMessages.push(message);
+    await saveSettingsState(state);
+    notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login });
+    res.json({ message, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
