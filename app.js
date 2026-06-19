@@ -4662,7 +4662,56 @@ function messageActions(msg) {
   `;
 }
 
-function renderSupport() {
+async function supportAttachmentsFromInput(input) {
+  const files = Array.from(input?.files || []).filter((file) => file && file.size).slice(0, 8);
+  return Promise.all(files.map(async (file) => ({
+    name: file.name || "image",
+    type: file.type || "image/png",
+    url: await fileToDataUrl(file)
+  })));
+}
+
+function supportAttachmentsHtml(attachments = []) {
+  const items = Array.isArray(attachments) ? attachments : [];
+  if (!items.length) return "";
+  return `<div class="group-attachments">${items.map(groupAttachmentView).join("")}</div>`;
+}
+
+function supportTicketThread(ticket) {
+  const closed = ticket.status === "closed";
+  const replies = Array.isArray(ticket.replies) ? ticket.replies : [];
+  return `
+    <details class="support-thread" ${closed ? "" : "open"}>
+      <summary>
+        <span>${esc(ticket.subject || "Обращение")}</span>
+        <small>${closed ? "закрыто" : "открыто"} · ${new Date(Number(ticket.updatedAt || ticket.createdAt || Date.now())).toLocaleString()}</small>
+      </summary>
+      <div class="support-thread-body">
+        <article class="support-message own">
+          <b>${esc(ticket.fromLogin || db.currentUser || "Вы")}</b>
+          <p>${esc(ticket.body || (ticket.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}</p>
+          ${supportAttachmentsHtml(ticket.attachments)}
+        </article>
+        ${replies.map((reply) => `
+          <article class="support-message ${sameLogin(reply.fromLogin, db.currentUser) ? "own" : ""}">
+            <b>${esc(reply.fromLogin || "support")}</b>
+            <p>${esc(reply.body || (reply.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}</p>
+            ${supportAttachmentsHtml(reply.attachments)}
+          </article>
+        `).join("")}
+        ${closed ? `<p class="muted">Обращение закрыто. История сохранена, новые сообщения заблокированы.</p>` : `
+          <form class="form support-reply-form" data-support-ticket-reply="${esc(ticket.id)}">
+            <textarea name="body" placeholder="Ответить поддержке"></textarea>
+            <input name="attachments" type="file" accept="image/*" multiple>
+            <button class="primary">Отправить</button>
+          </form>
+        `}
+      </div>
+    </details>
+  `;
+}
+
+function renderSupportLegacy() {
   route = "support";
   const recipients = supportRecipients();
   layout(`
@@ -4729,6 +4778,114 @@ function renderSupport() {
     showToast("Тикет отправлен в поддержку");
     renderMessages();
   };
+}
+
+function renderSupport() {
+  route = "support";
+  const recipients = supportRecipients();
+  const tickets = (db.supportTickets || [])
+    .filter((ticket) => sameLogin(ticket.fromLogin, db.currentUser) || sameLogin(ticket.recipientLogin, db.currentUser))
+    .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+  layout(`
+    <section class="screen support-screen">
+      <article class="support-card">
+        <h1>Новый тикет в поддержку</h1>
+        <form class="form" data-support-form>
+          <label class="field">Кому отправить
+            <select name="recipientId" required>
+              ${recipients.map((item) => `<option value="${esc(item.id)}">${esc(item.title || item.login)} · ${esc(item.login)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">Тема
+            <select name="subject" required>
+              <option value="" disabled selected>Выберите тему</option>
+              ${supportTopics.map((topic) => `<option value="${esc(topic)}">${esc(topic)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">Сообщение
+            <textarea name="body"></textarea>
+          </label>
+          <input data-support-file-input name="attachments" type="file" accept="image/*" multiple hidden>
+          <p class="muted" data-support-file-label>Фото не выбраны</p>
+          <div class="support-actions">
+            <button class="attach-button" type="button" data-support-attach aria-label="Прикрепить фото">${navIcon("attach") || "+"}</button>
+            <button class="primary" type="submit">Отправить</button>
+          </div>
+        </form>
+      </article>
+      <article class="support-card">
+        <h2>История обращений</h2>
+        ${tickets.length ? tickets.map(supportTicketThread).join("") : `<p class="muted">Обращений пока нет.</p>`}
+      </article>
+    </section>
+  `);
+  const form = document.querySelector("[data-support-form]");
+  const fileInput = document.querySelector("[data-support-file-input]");
+  const fileLabel = document.querySelector("[data-support-file-label]");
+  document.querySelector("[data-support-attach]")?.addEventListener("click", () => fileInput?.click());
+  fileInput?.addEventListener("change", () => {
+    const count = fileInput.files?.length || 0;
+    if (fileLabel) fileLabel.textContent = count ? `Выбрано фото: ${count}` : "Фото не выбраны";
+  });
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const recipientId = String(data.get("recipientId") || "");
+    const subject = String(data.get("subject") || "");
+    const body = String(data.get("body") || "").trim();
+    const recipient = recipients.find((item) => item.id === recipientId) || recipients[0];
+    const attachments = await supportAttachmentsFromInput(fileInput);
+    if (!body && !attachments.length) return showToast("Введите сообщение или прикрепите фото");
+    if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+      try {
+        const payload = await apiFetch("/api/support/tickets", {
+          method: "POST",
+          body: JSON.stringify({ recipientId, subject, body, attachments })
+        });
+        applyRemoteState(payload);
+        showToast("Обращение отправлено");
+        renderSupport();
+        return;
+      } catch (error) {
+        showToast(error.message || "Поддержка временно не приняла обращение");
+      }
+    }
+    db.messages.unshift({
+      id: `support-${Date.now()}`,
+      storeId: "support",
+      storeTag: "supportcerber",
+      toLogin: recipient?.login || "support",
+      fromLogin: db.currentUser,
+      subject: `[${recipient?.title || "Поддержка"}] ${subject}`,
+      body,
+      attachments,
+      createdAt: Date.now(),
+      date: new Date().toLocaleString(),
+      system: "support"
+    });
+    saveDb();
+    showToast("Тикет отправлен в поддержку");
+    renderSupport();
+  };
+  document.querySelectorAll("[data-support-ticket-reply]").forEach((replyForm) => {
+    replyForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = String(new FormData(replyForm).get("body") || "").trim();
+      const attachments = await supportAttachmentsFromInput(replyForm.querySelector('input[type="file"]'));
+      if (!body && !attachments.length) return showToast("Введите ответ или прикрепите фото");
+      try {
+        const payload = await apiFetch(`/api/support/tickets/${encodeURIComponent(replyForm.dataset.supportTicketReply)}/reply`, {
+          method: "POST",
+          body: JSON.stringify({ body, attachments })
+        });
+        applyRemoteState(payload);
+        showToast("Ответ отправлен");
+        renderSupport();
+      } catch (error) {
+        showToast(error.message || "Не удалось отправить ответ");
+      }
+    });
+  });
 }
 
 function renderReferrals(tab = activeReferralTab) {

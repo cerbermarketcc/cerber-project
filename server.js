@@ -1163,16 +1163,19 @@ app.post("/api/support/tickets", async (req, res, next) => {
     const recipient = settings.recipients.find((item) => item.id === recipientId) || settings.recipients[0];
     const subject = String(req.body.subject || recipient.title || "Обращение").trim();
     const body = String(req.body.body || "").trim();
-    if (!body) return res.status(400).json({ error: "Введите текст обращения" });
+    const attachments = normalizeSupportAttachments(req.body.attachments);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите текст или прикрепите фото" });
     const ticket = {
       id: `support-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       subject,
       body,
+      attachments,
       fromLogin: user.login,
       recipientLogin: recipient.login,
       recipientTitle: recipient.title,
       status: "open",
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       replies: []
     };
     state.supportSettings = settings;
@@ -1185,13 +1188,52 @@ app.post("/api/support/tickets", async (req, res, next) => {
       toLogin: ticket.recipientLogin,
       fromLogin: user.login,
       subject: `[${ticket.recipientTitle}] ${ticket.subject}`,
-      body: `${ticket.body}\n\nТикет: ${ticket.id}`,
+      body: `${ticket.body || "[фото]"}\n\nТикет: ${ticket.id}`,
+      attachments,
       createdAt: ticket.createdAt,
       date: new Date(ticket.createdAt).toLocaleString("ru-RU"),
       system: "support",
       supportTicketId: ticket.id
     });
     notifyRealtime("support_ticket_created", { ticketId: ticket.id, recipientLogin: ticket.recipientLogin });
+    res.json({ ticket: supportTicketPublic(ticket), ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/support/tickets/:id/reply", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const ticket = (state.supportTickets || []).find((item) => String(item.id) === String(req.params.id));
+    if (!ticket || !sameLogin(ticket.fromLogin, user.login)) return res.status(404).json({ error: "Обращение не найдено" });
+    if (ticket.status === "closed") return res.status(409).json({ error: "Обращение закрыто" });
+    const body = String(req.body.body || "").trim();
+    const attachments = normalizeSupportAttachments(req.body.attachments);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите текст или прикрепите фото" });
+    const reply = { id: `reply-${Date.now()}`, fromLogin: user.login, body, attachments, createdAt: Date.now() };
+    ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
+    ticket.replies.push(reply);
+    ticket.updatedAt = reply.createdAt;
+    await saveSettingsState(state);
+    await upsertPrivateMessage({
+      id: `${ticket.id}-${reply.id}`,
+      storeId: "support",
+      storeTag: "support",
+      toLogin: ticket.recipientLogin,
+      fromLogin: user.login,
+      subject: `Ответ по тикету ${ticket.id}`,
+      body: body || "[фото]",
+      attachments,
+      createdAt: reply.createdAt,
+      date: new Date(reply.createdAt).toLocaleString("ru-RU"),
+      system: "support_reply",
+      supportTicketId: ticket.id
+    });
+    notifyRealtime("support_ticket_replied", { ticketId: ticket.id });
     res.json({ ticket: supportTicketPublic(ticket), ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -1353,8 +1395,9 @@ app.post("/api/admin/support-tickets/:id/reply", async (req, res, next) => {
     if (!ticket) return res.status(404).json({ error: "Обращение не найдено" });
     if (ticket.status === "closed") return res.status(409).json({ error: "Обращение уже закрыто" });
     const body = String(req.body.body || "").trim();
-    if (!body) return res.status(400).json({ error: "Введите ответ" });
-    const reply = { id: `reply-${Date.now()}`, fromLogin: admin.login, body, createdAt: Date.now() };
+    const attachments = normalizeSupportAttachments(req.body.attachments);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите ответ или прикрепите фото" });
+    const reply = { id: `reply-${Date.now()}`, fromLogin: admin.login, body, attachments, createdAt: Date.now() };
     ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
     ticket.replies.push(reply);
     ticket.updatedAt = Date.now();
@@ -1366,7 +1409,8 @@ app.post("/api/admin/support-tickets/:id/reply", async (req, res, next) => {
       toLogin: ticket.fromLogin,
       fromLogin: ticket.recipientLogin || admin.login,
       subject: `Ответ по тикету ${ticket.id}`,
-      body,
+      body: body || "[фото]",
+      attachments,
       createdAt: reply.createdAt,
       date: new Date(reply.createdAt).toLocaleString("ru-RU"),
       system: "support_reply",
@@ -1387,6 +1431,7 @@ app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
     if (!ticket) return res.status(404).json({ error: "Обращение не найдено" });
     ticket.status = "closed";
     ticket.closedAt = Date.now();
+    ticket.updatedAt = ticket.closedAt;
     ticket.closedBy = admin.login;
     await saveSettingsState(state);
     await upsertPrivateMessage({
@@ -2199,14 +2244,37 @@ function supportTicketPublic(ticket = {}) {
     id: ticket.id,
     subject: ticket.subject,
     body: ticket.body,
+    attachments: Array.isArray(ticket.attachments) ? ticket.attachments : [],
     fromLogin: ticket.fromLogin,
     recipientLogin: ticket.recipientLogin,
     recipientTitle: ticket.recipientTitle,
     status: ticket.status || "open",
     createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt || ticket.createdAt || 0,
     closedAt: ticket.closedAt || 0,
-    replies: Array.isArray(ticket.replies) ? ticket.replies : []
+    closedBy: ticket.closedBy || "",
+    replies: Array.isArray(ticket.replies) ? ticket.replies.map((reply) => ({
+      id: reply.id,
+      fromLogin: reply.fromLogin,
+      body: reply.body || "",
+      attachments: Array.isArray(reply.attachments) ? reply.attachments : [],
+      createdAt: reply.createdAt || 0
+    })) : []
   };
+}
+
+function normalizeSupportAttachments(value, maxItems = 8) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, maxItems).map((file, index) => {
+    const url = String(file?.url || "").trim();
+    if (!url || url.length > 1600000) return null;
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
+    return {
+      name: String(file?.name || `image-${index + 1}`).slice(0, 120),
+      type: String(file?.type || "image/png").slice(0, 80),
+      url
+    };
+  }).filter(Boolean);
 }
 
 async function upsertPrivateMessage(message) {

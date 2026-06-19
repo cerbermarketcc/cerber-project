@@ -98,6 +98,15 @@ async function fileToDataUrl(file) {
   }
 }
 
+async function filesToSupportAttachments(input) {
+  const files = Array.from(input?.files || []).filter((file) => file && file.size).slice(0, 8);
+  return Promise.all(files.map(async (file) => ({
+    name: file.name || "image",
+    type: file.type || "image/png",
+    url: await fileToDataUrl(file)
+  })));
+}
+
 async function formImageValue(formData, fileName, fallbackName = "") {
   const file = formData.get(fileName);
   if (file && file.size) return fileToDataUrl(file);
@@ -556,15 +565,44 @@ function renderMisc() {
       </article>
     </section>
     <section class="support-ticket-list">
-      ${tickets.map(supportTicketCard).join("") || `<article class="split-card"><p class="muted">Обращений пока нет.</p></article>`}
+      ${supportTicketGroups(tickets)}
     </section>
   `;
+}
+
+function supportTicketGroups(tickets) {
+  if (!tickets.length) return `<article class="split-card"><p class="muted">Обращений пока нет.</p></article>`;
+  const groups = new Map();
+  tickets.forEach((ticket) => {
+    const login = String(ticket.fromLogin || "-");
+    if (!groups.has(login)) groups.set(login, []);
+    groups.get(login).push(ticket);
+  });
+  return [...groups.entries()].map(([login, items]) => {
+    const openCount = items.filter((ticket) => ticket.status !== "closed").length;
+    const last = items.slice().sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))[0];
+    return `
+      <details class="split-card support-user-ticket">
+        <summary>
+          <strong>${esc(login)}</strong>
+          <span>${openCount ? `+${openCount} обращ.` : "нет открытых"} · ${esc(last?.recipientTitle || last?.subject || "")}</span>
+        </summary>
+        ${items.map(supportTicketCard).join("")}
+      </details>
+    `;
+  }).join("");
+}
+
+function supportAttachmentsHtml(attachments = []) {
+  const items = Array.isArray(attachments) ? attachments : [];
+  if (!items.length) return "";
+  return `<div class="support-attachments">${items.map((file) => `<a href="${esc(file.url)}" target="_blank" rel="noopener"><img src="${esc(file.url)}" alt="${esc(file.name || "photo")}"></a>`).join("")}</div>`;
 }
 
 function supportTicketCard(ticket) {
   const closed = ticket.status === "closed";
   return `
-    <article class="split-card support-ticket-card">
+    <article class="support-ticket-card">
       <div class="ticket-head">
         <div>
           <h3>${esc(ticket.subject || ticket.id)}</h3>
@@ -572,11 +610,13 @@ function supportTicketCard(ticket) {
         </div>
         <span class="status ${closed ? "off" : ""}">${closed ? "closed" : "open"}</span>
       </div>
-      <p>${esc(ticket.body || "").replace(/\n/g, "<br>")}</p>
-      ${(ticket.replies || []).length ? `<h4>Ответы</h4>${ticket.replies.map((reply) => `<p class="notice"><strong>${esc(reply.fromLogin || "admin")}</strong> · ${fmtDate(reply.createdAt)}<br>${esc(reply.body || "").replace(/\n/g, "<br>")}</p>`).join("")}` : ""}
+      <p>${esc(ticket.body || (ticket.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}</p>
+      ${supportAttachmentsHtml(ticket.attachments)}
+      ${(ticket.replies || []).length ? `<h4>Ответы</h4>${ticket.replies.map((reply) => `<div class="notice"><strong>${esc(reply.fromLogin || "admin")}</strong> · ${fmtDate(reply.createdAt)}<br>${esc(reply.body || (reply.attachments?.length ? "[фото]" : "")).replace(/\n/g, "<br>")}${supportAttachmentsHtml(reply.attachments)}</div>`).join("")}` : ""}
       ${closed ? `<p class="muted">Обращение закрыто ${fmtDate(ticket.closedAt)}. Ответы заблокированы.</p>` : `
         <form data-support-reply-form="${esc(ticket.id)}">
-          <label class="field">Ответ пользователю<textarea name="body" required></textarea></label>
+          <label class="field">Ответ пользователю<textarea name="body"></textarea></label>
+          <label class="field">Фото<input name="attachments" type="file" accept="image/*" multiple></label>
           <button class="primary">Ответить</button>
           <button class="ghost danger" type="button" data-support-close="${esc(ticket.id)}">Закрыть обращение</button>
         </form>
@@ -862,11 +902,12 @@ function bindActions() {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = String(new FormData(form).get("body") || "").trim();
-      if (!body) return;
+      const attachments = await filesToSupportAttachments(form.querySelector('input[type="file"]'));
+      if (!body && !attachments.length) return;
       try {
         data = await api(`/api/admin/support-tickets/${encodeURIComponent(form.dataset.supportReplyForm)}/reply`, {
           method: "POST",
-          body: JSON.stringify({ body })
+          body: JSON.stringify({ body, attachments })
         });
         toast("Ответ отправлен");
         renderShell();

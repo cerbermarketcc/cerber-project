@@ -375,6 +375,33 @@ tr:hover td {
 .support-ticket-card {
   display: grid;
   gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.support-user-ticket summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.support-user-ticket summary span {
+  color: var(--muted);
+}
+
+.support-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.support-attachments img {
+  width: 92px;
+  height: 92px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
 }
 
 .ticket-head {
