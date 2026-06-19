@@ -901,6 +901,7 @@ function normalizeProduct(product, store = {}) {
         city: position.city || "chisinau",
         district: position.district || "",
         deliveryType: position.deliveryType || "Курьер",
+        weight: String(position.weight ?? "").trim(),
         stock: positionItems.length || deliveryItems.length || Number(position.stock || 0),
         status: position.status || "ready"
       };
@@ -3000,6 +3001,14 @@ function productPositions(product) {
   });
   return filtered.length ? filtered : positions;
 }
+
+function positionWeightLabel(position = {}) {
+  const value = position.weight;
+  if (value === undefined || value === null) return "-";
+  const text = String(value).trim();
+  return text ? text : "-";
+}
+
 function currentLocationFilterLabel() {
   const filters = db.filters || {};
   const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
@@ -3069,7 +3078,7 @@ function positionCardView(position, product, store) {
         <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
         <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
         <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
-        <p><span>Вес</span><strong>${esc(position.weight || "-")}</strong></p>
+        <p><span>Вес</span><strong>${esc(positionWeightLabel(position))}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
         <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
@@ -6152,7 +6161,7 @@ function ownerProductManager(store, product) {
               <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
               <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
               <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
-              <p><span>Вес</span><strong>${esc(position.weight || "-")}</strong></p>
+              <p><span>Вес</span><strong>${esc(positionWeightLabel(position))}</strong></p>
               <p><span>Цена</span><strong>${Number(position.priceUsd || product.priceUsd || 0).toFixed(2)} $</strong></p>
               <p><span>LTC</span><strong>${usdToLtc(Number(position.priceUsd || product.priceUsd || 0)).toFixed(6)} LTC</strong></p>
               <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
@@ -6660,7 +6669,7 @@ function adminStoreEditor(store) {
           <label class="field">Город<select name="city" data-location-city>${citySelectOptions(position.country || "moldova", position.city || "chisinau")}</select></label>
           <label class="field">Район<select name="district" data-location-district>${districtSelectOptions(position.country || "moldova", position.city || "chisinau", position.district || "")}</select></label>
           <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
-          <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
+          <label class="field">Вес<input name="weight" value="${esc(position.weight ?? "")}"></label>
         </div>
         <label class="field">Фото страницы магазина<input name="storeImage" type="file" accept="image/*"></label>
         <label class="field">Главное фото товара<input name="mainImage" type="file" accept="image/*"></label>
@@ -7365,7 +7374,7 @@ function shopStorageTab(store, products, stats = {}) {
                   </div>
                   <label class="field">Описание<textarea name="description">${esc(position.description || "")}</textarea></label>
                   <div class="row">
-                    <label class="field">Вес<input name="weight" value="${esc(position.weight || "")}"></label>
+                    <label class="field">Вес<input name="weight" value="${esc(position.weight ?? "")}"></label>
                     <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
                     <label class="field">Статус<select name="status">
                       <option value="ready" ${String(position.status || "ready") === "ready" ? "selected" : ""}>ready</option>
