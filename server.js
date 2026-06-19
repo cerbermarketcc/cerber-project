@@ -24,7 +24,7 @@ const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
-const groupChatHiddenSiteEmojiIds = new Set(["004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "016", "017", "018"]);
+const groupChatHiddenSiteEmojiIds = new Set(["024", "025", "026", "027", "028", "029", "030", "031", "032", "033", "034", "036", "037", "038"]);
 const walletCoins = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC" },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT" },
