@@ -292,7 +292,7 @@ function renderDashboard() {
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
       <p class="muted">Доступно к выводу: <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Вывод создается на LTC счет площадки из настроек.</p>
-      <button class="primary" data-owner-withdraw ${Number(s.ownerWithdrawableUsd || 0) > 0 ? "" : "disabled"}>Вывести средства</button>
+      <button class="primary" data-owner-withdraw>Вывести средства</button>
     </article>
     <section class="charts">
       ${chartBox("Продажи", "sales")}
@@ -916,14 +916,20 @@ function bindActions() {
     data.selectedBotId = row.dataset.botSelect;
     renderShell();
   });
-  root.querySelector("[data-owner-withdraw]")?.addEventListener("click", async () => {
+  root.querySelector("[data-owner-withdraw]")?.addEventListener("click", async (event) => {
     if (!confirm("Создать заявку на вывод комиссии владельца?")) return;
+    const button = event.currentTarget;
+    const oldText = button.textContent;
+    button.disabled = true;
+    button.textContent = "Создаём заявку...";
     try {
       data = await api("/api/admin/withdrawals/owner", { method: "POST" });
       toast("Заявка владельца на вывод создана");
       renderShell();
     } catch (error) {
       toast(error.message, true);
+      button.disabled = false;
+      button.textContent = oldText;
     }
   });
   root.querySelector("[data-settings-form]")?.addEventListener("submit", async (event) => {

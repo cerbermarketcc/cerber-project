@@ -7817,7 +7817,7 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
     <div class="seller-card-head"><h3>Вывести средства</h3><span>1 раз в 3 дня</span></div>
     <p class="desc">Баланс магазина: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong>. Вывод идет на LTC кошелек из настроек магазина.</p>
     <p class="desc">LTC кошелек: <strong>${esc(wallet || "не сохранен")}</strong></p>
-    <button class="primary" data-shop-payout-request="${esc(store.id)}" ${availableUsd > 0 ? "" : "disabled"}>Вывести средства</button>
+    <button class="primary" data-shop-payout-request="${esc(store.id)}">Вывести средства</button>
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
