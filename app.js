@@ -1356,8 +1356,13 @@ function groupEmojiUrlList(value = []) {
 function groupInlineEmojiHtml(value = []) {
   const urls = groupEmojiUrlList(value);
   return urls.length
-    ? `<span class="chat-inline-emojis">${urls.map((url) => `<img src="${esc(url)}" alt="">`).join("")}</span>`
+    ? `<span class="chat-inline-emojis">${urls.map((url) => `<img src="${esc(url)}" data-group-inline-emoji="${esc(url)}" alt="">`).join("")}</span>`
     : "";
+}
+
+function groupEmojiDraftFromDom() {
+  return groupEmojiUrlList(Array.from(document.querySelectorAll("[data-group-emoji-draft] [data-group-inline-emoji]"))
+    .map((image) => image.dataset.groupInlineEmoji || image.getAttribute("src") || ""));
 }
 
 function messageReactionsHtml(msg, scope) {
@@ -4441,7 +4446,8 @@ function renderGroupChat() {
     if (!form) return;
     const text = form.querySelector("textarea")?.value.trim() || "";
     const file = form.querySelector("[data-group-attachment]")?.files?.[0];
-    form.classList.toggle("has-content", Boolean(text || file || groupVoiceDraft || groupEmojiDraft.length));
+    const hasEmoji = Boolean(groupEmojiDraft.length || groupEmojiDraftFromDom().length);
+    form.classList.toggle("has-content", Boolean(text || file || groupVoiceDraft || hasEmoji));
   };
   const renderGroupEmojiDraft = () => {
     groupEmojiDraft = groupEmojiUrlList(groupEmojiDraft);
@@ -4488,6 +4494,8 @@ function renderGroupChat() {
       groupEmojiDraft = groupEmojiUrlList([...groupEmojiDraft, emojiUrl]);
       renderGroupEmojiDraft();
       syncGroupComposer();
+      document.querySelector("[data-group-form]")?.classList.add("has-content");
+      document.querySelector("[data-group-form] textarea")?.focus();
     };
   });
   renderGroupEmojiDraft();
@@ -4640,7 +4648,7 @@ async function handleGroupMessageSend(event) {
   const data = new FormData(event.currentTarget);
   const body = String(data.get("body") || "").trim();
   const file = data.get("attachment");
-  const emojiUrls = groupEmojiUrlList(groupEmojiDraft);
+  const emojiUrls = groupEmojiUrlList(groupEmojiDraft.length ? groupEmojiDraft : groupEmojiDraftFromDom());
   if (!body && (!file || !file.size) && !groupVoiceDraft && !emojiUrls.length) return;
   if (body && handleGroupCommand(body)) {
     event.currentTarget.reset();
