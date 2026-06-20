@@ -719,6 +719,21 @@ body[data-theme="dark"] .mirror-row {
   margin-top: 4px;
 }
 
+.chat-inline-emojis {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.chat-inline-emojis img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
 .message-reactions {
   display: flex;
   flex-wrap: wrap;
@@ -894,6 +909,45 @@ body[data-theme="dark"] .mirror-row {
 .group-input-wrap {
   position: relative;
   min-width: 0;
+}
+
+.group-emoji-draft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 34px;
+  margin: 0 48px 8px 12px;
+  padding: 5px 8px;
+  overflow-x: auto;
+  border: 1px solid rgba(148, 163, 184, .35);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, .86);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, .08);
+}
+
+.group-emoji-draft[hidden] {
+  display: none;
+}
+
+.group-emoji-draft .chat-inline-emojis {
+  flex-wrap: nowrap;
+  margin-left: 0;
+}
+
+.group-emoji-draft button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: #17191f;
+  color: #fff;
+  font: inherit;
+  font-weight: 900;
 }
 
 .group-form textarea {

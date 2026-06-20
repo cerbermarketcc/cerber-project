@@ -66,6 +66,7 @@ const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
+let groupEmojiDraft = [];
 let groupChatRefreshTimer = null;
 let groupPresenceSavedAt = 0;
 let groupWidgetOpen = false;
@@ -1343,6 +1344,20 @@ function siteEmojiUrl(url = "") {
 function siteEmojiMessageFields(url = "") {
   const cleanUrl = siteEmojiUrl(url);
   return cleanUrl ? { stickerUrl: cleanUrl, attachments: [] } : null;
+}
+
+function groupEmojiUrlList(value = []) {
+  return (Array.isArray(value) ? value : [])
+    .map(siteEmojiUrl)
+    .filter((url) => url && groupChatSiteEmojiAllowed(url))
+    .slice(0, 12);
+}
+
+function groupInlineEmojiHtml(value = []) {
+  const urls = groupEmojiUrlList(value);
+  return urls.length
+    ? `<span class="chat-inline-emojis">${urls.map((url) => `<img src="${esc(url)}" alt="">`).join("")}</span>`
+    : "";
 }
 
 function messageReactionsHtml(msg, scope) {
@@ -4174,6 +4189,7 @@ async function sendGroupMessageRemote(message) {
       body: JSON.stringify({
         body: message.body || "",
         stickerUrl: message.stickerUrl || "",
+        emojiUrls: groupEmojiUrlList(message.emojiUrls),
         attachments: Array.isArray(message.attachments) ? message.attachments : []
       })
     });
@@ -4292,15 +4308,15 @@ function startGroupChatRefresh() {
     if (route !== "group-chat") return;
     const form = document.querySelector("[data-group-form]");
     const text = form?.querySelector("textarea")?.value || "";
-    if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft) return;
+    if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft || groupEmojiDraft.length) return;
     const before = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     const ok = await loadRemoteSession();
     if (!ok || route !== "group-chat") return;
     const after = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     if (before !== after) renderGroupChat();
@@ -4393,6 +4409,10 @@ function renderGroupChat() {
             <form class="group-form" data-group-form>
               <button type="button" class="group-round-button group-attach-button" data-group-attach title="Фото, видео или стикер">📎</button>
               <div class="group-input-wrap">
+                <div class="group-emoji-draft" data-group-emoji-draft ${groupEmojiDraft.length ? "" : "hidden"}>
+                  ${groupInlineEmojiHtml(groupEmojiDraft)}
+                  <button type="button" data-group-emoji-clear title="Очистить">×</button>
+                </div>
                 <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
                 <button type="button" class="group-emoji-toggle" data-group-emoji-toggle title="Смайлики">◔</button>
                 <div class="group-sticker-row" data-group-sticker-row hidden>
@@ -4421,8 +4441,25 @@ function renderGroupChat() {
     if (!form) return;
     const text = form.querySelector("textarea")?.value.trim() || "";
     const file = form.querySelector("[data-group-attachment]")?.files?.[0];
-    form.classList.toggle("has-content", Boolean(text || file || groupVoiceDraft));
+    form.classList.toggle("has-content", Boolean(text || file || groupVoiceDraft || groupEmojiDraft.length));
   };
+  const renderGroupEmojiDraft = () => {
+    groupEmojiDraft = groupEmojiUrlList(groupEmojiDraft);
+    const box = document.querySelector("[data-group-emoji-draft]");
+    if (!box) return;
+    box.hidden = !groupEmojiDraft.length;
+    box.innerHTML = `${groupInlineEmojiHtml(groupEmojiDraft)}<button type="button" data-group-emoji-clear title="Очистить">×</button>`;
+    box.querySelector("[data-group-emoji-clear]")?.addEventListener("click", () => {
+      groupEmojiDraft = [];
+      renderGroupEmojiDraft();
+      syncGroupComposer();
+    });
+  };
+  document.querySelector("[data-group-emoji-clear]")?.addEventListener("click", () => {
+    groupEmojiDraft = [];
+    renderGroupEmojiDraft();
+    syncGroupComposer();
+  });
   document.querySelector("[data-group-form] textarea")?.addEventListener("input", syncGroupComposer);
   document.querySelector("[data-group-emoji-toggle]")?.addEventListener("click", () => {
     const row = document.querySelector("[data-group-sticker-row]");
@@ -4444,29 +4481,16 @@ function renderGroupChat() {
     };
   });
   document.querySelectorAll("[data-group-site-emoji]").forEach((button) => {
-    button.onclick = async () => {
-      const user = currentUser();
-      const sticker = siteEmojiMessageFields(button.dataset.groupSiteEmoji);
-      if (!user || !sticker) return;
-      if (!groupChatSiteEmojiAllowed(sticker.stickerUrl)) return showToast("Этот стикер убран из общего чата");
-      const message = {
-        id: `group-${Date.now()}`,
-        fromLogin: user.login,
-        body: "",
-        ...sticker,
-        likes: [],
-        reactions: {},
-        createdAt: Date.now(),
-        date: new Date().toLocaleString()
-      };
-      const savedRemote = await sendGroupMessageRemote(message);
-      if (!savedRemote) {
-        db.groupMessages.push(message);
-        saveDb();
-      }
-      renderGroupChat();
+    button.onclick = () => {
+      const emojiUrl = siteEmojiUrl(button.dataset.groupSiteEmoji);
+      if (!emojiUrl) return;
+      if (!groupChatSiteEmojiAllowed(emojiUrl)) return showToast("Этот стикер убран из общего чата");
+      groupEmojiDraft = groupEmojiUrlList([...groupEmojiDraft, emojiUrl]);
+      renderGroupEmojiDraft();
+      syncGroupComposer();
     };
   });
+  renderGroupEmojiDraft();
   syncGroupComposer();
   document.querySelector("[data-group-title-form]")?.addEventListener("submit", handleGroupTitleSave);
   document.querySelectorAll("[data-group-user]").forEach((button) => {
@@ -4540,6 +4564,7 @@ function groupMessageView(msg) {
   const system = msg.fromLogin === "cerber-market";
   const likes = Array.isArray(msg.likes) ? msg.likes : [];
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const emojiUrls = groupEmojiUrlList(msg.emojiUrls);
   if (system) {
     return `
       <article class="group-system-message" data-group-message="${esc(msg.id)}">
@@ -4556,7 +4581,7 @@ function groupMessageView(msg) {
           <button class="link-button" data-group-user="${esc(msg.fromLogin)}">${esc(groupMessageAuthor(msg.fromLogin))}</button>
           <span>${esc(msg.date)}</span>
         </div>
-        ${msg.body ? `<p>${esc(msg.body).replace(/\n/g, "<br>")}</p>` : ""}
+        ${(msg.body || emojiUrls.length) ? `<p>${esc(msg.body || "").replace(/\n/g, "<br>")}${emojiUrls.length ? groupInlineEmojiHtml(emojiUrls) : ""}</p>` : ""}
         ${msg.stickerUrl ? `<img class="chat-sticker" src="${esc(msg.stickerUrl)}" alt="">` : ""}
         ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
         ${likes.length ? `<button class="group-like-badge" data-group-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
@@ -4615,7 +4640,8 @@ async function handleGroupMessageSend(event) {
   const data = new FormData(event.currentTarget);
   const body = String(data.get("body") || "").trim();
   const file = data.get("attachment");
-  if (!body && (!file || !file.size) && !groupVoiceDraft) return;
+  const emojiUrls = groupEmojiUrlList(groupEmojiDraft);
+  if (!body && (!file || !file.size) && !groupVoiceDraft && !emojiUrls.length) return;
   if (body && handleGroupCommand(body)) {
     event.currentTarget.reset();
     renderGroupChat();
@@ -4630,12 +4656,14 @@ async function handleGroupMessageSend(event) {
     id: `group-${Date.now()}`,
     fromLogin: user.login,
     body,
+    emojiUrls,
     attachments,
     likes: [],
     createdAt: Date.now(),
     date: new Date().toLocaleString()
   };
   groupVoiceDraft = null;
+  groupEmojiDraft = [];
   const savedRemote = await sendGroupMessageRemote(message);
   if (!savedRemote) {
     db.groupMessages.push(message);

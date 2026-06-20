@@ -1360,6 +1360,17 @@ function sanitizeGroupMessagePayload(payload = {}) {
     error.status = 400;
     throw error;
   }
+  const emojiUrls = Array.isArray(payload.emojiUrls) ? payload.emojiUrls.slice(0, 12).map((value) => {
+    const url = String(value || "").trim();
+    const match = url.match(/^(?:\/)?assets\/site-emojis\/telegram-(\d{3})\.png$/i);
+    if (!match) return null;
+    if (groupChatHiddenSiteEmojiIds.has(match[1])) {
+      const error = new Error("Стикер убран из общего чата");
+      error.status = 400;
+      throw error;
+    }
+    return url.replace(/^\//, "");
+  }).filter(Boolean) : [];
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 4).map((file, index) => {
     const url = String(file?.url || "").trim();
     if (!url || url.length > 1600000) return null;
@@ -1370,12 +1381,12 @@ function sanitizeGroupMessagePayload(payload = {}) {
       url
     };
   }).filter(Boolean) : [];
-  if (!body && !stickerUrl && !attachments.length) {
+  if (!body && !stickerUrl && !emojiUrls.length && !attachments.length) {
     const error = new Error("Сообщение пустое");
     error.status = 400;
     throw error;
   }
-  return { body, stickerUrl, attachments };
+  return { body, stickerUrl, emojiUrls, attachments };
 }
 
 app.post("/api/group/messages", async (req, res, next) => {
@@ -1389,6 +1400,7 @@ app.post("/api/group/messages", async (req, res, next) => {
       id: `group-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       fromLogin: user.login,
       body: payload.body,
+      emojiUrls: payload.emojiUrls,
       attachments: payload.attachments,
       likes: [],
       reactions: {},
