@@ -212,6 +212,7 @@ const defaults = {
   ltcBalances: {},
   walletTransactions: [],
   walletDeposits: [],
+  walletWithdrawals: [],
   siteNotifications: [],
   broadcasts: [],
   userFilters: [],
@@ -758,6 +759,7 @@ function normalizeDb(next) {
   if (!next.ltcBalances) next.ltcBalances = {};
   if (!Array.isArray(next.walletTransactions)) next.walletTransactions = [];
   if (!Array.isArray(next.walletDeposits)) next.walletDeposits = [];
+  if (!Array.isArray(next.walletWithdrawals)) next.walletWithdrawals = [];
   if (!Array.isArray(next.siteNotifications)) next.siteNotifications = [];
   if (!Array.isArray(next.broadcasts)) next.broadcasts = [];
   if (!Array.isArray(next.userFilters)) next.userFilters = [];
@@ -1437,6 +1439,7 @@ async function persistRemoteState() {
           ltcBalances: db.ltcBalances,
           walletTransactions: db.walletTransactions,
           walletDeposits: db.walletDeposits,
+          walletWithdrawals: db.walletWithdrawals,
           siteNotifications: db.siteNotifications,
           broadcasts: db.broadcasts,
           userFilters: db.userFilters,
@@ -1725,6 +1728,10 @@ function walletTransactions(login = db.currentUser) {
   return (db.walletTransactions || []).filter((item) => sameLogin(item.login, login)).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
+function walletWithdrawals(login = db.currentUser) {
+  return (db.walletWithdrawals || []).filter((item) => sameLogin(item.login, login)).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
 function addWalletTransaction(tx) {
   db.walletTransactions = db.walletTransactions || [];
   db.walletTransactions.unshift({
@@ -1810,6 +1817,14 @@ function walletDepositCoin(deposit) {
 
 function walletDepositPayAmount(deposit) {
   return Number(deposit.payAmount || deposit.amountPay || 0);
+}
+
+function walletWithdrawalStatusText(status = "pending") {
+  const raw = String(status || "pending").toLowerCase();
+  if (raw === "completed" || raw === "paid") return "Завершено";
+  if (raw === "cancelled" || raw === "canceled" || raw === "rejected") return "Отменено";
+  if (raw === "maintenance") return "Техработы";
+  return "В обработке";
 }
 
 function locationLabel(position = {}) {
@@ -5682,6 +5697,7 @@ function renderWallet() {
   const ltc = userLtcBalance();
   const usd = userLtcUsdBalance();
   const txs = walletTransactions();
+  const withdrawals = walletWithdrawals();
   layout(`
     <section class="screen wallet-screen">
       <article class="wallet-hero">
@@ -5703,6 +5719,24 @@ function renderWallet() {
           <button class="ghost-button" data-route="exchange">Купить LTC ↙</button>
         </div>
       </article>
+      <article class="wallet-balance-card">
+        <h2>Вывод и функции LTC</h2>
+        <p class="desc">Базовый вывод LTC работает отдельно от ff.io. Очистка LTC через MWEB и swap вынесены в отдельные функции и могут быть закрыты на техработы без остановки кошелька.</p>
+        <div class="wallet-actions">
+          <button class="ghost-button" data-wallet-withdraw-open>Обычный вывод LTC</button>
+          <button class="ghost-button" data-wallet-feature-maintenance="ltc_mweb_clean">Очистка LTC MWEB</button>
+          <button class="ghost-button" data-wallet-feature-maintenance="swap">Swap / ff.io</button>
+        </div>
+      </article>
+      <article class="wallet-transactions">
+        <h2>Заявки на вывод</h2>
+        ${withdrawals.length ? withdrawals.map(walletWithdrawalView).join("") : `
+          <div class="empty-orders">
+            <h2>Заявок нет</h2>
+            <p>Обычные выводы LTC появятся здесь.</p>
+          </div>
+        `}
+      </article>
       <article class="wallet-convert-card">
         <p><span>${ltc.toFixed(6)}</span><strong>LTC</strong></p>
         <p><span>${usd.toFixed(2)}</span><strong>USD</strong></p>
@@ -5719,6 +5753,10 @@ function renderWallet() {
     </section>
   `);
   document.querySelector("[data-wallet-deposit-open]")?.addEventListener("click", openWalletDepositModal);
+  document.querySelectorAll("[data-wallet-withdraw-open]").forEach((button) => button.addEventListener("click", openWalletWithdrawModal));
+  document.querySelectorAll("[data-wallet-feature-maintenance]").forEach((button) => {
+    button.addEventListener("click", () => showToast("Эта функция отдельная от кошелька и сейчас закрыта на техработы"));
+  });
   document.querySelectorAll(".wallet-tx[data-wallet-deposit]").forEach((row) => {
     row.addEventListener("click", () => showWalletDepositDetails(row.dataset.walletDeposit));
   });
@@ -5763,6 +5801,20 @@ function walletTransactionView(tx) {
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
       ${canOpenDeposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
+    </article>
+  `;
+}
+
+function walletWithdrawalView(request) {
+  const amount = Number(request.amountLtc || 0);
+  return `
+    <article class="wallet-tx ${String(request.status || "pending").toLowerCase()}">
+      <div class="wallet-tx-main">
+        <h3>${esc(request.kind === "ltc_mweb_clean" ? "Очистка LTC MWEB" : request.kind === "swap" ? "Swap / ff.io" : "Вывод LTC")}</h3>
+        <p>${esc(request.date || new Date(request.createdAt || Date.now()).toLocaleString())} · ${esc(walletWithdrawalStatusText(request.status))}</p>
+        <small>${esc(request.address || request.note || "")}</small>
+      </div>
+      <strong class="minus">-${amount.toFixed(6)} LTC</strong>
     </article>
   `;
 }
@@ -5846,6 +5898,47 @@ function openWalletDepositModal() {
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-wallet-deposit-form]").onsubmit = createWalletDeposit;
+}
+
+function openWalletWithdrawModal() {
+  const max = userLtcBalance();
+  showModal(`
+    <h2>Обычный вывод LTC</h2>
+    <p class="desc">Это базовый вывод из кошелька CERBER. Он не использует ff.io. Очистка MWEB и swap работают отдельными разделами.</p>
+    <form class="form" data-wallet-withdraw-form>
+      <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.000001" step="0.000001" max="${esc(max)}" value="${esc(max ? Math.min(max, 0.01).toFixed(6) : "0.000000")}" required></label>
+      <label class="field">LTC адрес получателя<input name="address" placeholder="ltc1..." required></label>
+      <label class="field">Комментарий<textarea name="note" placeholder="необязательно"></textarea></label>
+      <button class="primary">Создать заявку</button>
+    </form>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-wallet-withdraw-form]").onsubmit = createWalletWithdrawal;
+}
+
+async function createWalletWithdrawal(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const amountLtc = Number(data.get("amountLtc") || 0);
+  const address = String(data.get("address") || "").trim();
+  if (amountLtc <= 0 || amountLtc > userLtcBalance()) return showToast("Недостаточно LTC для вывода");
+  if (!address) return showToast("Укажите LTC адрес");
+  const submit = event.currentTarget.querySelector("button");
+  setButtonLoading(submit, true, "Создаём заявку");
+  try {
+    if (!API_ENABLED) throw new Error("API недоступен");
+    const payload = await apiFetch("/api/wallet/withdrawals", {
+      method: "POST",
+      body: JSON.stringify({ kind: "ltc_withdraw", amountLtc, address, note: data.get("note") || "" })
+    });
+    applyRemoteState(payload);
+    document.querySelector("[data-modal]")?.classList.remove("open");
+    showToast("Заявка на вывод создана");
+    renderWallet();
+  } catch (error) {
+    showToast(error.message || "Не удалось создать заявку на вывод");
+    setButtonLoading(submit, false);
+  }
 }
 
 async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "Пополнение баланса") {
@@ -7719,6 +7812,11 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
     ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
+    <div class="seller-card-head"><h3>Заявка на вывод</h3><span>обычный LTC вывод</span></div>
+    <p class="desc">Вывод магазина не использует ff.io. Swap и MWEB-очистка остаются отдельными функциями.</p>
+    <button class="primary" data-shop-payout-request="${esc(store.id)}" ${netUsd > 0 ? "" : "disabled"}>Создать заявку на вывод ${netUsd.toFixed(2)} $</button>
+  </section>
+  <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
     ${financeRows.length ? financeRows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title)} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${Number(tx.netUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
   </section>`;
@@ -8131,6 +8229,31 @@ function bindShopPanelActions(store, activeTab) {
       }
     };
   });
+  document.querySelector("[data-shop-payout-request]")?.addEventListener("click", requestShopPayout);
+}
+
+async function requestShopPayout(event) {
+  const store = shopPanelStore() || sellerAdminStore();
+  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  if (!store || !token) return showToast("Войдите в Shop Admin заново");
+  const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
+  if (!wallet) return showToast("Сначала укажите LTC кошелек в настройках магазина");
+  const button = event.currentTarget;
+  setButtonLoading(button, true, "Создаём заявку");
+  try {
+    const payload = await apiFetch("/api/store-admin/withdrawals", {
+      method: "POST",
+      timeoutMs: 15000,
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ storeId: store.id, address: wallet })
+    });
+    applyRemoteState(payload);
+    showToast("Заявка магазина на вывод создана");
+    renderShopPanel("finances");
+  } catch (error) {
+    showToast(error.message || "Не удалось создать заявку на вывод");
+    setButtonLoading(button, false);
+  }
 }
 
 function renderSeller() {

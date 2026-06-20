@@ -406,6 +406,7 @@ async function ensureSeed() {
       ltcBalances: {},
       walletTransactions: [],
       walletDeposits: [],
+      walletWithdrawals: [],
       telegramBot: {
         users: {},
         sentMessages: {}
@@ -545,6 +546,7 @@ async function stateFor(user) {
         ltcBalances: settingsData.ltcBalances || {},
         walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
         walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
+        walletWithdrawals: Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : [],
         mirrorBots,
         bots: {
           total: mirrorBots.length,
@@ -1153,6 +1155,58 @@ app.get("/api/session", async (req, res, next) => {
   }
 });
 
+app.post("/api/store-admin/withdrawals", async (req, res, next) => {
+  try {
+    requireDb();
+    const sellerToken = verifySellerAdminToken(req);
+    if (!sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    const storeId = String(req.body.storeId || sellerToken.storeId || "").trim();
+    if (!storeId || storeId !== sellerToken.storeId) return res.status(403).json({ error: "Нет доступа к магазину" });
+    const address = String(req.body.address || "").trim();
+    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC кошелек магазина" });
+
+    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+    const store = row?.data || await loadStoreForAdmin(storeId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+
+    const completed = orders.filter((order) => order.storeId === storeId && adminIsPaidProductOrder(order));
+    const earnedUsd = completed.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+    const requestedUsd = state.walletWithdrawals
+      .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
+      .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+    const availableUsd = Math.max(0, earnedUsd - requestedUsd);
+    if (availableUsd <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
+
+    const request = {
+      id: `store-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      kind: "ltc_withdraw",
+      scope: "store",
+      storeId,
+      storeName: store.name || store.id,
+      login: store.ownerLogin || store.id,
+      amountUsd: availableUsd,
+      amountLtc: availableUsd / 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      address,
+      status: "pending",
+      provider: "manual",
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU")
+    };
+    state.walletWithdrawals.unshift(request);
+    await saveSettingsState(state);
+    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd: availableUsd });
+    notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
+    res.json({ withdrawal: request, ...(await stateFor(null)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/support/tickets", async (req, res, next) => {
   try {
     requireDb();
@@ -1300,6 +1354,7 @@ app.put("/api/state", async (req, res, next) => {
         ltcBalances: state.ltcBalances || {},
         walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
         walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
+        walletWithdrawals: Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [],
         telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
         mirrorBots: currentSettingsData.mirrorBots || [],
         siteNotifications: currentSettingsData.siteNotifications || [],
@@ -2855,6 +2910,7 @@ function adminBuildOverview(data) {
   const exchangeRequests = Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [];
   const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
   const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
   const completedOrders = productOrders.filter(adminIsPaidProductOrder);
@@ -2986,6 +3042,7 @@ function adminBuildOverview(data) {
     finances: {
       walletDeposits,
       walletTransactions,
+      walletWithdrawals,
       balances: state.balances || {},
       ltcBalances: state.ltcBalances || {},
       depositsByStatus: {
@@ -3345,6 +3402,76 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
     await saveSettingsState({ ...state, walletDeposits: deposits, walletTransactions });
 
     res.json({ deposit, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/wallet/withdrawals", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    const kind = String(req.body.kind || "ltc_withdraw").trim();
+    if (kind === "ltc_mweb_clean" || kind === "swap") {
+      return res.status(503).json({
+        error: kind === "ltc_mweb_clean"
+          ? "Очистка LTC через MWEB выделена в отдельный раздел и сейчас закрыта на техработы"
+          : "Swap через ff.io выделен в отдельный раздел и сейчас закрыт на техработы"
+      });
+    }
+    if (kind !== "ltc_withdraw") return res.status(400).json({ error: "Неизвестный тип вывода" });
+
+    const amountLtc = Number(req.body.amountLtc || 0);
+    const address = String(req.body.address || "").trim();
+    const note = String(req.body.note || "").trim().slice(0, 500);
+    if (!Number.isFinite(amountLtc) || amountLtc <= 0) return res.status(400).json({ error: "Укажите сумму LTC" });
+    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC адрес" });
+
+    const state = await loadSettingsState();
+    state.ltcBalances = state.ltcBalances || {};
+    state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+    state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+    const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
+    if (amountLtc > balance) return res.status(400).json({ error: "Недостаточно LTC для вывода" });
+
+    const request = {
+      id: `withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      kind,
+      login: user.login,
+      loginKey: user.login_key,
+      amountLtc,
+      amountUsd: amountLtc * 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      address,
+      note,
+      status: "pending",
+      provider: "manual",
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU")
+    };
+
+    state.ltcBalances[user.login] = Math.max(0, balance - amountLtc);
+    state.walletWithdrawals.unshift(request);
+    state.walletTransactions.unshift({
+      id: `tx-${request.id}`,
+      login: user.login,
+      type: "withdrawal",
+      title: "Вывод LTC",
+      amountLtc: -amountLtc,
+      amountUsd: -request.amountUsd,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      address,
+      createdAt: request.createdAt,
+      date: request.date,
+      status: "processing"
+    });
+    await saveSettingsState(state);
+    notifyRealtime("wallet_withdrawal_created", { id: request.id, login: user.login, kind });
+    res.json({ withdrawal: request, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }

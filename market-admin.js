@@ -513,10 +513,11 @@ function renderFinance() {
   const buckets = data.finances.depositsByStatus || {};
   const bucketCard = (label, rows) => statCard(label, rows?.length || 0, fmtMoney((rows || []).reduce((sum, item) => sum + Number(item.amountUsd || item.priceAmount || 0), 0)));
   const deposits = data.finances.walletDeposits || [];
+  const withdrawals = data.finances.walletWithdrawals || [];
   return `<section class="grid">${bucketCard("Успешные депозиты", buckets.successful)}${bucketCard("В ожидании", buckets.pending)}${bucketCard("Отмененные", buckets.cancelled)}${bucketCard("Ошибочные", buckets.failed)}</section>
-  <article class="table-card"><table><thead><tr><th>ID</th><th>Пользователь</th><th>Монета</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${esc(d.coinId || d.payCurrency)}</td><td>${fmtMoney(d.amountUsd)}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>`;
+  <article class="table-card"><h3>Пополнения</h3><table><thead><tr><th>ID</th><th>Пользователь</th><th>Монета</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${esc(d.coinId || d.payCurrency)}</td><td>${fmtMoney(d.amountUsd)}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
+  <article class="table-card"><h3>Заявки на вывод</h3><table><thead><tr><th>ID</th><th>Логин</th><th>Тип</th><th>Сумма</th><th>Адрес</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.login)}</td><td>${esc(w.kind || "ltc_withdraw")}</td><td>${Number(w.amountLtc || 0).toFixed(8)} LTC</td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span></td><td>${fmtDate(w.createdAt)}</td></tr>`).join("")}</tbody></table></article>`;
 }
-
 function renderSettings() {
   const owner = data.settings.ownerSettings || {};
   return `<article class="split-card"><h2>Глобальные комиссии</h2><form data-settings-form>
