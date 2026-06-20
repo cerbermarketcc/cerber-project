@@ -1819,6 +1819,16 @@ function walletDepositPayAmount(deposit) {
   return Number(deposit.payAmount || deposit.amountPay || 0);
 }
 
+function activeWithdrawalUsd(scope = "", storeId = "") {
+  return (Array.isArray(db.walletWithdrawals) ? db.walletWithdrawals : [])
+    .filter((item) => {
+      if (scope && item.scope !== scope) return false;
+      if (storeId && item.storeId !== storeId) return false;
+      return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
+    })
+    .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
 function walletWithdrawalStatusText(status = "pending") {
   const raw = String(status || "pending").toLowerCase();
   if (raw === "completed" || raw === "paid") return "Завершено";
@@ -5716,16 +5726,8 @@ function renderWallet() {
         </div>
         <div class="wallet-actions">
           <button class="ghost-button" data-wallet-deposit-open>Пополнить +</button>
+          <button class="ghost-button" data-wallet-withdraw-open>&#1042;&#1099;&#1074;&#1077;&#1089;&#1090;&#1080; LTC</button>
           <button class="ghost-button" data-route="exchange">Купить LTC ↙</button>
-        </div>
-      </article>
-      <article class="wallet-balance-card">
-        <h2>Вывод и функции LTC</h2>
-        <p class="desc">Базовый вывод LTC работает отдельно от ff.io. Очистка LTC через MWEB и swap вынесены в отдельные функции и могут быть закрыты на техработы без остановки кошелька.</p>
-        <div class="wallet-actions">
-          <button class="ghost-button" data-wallet-withdraw-open>Обычный вывод LTC</button>
-          <button class="ghost-button" data-wallet-feature-maintenance="ltc_mweb_clean">Очистка LTC MWEB</button>
-          <button class="ghost-button" data-wallet-feature-maintenance="swap">Swap / ff.io</button>
         </div>
       </article>
       <article class="wallet-transactions">
@@ -5754,9 +5756,6 @@ function renderWallet() {
   `);
   document.querySelector("[data-wallet-deposit-open]")?.addEventListener("click", openWalletDepositModal);
   document.querySelectorAll("[data-wallet-withdraw-open]").forEach((button) => button.addEventListener("click", openWalletWithdrawModal));
-  document.querySelectorAll("[data-wallet-feature-maintenance]").forEach((button) => {
-    button.addEventListener("click", () => showToast("Эта функция отдельная от кошелька и сейчас закрыта на техработы"));
-  });
   document.querySelectorAll(".wallet-tx[data-wallet-deposit]").forEach((row) => {
     row.addEventListener("click", () => showWalletDepositDetails(row.dataset.walletDeposit));
   });
@@ -5810,7 +5809,7 @@ function walletWithdrawalView(request) {
   return `
     <article class="wallet-tx ${String(request.status || "pending").toLowerCase()}">
       <div class="wallet-tx-main">
-        <h3>${esc(request.kind === "ltc_mweb_clean" ? "Очистка LTC MWEB" : request.kind === "swap" ? "Swap / ff.io" : "Вывод LTC")}</h3>
+        <h3>Вывод LTC</h3>
         <p>${esc(request.date || new Date(request.createdAt || Date.now()).toLocaleString())} · ${esc(walletWithdrawalStatusText(request.status))}</p>
         <small>${esc(request.address || request.note || "")}</small>
       </div>
@@ -5904,7 +5903,7 @@ function openWalletWithdrawModal() {
   const max = userLtcBalance();
   showModal(`
     <h2>Обычный вывод LTC</h2>
-    <p class="desc">Это базовый вывод из кошелька CERBER. Он не использует ff.io. Очистка MWEB и swap работают отдельными разделами.</p>
+    <p class="desc">Создайте заявку на вывод LTC на внешний кошелек.</p>
     <form class="form" data-wallet-withdraw-form>
       <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.000001" step="0.000001" max="${esc(max)}" value="${esc(max ? Math.min(max, 0.01).toFixed(6) : "0.000000")}" required></label>
       <label class="field">LTC адрес получателя<input name="address" placeholder="ltc1..." required></label>
@@ -7804,24 +7803,27 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
   const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
   const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  const requestedUsd = activeWithdrawalUsd("store", store.id);
+  const availableUsd = Math.max(0, netUsd - requestedUsd);
+  const wallet = store.ltcWallet || storeWallets(store).ltc || "";
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
   <section class="seller-dashboard-stats">
-    ${sellerDashStat("К выводу магазину", `${netUsd.toFixed(2)} $`, `${usdToLtc(netUsd).toFixed(8)} LTC`)}
+    ${sellerDashStat("К выводу магазину", `${availableUsd.toFixed(2)} $`, `${usdToLtc(availableUsd).toFixed(8)} LTC`)}
     ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
     ${sellerDashStat("Валовый оборот", `${grossUsd.toFixed(2)} $`, "до комиссии")}
     ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
-    <div class="seller-card-head"><h3>Заявка на вывод</h3><span>обычный LTC вывод</span></div>
-    <p class="desc">Вывод магазина не использует ff.io. Swap и MWEB-очистка остаются отдельными функциями.</p>
-    <button class="primary" data-shop-payout-request="${esc(store.id)}" ${netUsd > 0 ? "" : "disabled"}>Создать заявку на вывод ${netUsd.toFixed(2)} $</button>
+    <div class="seller-card-head"><h3>Вывести средства</h3><span>1 раз в 3 дня</span></div>
+    <p class="desc">Баланс магазина: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong>. Вывод идет на LTC кошелек из настроек магазина.</p>
+    <p class="desc">LTC кошелек: <strong>${esc(wallet || "не сохранен")}</strong></p>
+    <button class="primary" data-shop-payout-request="${esc(store.id)}" ${availableUsd > 0 ? "" : "disabled"}>Вывести средства</button>
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
     ${financeRows.length ? financeRows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title)} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${Number(tx.netUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
   </section>`;
 }
-
 function shopStaffTab(store) {
   const staff = Array.isArray(store.staff) ? store.staff : [];
   const accessOptions = SHOP_STAFF_ACCESS_TABS.map(([id, , label]) => `
@@ -8237,7 +8239,7 @@ async function requestShopPayout(event) {
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   if (!store || !token) return showToast("Войдите в Shop Admin заново");
   const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
-  if (!wallet) return showToast("Сначала укажите LTC кошелек в настройках магазина");
+  if (!wallet) return showToast("Вы не сохранили ваш LTC кошелек в настройках магазина");
   const button = event.currentTarget;
   setButtonLoading(button, true, "Создаём заявку");
   try {

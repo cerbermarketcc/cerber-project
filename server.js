@@ -23,6 +23,7 @@ const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kk
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
+const storeWithdrawalCooldownMs = 3 * 24 * 60 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const groupChatHiddenSiteEmojiIds = new Set(["030", "031", "032", "033", "034", "035", "036"]);
 const walletCoins = [
@@ -1174,6 +1175,13 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
 
     const completed = orders.filter((order) => order.storeId === storeId && adminIsPaidProductOrder(order));
     const earnedUsd = completed.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+    const lastStoreWithdrawal = state.walletWithdrawals
+      .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
+    if (lastStoreWithdrawal && Date.now() - Number(lastStoreWithdrawal.createdAt || 0) < storeWithdrawalCooldownMs) {
+      const nextAt = Number(lastStoreWithdrawal.createdAt || 0) + storeWithdrawalCooldownMs;
+      return res.status(429).json({ error: `Вывод магазина доступен раз в 3 дня. Следующий вывод: ${new Date(nextAt).toLocaleString("ru-RU")}` });
+    }
     const requestedUsd = state.walletWithdrawals
       .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
       .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
@@ -1984,6 +1992,45 @@ app.put("/api/admin/settings", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    const state = data.state;
+    const storeById = new Map(data.stores.map((store) => [store.id, store]));
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const completedOrders = orders.filter((order) => (order.type === "product" || order.storeId) && adminIsPaidProductOrder(order));
+    const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
+    const availableUsd = Math.max(0, totalCommissionUsd - activeWithdrawalUsd(state, "owner"));
+    if (availableUsd <= 0) return res.status(400).json({ error: "Нет комиссии владельца для вывода" });
+    const address = String(state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
+    if (!address) return res.status(400).json({ error: "LTC счет площадки не указан в настройках" });
+    state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+    const request = {
+      id: `owner-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      kind: "ltc_withdraw",
+      scope: "owner",
+      login: admin.login,
+      amountUsd: availableUsd,
+      amountLtc: availableUsd / 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      address,
+      status: "pending",
+      provider: "manual",
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU")
+    };
+    state.walletWithdrawals.unshift(request);
+    await saveSettingsState(state);
+    await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd: availableUsd, address });
+    notifyRealtime("wallet_withdrawal_created", { id: request.id, scope: "owner" });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/admin/logs", async (req, res, next) => {
   try {
     requireAdmin(req);
@@ -2642,6 +2689,16 @@ function adminPlatformCommission(order, state, store) {
   return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
 }
 
+function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
+  return (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
+    .filter((item) => {
+      if (scope && item.scope !== scope) return false;
+      if (storeId && item.storeId !== storeId) return false;
+      return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
+    })
+    .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
 function applyProductOrderCommission(order, state = {}, store = null) {
   if (!order) return order;
   const amount = adminOrderAmount(order);
@@ -2914,6 +2971,10 @@ function adminBuildOverview(data) {
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
   const completedOrders = productOrders.filter(adminIsPaidProductOrder);
+  const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
+  const totalStoresNetUsd = completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0);
+  const ownerRequestedUsd = activeWithdrawalUsd(state, "owner");
+  const storesRequestedUsd = activeWithdrawalUsd(state, "store");
   const activeOrders = productOrders.filter((order) => ["active", "pending_payment", "processing"].includes(String(order.status || "").toLowerCase()));
   const disputes = [
     ...orders.filter((order) => order.disputeOpen || order.status === "dispute"),
@@ -3014,9 +3075,9 @@ function adminBuildOverview(data) {
     stats: {
       totalSales: completedOrders.length,
       totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
-      totalCommission: completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0),
-      ownerWithdrawableUsd: completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0),
-      storesWithdrawableUsd: completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0),
+      totalCommission: totalCommissionUsd,
+      ownerWithdrawableUsd: Math.max(0, totalCommissionUsd - ownerRequestedUsd),
+      storesWithdrawableUsd: Math.max(0, totalStoresNetUsd - storesRequestedUsd),
       newUsers: periods.find((period) => period.id === "day")?.newUsers || 0,
       totalUsers: profiles.length,
       usersWithPurchase: buyers.size,
@@ -3414,13 +3475,6 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const kind = String(req.body.kind || "ltc_withdraw").trim();
-    if (kind === "ltc_mweb_clean" || kind === "swap") {
-      return res.status(503).json({
-        error: kind === "ltc_mweb_clean"
-          ? "Очистка LTC через MWEB выделена в отдельный раздел и сейчас закрыта на техработы"
-          : "Swap через ff.io выделен в отдельный раздел и сейчас закрыт на техработы"
-      });
-    }
     if (kind !== "ltc_withdraw") return res.status(400).json({ error: "Неизвестный тип вывода" });
 
     const amountLtc = Number(req.body.amountLtc || 0);
