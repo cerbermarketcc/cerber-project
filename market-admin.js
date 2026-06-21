@@ -24,10 +24,17 @@ let section = "Dashboard";
 let query = "";
 let realtimeSocket = null;
 let refreshTimer = null;
+let adminLastInteractionAt = 0;
 
 function adminIsEditing() {
   const element = document.activeElement;
   return Boolean(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+}
+
+function adminCanSilentRender() {
+  if (adminIsEditing()) return false;
+  if (Date.now() - adminLastInteractionAt < 5000) return false;
+  return true;
 }
 
 function esc(value) {
@@ -154,7 +161,7 @@ async function refreshData(silent = false) {
   try {
     data = await api("/api/admin/overview");
     if (!silent) renderShell();
-    else if (!adminIsEditing()) root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), drawCharts());
+    else if (adminCanSilentRender()) root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), bindAdminButtonFeedback(root), drawCharts());
   } catch (error) {
     if (!silent) renderLogin("Сессия истекла");
   }
@@ -187,6 +194,7 @@ function renderLogin(message = "") {
       </form>
     </section>
   `;
+  bindAdminButtonFeedback(root);
   root.querySelector("[data-login-form]").onsubmit = async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -243,10 +251,27 @@ function renderShell() {
     query = event.target.value.toLowerCase();
     root.querySelector("[data-view]").innerHTML = renderSection();
     bindActions();
+    bindAdminButtonFeedback(root);
     drawCharts();
   };
   bindActions();
+  bindAdminButtonFeedback(root);
   drawCharts();
+}
+
+function bindAdminButtonFeedback(scope = root) {
+  scope.querySelectorAll("button:not([data-button-feedback-bound])").forEach((button) => {
+    button.dataset.buttonFeedbackBound = "1";
+    button.addEventListener("click", () => {
+      adminLastInteractionAt = Date.now();
+      if (button.disabled || button.classList.contains("is-loading")) return;
+      button.classList.remove("tap-loading");
+      void button.offsetWidth;
+      button.classList.add("tap-loading");
+      clearTimeout(button.tapLoadingTimer);
+      button.tapLoadingTimer = setTimeout(() => button.classList.remove("tap-loading"), 850);
+    });
+  });
 }
 
 function renderSection() {
@@ -1066,6 +1091,12 @@ function drawCharts() {
     });
   });
 }
+
+document.addEventListener("pointerdown", (event) => {
+  if (event.target.closest("button, a, input, textarea, select, label, .sidebar, [data-view]")) {
+    adminLastInteractionAt = Date.now();
+  }
+}, { passive: true });
 
 if (token) load().catch(() => renderLogin("Сессия истекла"));
 else renderLogin();

@@ -23,6 +23,7 @@ let turnstileWidgetId = null;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
 let realtimeRefreshTimer = null;
+let lastUserInteractionAt = 0;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -1266,6 +1267,9 @@ function restoreShopPanelStore(store) {
 
 function realtimeCanRenderNow() {
   const element = document.activeElement;
+  if (Date.now() - lastUserInteractionAt < 3500) return false;
+  if (document.querySelector("[data-nav-pop].open, [data-account-pop].open, [data-modal].open, [data-group-widget].open")) return false;
+  if (document.querySelector(".message-reaction-picker:not([hidden])")) return false;
   return !(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
 }
 
@@ -2432,6 +2436,7 @@ function renderAuth(message = "") {
       </section>
     </main>
   `;
+  bindButtonFeedback(root);
   document.querySelector("[data-auth-switch]").onclick = () => {
     authMode = authMode === "login" ? "register" : "login";
     renderAuth();
@@ -2462,6 +2467,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
     </main>
     <div class="toast"></div>
   `;
+  bindButtonFeedback(root);
   document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
     event.preventDefault();
     const password = new FormData(event.currentTarget).get("password");
@@ -7918,6 +7924,7 @@ function renderShopPanelLogin(message = "") {
     </main>
     <div class="toast"></div>
   `;
+  bindButtonFeedback(root);
   document.querySelector("[data-shop-panel-login]").onsubmit = async (event) => {
     event.preventDefault();
     const loginData = new FormData(event.currentTarget);
@@ -8559,6 +8566,7 @@ function blobToDataUrl(blob) {
 function showModal(html, className = "") {
   document.querySelector("[data-modal]").innerHTML = `<div class="modal ${className}">${html}</div>`;
   document.querySelector("[data-modal]").classList.add("open");
+  bindButtonFeedback(document.querySelector("[data-modal]"));
 }
 
 async function trackSiteBroadcast(notification, action) {
@@ -8604,6 +8612,7 @@ function showPendingSiteBroadcast() {
 
 function bindGlobal() {
   bindStoreCards();
+  bindButtonFeedback(document);
   document.querySelectorAll("[data-chat]").forEach((button) => button.onclick = () => renderChat(button.dataset.chat));
   document.querySelectorAll("[data-read]").forEach((button) => {
     button.onclick = () => {
@@ -8672,6 +8681,21 @@ function bindGlobal() {
     };
   });
   bindGroupFloatingWidget();
+}
+
+function bindButtonFeedback(scope = document) {
+  scope.querySelectorAll("button:not([data-button-feedback-bound])").forEach((button) => {
+    button.dataset.buttonFeedbackBound = "1";
+    button.addEventListener("click", () => {
+      lastUserInteractionAt = Date.now();
+      if (button.disabled || button.classList.contains("is-loading")) return;
+      button.classList.remove("tap-loading");
+      void button.offsetWidth;
+      button.classList.add("tap-loading");
+      clearTimeout(button.tapLoadingTimer);
+      button.tapLoadingTimer = setTimeout(() => button.classList.remove("tap-loading"), 850);
+    });
+  });
 }
 
 function bindGroupFloatingWidget() {
@@ -8860,5 +8884,10 @@ async function initApp() {
 }
 
 window.addEventListener("hashchange", safeRenderCurrent);
+document.addEventListener("pointerdown", (event) => {
+  if (event.target.closest("button, a, input, textarea, select, label, [data-nav-pop], [data-account-pop], [data-modal], [data-group-widget]")) {
+    lastUserInteractionAt = Date.now();
+  }
+}, { passive: true });
 
 initApp();
