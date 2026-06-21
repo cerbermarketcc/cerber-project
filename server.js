@@ -1187,6 +1187,9 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
     const availableUsd = Math.max(0, earnedUsd - requestedUsd);
     if (availableUsd <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
+    const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
+    if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступного баланса" });
 
     const request = {
       id: `store-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
@@ -1195,8 +1198,8 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       storeId,
       storeName: store.name || store.id,
       login: store.ownerLogin || store.id,
-      amountUsd: availableUsd,
-      amountLtc: availableUsd / 54.2,
+      amountUsd,
+      amountLtc: amountUsd / 54.2,
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -1207,7 +1210,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     };
     state.walletWithdrawals.unshift(request);
     await saveSettingsState(state);
-    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd: availableUsd });
+    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
     res.json({ withdrawal: request, ...(await stateFor(null)) });
   } catch (error) {
@@ -2003,16 +2006,19 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
     const availableUsd = Math.max(0, totalCommissionUsd - activeWithdrawalUsd(state, "owner"));
     if (availableUsd <= 0) return res.status(400).json({ error: "Нет комиссии владельца для вывода" });
-    const address = String(state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
-    if (!address) return res.status(400).json({ error: "LTC счет площадки не указан в настройках" });
+    const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
+    if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступной комиссии" });
+    const address = String(req.body.address || "").trim();
+    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC счет для вывода" });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const request = {
       id: `owner-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       kind: "ltc_withdraw",
       scope: "owner",
       login: admin.login,
-      amountUsd: availableUsd,
-      amountLtc: availableUsd / 54.2,
+      amountUsd,
+      amountLtc: amountUsd / 54.2,
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -2023,7 +2029,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     };
     state.walletWithdrawals.unshift(request);
     await saveSettingsState(state);
-    await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd: availableUsd, address });
+    await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, scope: "owner" });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
@@ -2697,6 +2703,16 @@ function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
       return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
     })
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
+function requestedWithdrawalUsd(body = {}, availableUsd = 0) {
+  const rawAll = String(body.amountMode || body.amount || "").trim().toLowerCase();
+  if (rawAll === "all" || body.all === true) return Math.max(0, Number(availableUsd || 0));
+  const amountUsd = Number(body.amountUsd || 0);
+  if (Number.isFinite(amountUsd) && amountUsd > 0) return amountUsd;
+  const amountLtc = Number(body.amountLtc || 0);
+  if (Number.isFinite(amountLtc) && amountLtc > 0) return amountLtc * 54.2;
+  return 0;
 }
 
 function applyProductOrderCommission(order, state = {}, store = null) {

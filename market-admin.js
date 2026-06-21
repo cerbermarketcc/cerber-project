@@ -292,7 +292,14 @@ function renderDashboard() {
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
       <p class="muted">Доступно к выводу: <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Вывод создается на LTC счет площадки из настроек.</p>
-      <button class="primary" data-owner-withdraw>Вывести средства</button>
+      <form data-owner-withdraw-form>
+        <div class="row">
+          <label class="field">Сумма USD<input name="amountUsd" type="number" min="0.01" step="0.01" max="${esc(s.ownerWithdrawableUsd || 0)}" value="${esc(Number(s.ownerWithdrawableUsd || 0).toFixed(2))}"></label>
+          <button class="ghost" type="button" data-owner-withdraw-all="${esc(Number(s.ownerWithdrawableUsd || 0).toFixed(2))}">Всё</button>
+        </div>
+        <label class="field">LTC кошелек для вывода<input name="address" value="${esc(data.settings?.paymentSettings?.platformLtcWallet || "")}" placeholder="ltc1..." required></label>
+        <button class="primary">Вывести средства</button>
+      </form>
     </article>
     <section class="charts">
       ${chartBox("Продажи", "sales")}
@@ -916,14 +923,31 @@ function bindActions() {
     data.selectedBotId = row.dataset.botSelect;
     renderShell();
   });
-  root.querySelector("[data-owner-withdraw]")?.addEventListener("click", async (event) => {
-    if (!confirm("Создать заявку на вывод комиссии владельца?")) return;
-    const button = event.currentTarget;
+  root.querySelector("[data-owner-withdraw-all]")?.addEventListener("click", (event) => {
+    const input = root.querySelector("[data-owner-withdraw-form] input[name='amountUsd']");
+    if (input) input.value = event.currentTarget.dataset.ownerWithdrawAll || "0.00";
+  });
+  root.querySelector("[data-owner-withdraw-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const availableUsd = Number(data?.stats?.ownerWithdrawableUsd || 0);
+    if (availableUsd <= 0) return toast("Нет комиссии владельца для вывода", true);
+    const form = event.currentTarget;
+    const fd = new FormData(form);
+    const amountUsd = Number(fd.get("amountUsd") || 0);
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return toast("Укажите сумму вывода", true);
+    if (amountUsd > availableUsd) return toast("Сумма больше доступного баланса", true);
+    const address = String(fd.get("address") || "").trim();
+    if (!address) return toast("Укажите LTC кошелек", true);
+    if (!confirm(`Создать заявку на вывод ${amountUsd.toFixed(2)} $ на ${address}?`)) return;
+    const button = form.querySelector("button.primary");
     const oldText = button.textContent;
     button.disabled = true;
     button.textContent = "Создаём заявку...";
     try {
-      data = await api("/api/admin/withdrawals/owner", { method: "POST" });
+      data = await api("/api/admin/withdrawals/owner", {
+        method: "POST",
+        body: JSON.stringify({ amountUsd, address })
+      });
       toast("Заявка владельца на вывод создана");
       renderShell();
     } catch (error) {

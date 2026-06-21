@@ -8231,30 +8231,66 @@ function bindShopPanelActions(store, activeTab) {
       }
     };
   });
-  document.querySelector("[data-shop-payout-request]")?.addEventListener("click", requestShopPayout);
+  document.querySelector("[data-shop-payout-request]")?.addEventListener("click", openShopPayoutModal);
+}
+
+function shopPayoutAvailableUsd(store) {
+  const financeRows = shopOrderFinanceRows(store);
+  const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  return Math.max(0, netUsd - activeWithdrawalUsd("store", store.id));
+}
+
+function openShopPayoutModal(event) {
+  const store = shopPanelStore() || sellerAdminStore();
+  if (!store || !localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY)) return showToast("Войдите в Shop Admin заново");
+  const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
+  if (!wallet) return showToast("Вы не сохранили ваш LTC кошелек в настройках магазина");
+  const availableUsd = shopPayoutAvailableUsd(store);
+  if (availableUsd <= 0) return showToast("Нет доступного баланса для вывода");
+  showModal(`
+    <h2>Вывести средства</h2>
+    <p class="desc">Доступно: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong></p>
+    <form class="form" data-shop-payout-form>
+      <label class="field">Сумма USD<input name="amountUsd" type="number" min="0.01" step="0.01" max="${esc(availableUsd)}" value="${esc(availableUsd.toFixed(2))}" required></label>
+      <button class="ghost-button" type="button" data-shop-payout-all="${esc(availableUsd.toFixed(2))}">Всё</button>
+      <label class="field">LTC кошелек для вывода<input name="address" value="${esc(wallet)}" placeholder="ltc1..." required></label>
+      <button class="primary">Создать заявку</button>
+    </form>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-shop-payout-all]")?.addEventListener("click", (buttonEvent) => {
+    const input = document.querySelector("[data-shop-payout-form] input[name='amountUsd']");
+    if (input) input.value = buttonEvent.currentTarget.dataset.shopPayoutAll || availableUsd.toFixed(2);
+  });
+  document.querySelector("[data-shop-payout-form]")?.addEventListener("submit", requestShopPayout);
 }
 
 async function requestShopPayout(event) {
+  event.preventDefault();
   const store = shopPanelStore() || sellerAdminStore();
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   if (!store || !token) return showToast("Войдите в Shop Admin заново");
-  const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
-  if (!wallet) return showToast("Вы не сохранили ваш LTC кошелек в настройках магазина");
-  const button = event.currentTarget;
-  setButtonLoading(button, true, "Создаём заявку");
+  const data = new FormData(event.currentTarget);
+  const amountUsd = Number(data.get("amountUsd") || 0);
+  const address = String(data.get("address") || "").trim();
+  if (amountUsd <= 0) return showToast("Укажите сумму вывода");
+  if (!address) return showToast("Укажите LTC кошелек");
+  const submit = event.currentTarget.querySelector("button.primary");
+  setButtonLoading(submit, true, "Создаём заявку");
   try {
     const payload = await apiFetch("/api/store-admin/withdrawals", {
       method: "POST",
       timeoutMs: 15000,
       headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ storeId: store.id, address: wallet })
+      body: JSON.stringify({ storeId: store.id, amountUsd, address })
     });
     applyRemoteState(payload);
+    document.querySelector("[data-modal]")?.classList.remove("open");
     showToast("Заявка магазина на вывод создана");
     renderShopPanel("finances");
   } catch (error) {
     showToast(error.message || "Не удалось создать заявку на вывод");
-    setButtonLoading(button, false);
+    setButtonLoading(submit, false);
   }
 }
 
