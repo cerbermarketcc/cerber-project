@@ -15,6 +15,7 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
+const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -335,7 +336,7 @@ function withTimeout(promise, label, timeoutMs = 8000) {
 }
 
 async function verifyCaptcha(token, req) {
-  if (!turnstileSiteKey || !turnstileSecretKey) {
+  if (!turnstileEnabled) {
     console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
     return;
   }
@@ -945,7 +946,7 @@ app.post("/api/telegram/group-chat/presence", async (req, res, next) => {
 
 app.get("/api/config", async (_req, res, next) => {
   try {
-    res.json({ turnstileSiteKey, cmsTexts: await readCmsTexts() });
+    res.json({ turnstileSiteKey: turnstileEnabled ? turnstileSiteKey : "", turnstileEnabled, cmsTexts: await readCmsTexts() });
   } catch (error) {
     next(error);
   }
