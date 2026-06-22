@@ -555,6 +555,240 @@ function tr(key) {
   return (text[db.lang] || text.ru)[key] || text.ru[key] || key;
 }
 
+Object.assign(text.ru, {
+  wallet: "Кошелек",
+  catalog: "Каталог",
+  stores: "Магазины",
+  filters: "Фильтры",
+  support: "Поддержка",
+  rules: "Правила",
+  referrals: "Реферальная программа",
+  exchangeRequests: "Заявки на обмен",
+  buy: "Купить",
+  price: "Цена",
+  store: "Магазин",
+  quantity: "Кол-во",
+  titleLabel: "Название",
+  type: "Тип",
+  weight: "Вес",
+  location: "Локация",
+  any: "Любой",
+  ready: "Готовый",
+  preorder: "Предзаказ",
+  noStores: "Магазины появятся после добавления в админке.",
+  noPositions: "Позиции пока не добавлены",
+  noFilteredProducts: "По выбранным фильтрам товаров нет.",
+  openFilters: "Открыть фильтры",
+  product: "Товар",
+  pieces: "шт.",
+  purchases: "покупок"
+});
+
+Object.assign(text.md, {
+  wallet: "Portofel",
+  catalog: "Catalog",
+  stores: "Magazine",
+  filters: "Filtre",
+  support: "Suport",
+  rules: "Reguli",
+  referrals: "Program de recomandare",
+  exchangeRequests: "Cereri de schimb",
+  buy: "Cumpara",
+  price: "Pret",
+  store: "Magazin",
+  quantity: "Cant.",
+  titleLabel: "Denumire",
+  type: "Tip",
+  weight: "Greutate",
+  location: "Locatie",
+  any: "Oricare",
+  ready: "Gata",
+  preorder: "Precomanda",
+  noStores: "Magazinele vor aparea dupa adaugarea in admin.",
+  noPositions: "Pozitiile nu au fost adaugate inca",
+  noFilteredProducts: "Nu exista produse pentru filtrele selectate.",
+  openFilters: "Deschide filtrele",
+  product: "Produs",
+  pieces: "buc.",
+  purchases: "cumparari"
+});
+
+Object.assign(text.en, {
+  wallet: "Wallet",
+  catalog: "Catalog",
+  stores: "Stores",
+  filters: "Filters",
+  support: "Support",
+  rules: "Rules",
+  referrals: "Referral program",
+  exchangeRequests: "Exchange requests",
+  buy: "Buy",
+  price: "Price",
+  store: "Store",
+  quantity: "Qty",
+  titleLabel: "Name",
+  type: "Type",
+  weight: "Weight",
+  location: "Location",
+  any: "Any",
+  ready: "Ready",
+  preorder: "Preorder",
+  noStores: "Stores will appear after they are added in admin.",
+  noPositions: "No positions added yet",
+  noFilteredProducts: "No products match the selected filters.",
+  openFilters: "Open filters",
+  product: "Product",
+  pieces: "pcs.",
+  purchases: "purchases"
+});
+
+const uiPhraseTranslations = {
+  md: {
+    "Магазины": "Magazine",
+    "Заказы": "Comenzi",
+    "Кошелек": "Portofel",
+    "Каталог": "Catalog",
+    "Общий чат": "Chat general",
+    "Реферальная программа": "Program de recomandare",
+    "Заявки на обмен": "Cereri de schimb",
+    "Поддержка": "Suport",
+    "Правила": "Reguli",
+    "Фильтры": "Filtre",
+    "Купить": "Cumpara",
+    "Цена": "Pret",
+    "Описание": "Descriere",
+    "Товары": "Produse",
+    "Карточки": "Carduri",
+    "Товары внутри карточек": "Produse in carduri",
+    "Доступные позиции": "Pozitii disponibile",
+    "Отзывы": "Recenzii",
+    "Любой": "Oricare",
+    "Готовый": "Gata",
+    "Предзаказ": "Precomanda",
+    "Магазин": "Magazin",
+    "Кол-во": "Cant.",
+    "Название": "Denumire",
+    "Тип": "Tip",
+    "Вес": "Greutate",
+    "Локация": "Locatie",
+    "Открыть фильтры": "Deschide filtrele",
+    "Позиции пока не добавлены": "Pozitiile nu au fost adaugate inca",
+    "По выбранным фильтрам товаров нет.": "Nu exista produse pentru filtrele selectate.",
+    "Магазины появятся после добавления в админке.": "Magazinele vor aparea dupa adaugarea in admin.",
+    "Сообщение": "Mesaj",
+    "Отправить": "Trimite",
+    "Закрыть": "Inchide",
+    "Сохранить": "Salveaza",
+    "Войти": "Intra",
+    "Создать": "Creeaza",
+    "Пополнить": "Alimenteaza",
+    "Сменить язык:": "Schimba limba:",
+    "Светлая тема": "Tema luminoasa",
+    "Темная тема": "Tema intunecata"
+  },
+  en: {
+    "Магазины": "Stores",
+    "Заказы": "Orders",
+    "Кошелек": "Wallet",
+    "Каталог": "Catalog",
+    "Общий чат": "Group chat",
+    "Реферальная программа": "Referral program",
+    "Заявки на обмен": "Exchange requests",
+    "Поддержка": "Support",
+    "Правила": "Rules",
+    "Фильтры": "Filters",
+    "Купить": "Buy",
+    "Цена": "Price",
+    "Описание": "Description",
+    "Товары": "Products",
+    "Карточки": "Cards",
+    "Товары внутри карточек": "Products inside cards",
+    "Доступные позиции": "Available positions",
+    "Отзывы": "Reviews",
+    "Любой": "Any",
+    "Готовый": "Ready",
+    "Предзаказ": "Preorder",
+    "Магазин": "Store",
+    "Кол-во": "Qty",
+    "Название": "Name",
+    "Тип": "Type",
+    "Вес": "Weight",
+    "Локация": "Location",
+    "Открыть фильтры": "Open filters",
+    "Позиции пока не добавлены": "No positions added yet",
+    "По выбранным фильтрам товаров нет.": "No products match the selected filters.",
+    "Магазины появятся после добавления в админке.": "Stores will appear after they are added in admin.",
+    "Сообщение": "Message",
+    "Отправить": "Send",
+    "Закрыть": "Close",
+    "Сохранить": "Save",
+    "Войти": "Sign in",
+    "Создать": "Create",
+    "Пополнить": "Deposit",
+    "Сменить язык:": "Change language:",
+    "Светлая тема": "Light theme",
+    "Темная тема": "Dark theme"
+  }
+};
+
+function translateUiText(value) {
+  const lang = currentLang();
+  if (lang === "ru" || value == null) return value;
+  const source = String(value);
+  const trimmed = source.trim();
+  if (!trimmed) return source;
+  const dictionary = uiPhraseTranslations[lang] || {};
+  if (dictionary[trimmed]) return source.replace(trimmed, dictionary[trimmed]);
+  return Object.entries(dictionary)
+    .sort((a, b) => b[0].length - a[0].length)
+    .reduce((result, [ruText, translated]) => result.split(ruText).join(translated), source);
+}
+
+function translateElementAttributes(element) {
+  ["placeholder", "title", "aria-label"].forEach((attribute) => {
+    if (element.hasAttribute(attribute)) element.setAttribute(attribute, translateUiText(element.getAttribute(attribute)));
+  });
+  if ((element.tagName === "INPUT" || element.tagName === "BUTTON") && /^(button|submit|reset)$/i.test(element.type || "button") && element.value) {
+    element.value = translateUiText(element.value);
+  }
+}
+
+function applyLanguageDomTranslations(rootElement = document.body) {
+  if (!rootElement || currentLang() === "ru") return;
+  const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
+      if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
+      return node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach((node) => {
+    node.nodeValue = translateUiText(node.nodeValue);
+  });
+  rootElement.querySelectorAll("[placeholder],[title],[aria-label],input[type='button'],input[type='submit'],button[value]").forEach(translateElementAttributes);
+}
+
+function currentLang() {
+  return ["ru", "md", "en"].includes(String(db.lang || "ru")) ? String(db.lang || "ru") : "ru";
+}
+
+function localizedValue(entity = {}, field = "") {
+  if (!entity || !field) return "";
+  const lang = currentLang();
+  const suffix = lang.charAt(0).toUpperCase() + lang.slice(1);
+  const directKeys = [`${field}${suffix}`, `${field}_${lang}`, `${lang}_${field}`];
+  for (const key of directKeys) {
+    if (typeof entity[key] === "string" && entity[key].trim()) return entity[key];
+  }
+  const translations = entity.translations || entity.i18n || {};
+  if (translations?.[lang]?.[field]) return translations[lang][field];
+  if (translations?.[field]?.[lang]) return translations[field][lang];
+  return entity[field] || "";
+}
+
 function applyCmsTextOverrides(overrides) {
   cmsTextOverrides = overrides && typeof overrides === "object" ? overrides : {};
   cmsVisualTextOverrides = cmsTextOverrides.__visual && typeof cmsTextOverrides.__visual === "object" ? cmsTextOverrides.__visual : {};
@@ -2408,6 +2642,7 @@ function layout(content) {
     <div class="toast"></div>
   `;
   bindGlobal();
+  applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
   mountCmsVisualEditor();
 }
@@ -2446,6 +2681,7 @@ function renderAuth(message = "") {
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
   mountTurnstile();
+  applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
   mountCmsVisualEditor();
 }
@@ -2954,9 +3190,11 @@ function renderFilters() {
 }
 
 function storeCard(store) {
-  const newLabel = db.lang === "en" ? "New" : db.lang === "ro" ? "Nou" : "Новый";
+  const storeName = localizedValue(store, "name");
+  const storeShort = localizedValue(store, "short");
+  const newLabel = db.lang === "en" ? "New" : db.lang === "md" ? "Nou" : "Новый";
   const isNewStore = storeInPlacement(store, "NEW");
-  const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "ro" ? "Oprit" : "Остановлен";
+  const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "md" ? "Oprit" : "Остановлен";
   const isStopped = storeIsStopped(store);
   return `
     <article class="shop-card ${isStopped ? "is-stopped" : ""}">
@@ -2964,14 +3202,14 @@ function storeCard(store) {
         <div class="shop-inner">
           <div class="shop-head">
             <div>
-              <div class="shop-title"><h2>${esc(store.name)}</h2><span class="verify">✓</span></div>
+              <div class="shop-title"><h2>${esc(storeName)}</h2><span class="verify">✓</span></div>
               ${isNewStore ? `<span class="new-store-badge">${esc(newLabel)}</span>` : ""}
               ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
-              <p class="desc">${esc(store.short)}</p>
+              <p class="desc">${esc(storeShort)}</p>
             </div>
             <span>✉</span>
           </div>
-          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(store.name)}">
+          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
           <p>${Number(store.rating).toFixed(2)} / ${esc(store.reviews)} ${tr("reviews")}</p>
         </div>
       </button>
@@ -2986,23 +3224,26 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
   if (!store) return renderCatalog();
   if (storeIsStopped(store) && !isAdmin() && !sameLogin(store.ownerLogin, db.currentUser)) return renderCatalog();
+  const storeName = localizedValue(store, "name");
+  const storeShort = localizedValue(store, "short");
+  const storeDescription = localizedValue(store, "description");
   const coverImage = store.cover || store.banner || store.image || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
   const publicProducts = sortedStoreProducts(store);
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
-    : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>Позиции пока не добавлены</p></article>`);
+    : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("noPositions")}</p></article>`);
   layout(`
     <section class="screen">
       <article class="panel">
         <img class="profile-cover" src="${esc(coverImage)}" alt="">
         <div class="profile-body">
-          <img class="profile-avatar" src="${esc(avatarImage)}" alt="${esc(store.name)}">
-          <p class="breadcrumbs">${tr("storesTop").split(" ")[0]} > ${esc(store.name)}</p>
-          <div class="shop-title"><h1 class="profile-title">${esc(store.name)}</h1><span class="verify">✓</span></div>
-          <p>${esc(store.short)}</p>
-          <p class="desc">${esc(store.description).slice(0, 130)}...</p>
+          <img class="profile-avatar" src="${esc(avatarImage)}" alt="${esc(storeName)}">
+          <p class="breadcrumbs">${tr("stores")} > ${esc(storeName)}</p>
+          <div class="shop-title"><h1 class="profile-title">${esc(storeName)}</h1><span class="verify">✓</span></div>
+          <p>${esc(storeShort)}</p>
+          <p class="desc">${esc(storeDescription).slice(0, 130)}...</p>
           <button class="read-button" data-read="${esc(store.id)}">${tr("read")}</button>
           <div class="stats">
             <div class="stat"><strong>${esc(store.orders)}</strong><span>${tr("orders")}</span></div>
@@ -3030,17 +3271,20 @@ function productStockSummary(product = {}) {
 
 function productCard(product, store) {
   const summary = productStockSummary(product);
+  const productTitle = localizedValue(product, "title");
+  const productCategory = localizedValue(product, "category");
+  const storeName = localizedValue(store, "name");
   return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
         <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
       <div class="product-body">
-        <h3>${esc(product.title)}</h3>
-        <p>${esc(product.category)}</p>
-        <p><strong>${esc(store.name)}</strong> <span class="verify">ok</span></p>
+        <h3>${esc(productTitle)}</h3>
+        <p>${esc(productCategory)}</p>
+        <p><strong>${esc(storeName)}</strong> <span class="verify">ok</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
-        ${summary.positions.length ? `<p>${summary.positions.length} позиций · ${summary.stock} шт.</p>` : ""}
-        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} purchases</p>
+        ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
+        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} ${tr("purchases")}</p>
         </div>
       </button>
     </article>
@@ -3051,6 +3295,9 @@ function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
   const ltcAmount = usdToLtc(minPrice);
   const summary = productStockSummary(product);
+  const productTitle = localizedValue(product, "title");
+  const productCategory = localizedValue(product, "category");
+  const storeName = localizedValue(store, "name");
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
@@ -3060,11 +3307,11 @@ function productCardView(product, store) {
             <span>#</span><span>*</span><span>+</span><span>-</span><span>/</span>
             <i></i><span>ok</span><span>*</span><span>#</span>
           </div>
-          <h3>${esc(product.title)}</h3>
-          <p class="desc">${esc(product.category)}</p>
-          <p><strong>${esc(store.name)}</strong> <span class="verify">ok</span></p>
+          <h3>${esc(productTitle)}</h3>
+          <p class="desc">${esc(productCategory)}</p>
+          <p><strong>${esc(storeName)}</strong> <span class="verify">ok</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
-          ${summary.positions.length ? `<p>${summary.positions.length} позиций · ${summary.stock} шт.</p>` : ""}
+          ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
           <p class="rating-line"><span class="ok-dot">ok</span><span class="time-dot">*</span><span class="star-dot">*</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
         </div>
       </button>
@@ -3108,39 +3355,43 @@ function renderProductView(storeId, productId) {
   if (!product) return renderStore(store.id, "positions");
   const positions = productPositions(product);
   const images = (product.images || [product.image || store.image]).slice(0, 5);
+  const storeName = localizedValue(store, "name");
+  const productTitle = localizedValue(product, "title");
+  const productCategory = localizedValue(product, "category");
+  const productDescription = localizedValue(product, "description");
   layout(`
     <section class="screen product-screen mega-product-screen">
-      <p class="breadcrumbs">Магазины &gt; ${esc(store.name)} &gt; ${esc(product.title)}</p>
-      <h1 class="product-page-title">${esc(product.title)}</h1>
-      <p class="product-page-category">${esc(product.category)}</p>
+      <p class="breadcrumbs">${tr("stores")} &gt; ${esc(storeName)} &gt; ${esc(productTitle)}</p>
+      <h1 class="product-page-title">${esc(productTitle)}</h1>
+      <p class="product-page-category">${esc(productCategory)}</p>
       <div class="mega-gallery">
-        <img class="mega-gallery-main" src="${esc(images[0] || store.image || fallbackImage)}" alt="${esc(product.title)}">
+        <img class="mega-gallery-main" src="${esc(images[0] || store.image || fallbackImage)}" alt="${esc(productTitle)}">
         <div class="mega-gallery-side">
           ${images.slice(1).map((image) => `<img src="${esc(image)}" alt="">`).join("")}
         </div>
       </div>
       <article class="product-copy">
-        ${product.description ? `<p>${esc(product.description)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
-        <p class="shop-line"><span>Магазин:</span> <strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
+        ${productDescription ? `<p>${esc(productDescription)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
+        <p class="shop-line"><span>${tr("store")}:</span> <strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${Number(product.priceUsd || 0).toFixed(0)}$</p>
         <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
       </article>
       <button class="location-select" data-filters>${esc(currentLocationFilterLabel())}<span>⌄</span></button>
       <div class="pill-tabs">
-        <button>Доступные позиции <span>${positions.length}</span></button>
-        <button class="muted">Отзывы <span>${esc(product.reviews || 0)}</span></button>
+        <button>${tr("positions")} <span>${positions.length}</span></button>
+        <button class="muted">${tr("reviews")} <span>${esc(product.reviews || 0)}</span></button>
       </div>
-      <div class="product-mode-tabs"><button class="active">Любой</button><button>Готовый</button><button>Предзаказ</button></div>
+      <div class="product-mode-tabs"><button class="active">${tr("any")}</button><button>${tr("ready")}</button><button>${tr("preorder")}</button></div>
       ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
         <article class="panel empty-state">
-          <p>По выбранным фильтрам товаров нет.</p>
-          <button class="primary" data-filters>Открыть фильтры</button>
+          <p>${tr("noFilteredProducts")}</p>
+          <button class="primary" data-filters>${tr("openFilters")}</button>
         </article>
       `}
     </section>
   `);
   document.querySelector("[data-read-product]")?.addEventListener("click", () => {
-    showModal(`<h2>${esc(product.title)}</h2><p>${esc(product.description || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+    showModal(`<h2>${esc(productTitle)}</h2><p>${esc(productDescription || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
   });
   fetchLitecoinUsdRate().then(() => {
     if (route === "product" && activeProductId === productId) {
@@ -3154,19 +3405,22 @@ function renderProductView(storeId, productId) {
 function positionCardView(position, product, store) {
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
+  const positionTitle = localizedValue(position, "title") || localizedValue(product, "title");
+  const positionDescription = localizedValue(position, "description");
+  const deliveryType = localizedValue(position, "deliveryType") || tr("product");
   return `
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
-        <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
-        <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
-        <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
-        <p><span>Вес</span><strong>${esc(positionWeightLabel(position))}</strong></p>
-        <p><span>Цена</span><strong>${priceUsd.toFixed(0)} $</strong></p>
+        <p><span>${tr("quantity")}</span><strong>${esc(position.stock || 0)} ${tr("pieces")}</strong></p>
+        <p><span>${tr("titleLabel")}</span><strong>${esc(positionTitle)}</strong></p>
+        <p><span>${tr("type")}</span><strong>${esc(deliveryType)}</strong></p>
+        <p><span>${tr("weight")}</span><strong>${esc(positionWeightLabel(position))}</strong></p>
+        <p><span>${tr("price")}</span><strong>${priceUsd.toFixed(0)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
-        <p class="wide"><span>Локация</span><strong>${esc(locationLabel(position))}</strong></p>
+        <p class="wide"><span>${tr("location")}</span><strong>${esc(locationLabel(position))}</strong></p>
       </div>
-      ${position.description ? `<p class="desc">${esc(position.description)}</p>` : ""}
-      <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>Купить</button>
+      ${positionDescription ? `<p class="desc">${esc(positionDescription)}</p>` : ""}
+      <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>${tr("buy")}</button>
     </article>
   `;
 }
@@ -8619,6 +8873,7 @@ function blobToDataUrl(blob) {
 function showModal(html, className = "") {
   document.querySelector("[data-modal]").innerHTML = `<div class="modal ${className}">${html}</div>`;
   document.querySelector("[data-modal]").classList.add("open");
+  applyLanguageDomTranslations(document.querySelector("[data-modal]"));
   bindButtonFeedback(document.querySelector("[data-modal]"));
 }
 
