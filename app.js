@@ -20,6 +20,7 @@ const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(B
 const API_ENABLED = location.protocol !== "file:";
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
+let turnstileToken = "";
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
 let realtimeRefreshTimer = null;
@@ -2412,6 +2413,7 @@ function layout(content) {
 
 function renderAuth(message = "") {
   turnstileWidgetId = null;
+  turnstileToken = "";
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -2507,17 +2509,28 @@ function mountTurnstile() {
   }
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
     sitekey: TURNSTILE_SITE_KEY,
-    theme: db.theme === "dark" ? "dark" : "light"
+    theme: db.theme === "dark" ? "dark" : "light",
+    callback: (token) => {
+      turnstileToken = String(token || "");
+    },
+    "expired-callback": () => {
+      turnstileToken = "";
+    },
+    "error-callback": () => {
+      turnstileToken = "";
+      return true;
+    }
   });
 }
 
 function captchaToken() {
   if (!API_ENABLED || !TURNSTILE_SITE_KEY) return "";
   if (!window.turnstile || turnstileWidgetId === null) return "";
-  return window.turnstile.getResponse(turnstileWidgetId);
+  return turnstileToken || window.turnstile.getResponse(turnstileWidgetId) || "";
 }
 
 function resetCaptcha() {
+  turnstileToken = "";
   if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
 }
 

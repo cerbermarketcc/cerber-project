@@ -349,8 +349,6 @@ async function verifyCaptcha(token, req) {
   const form = new URLSearchParams();
   form.set("secret", turnstileSecretKey);
   form.set("response", token);
-  const remoteIp = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  if (remoteIp) form.set("remoteip", String(remoteIp).split(",")[0].trim());
 
   const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
     method: "POST",
@@ -358,6 +356,12 @@ async function verifyCaptcha(token, req) {
   });
   const result = await response.json().catch(() => ({}));
   if (!result.success) {
+    console.warn("[captcha] Turnstile verification failed", {
+      errors: result["error-codes"] || [],
+      hostname: result.hostname || "",
+      action: result.action || "",
+      cdata: result.cdata || ""
+    });
     const error = new Error("Капча не пройдена, попробуйте ещё раз");
     error.status = 400;
     throw error;
