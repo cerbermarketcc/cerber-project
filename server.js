@@ -224,6 +224,19 @@ function loginKey(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function groupRoomKey(value) {
+  const room = String(value || "").trim().toLowerCase();
+  return ["ru", "md", "en"].includes(room) ? room : "ru";
+}
+
+function groupMemberEntryKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const [room, ...loginParts] = raw.includes(":") ? raw.split(":") : ["ru", raw];
+  const cleanLogin = loginKey(loginParts.join(":"));
+  return cleanLogin ? `${groupRoomKey(room)}:${cleanLogin}` : "";
+}
+
 function publicUser(row) {
   return row ? { login: row.login, name: row.name, role: row.role } : null;
 }
@@ -1339,8 +1352,8 @@ app.put("/api/state", async (req, res, next) => {
       ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
       ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
     ].reduce((items, login) => {
-      const cleanLogin = String(login || "").trim();
-      if (cleanLogin && !items.some((item) => loginKey(item) === loginKey(cleanLogin))) items.push(cleanLogin);
+      const cleanLogin = groupMemberEntryKey(login);
+      if (cleanLogin && !items.some((item) => groupMemberEntryKey(item) === cleanLogin)) items.push(cleanLogin);
       return items;
     }, []);
     const mergedGroupSettings = {
@@ -1424,6 +1437,7 @@ app.put("/api/state", async (req, res, next) => {
 
 function sanitizeGroupMessagePayload(payload = {}) {
   const body = String(payload.body || "").trim();
+  const room = groupRoomKey(payload.room);
   const stickerUrl = String(payload.stickerUrl || "").trim();
   const stickerMatch = stickerUrl.match(/telegram-(\d{3})\.png$/i);
   if (stickerMatch && groupChatHiddenSiteEmojiIds.has(stickerMatch[1])) {
@@ -1457,7 +1471,7 @@ function sanitizeGroupMessagePayload(payload = {}) {
     error.status = 400;
     throw error;
   }
-  return { body, stickerUrl, emojiUrls, attachments };
+  return { body, room, stickerUrl, emojiUrls, attachments };
 }
 
 app.post("/api/group/messages", async (req, res, next) => {
@@ -1470,6 +1484,7 @@ app.post("/api/group/messages", async (req, res, next) => {
     const message = {
       id: `group-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       fromLogin: user.login,
+      room: payload.room,
       body: payload.body,
       emojiUrls: payload.emojiUrls,
       attachments: payload.attachments,
@@ -1482,7 +1497,7 @@ app.post("/api/group/messages", async (req, res, next) => {
     state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
     state.groupMessages.push(message);
     await saveSettingsState(state);
-    notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login });
+    notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
     res.json({ message, ...(await stateFor(user)) });
   } catch (error) {
     next(error);

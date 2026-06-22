@@ -751,6 +751,7 @@ function normalizeDb(next) {
   if (!next.groupSettings.mutedUntil) next.groupSettings.mutedUntil = {};
   if (!Array.isArray(next.groupSettings.rollTimers)) next.groupSettings.rollTimers = [];
   if (!Array.isArray(next.groupSettings.members)) next.groupSettings.members = [];
+  next.groupSettings.members = mergeGroupMembers(next.groupSettings.members);
   if (!next.groupSettings.presence) next.groupSettings.presence = {};
   if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
@@ -2393,7 +2394,7 @@ function layout(content) {
         ${accountMenuButton("stores", "Магазины", `data-route="catalog"`)}
         ${accountMenuButton("orders", "Заказы", `data-route="orders"`, menuCountBadge(pendingOrders))}
         ${accountMenuButton("messages", tr("messages"), `data-route="messages"`)}
-        ${accountMenuButton("messages", "Общий чат", `data-route="group-chat"`)}
+        ${accountMenuButton("messages", groupRoomLabel(), `data-route="group-chat"`)}
         ${accountMenuButton("referrals", "Реферальная программа", `data-route="referrals"`, `<b>NEW</b>`)}
         ${accountMenuButton("exchange", "Заявки на обмен", `data-route="exchange"`)}
         <div class="divider"></div>
@@ -4138,6 +4139,27 @@ function groupMessageAuthor(login) {
   return login === "cerber-market" ? "CERBER MARKET" : login;
 }
 
+function currentGroupRoom() {
+  return ["ru", "md", "en"].includes(String(db.lang || "ru")) ? String(db.lang || "ru") : "ru";
+}
+
+function groupRoomLabel(room = currentGroupRoom()) {
+  return ({ ru: "русский чат", md: "молдавский чат", en: "английский чат" })[room] || "чат";
+}
+
+function groupRoomMemberKey(login, room = currentGroupRoom()) {
+  return `${room}:${loginKey(login)}`;
+}
+
+function groupMemberLoginFromKey(value) {
+  const raw = String(value || "").trim();
+  return raw.includes(":") ? raw.split(":").slice(1).join(":") : raw;
+}
+
+function groupMessageRoom(message = {}) {
+  return ["ru", "md", "en"].includes(String(message.room || "")) ? String(message.room) : "ru";
+}
+
 function ensureGroupSettings() {
   db.groupSettings = db.groupSettings || structuredClone(defaults.groupSettings);
   db.groupSettings.mutedUntil = db.groupSettings.mutedUntil || {};
@@ -4150,9 +4172,13 @@ function ensureGroupSettings() {
 
 function mergeGroupMembers(...lists) {
   const result = [];
-  lists.flat().filter(Boolean).forEach((login) => {
-    const cleanLogin = String(login || "").trim();
-    if (cleanLogin && !result.some((item) => sameLogin(item, cleanLogin))) result.push(cleanLogin);
+  lists.flat().filter(Boolean).forEach((entry) => {
+    const cleanEntry = String(entry || "").trim();
+    if (!cleanEntry) return;
+    const key = cleanEntry.includes(":")
+      ? cleanEntry
+      : groupRoomMemberKey(cleanEntry, "ru");
+    if (!result.some((item) => String(item).toLowerCase() === key.toLowerCase())) result.push(key);
   });
   return result;
 }
@@ -4177,13 +4203,15 @@ function writeStoredGroupMembers(members) {
 function rememberGroupMember(login) {
   if (!login) return;
   ensureGroupSettings();
-  db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, [login]);
+  db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, [groupRoomMemberKey(login)]);
   writeStoredGroupMembers(db.groupSettings.members);
 }
 
-function groupMemberLogins() {
+function groupMemberLogins(room = currentGroupRoom()) {
   ensureGroupSettings();
-  return mergeGroupMembers(db.groupSettings.members, readStoredGroupMembers());
+  return mergeGroupMembers(db.groupSettings.members, readStoredGroupMembers())
+    .filter((entry) => String(entry).toLowerCase().startsWith(`${room}:`))
+    .map(groupMemberLoginFromKey);
 }
 
 function isGroupMember(login = db.currentUser) {
@@ -4193,7 +4221,7 @@ function isGroupMember(login = db.currentUser) {
 function markGroupPresence(login = db.currentUser) {
   ensureGroupSettings();
   if (!login || !isGroupMember(login)) return;
-  db.groupSettings.presence[login] = Date.now();
+  db.groupSettings.presence[groupRoomMemberKey(login)] = Date.now();
   const cutoff = Date.now() - 5 * 60 * 1000;
   Object.entries(db.groupSettings.presence).forEach(([key, value]) => {
     if (Number(value || 0) < cutoff) delete db.groupSettings.presence[key];
@@ -4210,7 +4238,10 @@ function saveGroupPresenceSoon() {
 function groupOnlineCount() {
   ensureGroupSettings();
   const cutoff = Date.now() - 60 * 1000;
-  return Object.values(db.groupSettings.presence || {}).filter((seenAt) => Number(seenAt || 0) >= cutoff).length;
+  const room = currentGroupRoom();
+  return Object.entries(db.groupSettings.presence || {})
+    .filter(([key, seenAt]) => String(key).toLowerCase().startsWith(`${room}:`) && Number(seenAt || 0) >= cutoff)
+    .length;
 }
 
 function joinGroupChat() {
@@ -4220,13 +4251,17 @@ function joinGroupChat() {
   const wasMember = isGroupMember(user.login);
   rememberGroupMember(user.login);
   markGroupPresence(user.login);
-  if (!wasMember) pushGroupSystemMessage(`${user.login} вступил в общий чат.`);
+  if (!wasMember) pushGroupSystemMessage(`${user.login} вступил в ${groupRoomLabel()}.`);
   saveDb();
   renderGroupChat();
 }
 
 function visibleGroupMessages() {
-  return (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const room = currentGroupRoom();
+  return (db.groupMessages || [])
+    .filter((msg) => !msg.deleted && groupMessageRoom(msg) === room)
+    .slice()
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
 async function sendGroupMessageRemote(message) {
@@ -4239,6 +4274,7 @@ async function sendGroupMessageRemote(message) {
         body: message.body || "",
         stickerUrl: message.stickerUrl || "",
         emojiUrls: groupEmojiUrlList(message.emojiUrls),
+        room: message.room || currentGroupRoom(),
         attachments: Array.isArray(message.attachments) ? message.attachments : []
       })
     });
@@ -4319,6 +4355,7 @@ function pushGroupSystemMessage(body) {
   db.groupMessages.push({
     id: `group-system-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     fromLogin: "cerber-market",
+    room: currentGroupRoom(),
     body,
     createdAt: Date.now(),
     date: new Date().toLocaleString()
@@ -4355,17 +4392,18 @@ function startGroupChatRefresh() {
   if (groupChatRefreshTimer) clearInterval(groupChatRefreshTimer);
   groupChatRefreshTimer = setInterval(async () => {
     if (route !== "group-chat") return;
+    const room = currentGroupRoom();
     const form = document.querySelector("[data-group-form]");
     const text = form?.querySelector("textarea")?.value || "";
     if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft || groupEmojiDraft.length) return;
     const before = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     const ok = await loadRemoteSession();
     if (!ok || route !== "group-chat") return;
     const after = JSON.stringify({
-      messages: (db.groupMessages || []).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
       settings: db.groupSettings
     });
     if (before !== after) renderGroupChat();
@@ -4379,19 +4417,20 @@ function renderGroupChat() {
   startGroupChatRefresh();
   const user = currentUser();
   if (!user) return renderAuth();
+  const roomLabel = groupRoomLabel();
   if (!isGroupMember(user.login)) {
     const membersCount = groupMemberLogins().length + 1;
     layout(`
       <section class="group-chat-screen">
         <article class="group-join-card">
           <span class="group-live-dot"></span>
-          <h1>Cerber Чат</h1>
-          <p>Вступите в общий чат, чтобы видеть сообщения, отправлять сообщения и играть в рулетках на призы.</p>
+          <h1>Cerber ${esc(roomLabel)}</h1>
+          <p>Вступите в ${esc(roomLabel)}, чтобы видеть сообщения этого языка, отправлять сообщения и играть в рулетках на призы.</p>
           <div class="group-join-stats">
             <strong>${membersCount}</strong>
             <span>участников будет в чате после вашего входа</span>
           </div>
-          <button class="group-join-button" data-group-join>Вступить в общий чат</button>
+          <button class="group-join-button" data-group-join>Вступить в ${esc(roomLabel)}</button>
         </article>
       </section>
     `);
@@ -4405,11 +4444,11 @@ function renderGroupChat() {
   const muteUntil = groupMuteUntil(user?.login);
   const membersCount = groupMemberLogins().length;
   const onlineCount = groupOnlineCount();
-  const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted);
-  const messages = (db.groupMessages || []).filter((msg) => !msg.deleted).slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted && groupMessageRoom(msg) === currentGroupRoom());
+  const messages = visibleGroupMessages();
   if (!messages.length && API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
     loadRemoteSession().then((ok) => {
-      if (ok && route === "group-chat" && (db.groupMessages || []).some((msg) => !msg.deleted)) renderGroupChat();
+      if (ok && route === "group-chat" && visibleGroupMessages().length) renderGroupChat();
     }).catch(() => {});
   }
   const lastRoll = (settings.rollTimers || []).filter((timer) => !timer.done).sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))[0];
@@ -4422,7 +4461,7 @@ function renderGroupChat() {
             <span class="group-live-dot"></span>
             <div>
               <h2>${esc(settings.title || "Общий чат")}</h2>
-              <p>${membersCount} участников · ${onlineCount} онлайн</p>
+              <p>${esc(roomLabel)} · ${membersCount} участников · ${onlineCount} онлайн</p>
             </div>
           </div>
           ${moderator ? `
@@ -4707,6 +4746,7 @@ async function handleGroupMessageSend(event) {
   const message = {
     id: `group-${Date.now()}`,
     fromLogin: user.login,
+    room: currentGroupRoom(),
     body,
     emojiUrls,
     attachments,
@@ -4745,7 +4785,7 @@ function handleGroupCommand(body) {
   const pin = body.match(/^\/pin(?:\s+(.+))?/i);
   if (pin) {
     const query = String(pin[1] || "").trim();
-    const messages = (db.groupMessages || []).filter((msg) => !msg.deleted && msg.fromLogin !== "cerber-market");
+    const messages = visibleGroupMessages().filter((msg) => msg.fromLogin !== "cerber-market");
     const target = query
       ? messages.slice().reverse().find((msg) => msg.id === query || String(msg.body || "").includes(query))
       : messages[messages.length - 1];
@@ -8750,6 +8790,7 @@ async function handleGroupWidgetSend(event) {
   db.groupMessages.push({
     id: `group-${Date.now()}`,
     fromLogin: user.login,
+    room: currentGroupRoom(),
     body,
     attachments,
     likes: [],
