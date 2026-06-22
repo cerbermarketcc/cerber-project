@@ -2893,6 +2893,8 @@ function adminCollectMirrorBots(state) {
     const users = mirror.users && typeof mirror.users === "object" ? Object.values(mirror.users) : [];
     const errors = Array.isArray(mirror.telegramErrors) ? mirror.telegramErrors : [];
     const active = mirror.active !== false && mirror.verified !== false && !mirror.blocked;
+    const creatorLogin = mirror.login || mirror.loginKey || mirror.userId || "";
+    const creatorTelegram = mirror.username ? `@${String(mirror.username).replace(/^@/, "")}` : "";
     return {
       id: mirror.id || webhookId || `mirror-${index + 1}`,
       source: "mirrorBots",
@@ -2900,6 +2902,8 @@ function adminCollectMirrorBots(state) {
       userId: mirror.userId || mirror.loginKey || mirror.ownerChatId || "",
       loginKey: mirror.loginKey || "",
       login: mirror.login || "",
+      creatorLogin,
+      creatorTelegram,
       chatId: String(mirror.chatId || mirror.ownerChatId || ""),
       ownerTelegramId: String(mirror.ownerTelegramId || mirror.ownerChatId || mirror.chatId || ""),
       username: mirror.username || "",
@@ -2919,9 +2923,22 @@ function adminCollectMirrorBots(state) {
       webhookOk: Boolean(mirror.webhookOk),
       lastTelegramError: mirror.lastTelegramError || "",
       usersCount: users.length,
+      users: users.slice(0, 25).map((user) => ({
+        telegramId: String(user.telegramId || ""),
+        username: user.username || "",
+        firstName: user.firstName || "",
+        lastName: user.lastName || "",
+        firstSeenAt: user.firstSeenAt || null,
+        lastSeenAt: user.lastSeenAt || user.updatedAt || null
+      })),
       sentMessagesCount: Number(mirror.sentMessagesCount || 0),
       broadcastsCount: Number(mirror.broadcastsCount || 0),
       telegramErrorsCount: errors.length + Number(mirror.telegramErrorsCount || 0),
+      telegramErrors: errors.slice(0, 10).map((error) => ({
+        error: error.error || error.message || String(error || ""),
+        action: error.action || "",
+        createdAt: error.createdAt || null
+      })),
       storage: "app_settings.mirrorBots"
     };
   });
@@ -3219,6 +3236,10 @@ function adminBuildOverview(data) {
       total: mirrorBotUsers.length,
       active: mirrorBotUsers.filter((bot) => bot.active && !bot.blocked).length,
       blocked: mirrorBotUsers.filter((bot) => bot.blocked).length,
+      users: mirrorBotUsers.reduce((sum, bot) => sum + Number(bot.usersCount || 0), 0),
+      sentMessages: mirrorBotUsers.reduce((sum, bot) => sum + Number(bot.sentMessagesCount || 0), 0),
+      errors: mirrorBotUsers.reduce((sum, bot) => sum + Number(bot.telegramErrorsCount || 0), 0),
+      createdToday: mirrorBotUsers.filter((bot) => adminTimestamp(bot) >= Date.now() - 24 * 60 * 60 * 1000).length,
       items: mirrorBotUsers
     },
     logs: Array.isArray(state.adminLogs) ? state.adminLogs : [],

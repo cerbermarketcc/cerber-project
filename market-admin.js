@@ -719,28 +719,79 @@ function renderLogs() {
     store_deleted: "Удаление магазина",
     store_updated: "Изменение магазина",
     settings_updated: "Изменение настроек",
-    broadcast_created: "Создание рассылки"
+    broadcast_created: "Создание рассылки",
+    mirror_bot_created: "Создано зеркало",
+    mirror_bot_saved: "Зеркало сохранено",
+    mirror_bot_error: "Ошибка зеркала",
+    mirror_bot_enable: "Зеркало включено",
+    mirror_bot_disable: "Зеркало отключено",
+    mirror_bot_block: "Зеркало заблокировано",
+    mirror_bot_unblock: "Зеркало разблокировано",
+    mirror_bot_restartWebhook: "Webhook зеркала обновлён",
+    mirror_bot_checkApi: "Проверка API зеркала",
+    mirror_bot_delete: "Зеркало удалено"
   }[action] || action);
   return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function renderBots() {
-  return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <article class="table-card"><table><thead><tr><th>Источник</th><th>Кто создал</th><th>Telegram</th><th>Бот</th><th>Дата</th><th>Активность</th><th>Статус</th><th>Token</th><th>Управление</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.loginKey || b.login || "-")}</td><td>${esc(b.username || b.chatId || "-")}</td><td>${esc(b.botUsername || "-")}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.updatedAt)}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "disabled"}</td><td>${esc(b.token || "-")}</td><td><button class="ghost" data-bot-action="${b.verified ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.verified ? "Отключить" : "Включить"}</button> <button class="ghost danger" data-bot-action="${b.blocked ? "unblock" : "block"}" data-bot-id="${esc(b.id)}">${b.blocked ? "Разблокировать" : "Заблокировать"}</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>`;
-  return `<section class="grid">${statCard("Всего ботов", data.bots.total, "зеркала клиентов")}${statCard("Активные", data.bots.active, "verified")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <article class="table-card"><table><thead><tr><th>Источник</th><th>Chat ID</th><th>Создатель</th><th>Статус</th><th>Token</th><th>Управление</th></tr></thead><tbody>${data.bots.items.map((b) => `<tr><td>${esc(b.source || "")}</td><td>${esc(b.chatId)}</td><td>${esc(b.loginKey || "-")}</td><td>${b.blocked ? "blocked" : b.verified ? "active" : "disabled"}</td><td>${esc(b.token || "-")}</td><td><button class="ghost" data-bot-action="disable" data-bot-id="${esc(b.id)}">Отключить</button> <button class="ghost danger" data-bot-action="block" data-bot-id="${esc(b.id)}">Заблокировать</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>`;
+  return renderMirrorBots();
 }
 
 function renderMirrorBots() {
   const rows = data.bots.items || [];
   const selected = rows.find((b) => b.id === data.selectedBotId) || rows[0];
+  const statusLabel = (bot) => bot.status || (bot.blocked ? "blocked" : bot.active ? "active" : "disabled");
+  const tokenPreview = (token = "") => {
+    const value = String(token || "");
+    if (!value) return "-";
+    if (value.length <= 14) return value;
+    return `${value.slice(0, 8)}...${value.slice(-6)}`;
+  };
+  const usersTable = selected?.users?.length
+    ? smallTable(["TG ID", "Username", "Имя", "Первый вход", "Последний вход"], selected.users.map((user) => [
+      user.telegramId || "-",
+      user.username ? `@${user.username}` : "-",
+      [user.firstName, user.lastName].filter(Boolean).join(" ") || "-",
+      fmtDate(user.firstSeenAt),
+      fmtDate(user.lastSeenAt)
+    ]))
+    : "<p class='muted'>Пользователей внутри зеркала пока нет.</p>";
+  const errorsTable = selected?.telegramErrors?.length
+    ? smallTable(["Дата", "Действие", "Ошибка"], selected.telegramErrors.map((error) => [fmtDate(error.createdAt), error.action || "-", error.error || "-"]))
+    : "<p class='muted'>Ошибок Telegram API нет.</p>";
   const detail = selected ? `<article class="split-card">
     <h3>Зеркало @${esc(selected.botUsername || selected.botName || "-")}</h3>
-    <p class="muted">Токен: <code>${esc(selected.token || "-")}</code><br>Webhook: <code>${esc(selected.webhookUrl || "-")}</code><br>Telegram ID владельца: <strong>${esc(selected.ownerTelegramId || selected.chatId || "-")}</strong><br>Username владельца: <strong>${esc(selected.username || "-")}</strong><br>Дата регистрации: ${fmtDate(selected.createdAt)}<br>Последняя ошибка Telegram API: ${esc(selected.lastTelegramError || "-")}</p>
-    <section class="grid">${statCard("Пользователей", selected.usersCount || 0, "в зеркале")}${statCard("Сообщений", selected.sentMessagesCount || 0, "отправлено")}${statCard("Рассылок", selected.broadcastsCount || 0, "через зеркало")}${statCard("Ошибок API", selected.telegramErrorsCount || 0, "Telegram")}</section>
-  </article>` : `<article class="split-card"><h3>Зеркал пока нет</h3><p class="muted">Зеркала появляются автоматически после подключения токена через основной Telegram-бот.</p></article>`;
-  return `<section class="grid">${statCard("Всего зеркал", data.bots.total, "автоматический реестр")}${statCard("Активные", data.bots.active, "работают")}${statCard("Заблокированные", data.bots.blocked, "blocked")}</section>
-  <article class="table-card"><table><thead><tr><th>ID</th><th>Username пользователя</th><th>Username бота</th><th>Название</th><th>Статус</th><th>Webhook</th><th>Дата</th><th>Активность</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.username || b.loginKey || "-")}</td><td>${esc(b.botUsername || "-")}</td><td>${esc(b.botName || "-")}</td><td>${esc(b.status || (b.blocked ? "blocked" : b.active ? "active" : "disabled"))}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
+    <section class="grid">
+      ${statCard("Пользователей", selected.usersCount || 0, "в зеркале")}
+      ${statCard("Сообщений", selected.sentMessagesCount || 0, "отправлено ботом")}
+      ${statCard("Рассылок", selected.broadcastsCount || 0, "через зеркало")}
+      ${statCard("Ошибок API", selected.telegramErrorsCount || 0, "Telegram")}
+    </section>
+    <div class="mirror-detail">
+      <p><strong>Создал:</strong> ${esc(selected.creatorLogin || selected.loginKey || selected.login || "-")} ${selected.creatorTelegram ? `<span class="muted">(${esc(selected.creatorTelegram)})</span>` : ""}</p>
+      <p><strong>Telegram ID:</strong> ${esc(selected.ownerTelegramId || selected.chatId || "-")} · <strong>Chat ID:</strong> ${esc(selected.chatId || "-")}</p>
+      <p><strong>Имя в Telegram:</strong> ${esc(selected.telegramName || "-")} · <strong>Username:</strong> ${esc(selected.username ? `@${selected.username}` : "-")}</p>
+      <p><strong>Бот:</strong> ${esc(selected.botUsername ? `@${selected.botUsername}` : selected.botName || "-")} · <strong>Название:</strong> ${esc(selected.botName || "-")}</p>
+      <p><strong>Создано:</strong> ${fmtDate(selected.createdAt)} · <strong>Обновлено:</strong> ${fmtDate(selected.updatedAt)} · <strong>Активность:</strong> ${fmtDate(selected.lastActivityAt)}</p>
+      <p><strong>Webhook:</strong> ${selected.webhookOk ? "ok" : "error"} · <code>${esc(selected.webhookUrl || "-")}</code></p>
+      <p><strong>Token:</strong> <code>${esc(tokenPreview(selected.token))}</code> · <strong>Хранилище:</strong> ${esc(selected.storage || "-")}</p>
+      <p><strong>Последняя ошибка:</strong> ${esc(selected.lastTelegramError || "-")}</p>
+    </div>
+    <h3>Пользователи зеркала</h3>
+    <div class="table-card">${usersTable}</div>
+    <h3>Ошибки Telegram API</h3>
+    <div class="table-card">${errorsTable}</div>
+  </article>` : `<article class="split-card"><h3>Зеркал пока нет</h3><p class="muted">Зеркала появятся автоматически после подключения токена через основной Telegram-бот.</p></article>`;
+  return `<section class="grid">
+    ${statCard("Всего зеркал", data.bots.total || 0, "автоматический реестр")}
+    ${statCard("Активные", data.bots.active || 0, "работают")}
+    ${statCard("Создано за 24ч", data.bots.createdToday || 0, "новые зеркала")}
+    ${statCard("Пользователей", data.bots.users || 0, "во всех зеркалах")}
+    ${statCard("Сообщений", data.bots.sentMessages || 0, "отправлено ботами")}
+    ${statCard("Ошибок API", data.bots.errors || 0, "Telegram")}
+  </section>
+  <article class="table-card"><table><thead><tr><th>ID</th><th>Создал</th><th>TG username</th><th>Chat ID</th><th>Бот</th><th>Создано</th><th>Активность</th><th>Польз.</th><th>Webhook</th><th>Статус</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.creatorLogin || b.loginKey || b.login || "-")}</td><td>${esc(b.creatorTelegram || (b.username ? `@${b.username}` : "-"))}</td><td>${esc(b.chatId || "-")}</td><td>${esc(b.botUsername ? `@${b.botUsername}` : b.botName || "-")}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td>${Number(b.usersCount || 0)}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${esc(statusLabel(b))}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
 }
 
 function bindActions() {

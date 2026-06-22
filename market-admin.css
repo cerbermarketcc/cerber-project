@@ -457,6 +457,21 @@ tr:hover td {
   color: var(--muted);
 }
 
+.mirror-detail {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.mirror-detail p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.mirror-detail code {
+  word-break: break-all;
+}
+
 @media (max-width: 980px) {
   .admin-shell {
     grid-template-columns: 1fr;
