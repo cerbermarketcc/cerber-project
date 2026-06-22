@@ -3864,32 +3864,23 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     setButtonLoading(button, true, "Создаём счет");
     const selectedCoinId = document.querySelector("[data-checkout-coin]")?.value || defaultCoin.id;
     const selectedCoin = walletCoinById(selectedCoinId);
-    const order = handleProductReservation(storeId, productId, positionId, { silent: true, coinId: selectedCoin.id });
-    if (!order) {
-      setButtonLoading(button, false);
-      return;
-    }
     try {
-      const deposit = await createWalletDepositRequest(priceUsd, selectedCoin.id, `Пополнение для заказа: ${product.title}`);
-      order.walletDepositId = deposit.id;
-      order.walletDepositAmountUsd = priceUsd;
-      order.walletDepositAmountLtc = deposit.payAmount || usdToLtc(priceUsd);
-      order.walletDepositAddress = deposit.payAddress || "";
-      order.walletDepositPaymentUrl = deposit.paymentUrl || "";
-      order.paymentUrl = deposit.paymentUrl || order.paymentUrl || "";
-      order.coinId = selectedCoin.id;
-      order.payCurrency = selectedCoin.payCurrency;
-      saveDb();
-      showProductOrder(order.id);
+      const payload = await apiFetch("/api/orders/product/deposit", {
+        method: "POST",
+        body: JSON.stringify({ storeId, productId, positionId, coinId: selectedCoin.id, payCurrency: selectedCoin.payCurrency })
+      });
+      applyRemoteState(payload);
+      document.querySelector("[data-modal]")?.classList.remove("open");
+      if (payload.order?.id) showProductOrder(payload.order.id);
+      else renderOrders("all");
     } catch (error) {
-      cancelProductOrder(order.id, { silent: true });
       if (/Сессия не найдена|session/i.test(String(error.message || ""))) {
         clearSession();
         authMode = "login";
         renderAuth("Сессия истекла. Войдите снова, чтобы создать счёт.");
         return;
       }
-      showToast(error.message || "Не удалось создать счет LTC");
+      showToast(error.message || "Не удалось создать счёт LTC");
       setButtonLoading(button, false);
     }
   });

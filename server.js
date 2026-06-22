@@ -56,6 +56,7 @@ let adminRealtimeServer = null;
 let publicRealtimeServer = null;
 let seedReady = false;
 let seedPromise = null;
+const maxDataImageLength = 7_000_000;
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
@@ -65,7 +66,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "40mb" }));
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
   if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini)$/i.test(pathname)) {
@@ -290,7 +291,7 @@ function isBrokenImageValue(value = "") {
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
   if (isBrokenImageValue(image)) return fallback;
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > 5000000) return fallback;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > maxDataImageLength) return fallback;
   return image;
 }
 
@@ -1512,7 +1513,7 @@ function sanitizeGroupMessagePayload(payload = {}) {
   }).filter(Boolean) : [];
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 4).map((file, index) => {
     const url = String(file?.url || "").trim();
-    if (!url || url.length > 1600000) return null;
+    if (!url || url.length > maxDataImageLength) return null;
     if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
     return {
       name: String(file?.name || `file-${index + 1}`).slice(0, 120),
@@ -2525,7 +2526,7 @@ function normalizeSupportAttachments(value, maxItems = 8) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, maxItems).map((file, index) => {
     const url = String(file?.url || "").trim();
-    if (!url || url.length > 1600000) return null;
+    if (!url || url.length > maxDataImageLength) return null;
     if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
     return {
       name: String(file?.name || `image-${index + 1}`).slice(0, 120),
@@ -3512,6 +3513,117 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     await saveSettingsState(state);
     notifyRealtime("order_paid", { orderId: order.id, storeId });
     res.json({ order, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/product/deposit", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    const storeId = String(req.body.storeId || "").trim();
+    const productId = String(req.body.productId || "").trim();
+    const positionId = String(req.body.positionId || "").trim();
+    const coin = walletCoinFromRequest(req.body);
+    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+    const store = row?.data || null;
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const status = String(store.status || "active").toLowerCase();
+    if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
+      return res.status(409).json({ error: "Магазин временно остановлен" });
+    }
+    const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
+    const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
+    if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
+    if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
+
+    const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
+
+    const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+    const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+    const fromPosition = positionItems.length > 0;
+    const sourceItems = fromPosition ? positionItems : productItems;
+    const requiresIssuedDescription = sourceItems.length > 0;
+    const reservedDescription = sourceItems[0] || "";
+    if (requiresIssuedDescription && !reservedDescription) {
+      return res.status(409).json({ error: "Нет доступных описаний для выдачи" });
+    }
+
+    const state = await loadSettingsState();
+    state.orders = Array.isArray(state.orders) ? state.orders : [];
+    const now = Date.now();
+    const order = {
+      id: `order-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      type: "product",
+      login: user.login,
+      storeId,
+      productId,
+      positionId,
+      product: product.title || "",
+      storeName: store.name || store.id,
+      status: "pending_payment",
+      paymentStatus: "waiting",
+      paymentProvider: "nowpayments",
+      createdAt: now,
+      paymentExpiresAt: now + walletDepositTtlMs,
+      autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
+      autoReleaseAt: 0,
+      amountUsd: priceUsd,
+      ltcAmount: priceUsd / 54.2,
+      coinId: coin.id,
+      payCurrency: coin.payCurrency,
+      sellerWallet: coin.id === "ltc" ? String(store.ltcWallet || "") : String(store.wallets?.[coin.id] || ""),
+      location: [position.city, position.district].filter(Boolean).join(", "),
+      productDescription: product.description || "",
+      reservedDescription: "",
+      reservedFromPosition: fromPosition,
+      reservedStock: false
+    };
+    applyProductOrderCommission(order, state, store);
+
+    const payment = await createNowpaymentsWalletPayment({
+      price_amount: priceUsd,
+      price_currency: "usd",
+      pay_currency: coin.payCurrency,
+      order_id: order.id,
+      order_description: `${order.product || "CERBER order"} / ${order.storeName || ""}`,
+      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
+    });
+
+    order.paymentId = payment.payment_id || payment.id || "";
+    order.payAddress = payment.pay_address || payment.address || "";
+    order.payAmount = Number(payment.pay_amount || 0);
+    order.paymentUrl = payment.payment_url || payment.invoice_url || "";
+    order.paymentStatus = payment.payment_status || "waiting";
+    order.walletDepositAmountUsd = priceUsd;
+    order.walletDepositAmountLtc = order.payAmount || order.ltcAmount;
+    order.walletDepositAddress = order.payAddress || "";
+    order.walletDepositPaymentUrl = order.paymentUrl || "";
+    order.paymentProviderPayload = {
+      paymentId: order.paymentId,
+      payAddress: order.payAddress,
+      payAmount: order.payAmount,
+      payCurrency: coin.payCurrency,
+      coinId: coin.id,
+      paymentUrl: order.paymentUrl
+    };
+
+    if (requiresIssuedDescription) {
+      order.reservedDescription = sourceItems.shift() || "";
+      order.reservedStock = Boolean(order.reservedDescription);
+    }
+    position.stock = Math.max(0, Number(position.stock || 0) - 1);
+    state.orders.unshift(order);
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveOwnerStoreFallback(store);
+    await saveSettingsState(state);
+    notifyRealtime("order_created", { orderId: order.id, storeId });
+    res.json({ order, paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
