@@ -1393,6 +1393,7 @@ function applyRemoteState(payload) {
   db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
   db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
   db.orders = mergeOrderLists(db.orders, rememberedOrders);
+  prunePersonalStateForCurrentUser();
   db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, rememberedGroupMembers);
   writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
@@ -1507,6 +1508,34 @@ function realtimeCanRenderNow() {
   if (document.querySelector("[data-nav-pop].open, [data-account-pop].open, [data-modal].open, [data-group-widget].open")) return false;
   if (document.querySelector(".message-reaction-picker:not([hidden])")) return false;
   return !(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+}
+
+function recordBelongsToLogin(record = {}, login = "") {
+  if (!login) return false;
+  return [record.login, record.fromLogin, record.toLogin, record.ownerLogin, record.recipientLogin]
+    .some((value) => sameLogin(value, login));
+}
+
+function prunePersonalStateForCurrentUser() {
+  const login = db.currentUser || "";
+  if (!login) {
+    if (localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY) && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
+    db.messages = [];
+    db.orders = [];
+    db.walletTransactions = [];
+    db.walletDeposits = [];
+    db.walletWithdrawals = [];
+    db.balances = {};
+    db.ltcBalances = {};
+    db.supportTickets = [];
+    return;
+  }
+  db.messages = (db.messages || []).filter((item) => recordBelongsToLogin(item, login));
+  db.orders = (db.orders || []).filter((item) => recordBelongsToLogin(item, login));
+  db.walletTransactions = (db.walletTransactions || []).filter((item) => sameLogin(item.login, login));
+  db.walletDeposits = (db.walletDeposits || []).filter((item) => sameLogin(item.login, login));
+  db.walletWithdrawals = (db.walletWithdrawals || []).filter((item) => sameLogin(item.login, login));
+  db.supportTickets = (db.supportTickets || []).filter((item) => recordBelongsToLogin(item, login));
 }
 
 function scheduleRealtimeRefresh() {
@@ -3621,10 +3650,24 @@ function activateProductOrderAfterPayment(order, providerPayload = {}) {
   return true;
 }
 
-function handleProductPurchase(storeId, productId, positionId) {
+async function handleProductPurchase(storeId, productId, positionId) {
   if (!currentUser() || (API_ENABLED && !hasApiSession())) {
     authMode = "login";
     return renderAuth("Войдите или зарегистрируйтесь, чтобы купить товар");
+  }
+  if (API_ENABLED) {
+    try {
+      const payload = await apiFetch("/api/orders/product/balance", {
+        method: "POST",
+        body: JSON.stringify({ storeId, productId, positionId })
+      });
+      applyRemoteState(payload);
+      renderOrders("active");
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось оплатить заказ с баланса");
+      return;
+    }
   }
   const store = storeById(storeId);
   const product = productById(store, productId);
@@ -3800,12 +3843,21 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     ${enough ? `<p class="desc">На балансе достаточно средств. После оплаты описание товара появится в деталях заказа.</p>` : `<p class="notice">На балансе недостаточно средств. Пополните LTC на нужную сумму, заказ будет в обработке 40 минут.</p>`}
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
-  document.querySelector("[data-checkout-balance]")?.addEventListener("click", (event) => {
-    setButtonLoading(event.currentTarget, true);
-    const order = handleProductReservation(storeId, productId, positionId, { silent: true });
-    if (!order) return;
-    payProductOrderFromBalance(order.id);
-    document.querySelector("[data-modal]")?.classList.remove("open");
+  document.querySelector("[data-checkout-balance]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    setButtonLoading(button, true);
+    try {
+      const payload = await apiFetch("/api/orders/product/balance", {
+        method: "POST",
+        body: JSON.stringify({ storeId, productId, positionId })
+      });
+      applyRemoteState(payload);
+      document.querySelector("[data-modal]")?.classList.remove("open");
+      renderOrders("active");
+    } catch (error) {
+      showToast(error.message || "Не удалось оплатить заказ с баланса");
+      setButtonLoading(button, false);
+    }
   });
   document.querySelector("[data-checkout-deposit]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -7860,16 +7912,6 @@ function shopPanelTabContent(tab, data) {
     `;
   }
   if (tab === "staff") return shopStaffTab(store);
-  if (tab === "staff") {
-    return `
-      <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Доступы сотрудников, роли и права внутри магазина.</p></div></section>
-      <section class="seller-dashboard-card seller-wide-card">
-        <div class="seller-card-head"><h3>Команда</h3><span>1 активный доступ</span></div>
-        <div class="seller-source"><span>${esc(store.ownerLogin || "test")}</span><strong>Владелец</strong></div>
-        <p>Новые сотрудники и права будут подключаться здесь.</p>
-      </section>
-    `;
-  }
   return `
     <section class="seller-dashboard-hero"><div><h2>Dashboard</h2><p>Панель магазина.</p></div></section>
   `;

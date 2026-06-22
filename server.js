@@ -478,15 +478,9 @@ async function stateFor(user) {
       "app_settings query",
       8000
     );
-    const profilesQuery = withTimeout(
-      supabase.from("profiles").select("login,name,role").limit(500),
-      "profiles query",
-      8000
-    );
-    const [messagesResult, settingsResult, profilesResult] = await Promise.all([
+    const [messagesResult, settingsResult] = await Promise.all([
       messagesQuery,
-      settingsQuery,
-      profilesQuery
+      settingsQuery
     ]);
     const storesResult = await withTimeout(
       supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
@@ -504,18 +498,15 @@ async function stateFor(user) {
     const { data: stores, error: storesError } = storesResult;
     const { data: messages, error: messagesError } = messagesResult;
     const { data: settings, error: settingsError } = settingsResult;
-    const { data: profiles, error: profilesError } = profilesResult;
     if (storesError) throw storesError;
     if (messagesError) throw messagesError;
     if (settingsError) throw settingsError;
-    if (profilesError) throw profilesError;
     console.log("[stateFor] timings", {
       seedMs,
       queriesMs,
       totalMs: Date.now() - totalStartedAt,
       stores: stores?.length || 0,
-      messages: messages?.length || 0,
-      profiles: profiles?.length || 0
+      messages: messages?.length || 0
     });
     const settingsData = settings?.data || {};
     if (normalizeServerOrders(settingsData)) {
@@ -523,7 +514,6 @@ async function stateFor(user) {
         console.error("[stateFor] order normalization save failed", { message: error.message });
       });
     }
-    const mirrorBots = adminCollectMirrorBots(settingsData);
     const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
     const storesFromDb = Array.isArray(storesResult.data)
       ? storesResult.data.map((row) => row.data)
@@ -543,6 +533,54 @@ async function stateFor(user) {
       });
     }
     const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+    const userLogin = user?.login || "";
+    const userKey = loginKey(userLogin);
+    const sameUser = (value) => userKey && loginKey(value) === userKey;
+    const allMessages = (messages || []).map((row) => row.data);
+    const privateMessages = user
+      ? allMessages.filter((message) => (
+        sameUser(message.fromLogin) ||
+        sameUser(message.toLogin) ||
+        sameUser(message.login) ||
+        sameUser(message.recipientLogin)
+      ))
+      : [];
+    const userOrders = user
+      ? orders.filter((order) => (
+        sameUser(order.login) ||
+        sameUser(order.fromLogin) ||
+        sameUser(order.toLogin) ||
+        sameUser(order.ownerLogin)
+      ))
+      : [];
+    const userExchangeRequests = user
+      ? (settingsData.exchangeRequests || []).filter((request) => (
+        sameUser(request.login) ||
+        sameUser(request.fromLogin) ||
+        sameUser(request.toLogin) ||
+        sameUser(request.ownerLogin)
+      ))
+      : [];
+    const userWalletTransactions = user
+      ? (Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : []).filter((item) => sameUser(item.login))
+      : [];
+    const userWalletDeposits = user
+      ? (Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : []).filter((item) => sameUser(item.login))
+      : [];
+    const userWalletWithdrawals = user
+      ? (Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : []).filter((item) => sameUser(item.login))
+      : [];
+    const userBalances = user ? {
+      ...(settingsData.balances?.[userLogin] != null ? { [userLogin]: settingsData.balances[userLogin] } : {}),
+      ...(settingsData.balances?.[userKey] != null ? { [userKey]: settingsData.balances[userKey] } : {})
+    } : {};
+    const userLtcBalances = user ? {
+      ...(settingsData.ltcBalances?.[userLogin] != null ? { [userLogin]: settingsData.ltcBalances[userLogin] } : {}),
+      ...(settingsData.ltcBalances?.[userKey] != null ? { [userKey]: settingsData.ltcBalances[userKey] } : {})
+    } : {};
+    const userSupportTickets = Array.isArray(settingsData.supportTickets) && user
+      ? settingsData.supportTickets.filter((ticket) => sameUser(ticket.fromLogin) || sameUser(ticket.recipientLogin)).map(supportTicketPublic)
+      : [];
 
     return {
       user: publicUser(user),
@@ -550,40 +588,38 @@ async function stateFor(user) {
         currentUser: user?.login || "",
         theme: settingsData.theme || "light",
         lang: settingsData.lang || "ru",
-        users: profiles || [],
+        users: user ? [publicUser(user)] : [],
         stores: visibleStores,
-        messages: (messages || []).map((row) => row.data),
-        orders,
+        messages: privateMessages,
+        orders: userOrders,
         exchangeCards: visibleExchangeCards,
-        exchangeRequests: settingsData.exchangeRequests || [],
+        exchangeRequests: userExchangeRequests,
         groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
         groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
         referrals: settingsData.referrals || [],
         referralPayments: settingsData.referralPayments || [],
         referralCodes: settingsData.referralCodes || {},
-        balances: settingsData.balances || {},
-        ltcBalances: settingsData.ltcBalances || {},
-        walletTransactions: Array.isArray(settingsData.walletTransactions) ? settingsData.walletTransactions : [],
-        walletDeposits: Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : [],
-        walletWithdrawals: Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : [],
-        mirrorBots,
+        balances: userBalances,
+        ltcBalances: userLtcBalances,
+        walletTransactions: userWalletTransactions,
+        walletDeposits: userWalletDeposits,
+        walletWithdrawals: userWalletWithdrawals,
+        mirrorBots: [],
         bots: {
-          total: mirrorBots.length,
-          active: mirrorBots.filter((bot) => bot.active && !bot.blocked).length,
-          blocked: mirrorBots.filter((bot) => bot.blocked).length,
-          items: mirrorBots
+          total: 0,
+          active: 0,
+          blocked: 0,
+          items: []
         },
         siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
         broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
-        supportSettings: normalizeSupportSettings(settingsData.supportSettings),
-        supportTickets: Array.isArray(settingsData.supportTickets) && user
-          ? settingsData.supportTickets.filter((ticket) => sameLogin(ticket.fromLogin, user.login) || sameLogin(ticket.recipientLogin, user.login)).map(supportTicketPublic)
-          : [],
+        supportSettings: { recipients: [] },
+        supportTickets: userSupportTickets,
         userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
         blockedUsers: settingsData.blockedUsers || {},
         storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
-        ownerSettings: settingsData.ownerSettings || {},
-        paymentSettings: settingsData.paymentSettings || {},
+        ownerSettings: {},
+        paymentSettings: {},
         referralPeriod: settingsData.referralPeriod || {},
         filters: settingsData.filters || {}
       }
@@ -800,9 +836,24 @@ function sellerAdminSecret() {
 }
 
 function signSellerAdminToken(storeId, meta = {}) {
-  const payload = Buffer.from(JSON.stringify({ storeId, ...meta, createdAt: Date.now() })).toString("base64url");
+  const now = Date.now();
+  const payload = Buffer.from(JSON.stringify({ storeId, ...meta, createdAt: now, expiresAt: now + 7 * 24 * 60 * 60 * 1000 })).toString("base64url");
   const signature = crypto.createHmac("sha256", sellerAdminSecret()).update(payload).digest("base64url");
   return `${payload}.${signature}`;
+}
+
+async function stateForStoreAdmin(storeId) {
+  const payload = await stateFor(null);
+  const id = String(storeId || "");
+  const state = await loadSettingsState();
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300)).data || [];
+  payload.state.orders = orders.filter((order) => String(order.storeId || "") === id);
+  payload.state.messages = messages
+    .map((row) => row.data)
+    .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
+  payload.state.walletWithdrawals = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id);
+  return payload;
 }
 
 function verifySellerAdminToken(req) {
@@ -814,7 +865,9 @@ function verifySellerAdminToken(req) {
   const expectedBuffer = Buffer.from(expected);
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
   try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (data.expiresAt && Date.now() > Number(data.expiresAt)) return null;
+    return data;
   } catch {
     return null;
   }
@@ -1083,7 +1136,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     if (ownerLoginOk && password === (store.adminPassword || "")) {
-      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null } });
+      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || password !== String(staff.password || "")) {
@@ -1093,7 +1146,8 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     res.json({
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
       store,
-      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions }
+      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
+      ...(await stateForStoreAdmin(store.id))
     });
   } catch (error) {
     next(error);
@@ -1129,7 +1183,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
-    res.json({ store: mergedStore, ...(await stateFor(null)) });
+    res.json({ store: mergedStore, ...(await stateForStoreAdmin(mergedStore.id)) });
   } catch (error) {
     next(error);
   }
@@ -1230,7 +1284,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     await saveSettingsState(state);
     await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
-    res.json({ withdrawal: request, ...(await stateFor(null)) });
+    res.json({ withdrawal: request, ...(await stateForStoreAdmin(storeId)) });
   } catch (error) {
     next(error);
   }
@@ -1373,24 +1427,24 @@ app.put("/api/state", async (req, res, next) => {
         lang: state.lang || "ru",
         orders: Array.isArray(state.orders) ? state.orders : [],
         exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
-        exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [],
+        exchangeRequests: currentSettingsData.exchangeRequests || [],
         groupMessages: mergedGroupMessages,
         groupSettings: mergedGroupSettings,
         referrals: Array.isArray(state.referrals) ? state.referrals : [],
         referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
         referralCodes: state.referralCodes || {},
-        balances: state.balances || {},
-        ltcBalances: state.ltcBalances || {},
-        walletTransactions: Array.isArray(state.walletTransactions) ? state.walletTransactions : [],
-        walletDeposits: Array.isArray(state.walletDeposits) ? state.walletDeposits : [],
-        walletWithdrawals: Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [],
+        balances: currentSettingsData.balances || {},
+        ltcBalances: currentSettingsData.ltcBalances || {},
+        walletTransactions: Array.isArray(currentSettingsData.walletTransactions) ? currentSettingsData.walletTransactions : [],
+        walletDeposits: Array.isArray(currentSettingsData.walletDeposits) ? currentSettingsData.walletDeposits : [],
+        walletWithdrawals: Array.isArray(currentSettingsData.walletWithdrawals) ? currentSettingsData.walletWithdrawals : [],
         telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
         mirrorBots: currentSettingsData.mirrorBots || [],
         siteNotifications: currentSettingsData.siteNotifications || [],
         broadcasts: currentSettingsData.broadcasts || [],
         userFilters: currentSettingsData.userFilters || [],
         blockedUsers: currentSettingsData.blockedUsers || {},
-        storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications : [],
+        storeApplications: Array.isArray(currentSettingsData.storeApplications) ? currentSettingsData.storeApplications : [],
         ownerSettings: currentSettingsData.ownerSettings || {},
         paymentSettings: currentSettingsData.paymentSettings || {},
         referralPeriod: state.referralPeriod || {},
@@ -2334,7 +2388,9 @@ async function savePublicStoresCache(stores = []) {
   if (!Array.isArray(stores) || !stores.length) return;
   const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
   const state = settings?.data || {};
-  state.publicStoresCache = stores.map(publicStoreForState);
+  const nextCache = stores.map(publicStoreForState);
+  if (JSON.stringify(state.publicStoresCache || []) === JSON.stringify(nextCache)) return;
+  state.publicStoresCache = nextCache;
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
 }
@@ -3367,6 +3423,100 @@ async function cancelWalletDeposit(deposit, state, providerPayload = {}) {
   await saveSettingsState(state);
 }
 
+app.post("/api/orders/product/balance", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const storeId = String(req.body.storeId || "").trim();
+    const productId = String(req.body.productId || "").trim();
+    const positionId = String(req.body.positionId || "").trim();
+    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+    const store = row?.data || null;
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const status = String(store.status || "active").toLowerCase();
+    if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
+      return res.status(409).json({ error: "Магазин временно остановлен" });
+    }
+    const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
+    const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
+    if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
+    if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
+
+    const state = await loadSettingsState();
+    state.orders = Array.isArray(state.orders) ? state.orders : [];
+    state.ltcBalances = state.ltcBalances || {};
+    state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+    const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+    const ltcAmount = priceUsd / 54.2;
+    const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
+    if (balance + 0.00000001 < ltcAmount) return res.status(400).json({ error: "Недостаточно LTC на балансе" });
+
+    const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+    const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+    const fromPosition = positionItems.length > 0;
+    const sourceItems = fromPosition ? positionItems : productItems;
+    const reservedDescription = sourceItems.length ? sourceItems.shift() : "";
+    if (!reservedDescription && (positionItems.length || productItems.length)) {
+      return res.status(409).json({ error: "Нет доступных описаний для выдачи" });
+    }
+
+    position.stock = Math.max(0, Number(position.stock || 0) - 1);
+    product.purchases = Number(product.purchases || 0) + 1;
+    store.orders = Number(store.orders || 0) + 1;
+    const now = Date.now();
+    const order = {
+      id: `order-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      type: "product",
+      login: user.login,
+      storeId,
+      productId,
+      positionId,
+      product: product.title || "",
+      storeName: store.name || store.id,
+      status: "active",
+      paymentStatus: "paid",
+      paymentProvider: "balance",
+      createdAt: now,
+      paidAt: now,
+      autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
+      autoReleaseAt: 0,
+      amountUsd: priceUsd,
+      ltcAmount,
+      location: [position.city, position.district].filter(Boolean).join(", "),
+      productDescription: product.description || "",
+      reservedDescription,
+      reservedFromPosition: fromPosition,
+      reservedStock: true
+    };
+    order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
+    applyProductOrderCommission(order, state, store);
+    state.ltcBalances[user.login] = Math.max(0, balance - ltcAmount);
+    state.orders.unshift(order);
+    state.walletTransactions.unshift({
+      id: `tx-${order.id}`,
+      login: user.login,
+      type: "purchase",
+      title: `Покупка: ${order.product}`,
+      amountLtc: -ltcAmount,
+      amountUsd: -priceUsd,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      status: "completed"
+    });
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveOwnerStoreFallback(store);
+    await saveSettingsState(state);
+    notifyRealtime("order_paid", { orderId: order.id, storeId });
+    res.json({ order, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], async (req, res, next) => {
   try {
     requireDb();
@@ -3484,7 +3634,6 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
       id: `tx-${deposit.id}`,
       login: user.login,
       type: "deposit",
-      title: "Пополнение LTC",
       title: "Пополнение баланса",
       amountLtc: amountLtcExpected,
       amountUsd,
