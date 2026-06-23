@@ -4730,15 +4730,31 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
 
 const proverkaTimers = new Map();
 const proverkaHelpText = [
-  "Привет! Я бот для случайных чисел и таймеров.",
+  "👋 Привет! Я бот для розыгрышей, случайных номеров и таймеров.",
   "",
-  "Команды:",
-  "/proverka - выдаю случайное число от 1 до 999",
-  "/krut номер - выдаю случайный номер от 1 до указанного номера",
-  "/timer минуты - запускаю таймер, например /timer 2",
-  "/timeroff - выключаю таймер",
-  "/timekrut номер минуты - выдаю номер и запускаю таймер, например /timekrut 20 2"
+  "✅ Меня можно добавлять в группы и чаты. Все участники смогут пользоваться командами.",
+  "",
+  "📌 Команды:",
+  "/proverka - случайное число от 1 до 999",
+  "/krut номер - случайный номер от 1 до указанного числа",
+  "/timer минуты - таймер на указанное время",
+  "/timeroff - остановить таймер",
+  "/timekrut номер минуты - номер + таймер одной командой",
+  "",
+  "💡 Примеры:",
+  "/krut 20",
+  "/timer 2",
+  "/timekrut 20 2"
 ].join("\n");
+
+const proverkaCommands = [
+  { command: "proverka", description: "Случайное число от 1 до 999" },
+  { command: "krut", description: "Случайный номер до указанного числа" },
+  { command: "timer", description: "Запустить таймер в минутах" },
+  { command: "timeroff", description: "Остановить таймер" },
+  { command: "timekrut", description: "Случайный номер и таймер" },
+  { command: "help", description: "Показать помощь" }
+];
 
 function proverkaCommand(message) {
   const text = String(message?.text || "").trim();
@@ -4754,6 +4770,10 @@ function proverkaPositiveInt(value) {
   if (!/^\d+$/.test(String(value || ""))) return 0;
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : 0;
+}
+
+function proverkaReplyTarget(message) {
+  return message?.reply_to_message?.message_id || message?.message_id || undefined;
 }
 
 async function proverkaTelegramApi(method, payload = {}) {
@@ -4777,22 +4797,34 @@ async function proverkaTelegramApi(method, payload = {}) {
   return body;
 }
 
-async function proverkaSendMessage(chatId, text) {
-  return proverkaTelegramApi("sendMessage", {
+async function proverkaSendMessage(chatId, text, options = {}) {
+  const payload = {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true
+  };
+  if (options.replyToMessageId) {
+    payload.reply_to_message_id = options.replyToMessageId;
+    payload.allow_sending_without_reply = true;
+  }
+  return proverkaTelegramApi("sendMessage", payload);
+}
+
+async function proverkaEnsureCommands() {
+  if (!proverkaBotToken) return;
+  await proverkaTelegramApi("setMyCommands", { commands: proverkaCommands }).catch((error) => {
+    console.error("Proverka setMyCommands error", error);
   });
 }
 
-function proverkaStartTimer(chatId, minutes) {
+function proverkaStartTimer(chatId, minutes, replyToMessageId) {
   const key = String(chatId);
   const oldTimer = proverkaTimers.get(key);
   if (oldTimer) clearTimeout(oldTimer);
   const timer = setTimeout(() => {
     proverkaTimers.delete(key);
-    proverkaSendMessage(chatId, "Время истекло! ⚠️").catch((error) => {
+    proverkaSendMessage(chatId, "⚠️ Время истекло!", { replyToMessageId }).catch((error) => {
       console.error("Proverka timer send error", error);
     });
   }, minutes * 60 * 1000);
@@ -4805,7 +4837,7 @@ async function proverkaStopTimer(chatId) {
   const timer = proverkaTimers.get(key);
   if (timer) clearTimeout(timer);
   proverkaTimers.delete(key);
-  await proverkaSendMessage(chatId, "Таймер приостановлен.");
+  await proverkaSendMessage(chatId, "⏸️ Таймер приостановлен.");
 }
 
 async function handleProverkaMessage(message) {
@@ -4827,29 +4859,29 @@ async function handleProverkaMessage(message) {
 
   if (command === "/proverka") {
     const number = Math.floor(Math.random() * 999) + 1;
-    await proverkaSendMessage(chatId, `Выпало число <b>${number}</b>.`);
+    await proverkaSendMessage(chatId, `🎲 Выпало число <b>${number}</b>.`);
     return;
   }
 
   if (command === "/krut") {
     const limit = args.length === 1 ? proverkaPositiveInt(args[0]) : 0;
     if (!limit) {
-      await proverkaSendMessage(chatId, "Напиши так: /krut номер");
+      await proverkaSendMessage(chatId, "ℹ️ Напиши так: /krut номер");
       return;
     }
     const number = Math.floor(Math.random() * limit) + 1;
-    await proverkaSendMessage(chatId, `Выпал номер <b>${number}</b> из <b>${limit}</b>.`);
+    await proverkaSendMessage(chatId, `🎯 Выпал номер <b>${number}</b>.`);
     return;
   }
 
   if (command === "/timer") {
     const minutes = args.length === 1 ? proverkaPositiveInt(args[0]) : 0;
     if (!minutes) {
-      await proverkaSendMessage(chatId, "Напиши так: /timer время_в_минутах");
+      await proverkaSendMessage(chatId, "ℹ️ Напиши так: /timer время_в_минутах");
       return;
     }
-    proverkaStartTimer(chatId, minutes);
-    await proverkaSendMessage(chatId, `Таймер запущен на <b>${minutes}</b> минут.`);
+    proverkaStartTimer(chatId, minutes, proverkaReplyTarget(message));
+    await proverkaSendMessage(chatId, `⏱️ Таймер запущен на <b>${minutes}</b> минут.`);
     return;
   }
 
@@ -4862,12 +4894,12 @@ async function handleProverkaMessage(message) {
     const limit = args.length === 2 ? proverkaPositiveInt(args[0]) : 0;
     const minutes = args.length === 2 ? proverkaPositiveInt(args[1]) : 0;
     if (!limit || !minutes) {
-      await proverkaSendMessage(chatId, "Напиши так: /timekrut номер время_в_минутах");
+      await proverkaSendMessage(chatId, "ℹ️ Напиши так: /timekrut номер время_в_минутах");
       return;
     }
     const number = Math.floor(Math.random() * limit) + 1;
-    proverkaStartTimer(chatId, minutes);
-    await proverkaSendMessage(chatId, `Выпал номер <b>${number}</b> из <b>${limit}</b>. Таймер запущен на <b>${minutes}</b> минут!`);
+    proverkaStartTimer(chatId, minutes, proverkaReplyTarget(message));
+    await proverkaSendMessage(chatId, `🎯 Выпал номер <b>${number}</b>. ⏱️ Таймер запущен на <b>${minutes}</b> минут!`);
   }
 }
 
@@ -4882,6 +4914,7 @@ app.get("/api/proverka-bot/webhook", (_req, res) => {
 app.post("/api/proverka-bot/webhook", async (req, res, next) => {
   try {
     if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
+    await proverkaEnsureCommands();
     if (req.body?.message) await handleProverkaMessage(req.body.message);
     res.json({ ok: true });
   } catch (error) {
