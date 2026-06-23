@@ -5272,6 +5272,11 @@ const proverkaCommands = [
 ];
 let proverkaCommandsSynced = false;
 let proverkaCommandsNextSyncAt = 0;
+let proverkaStateCache = null;
+let proverkaStateLoadPromise = null;
+let proverkaStateSaveTimer = null;
+let proverkaStateSaveInFlight = false;
+let proverkaStateDirty = false;
 
 function proverkaHtml(value) {
   return String(value ?? "").replace(/[&<>\"']/g, (char) => ({
@@ -5342,6 +5347,53 @@ function proverkaInitStats(state) {
   state.proverkaBot.settings = { ...proverkaDefaultSettings, ...(state.proverkaBot.settings || {}) };
   state.proverkaBot.settings.reputation_notifications = true;
   return state.proverkaBot;
+}
+
+async function proverkaLoadState() {
+  if (proverkaStateCache) return { proverkaBot: proverkaStateCache };
+  if (!proverkaStateLoadPromise) {
+    proverkaStateLoadPromise = supabase.from("app_settings").select("data").eq("id", "main").maybeSingle()
+      .then(({ data }) => {
+        proverkaStateCache = data?.data?.proverkaBot && typeof data.data.proverkaBot === "object"
+          ? data.data.proverkaBot
+          : {};
+        return { proverkaBot: proverkaStateCache };
+      })
+      .finally(() => {
+        proverkaStateLoadPromise = null;
+      });
+  }
+  return proverkaStateLoadPromise;
+}
+
+async function proverkaFlushState() {
+  if (!proverkaStateCache || proverkaStateSaveInFlight || !proverkaStateDirty) return;
+  proverkaStateSaveInFlight = true;
+  proverkaStateDirty = false;
+  try {
+    const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const currentData = currentSettings?.data || {};
+    await supabase.from("app_settings").upsert({
+      id: "main",
+      data: { ...currentData, proverkaBot: proverkaStateCache }
+    }, { onConflict: "id" });
+  } catch (error) {
+    proverkaStateDirty = true;
+    console.error("Proverka stats save error", error);
+  } finally {
+    proverkaStateSaveInFlight = false;
+    if (proverkaStateDirty) proverkaScheduleSave(10000);
+  }
+}
+
+function proverkaScheduleSave(delayMs = 2500) {
+  proverkaStateDirty = true;
+  if (proverkaStateSaveTimer) clearTimeout(proverkaStateSaveTimer);
+  proverkaStateSaveTimer = setTimeout(() => {
+    proverkaStateSaveTimer = null;
+    proverkaFlushState().catch((error) => console.error("Proverka stats flush error", error));
+  }, delayMs);
+  if (typeof proverkaStateSaveTimer.unref === "function") proverkaStateSaveTimer.unref();
 }
 
 function proverkaUserKey(chatId, userId) {
@@ -5645,11 +5697,16 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
   try {
     requireDb();
     if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
-    await proverkaEnsureCommands();
     if (req.body?.message) {
-      const state = await loadSettingsState();
-      await handleProverkaMessage(state, req.body.message);
-      await saveSettingsState(state);
+      const message = req.body.message;
+      Promise.resolve().then(async () => {
+        await proverkaEnsureCommands();
+        const state = await proverkaLoadState();
+        await handleProverkaMessage(state, message);
+        proverkaScheduleSave();
+      }).catch((error) => {
+        console.error("Proverka background processing error", error);
+      });
     }
     res.json({ ok: true });
   } catch (error) {
