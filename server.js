@@ -5496,19 +5496,8 @@ async function proverkaProcessReputation(stats, message) {
 function proverkaShouldCountMessage(stats, message) {
   if (!message?.from?.id || message.from.is_bot) return false;
   const text = String(message.text || "").trim();
-  if (!text) return false;
   if (text.startsWith("/") && !stats.settings.count_commands_as_messages) return false;
   if (proverkaVoteValue(text) && !stats.settings.count_plus_minus_as_messages) return false;
-  if (text.length < 2) return false;
-
-  const key = proverkaUserKey(message.chat.id, message.from.id);
-  const flood = stats.flood[key] || {};
-  const now = Date.now();
-  if (flood.text === text && now - Number(flood.at || 0) < stats.settings.duplicate_message_window_ms) {
-    stats.flood[key] = { text, at: now };
-    return false;
-  }
-  stats.flood[key] = { text, at: now };
   return true;
 }
 
