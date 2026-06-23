@@ -23,6 +23,7 @@ const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber-project.onr
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
+const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const storeWithdrawalCooldownMs = 3 * 24 * 60 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
@@ -4721,6 +4722,167 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
       delete state.__mirrorId;
     }
     await saveSettingsState(state);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const proverkaTimers = new Map();
+const proverkaHelpText = [
+  "Привет! Я бот для случайных чисел и таймеров.",
+  "",
+  "Команды:",
+  "/proverka - выдаю случайное число от 1 до 999",
+  "/krut номер - выдаю случайный номер от 1 до указанного номера",
+  "/timer минуты - запускаю таймер, например /timer 2",
+  "/timeroff - выключаю таймер",
+  "/timekrut номер минуты - выдаю номер и запускаю таймер, например /timekrut 20 2"
+].join("\n");
+
+function proverkaCommand(message) {
+  const text = String(message?.text || "").trim();
+  if (!text.startsWith("/")) return { command: "", args: [] };
+  const parts = text.split(/\s+/);
+  return {
+    command: parts[0].split("@", 1)[0].toLowerCase(),
+    args: parts.slice(1)
+  };
+}
+
+function proverkaPositiveInt(value) {
+  if (!/^\d+$/.test(String(value || ""))) return 0;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : 0;
+}
+
+async function proverkaTelegramApi(method, payload = {}) {
+  if (!proverkaBotToken) {
+    const error = new Error("PROVERKA_BOT_TOKEN is not configured");
+    error.status = 500;
+    throw error;
+  }
+  const response = await fetch(`https://api.telegram.org/bot${proverkaBotToken}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.description || `Telegram ${method} error`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+async function proverkaSendMessage(chatId, text) {
+  return proverkaTelegramApi("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  });
+}
+
+function proverkaStartTimer(chatId, minutes) {
+  const key = String(chatId);
+  const oldTimer = proverkaTimers.get(key);
+  if (oldTimer) clearTimeout(oldTimer);
+  const timer = setTimeout(() => {
+    proverkaTimers.delete(key);
+    proverkaSendMessage(chatId, "Время истекло! ⚠️").catch((error) => {
+      console.error("Proverka timer send error", error);
+    });
+  }, minutes * 60 * 1000);
+  if (typeof timer.unref === "function") timer.unref();
+  proverkaTimers.set(key, timer);
+}
+
+async function proverkaStopTimer(chatId) {
+  const key = String(chatId);
+  const timer = proverkaTimers.get(key);
+  if (timer) clearTimeout(timer);
+  proverkaTimers.delete(key);
+  await proverkaSendMessage(chatId, "Таймер приостановлен.");
+}
+
+async function handleProverkaMessage(message) {
+  const chatId = message?.chat?.id;
+  if (!chatId) return;
+
+  if (Array.isArray(message.new_chat_members) && message.new_chat_members.length) {
+    await proverkaSendMessage(chatId, proverkaHelpText);
+    return;
+  }
+
+  const { command, args } = proverkaCommand(message);
+  if (!command) return;
+
+  if (command === "/start" || command === "/help") {
+    await proverkaSendMessage(chatId, proverkaHelpText);
+    return;
+  }
+
+  if (command === "/proverka") {
+    const number = Math.floor(Math.random() * 999) + 1;
+    await proverkaSendMessage(chatId, `Выпало число <b>${number}</b>.`);
+    return;
+  }
+
+  if (command === "/krut") {
+    const limit = args.length === 1 ? proverkaPositiveInt(args[0]) : 0;
+    if (!limit) {
+      await proverkaSendMessage(chatId, "Напиши так: /krut номер");
+      return;
+    }
+    const number = Math.floor(Math.random() * limit) + 1;
+    await proverkaSendMessage(chatId, `Выпал номер <b>${number}</b> из <b>${limit}</b>.`);
+    return;
+  }
+
+  if (command === "/timer") {
+    const minutes = args.length === 1 ? proverkaPositiveInt(args[0]) : 0;
+    if (!minutes) {
+      await proverkaSendMessage(chatId, "Напиши так: /timer время_в_минутах");
+      return;
+    }
+    proverkaStartTimer(chatId, minutes);
+    await proverkaSendMessage(chatId, `Таймер запущен на <b>${minutes}</b> минут.`);
+    return;
+  }
+
+  if (command === "/timeroff") {
+    await proverkaStopTimer(chatId);
+    return;
+  }
+
+  if (command === "/timekrut") {
+    const limit = args.length === 2 ? proverkaPositiveInt(args[0]) : 0;
+    const minutes = args.length === 2 ? proverkaPositiveInt(args[1]) : 0;
+    if (!limit || !minutes) {
+      await proverkaSendMessage(chatId, "Напиши так: /timekrut номер время_в_минутах");
+      return;
+    }
+    const number = Math.floor(Math.random() * limit) + 1;
+    proverkaStartTimer(chatId, minutes);
+    await proverkaSendMessage(chatId, `Выпал номер <b>${number}</b> из <b>${limit}</b>. Таймер запущен на <b>${minutes}</b> минут!`);
+  }
+}
+
+app.get("/api/proverka-bot/webhook", (_req, res) => {
+  res.json({
+    ok: true,
+    configured: Boolean(proverkaBotToken),
+    webhook: `${publicBaseUrl}/api/proverka-bot/webhook`
+  });
+});
+
+app.post("/api/proverka-bot/webhook", async (req, res, next) => {
+  try {
+    if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
+    if (req.body?.message) await handleProverkaMessage(req.body.message);
     res.json({ ok: true });
   } catch (error) {
     next(error);
