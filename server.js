@@ -5236,7 +5236,7 @@ const proverkaDefaultSettings = {
   reputation_enabled: true,
   levels_enabled: true,
   stats_enabled: true,
-  reputation_notifications: false,
+  reputation_notifications: true,
   max_stats_users: 30,
   count_commands_as_messages: false,
   count_plus_minus_as_messages: false,
@@ -5299,6 +5299,13 @@ function proverkaPositiveInt(value) {
   return Number.isSafeInteger(number) && number > 0 ? number : 0;
 }
 
+function proverkaVoteValue(text) {
+  const value = String(text || "").trim();
+  if (["+", "＋", "➕", "👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿"].includes(value)) return 1;
+  if (["-", "−", "—", "➖", "👎", "👎🏻", "👎🏼", "👎🏽", "👎🏾", "👎🏿"].includes(value)) return -1;
+  return 0;
+}
+
 function proverkaReplyTarget(message) {
   return message?.reply_to_message?.message_id || message?.message_id || undefined;
 }
@@ -5333,6 +5340,7 @@ function proverkaInitStats(state) {
   state.proverkaBot.votes = state.proverkaBot.votes && typeof state.proverkaBot.votes === "object" ? state.proverkaBot.votes : {};
   state.proverkaBot.flood = state.proverkaBot.flood && typeof state.proverkaBot.flood === "object" ? state.proverkaBot.flood : {};
   state.proverkaBot.settings = { ...proverkaDefaultSettings, ...(state.proverkaBot.settings || {}) };
+  state.proverkaBot.settings.reputation_notifications = true;
   return state.proverkaBot;
 }
 
@@ -5438,10 +5446,17 @@ async function proverkaProcessReputation(stats, message) {
   const chatId = message?.chat?.id;
   const voter = message?.from;
   const targetMessage = message?.reply_to_message;
-  const value = String(message?.text || "").trim() === "+" ? 1 : -1;
-  if (!chatId || !voter?.id || !targetMessage?.message_id || !targetMessage?.from?.id) return false;
+  const value = proverkaVoteValue(message?.text);
+  if (!value) return false;
+  if (!chatId || !voter?.id || !targetMessage?.message_id || !targetMessage?.from?.id) {
+    await proverkaSendMessage(chatId, "ℹ️ Чтобы изменить репутацию, ответь + или - на сообщение другого участника.", { replyToMessageId: message?.message_id });
+    return true;
+  }
   if (targetMessage.from.is_bot) return true;
-  if (String(voter.id) === String(targetMessage.from.id)) return true;
+  if (String(voter.id) === String(targetMessage.from.id)) {
+    await proverkaSendMessage(chatId, "ℹ️ Себе репутацию ставить нельзя.", { replyToMessageId: message?.message_id });
+    return true;
+  }
 
   const target = proverkaEnsureUser(stats, chatId, targetMessage.from);
   proverkaEnsureUser(stats, chatId, voter);
@@ -5483,7 +5498,7 @@ function proverkaShouldCountMessage(stats, message) {
   const text = String(message.text || "").trim();
   if (!text) return false;
   if (text.startsWith("/") && !stats.settings.count_commands_as_messages) return false;
-  if ((text === "+" || text === "-") && !stats.settings.count_plus_minus_as_messages) return false;
+  if (proverkaVoteValue(text) && !stats.settings.count_plus_minus_as_messages) return false;
   if (text.length < 2) return false;
 
   const key = proverkaUserKey(message.chat.id, message.from.id);
@@ -5619,7 +5634,7 @@ async function handleProverkaMessage(state, message) {
   }
 
   const text = String(message.text || "").trim();
-  if ((text === "+" || text === "-") && stats.settings.reputation_enabled) {
+  if (proverkaVoteValue(text) && stats.settings.reputation_enabled) {
     await proverkaProcessReputation(stats, message);
     return;
   }
