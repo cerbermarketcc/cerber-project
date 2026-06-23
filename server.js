@@ -4728,11 +4728,524 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
   }
 });
 
+
 const proverkaTimers = new Map();
+const proverkaLevels = [
+  {
+    "level": 1,
+    "messages": 10,
+    "title": "Нулевой След"
+  },
+  {
+    "level": 2,
+    "messages": 50,
+    "title": "Тихий Наблюдатель"
+  },
+  {
+    "level": 3,
+    "messages": 100,
+    "title": "Серый Ник"
+  },
+  {
+    "level": 4,
+    "messages": 200,
+    "title": "Уличный Пакет"
+  },
+  {
+    "level": 5,
+    "messages": 300,
+    "title": "Ночной Курьер"
+  },
+  {
+    "level": 6,
+    "messages": 450,
+    "title": "Тёмный Стажёр"
+  },
+  {
+    "level": 7,
+    "messages": 600,
+    "title": "Форумный Призрак"
+  },
+  {
+    "level": 8,
+    "messages": 800,
+    "title": "Слитый Аккаунт"
+  },
+  {
+    "level": 9,
+    "messages": 1000,
+    "title": "Чёрный Логин"
+  },
+  {
+    "level": 10,
+    "messages": 1250,
+    "title": "Подвальный Юзер"
+  },
+  {
+    "level": 11,
+    "messages": 1500,
+    "title": "Шёпот Канала"
+  },
+  {
+    "level": 12,
+    "messages": 1800,
+    "title": "Мутный Контакт"
+  },
+  {
+    "level": 13,
+    "messages": 2100,
+    "title": "Сквозной Трафик"
+  },
+  {
+    "level": 14,
+    "messages": 2500,
+    "title": "Серверный Пассажир"
+  },
+  {
+    "level": 15,
+    "messages": 3000,
+    "title": "Тень Маркета"
+  },
+  {
+    "level": 16,
+    "messages": 3500,
+    "title": "Ночной Сигнал"
+  },
+  {
+    "level": 17,
+    "messages": 4000,
+    "title": "Смотрящий Ветки"
+  },
+  {
+    "level": 18,
+    "messages": 4600,
+    "title": "Архивный Гость"
+  },
+  {
+    "level": 19,
+    "messages": 5200,
+    "title": "Ломанный Профиль"
+  },
+  {
+    "level": 20,
+    "messages": 6000,
+    "title": "Чёрный Резидент"
+  },
+  {
+    "level": 21,
+    "messages": 6800,
+    "title": "Глубинный Ник"
+  },
+  {
+    "level": 22,
+    "messages": 7600,
+    "title": "Мастер Тишины"
+  },
+  {
+    "level": 23,
+    "messages": 8500,
+    "title": "Зашифрованный След"
+  },
+  {
+    "level": 24,
+    "messages": 9500,
+    "title": "Тёмный Связной"
+  },
+  {
+    "level": 25,
+    "messages": 10500,
+    "title": "Призрак Лога"
+  },
+  {
+    "level": 26,
+    "messages": 11600,
+    "title": "Скрытый Узел"
+  },
+  {
+    "level": 27,
+    "messages": 12700,
+    "title": "Пепельный Хакер"
+  },
+  {
+    "level": 28,
+    "messages": 13900,
+    "title": "Сетевой Волк"
+  },
+  {
+    "level": 29,
+    "messages": 15100,
+    "title": "Чёрный Оператор"
+  },
+  {
+    "level": 30,
+    "messages": 16500,
+    "title": "Легенда Подвала"
+  },
+  {
+    "level": 31,
+    "messages": 17900,
+    "title": "Теневой Агент"
+  },
+  {
+    "level": 32,
+    "messages": 19400,
+    "title": "Глухой Канал"
+  },
+  {
+    "level": 33,
+    "messages": 20900,
+    "title": "Синдикатный Ник"
+  },
+  {
+    "level": 34,
+    "messages": 22500,
+    "title": "Ночной Архитектор"
+  },
+  {
+    "level": 35,
+    "messages": 24200,
+    "title": "Чёрный Протокол"
+  },
+  {
+    "level": 36,
+    "messages": 25900,
+    "title": "Гость Без Следа"
+  },
+  {
+    "level": 37,
+    "messages": 27700,
+    "title": "Хранитель Лога"
+  },
+  {
+    "level": 38,
+    "messages": 29600,
+    "title": "Проводник Тьмы"
+  },
+  {
+    "level": 39,
+    "messages": 31500,
+    "title": "Тёмный Модуль"
+  },
+  {
+    "level": 40,
+    "messages": 33500,
+    "title": "Король Ветки"
+  },
+  {
+    "level": 41,
+    "messages": 35600,
+    "title": "Призрак Сервера"
+  },
+  {
+    "level": 42,
+    "messages": 37700,
+    "title": "Закрытый Доступ"
+  },
+  {
+    "level": 43,
+    "messages": 39900,
+    "title": "Смотритель Ночи"
+  },
+  {
+    "level": 44,
+    "messages": 42200,
+    "title": "Чёрный Скрипт"
+  },
+  {
+    "level": 45,
+    "messages": 44500,
+    "title": "Невидимый Связной"
+  },
+  {
+    "level": 46,
+    "messages": 46900,
+    "title": "Пепельный Брокер"
+  },
+  {
+    "level": 47,
+    "messages": 49400,
+    "title": "Сетевой Демон"
+  },
+  {
+    "level": 48,
+    "messages": 51900,
+    "title": "Холодный Админ"
+  },
+  {
+    "level": 49,
+    "messages": 54500,
+    "title": "Узник Трафика"
+  },
+  {
+    "level": 50,
+    "messages": 57200,
+    "title": "Полутёмный Барон"
+  },
+  {
+    "level": 51,
+    "messages": 60000,
+    "title": "Тёмный Барон"
+  },
+  {
+    "level": 52,
+    "messages": 62900,
+    "title": "Глубинный Барон"
+  },
+  {
+    "level": 53,
+    "messages": 65900,
+    "title": "Архивный Барон"
+  },
+  {
+    "level": 54,
+    "messages": 69000,
+    "title": "Чёрный Барон"
+  },
+  {
+    "level": 55,
+    "messages": 72200,
+    "title": "Барон Без Следа"
+  },
+  {
+    "level": 56,
+    "messages": 75500,
+    "title": "Серый Куратор"
+  },
+  {
+    "level": 57,
+    "messages": 78900,
+    "title": "Ночной Куратор"
+  },
+  {
+    "level": 58,
+    "messages": 82400,
+    "title": "Теневой Куратор"
+  },
+  {
+    "level": 59,
+    "messages": 86000,
+    "title": "Чёрный Куратор"
+  },
+  {
+    "level": 60,
+    "messages": 89700,
+    "title": "Куратор Глубины"
+  },
+  {
+    "level": 61,
+    "messages": 93500,
+    "title": "Хозяин Лога"
+  },
+  {
+    "level": 62,
+    "messages": 97400,
+    "title": "Хозяин Узла"
+  },
+  {
+    "level": 63,
+    "messages": 101400,
+    "title": "Хозяин Тени"
+  },
+  {
+    "level": 64,
+    "messages": 105500,
+    "title": "Хозяин Канала"
+  },
+  {
+    "level": 65,
+    "messages": 109700,
+    "title": "Хозяин Подвала"
+  },
+  {
+    "level": 66,
+    "messages": 114000,
+    "title": "Скрытый Магистр"
+  },
+  {
+    "level": 67,
+    "messages": 118400,
+    "title": "Магистр Трафика"
+  },
+  {
+    "level": 68,
+    "messages": 122900,
+    "title": "Магистр Ветки"
+  },
+  {
+    "level": 69,
+    "messages": 127500,
+    "title": "Магистр Шума"
+  },
+  {
+    "level": 70,
+    "messages": 132200,
+    "title": "Чёрный Магистр"
+  },
+  {
+    "level": 71,
+    "messages": 137000,
+    "title": "Нулевой Авторитет"
+  },
+  {
+    "level": 72,
+    "messages": 141900,
+    "title": "Тёмный Авторитет"
+  },
+  {
+    "level": 73,
+    "messages": 146900,
+    "title": "Серверный Авторитет"
+  },
+  {
+    "level": 74,
+    "messages": 152000,
+    "title": "Глубинный Авторитет"
+  },
+  {
+    "level": 75,
+    "messages": 157200,
+    "title": "Авторитет Без Лица"
+  },
+  {
+    "level": 76,
+    "messages": 162500,
+    "title": "Смотрящий Канала"
+  },
+  {
+    "level": 77,
+    "messages": 167900,
+    "title": "Смотрящий Сетки"
+  },
+  {
+    "level": 78,
+    "messages": 173400,
+    "title": "Смотрящий Лога"
+  },
+  {
+    "level": 79,
+    "messages": 179000,
+    "title": "Смотрящий Глубины"
+  },
+  {
+    "level": 80,
+    "messages": 184700,
+    "title": "Чёрный Смотрящий"
+  },
+  {
+    "level": 81,
+    "messages": 190500,
+    "title": "Повелитель Ветки"
+  },
+  {
+    "level": 82,
+    "messages": 196400,
+    "title": "Повелитель Лога"
+  },
+  {
+    "level": 83,
+    "messages": 202400,
+    "title": "Повелитель Трафика"
+  },
+  {
+    "level": 84,
+    "messages": 208500,
+    "title": "Повелитель Подвала"
+  },
+  {
+    "level": 85,
+    "messages": 214700,
+    "title": "Повелитель Тьмы"
+  },
+  {
+    "level": 86,
+    "messages": 221000,
+    "title": "Лорд Канала"
+  },
+  {
+    "level": 87,
+    "messages": 227400,
+    "title": "Лорд Узла"
+  },
+  {
+    "level": 88,
+    "messages": 233900,
+    "title": "Лорд Архива"
+  },
+  {
+    "level": 89,
+    "messages": 240500,
+    "title": "Лорд Без Следа"
+  },
+  {
+    "level": 90,
+    "messages": 247200,
+    "title": "Чёрный Лорд"
+  },
+  {
+    "level": 91,
+    "messages": 254000,
+    "title": "Теневой Монарх"
+  },
+  {
+    "level": 92,
+    "messages": 260900,
+    "title": "Монарх Сети"
+  },
+  {
+    "level": 93,
+    "messages": 267900,
+    "title": "Монарх Глубины"
+  },
+  {
+    "level": 94,
+    "messages": 275000,
+    "title": "Монарх Подполья"
+  },
+  {
+    "level": 95,
+    "messages": 282200,
+    "title": "Чёрный Монарх"
+  },
+  {
+    "level": 96,
+    "messages": 289500,
+    "title": "Легенда Без Лица"
+  },
+  {
+    "level": 97,
+    "messages": 296900,
+    "title": "Легенда Глубины"
+  },
+  {
+    "level": 98,
+    "messages": 304400,
+    "title": "Легенда Тёмной Сети"
+  },
+  {
+    "level": 99,
+    "messages": 312000,
+    "title": "Абсолютный Призрак"
+  },
+  {
+    "level": 100,
+    "messages": 320000,
+    "title": "Бог Чёрного Канала"
+  }
+];
+const proverkaDefaultSettings = {
+  reputation_enabled: true,
+  levels_enabled: true,
+  stats_enabled: true,
+  reputation_notifications: false,
+  max_stats_users: 30,
+  count_commands_as_messages: false,
+  count_plus_minus_as_messages: false,
+  duplicate_message_window_ms: 10000
+};
 const proverkaHelpText = [
-  "👋 Привет! Я бот для розыгрышей, случайных номеров и таймеров.",
+  "👋 Привет! Я бот для розыгрышей, таймеров, репутации и уровней.",
   "",
-  "✅ Меня можно добавлять в группы и чаты. Все участники смогут пользоваться командами.",
+  "✅ Меня можно добавлять в группы и чаты. Бот считает активность, выдаёт уровни и показывает топ участников.",
   "",
   "📌 Команды:",
   "/proverka - случайное число от 1 до 999",
@@ -4740,11 +5253,11 @@ const proverkaHelpText = [
   "/timer минуты - таймер на указанное время",
   "/timeroff - остановить таймер",
   "/timekrut номер минуты - номер + таймер одной командой",
+  "/stats - топ-30, уровни, сообщения и репутация",
   "",
-  "💡 Примеры:",
-  "/krut 20",
-  "/timer 2",
-  "/timekrut 20 2"
+  "⭐ Репутация:",
+  "Ответь + на чужое сообщение, чтобы дать +1 репутации.",
+  "Ответь - на чужое сообщение, чтобы снять 1 репутацию."
 ].join("\n");
 
 const proverkaCommands = [
@@ -4753,8 +5266,22 @@ const proverkaCommands = [
   { command: "timer", description: "Запустить таймер в минутах" },
   { command: "timeroff", description: "Остановить таймер" },
   { command: "timekrut", description: "Случайный номер и таймер" },
+  { command: "stats", description: "Статистика и топ чата" },
+  { command: "stat", description: "Статистика и топ чата" },
   { command: "help", description: "Показать помощь" }
 ];
+let proverkaCommandsSynced = false;
+let proverkaCommandsNextSyncAt = 0;
+
+function proverkaHtml(value) {
+  return String(value ?? "").replace(/[&<>\"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '\"': "&quot;",
+    "'": "&#39;"
+  }[char]));
+}
 
 function proverkaCommand(message) {
   const text = String(message?.text || "").trim();
@@ -4774,6 +5301,69 @@ function proverkaPositiveInt(value) {
 
 function proverkaReplyTarget(message) {
   return message?.reply_to_message?.message_id || message?.message_id || undefined;
+}
+
+function proverkaUserName(user) {
+  const first = String(user?.first_name || "").trim();
+  const last = String(user?.last_name || "").trim();
+  return [first, last].filter(Boolean).join(" ") || user?.username || String(user?.id || "user");
+}
+
+function proverkaMentionFromStats(user) {
+  if (user?.username) return `@${proverkaHtml(user.username)}`;
+  return proverkaHtml(user?.display_name || user?.user_id || "user");
+}
+
+function proverkaLevelForMessages(totalMessages) {
+  let current = { level: 0, messages: 0, title: "Без уровня" };
+  for (const level of proverkaLevels) {
+    if (Number(totalMessages || 0) >= level.messages) current = level;
+    else break;
+  }
+  return current;
+}
+
+function proverkaNextLevel(currentLevel) {
+  return proverkaLevels.find((item) => item.level > Number(currentLevel || 0)) || null;
+}
+
+function proverkaInitStats(state) {
+  state.proverkaBot = state.proverkaBot && typeof state.proverkaBot === "object" ? state.proverkaBot : {};
+  state.proverkaBot.users = state.proverkaBot.users && typeof state.proverkaBot.users === "object" ? state.proverkaBot.users : {};
+  state.proverkaBot.votes = state.proverkaBot.votes && typeof state.proverkaBot.votes === "object" ? state.proverkaBot.votes : {};
+  state.proverkaBot.flood = state.proverkaBot.flood && typeof state.proverkaBot.flood === "object" ? state.proverkaBot.flood : {};
+  state.proverkaBot.settings = { ...proverkaDefaultSettings, ...(state.proverkaBot.settings || {}) };
+  return state.proverkaBot;
+}
+
+function proverkaUserKey(chatId, userId) {
+  return `${chatId}:${userId}`;
+}
+
+function proverkaVoteKey(chatId, messageId, voterId) {
+  return `${chatId}:${messageId}:${voterId}`;
+}
+
+function proverkaEnsureUser(stats, chatId, telegramUser) {
+  const userId = String(telegramUser?.id || "");
+  if (!userId) return null;
+  const key = proverkaUserKey(chatId, userId);
+  const now = new Date().toISOString();
+  const old = stats.users[key] || {};
+  const level = proverkaLevelForMessages(old.total_messages || 0);
+  const user = {
+    user_id: userId,
+    username: String(telegramUser?.username || old.username || ""),
+    display_name: proverkaUserName(telegramUser) || old.display_name || userId,
+    chat_id: String(chatId),
+    reputation: Number(old.reputation || 0),
+    total_messages: Number(old.total_messages || 0),
+    current_level: Number(old.current_level ?? level.level),
+    created_at: old.created_at || now,
+    updated_at: now
+  };
+  stats.users[key] = user;
+  return user;
 }
 
 async function proverkaTelegramApi(method, payload = {}) {
@@ -4812,8 +5402,12 @@ async function proverkaSendMessage(chatId, text, options = {}) {
 }
 
 async function proverkaEnsureCommands() {
-  if (!proverkaBotToken) return;
-  await proverkaTelegramApi("setMyCommands", { commands: proverkaCommands }).catch((error) => {
+  if (!proverkaBotToken || proverkaCommandsSynced || Date.now() < proverkaCommandsNextSyncAt) return;
+  await proverkaTelegramApi("setMyCommands", { commands: proverkaCommands }).then(() => {
+    proverkaCommandsSynced = true;
+  }).catch((error) => {
+    const retryAfter = Number(String(error.message || "").match(/retry after (\d+)/i)?.[1] || 900);
+    proverkaCommandsNextSyncAt = Date.now() + retryAfter * 1000;
     console.error("Proverka setMyCommands error", error);
   });
 }
@@ -4840,15 +5434,141 @@ async function proverkaStopTimer(chatId) {
   await proverkaSendMessage(chatId, "⏸️ Таймер приостановлен.");
 }
 
-async function handleProverkaMessage(message) {
+async function proverkaProcessReputation(stats, message) {
   const chatId = message?.chat?.id;
-  if (!chatId) return;
+  const voter = message?.from;
+  const targetMessage = message?.reply_to_message;
+  const value = String(message?.text || "").trim() === "+" ? 1 : -1;
+  if (!chatId || !voter?.id || !targetMessage?.message_id || !targetMessage?.from?.id) return false;
+  if (targetMessage.from.is_bot) return true;
+  if (String(voter.id) === String(targetMessage.from.id)) return true;
 
+  const target = proverkaEnsureUser(stats, chatId, targetMessage.from);
+  proverkaEnsureUser(stats, chatId, voter);
+  if (!target) return true;
+
+  const key = proverkaVoteKey(chatId, targetMessage.message_id, voter.id);
+  const oldVote = stats.votes[key];
+  if (oldVote && Number(oldVote.vote_value) === value) return true;
+  if (oldVote?.changed_once) return true;
+
+  const delta = value - Number(oldVote?.vote_value || 0);
+  target.reputation = Number(target.reputation || 0) + delta;
+  target.updated_at = new Date().toISOString();
+  stats.votes[key] = {
+    chat_id: String(chatId),
+    target_message_id: String(targetMessage.message_id),
+    target_user_id: String(targetMessage.from.id),
+    voter_user_id: String(voter.id),
+    vote_value: value,
+    changed_once: Boolean(oldVote),
+    created_at: oldVote?.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+
+  if (stats.settings.reputation_notifications) {
+    const voterStats = proverkaEnsureUser(stats, chatId, voter);
+    const sign = value > 0 ? "+1" : "-1";
+    await proverkaSendMessage(
+      chatId,
+      `⭐ ${proverkaMentionFromStats(target)} получил ${sign} к репутации от ${proverkaMentionFromStats(voterStats)}. Текущая репутация: ${target.reputation >= 0 ? "+" : ""}${target.reputation}`,
+      { replyToMessageId: targetMessage.message_id }
+    );
+  }
+  return true;
+}
+
+function proverkaShouldCountMessage(stats, message) {
+  if (!message?.from?.id || message.from.is_bot) return false;
+  const text = String(message.text || "").trim();
+  if (!text) return false;
+  if (text.startsWith("/") && !stats.settings.count_commands_as_messages) return false;
+  if ((text === "+" || text === "-") && !stats.settings.count_plus_minus_as_messages) return false;
+  if (text.length < 2) return false;
+
+  const key = proverkaUserKey(message.chat.id, message.from.id);
+  const flood = stats.flood[key] || {};
+  const now = Date.now();
+  if (flood.text === text && now - Number(flood.at || 0) < stats.settings.duplicate_message_window_ms) {
+    stats.flood[key] = { text, at: now };
+    return false;
+  }
+  stats.flood[key] = { text, at: now };
+  return true;
+}
+
+async function proverkaCountMessage(stats, message) {
+  const user = proverkaEnsureUser(stats, message.chat.id, message.from);
+  if (!user) return;
+  const oldLevel = Number(user.current_level || 0);
+  user.total_messages = Number(user.total_messages || 0) + 1;
+  const newLevel = proverkaLevelForMessages(user.total_messages);
+  user.current_level = newLevel.level;
+  user.updated_at = new Date().toISOString();
+
+  if (stats.settings.levels_enabled && newLevel.level > oldLevel) {
+    const next = proverkaNextLevel(newLevel.level);
+    const who = proverkaMentionFromStats(user);
+    if (next) {
+      await proverkaSendMessage(
+        message.chat.id,
+        `🌑 ${who}, тебе присвоен уровень: <b>${proverkaHtml(newLevel.title)}</b>. Следующий уровень через <b>${next.messages - user.total_messages}</b> сообщений.`
+      );
+    } else {
+      await proverkaSendMessage(
+        message.chat.id,
+        `🌑 ${who}, тебе присвоен максимальный уровень: <b>${proverkaHtml(newLevel.title)}</b>. Дальше только тьма.`
+      );
+    }
+  }
+}
+
+function proverkaStatsText(stats, chatId, requester) {
+  const users = Object.values(stats.users || {})
+    .filter((user) => String(user.chat_id) === String(chatId))
+    .sort((a, b) => (
+      Number(b.current_level || 0) - Number(a.current_level || 0) ||
+      Number(b.total_messages || 0) - Number(a.total_messages || 0) ||
+      Number(b.reputation || 0) - Number(a.reputation || 0)
+    ))
+    .slice(0, Number(stats.settings.max_stats_users || 30));
+
+  const lines = ["📊 <b>Статистика чата</b>", "", `<b>Топ-${stats.settings.max_stats_users || 30} пользователей:</b>`];
+  if (!users.length) lines.push("Пока нет статистики. Напишите несколько обычных сообщений, и бот начнёт считать активность.");
+  users.forEach((user, index) => {
+    const level = proverkaLevelForMessages(user.total_messages || 0);
+    const rep = Number(user.reputation || 0);
+    lines.push(`${index + 1}. ${proverkaMentionFromStats(user)} — уровень ${level.level}: ${proverkaHtml(level.title)} | сообщений: ${user.total_messages || 0} | репутация: ${rep >= 0 ? "+" : ""}${rep}`);
+  });
+
+  const requesterStats = requester?.id ? proverkaEnsureUser(stats, chatId, requester) : null;
+  if (requesterStats) {
+    const level = proverkaLevelForMessages(requesterStats.total_messages || 0);
+    const next = proverkaNextLevel(level.level);
+    const rep = Number(requesterStats.reputation || 0);
+    lines.push("", "<b>Твоя статистика:</b>");
+    lines.push(`Уровень: ${level.level} — ${proverkaHtml(level.title)}`);
+    lines.push(`Сообщений: ${requesterStats.total_messages || 0}`);
+    lines.push(`До следующего уровня: ${next ? `${next.messages - Number(requesterStats.total_messages || 0)} сообщений` : "максимальный уровень"}`);
+    lines.push(`Репутация: ${rep >= 0 ? "+" : ""}${rep}`);
+  }
+  return lines.join("\n");
+}
+
+async function handleProverkaMessage(state, message) {
+  const chatId = message?.chat?.id;
+  if (!chatId || !message.from || message.from.is_bot) return;
+  const stats = proverkaInitStats(state);
   const { command, args } = proverkaCommand(message);
-  if (!command) return;
 
   if (command === "/start" || command === "/help") {
     await proverkaSendMessage(chatId, proverkaHelpText);
+    return;
+  }
+
+  if (["/stats", "/stat", "/стат", "/стата", "/статистика"].includes(command)) {
+    if (!stats.settings.stats_enabled) return;
+    await proverkaSendMessage(chatId, proverkaStatsText(stats, chatId, message.from));
     return;
   }
 
@@ -4895,6 +5615,17 @@ async function handleProverkaMessage(message) {
     const number = Math.floor(Math.random() * limit) + 1;
     proverkaStartTimer(chatId, minutes, proverkaReplyTarget(message));
     await proverkaSendMessage(chatId, `🎯 Выпал номер <b>${number}</b>. ⏱️ Таймер запущен на <b>${minutes}</b> минут!`);
+    return;
+  }
+
+  const text = String(message.text || "").trim();
+  if ((text === "+" || text === "-") && stats.settings.reputation_enabled) {
+    await proverkaProcessReputation(stats, message);
+    return;
+  }
+
+  if (proverkaShouldCountMessage(stats, message)) {
+    await proverkaCountMessage(stats, message);
   }
 }
 
@@ -4908,14 +5639,20 @@ app.get("/api/proverka-bot/webhook", (_req, res) => {
 
 app.post("/api/proverka-bot/webhook", async (req, res, next) => {
   try {
+    requireDb();
     if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
     await proverkaEnsureCommands();
-    if (req.body?.message) await handleProverkaMessage(req.body.message);
+    if (req.body?.message) {
+      const state = await loadSettingsState();
+      await handleProverkaMessage(state, req.body.message);
+      await saveSettingsState(state);
+    }
     res.json({ ok: true });
   } catch (error) {
     next(error);
   }
 });
+
 
 app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
   res.sendFile(path.join(__dirname, "text-admin.html"));
