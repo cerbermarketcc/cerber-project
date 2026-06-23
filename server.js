@@ -5649,7 +5649,8 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
     }
     res.json({ ok: true });
   } catch (error) {
-    next(error);
+    console.error("Proverka webhook error", error);
+    res.json({ ok: true });
   }
 });
 
