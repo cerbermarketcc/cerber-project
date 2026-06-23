@@ -4844,11 +4844,6 @@ async function handleProverkaMessage(message) {
   const chatId = message?.chat?.id;
   if (!chatId) return;
 
-  if (Array.isArray(message.new_chat_members) && message.new_chat_members.length) {
-    await proverkaSendMessage(chatId, proverkaHelpText);
-    return;
-  }
-
   const { command, args } = proverkaCommand(message);
   if (!command) return;
 
