@@ -5927,10 +5927,10 @@ function proverkaDayStatsText(stats, chatId) {
     .map((item) => ({ ...item, count: Number(item.count || 0) }))
     .filter((item) => item.count > 0)
     .sort((a, b) => b.count - a.count || String(a.display_name || "").localeCompare(String(b.display_name || "")))
-    .slice(0, 50);
+    .slice(0, 30);
 
   const date = stats.day?.date || proverkaDayKey();
-  const lines = ["<b>Статистика за день</b>", "<b>Дата:</b> " + proverkaHtml(date), ""];
+  const lines = ["<b>Статистика за день: топ-30</b>", "<b>Дата:</b> " + proverkaHtml(date), ""];
   if (!rows.length) {
     lines.push("Сегодня сообщений пока нет.");
     return lines.join("\n");
