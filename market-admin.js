@@ -77,6 +77,26 @@ function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
 }
 
+function stableDisputeNumber(value = "") {
+  const text = String(value || Date.now());
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  return 100 + (hash % 900);
+}
+
+function disputeDisplayNumber(item = {}) {
+  return Number(item.disputeNumber || item.disputeNo || stableDisputeNumber(item.disputeThreadId || item.id || item.exchangeRequestId || "dispute"));
+}
+
+function disputeDisplayLabel(item = {}) {
+  return `#${disputeDisplayNumber(item)}`;
+}
+
+function disputeSearchText(item = {}) {
+  const label = disputeDisplayLabel(item);
+  return [label, label.replace("#", ""), item.id, item.login, item.fromLogin, item.storeName, item.storeId, item.toLogin, item.status].join(" ").toLowerCase();
+}
+
 function fmtMoney(value) {
   return `${Number(value || 0).toFixed(2)} $`;
 }
@@ -595,23 +615,31 @@ function renderDeals() {
 }
 
 function renderDisputes() {
-  const rows = filterRows(data.disputes, ["id", "login", "fromLogin", "storeId", "status"]);
-  return `<section class="split"><article class="table-card"><table><thead><tr><th>ID</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Срок</th><th></th></tr></thead><tbody>
-    ${rows.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Открыть</button></td></tr>`).join("")}
+  const rows = query ? data.disputes.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : data.disputes;
+  return `<section class="split"><article class="table-card"><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Срок</th><th></th></tr></thead><tbody>
+    ${rows.map((o) => `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Открыть чат</button></td></tr>`).join("")}
   </tbody></table></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
 }
 
 function disputeDetail(payload) {
   const d = payload.dispute;
-  return `<h2>Диспут ${esc(d.id)}</h2>
+  const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  return `<h2>Диспут ${esc(label)}</h2>
+    <p class="muted">Заказ: <strong>${esc(d.id)}</strong></p>
     <p><strong>Клиент:</strong> ${esc(payload.clientLogin || "-")}</p>
     <p><strong>Магазин:</strong> ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
     <p><strong>Сумма:</strong> ${fmtMoney(payload.amount)}</p>
     <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
-    <button class="primary" data-join-dispute="${esc(d.id)}">Войти в диспут</button>
+    <button class="primary" data-join-dispute="${esc(d.id)}">Войти и открыть чат</button>
     ${d.disputeOpen !== false ? `<button class="ghost" data-close-dispute="${esc(d.id)}">Закрыть спор</button>` : ""}
-    <h3>Переписка</h3>
-    <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], payload.messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
+    ${d.disputeOpen !== false && !d.disputeChatClosed ? `<form class="form compact-form" data-admin-dispute-reply="${esc(d.id)}">
+      <label class="field">Ответ клиенту<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту"></textarea></label>
+      <label class="field">Фото/видео<input name="attachment" type="file" accept="image/*,video/*,.webp,.gif"></label>
+      <button class="primary" type="submit">Отправить в чат</button>
+    </form>` : `<p class="muted">Диспут закрыт. Историю можно смотреть, писать нельзя.</p>`}
+    <h3>Чат диспута</h3>
+    <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
 }
 
 function renderBroadcasts() {
@@ -1039,9 +1067,33 @@ function bindActions() {
   });
   root.querySelectorAll("[data-join-dispute]").forEach((button) => button.onclick = async () => {
     try {
-      await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.joinDispute)}/join`, { method: "POST" });
-      toast("Администратор вошел в диспут");
-      await refreshData(true);
+      selectedDisputeId = button.dataset.joinDispute;
+      persistAdminUiState();
+      const payload = await api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}/join`, { method: "POST" });
+      const box = root.querySelector("[data-dispute-detail]");
+      if (box) box.innerHTML = disputeDetail(payload);
+      bindActions();
+      toast("Чат диспута открыт");
+      requestAnimationFrame(() => box?.querySelector("textarea")?.focus());
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-admin-dispute-reply]").forEach((form) => form.onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const disputeId = form.dataset.adminDisputeReply;
+      const formData = new FormData(form);
+      const attachments = await filesToSupportAttachments(formData.getAll("attachment"));
+      const payload = await api(`/api/admin/disputes/${encodeURIComponent(disputeId)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ body: formData.get("body"), attachments })
+      });
+      const box = root.querySelector("[data-dispute-detail]");
+      if (box) box.innerHTML = disputeDetail(payload);
+      bindActions();
+      toast("Сообщение отправлено клиенту");
+      requestAnimationFrame(() => box?.querySelector("textarea")?.focus());
     } catch (error) {
       toast(error.message, true);
     }

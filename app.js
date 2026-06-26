@@ -2485,6 +2485,21 @@ function esc(value) {
   }[char]));
 }
 
+function stableDisputeNumber(value = "") {
+  const text = String(value || Date.now());
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  return 100 + (hash % 900);
+}
+
+function disputeDisplayNumber(order = {}) {
+  return Number(order.disputeNumber || order.disputeNo || stableDisputeNumber(order.disputeThreadId || order.id || order.exchangeRequestId || "dispute"));
+}
+
+function disputeDisplayLabel(order = {}) {
+  return `#${disputeDisplayNumber(order)}`;
+}
+
 function showToast(message) {
   const toast = document.querySelector(".toast");
   if (!toast) return;
@@ -8251,15 +8266,18 @@ function shopDisputesTab(store) {
   const disputes = storeDisputes(store.id);
   return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина. Войдите в диспут, чтобы клиент увидел магазин в чате.</p></div></section>
   <section class="seller-dashboard-card seller-wide-card">
+    <label class="field seller-dispute-search">Найти диспут<input data-shop-dispute-search placeholder="#535, 535, клиент или ID заказа"></label>
     ${disputes.map((order) => {
       const messages = disputeMessagesForOrder(order);
+      const label = disputeDisplayLabel(order);
+      const searchText = [label, String(label).replace("#", ""), order.id, order.login, order.product, order.storeName, productOrderStatus(order)].join(" ").toLowerCase();
       return `
-        <article class="seller-dispute-card">
+        <article class="seller-dispute-card" data-shop-dispute-card data-search-text="${esc(searchText)}" data-order-id="${esc(order.id)}">
           <div class="seller-card-head">
-            <h3>${esc(order.product || order.id)}</h3>
+            <h3>${esc(label)} · ${esc(order.product || order.id)}</h3>
             <span>${esc(order.login || "")} · ${Number(order.amountUsd || 0).toFixed(2)} $</span>
           </div>
-          <p class="desc">Заказ: <strong>${esc(order.id)}</strong> · статус: <strong>${esc(productOrderStatus(order))}</strong></p>
+          <p class="desc">Номер диспута: <strong>${esc(label)}</strong> · заказ: <strong>${esc(order.id)}</strong> · статус: <strong>${esc(productOrderStatus(order))}</strong></p>
           <div class="private-chat-list seller-dispute-chat">
             ${messages.length ? messages.map((message) => privateMessageView(message)).join("") : `<p class="empty-chat">Сообщений по диспуту пока нет.</p>`}
           </div>
@@ -8705,6 +8723,14 @@ function bindShopPanelActions(store, activeTab) {
     await shopPersistAndRender("settings");
   });
 
+  document.querySelector("[data-shop-dispute-search]")?.addEventListener("input", (event) => {
+    const value = String(event.currentTarget.value || "").trim().toLowerCase().replace(/^#/, "");
+    document.querySelectorAll("[data-shop-dispute-card]").forEach((card) => {
+      const text = String(card.dataset.searchText || "").replace(/#/g, "");
+      card.hidden = Boolean(value) && !text.includes(value);
+    });
+  });
+
   document.querySelectorAll("[data-shop-dispute-close]").forEach((button) => {
     button.onclick = async () => {
       const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
@@ -8735,9 +8761,15 @@ function bindShopPanelActions(store, activeTab) {
           timeoutMs: 15000,
           headers: { Authorization: `Bearer ${token}` }
         });
+        const disputeId = button.dataset.shopDisputeJoin;
         applyRemoteState(payload);
         showToast("Магазин вошёл в диспут");
         renderShopPanel("disputes");
+        requestAnimationFrame(() => {
+          const card = Array.from(document.querySelectorAll("[data-shop-dispute-card]")).find((item) => item.dataset.orderId === disputeId);
+          card?.scrollIntoView({ behavior: "smooth", block: "center" });
+          card?.querySelector("textarea")?.focus();
+        });
       } catch (error) {
         showToast(error.message || "Не удалось войти в диспут");
       }
@@ -8770,9 +8802,15 @@ function bindShopPanelActions(store, activeTab) {
           headers: { Authorization: `Bearer ${token}` },
           body: JSON.stringify({ body, attachments })
         });
+        const disputeId = form.dataset.shopDisputeReply;
         applyRemoteState(payload);
         showToast("Сообщение отправлено");
         renderShopPanel("disputes");
+        requestAnimationFrame(() => {
+          const card = Array.from(document.querySelectorAll("[data-shop-dispute-card]")).find((item) => item.dataset.orderId === disputeId);
+          card?.scrollIntoView({ behavior: "smooth", block: "center" });
+          card?.querySelector("textarea")?.focus();
+        });
       } catch (error) {
         showToast(error.message || "Не удалось отправить сообщение");
       }

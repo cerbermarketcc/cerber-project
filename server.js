@@ -1205,6 +1205,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       return res.status(403).json({ error: "Нет доступа к спору этого магазина" });
     }
     const now = Date.now();
+    const publicNumber = ensureDisputeNumber(state, order);
     order.status = "completed";
     order.paymentStatus = order.paymentStatus || "paid";
     order.disputeOpen = false;
@@ -1220,7 +1221,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
       fromLogin: admin?.login || store?.ownerLogin || store?.id || "admin",
-      subject: `Диспут по заказу ${order.id}`,
+      subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body: "Диспут закрыт. История переписки сохранена.",
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
@@ -1923,15 +1924,13 @@ app.get("/api/admin/disputes/:id", async (req, res, next) => {
     const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
     const clientLogin = dispute.login || dispute.fromLogin || "";
     const storeLogin = store?.ownerLogin || dispute.toLogin || "";
+    const threadId = dispute.disputeThreadId || "";
     const messages = data.messages.filter((message) => (
-      message.system?.includes("dispute") ||
-      message.subject?.includes(id) ||
-      sameLogin(message.fromLogin, clientLogin) ||
-      sameLogin(message.toLogin, clientLogin) ||
-      sameLogin(message.fromLogin, storeLogin) ||
-      sameLogin(message.toLogin, storeLogin)
-    )).slice(0, 120);
-    res.json({ dispute, order, request, store, clientLogin, storeLogin, amount: adminOrderAmount(dispute), messages });
+      (threadId && message.disputeThreadId === threadId) ||
+      message.orderId === id ||
+      message.subject?.includes(id)
+    )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
+    res.json({ dispute, order, request, store, clientLogin, storeLogin, amount: adminOrderAmount(dispute), disputeNumber: disputeNumber(dispute), messages });
   } catch (error) {
     next(error);
   }
@@ -1947,21 +1946,87 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
     const dispute = order || request;
     if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
     const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
+    const now = Date.now();
+    const threadId = dispute.disputeThreadId || `dispute-${dispute.id}-${now}`;
+    const publicNumber = order ? ensureDisputeNumber(data.state, dispute) : disputeNumber(dispute);
+    dispute.disputeThreadId = threadId;
+    if (order) await saveSettingsState(data.state);
     const message = {
-      id: `admin-dispute-${Date.now()}`,
+      id: `admin-dispute-${id}-${now}`,
       storeId: store?.id || dispute.storeId || "",
       storeTag: store?.tag || store?.name || "",
       toLogin: dispute.login || dispute.fromLogin || "",
-      fromLogin: "cerber-owner",
-      subject: `Диспут: ${id}`,
+      fromLogin: admin.login || "cerber-owner",
+      subject: `Диспут #${publicNumber} по заказу ${id}`,
       body: "Владелец Cerber вошел в диспут",
-      createdAt: Date.now(),
-      date: new Date().toLocaleString("ru-RU"),
-      system: "admin-dispute-join"
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "admin-dispute-join",
+      orderId: id,
+      disputeThreadId: threadId
     };
     await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
-    await appendAdminLog("admin_joined_dispute", admin.login, { disputeId: id });
-    res.json(await adminBuildOverview(await adminLoadMarketplace()));
+    await appendAdminLog("admin_joined_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
+    const nextData = await adminLoadMarketplace();
+    const nextOrder = (nextData.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const nextRequest = (nextData.state.exchangeRequests || []).find((item) => item.id === id);
+    const nextDispute = nextOrder || nextRequest || dispute;
+    const messages = nextData.messages.filter((item) => (
+      item.disputeThreadId === threadId ||
+      item.orderId === id ||
+      item.subject?.includes(id)
+    )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store, clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    const id = req.params.id;
+    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
+    const dispute = order || request;
+    if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
+    if (dispute.disputeOpen === false || dispute.disputeChatClosed) return res.status(409).json({ error: "Диспут закрыт" });
+    const body = String(req.body.body || "").trim();
+    const attachments = normalizeSupportAttachments(req.body.attachments, 4);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
+    const now = Date.now();
+    const threadId = dispute.disputeThreadId || `dispute-${dispute.id}-${now}`;
+    const publicNumber = order ? ensureDisputeNumber(data.state, dispute) : disputeNumber(dispute);
+    dispute.disputeThreadId = threadId;
+    if (order) await saveSettingsState(data.state);
+    await upsertPrivateMessage({
+      id: `admin-dispute-reply-${id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: store?.id || dispute.storeId || "",
+      storeTag: store?.tag || store?.name || "",
+      toLogin: dispute.login || dispute.fromLogin || "",
+      fromLogin: admin.login || "cerber-owner",
+      subject: `Диспут #${publicNumber} по заказу ${id}`,
+      body,
+      attachments,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "admin-dispute-reply",
+      orderId: id,
+      disputeThreadId: threadId
+    });
+    await appendAdminLog("admin_replied_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
+    const nextData = await adminLoadMarketplace();
+    const nextOrder = (nextData.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const nextRequest = (nextData.state.exchangeRequests || []).find((item) => item.id === id);
+    const nextDispute = nextOrder || nextRequest || dispute;
+    const messages = nextData.messages.filter((item) => (
+      item.disputeThreadId === threadId ||
+      item.orderId === id ||
+      item.subject?.includes(id)
+    )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store, clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
   } catch (error) {
     next(error);
   }
@@ -2448,6 +2513,30 @@ async function removeOwnerStoreFallback(storeId) {
   state.publicStoresCache = publicStoresCache.filter((item) => String(item?.id || "") !== id);
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
+function stableDisputeNumber(value = "") {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  }
+  return 100 + (hash % 900);
+}
+
+function disputeNumber(order = {}) {
+  return Number(order.disputeNumber || order.disputeNo || stableDisputeNumber(order.disputeThreadId || order.id || Date.now()));
+}
+
+function ensureDisputeNumber(state = {}, order = {}) {
+  if (order.disputeNumber) return Number(order.disputeNumber);
+  const used = new Set((Array.isArray(state.orders) ? state.orders : []).map((item) => Number(item?.disputeNumber || 0)).filter(Boolean));
+  let value = stableDisputeNumber(order.id || order.disputeThreadId || Date.now());
+  for (let guard = 0; used.has(value) && guard < 900; guard += 1) {
+    value = 100 + Math.floor(Math.random() * 900);
+  }
+  order.disputeNumber = value;
+  return value;
 }
 
 function normalizeServerOrders(state = {}) {
@@ -4840,6 +4929,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
+    const publicNumber = ensureDisputeNumber(state, order);
     order.status = "dispute";
     order.disputeOpen = true;
     order.disputeOpenedAt = order.disputeOpenedAt || now;
@@ -4854,7 +4944,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
       storeTag: store.name || order.storeName || order.storeId,
       toLogin: store.ownerLogin || "admin",
       fromLogin: user.login,
-      subject: `Диспут по заказу ${order.id}`,
+      subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body: `${intro}\n\nЗаказ: ${order.id}\nТовар: ${order.product || "-"}\nМагазин: ${store.name || order.storeName || "-"}`,
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
@@ -4863,7 +4953,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
       disputeThreadId: threadId
     });
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId });
-    res.json({ order, disputePeer: store.ownerLogin || "admin", ...(await stateFor(user)) });
+    res.json({ order, disputePeer: store.ownerLogin || "admin", disputeNumber: publicNumber, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -4880,6 +4970,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
     const store = await loadStoreWithFallback(token.storeId);
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
+    const publicNumber = ensureDisputeNumber(state, order);
     order.disputeThreadId = threadId;
     await saveSettingsState(state);
     await upsertPrivateMessage({
@@ -4888,7 +4979,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
       fromLogin: store?.ownerLogin || store?.id || "store",
-      subject: `Диспут по заказу ${order.id}`,
+      subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body: `В чат диспута зашёл магазин ${store?.name || order.storeName || order.storeId}.`,
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
@@ -4923,7 +5014,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
       fromLogin: store?.ownerLogin || store?.id || "store",
-      subject: `Диспут по заказу ${order.id}`,
+      subject: `Диспут #${disputeNumber(order)} по заказу ${order.id}`,
       body,
       attachments,
       createdAt: now,
