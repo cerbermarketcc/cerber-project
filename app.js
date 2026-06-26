@@ -2340,6 +2340,18 @@ function orderCanDispute(order) {
   return !autoReleaseAt || Date.now() < autoReleaseAt;
 }
 
+function orderCanComplete(order) {
+  if (!order || order.type !== "product") return false;
+  if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
+  if (order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") return false;
+  return ["active", "paid"].includes(String(order.status || "").toLowerCase());
+}
+
+function orderNeedsReview(order) {
+  if (!order || order.type !== "product" || order.reviewLeft) return false;
+  return ["completed", "closed"].includes(String(order.status || "").toLowerCase());
+}
+
 function productPaymentUrl(order) {
   return order.paymentUrl || "";
 }
@@ -2989,6 +3001,12 @@ function renderOrders(tab = activeOrdersTab) {
   document.querySelectorAll("[data-order-dispute]").forEach((button) => {
     button.onclick = () => openProductDispute(button.dataset.orderDispute);
   });
+  document.querySelectorAll("[data-order-complete]").forEach((button) => {
+    button.onclick = () => completeProductOrderByClient(button.dataset.orderComplete);
+  });
+  document.querySelectorAll("[data-order-review]").forEach((button) => {
+    button.onclick = () => showProductReviewModal(button.dataset.orderReview);
+  });
   document.querySelectorAll("[data-order-close]").forEach((button) => {
     button.onclick = () => closeExchangeOrder(button.dataset.orderClose, "closed");
   });
@@ -3018,6 +3036,8 @@ function orderCard(order) {
         <span>${status}</span>
         <button data-order-open="${esc(order.exchangeRequestId || order.id)}">Детали</button>
         ${order.status === "pending_payment" ? `<button data-order-cancel="${esc(order.id)}">Отменить</button>` : ""}
+        ${orderCanComplete(order) ? `<button data-order-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
+        ${orderNeedsReview(order) ? `<button data-order-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
         ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
@@ -3095,6 +3115,8 @@ function showProductOrder(orderId) {
         <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
       </div>
     ` : ""}
+    ${orderCanComplete(order) ? `<button class="primary" data-product-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
+    ${orderNeedsReview(order) ? `<button class="primary" data-product-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
@@ -3111,27 +3133,94 @@ function showProductOrder(orderId) {
   document.querySelector("[data-order-cancel]")?.addEventListener("click", (event) => cancelProductOrder(event.currentTarget.dataset.orderCancel));
   document.querySelector("[data-pay-from-balance]")?.addEventListener("click", (event) => payProductOrderFromBalance(event.currentTarget.dataset.payFromBalance));
   document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
+  document.querySelector("[data-product-complete]")?.addEventListener("click", (event) => completeProductOrderByClient(event.currentTarget.dataset.productComplete));
+  document.querySelector("[data-product-review]")?.addEventListener("click", (event) => showProductReviewModal(event.currentTarget.dataset.productReview));
   document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
 }
 
-function handleProductReview(event) {
+async function completeProductOrderByClient(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || !orderCanComplete(order)) return;
+  if (API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/complete`, { method: "POST" });
+      applyRemoteState(payload);
+      showProductReviewModal(orderId);
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось завершить сделку");
+      return;
+    }
+  }
+  order.status = "completed";
+  order.paymentStatus = "paid";
+  order.completedAt = Date.now();
+  order.closedAt = order.completedAt;
+  order.closeReason = "Завершено клиентом";
+  saveDb();
+  showProductReviewModal(orderId);
+}
+
+function showProductReviewModal(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || !orderNeedsReview(order)) return showProductOrder(orderId);
+  showModal(`
+    <h2>Оставить отзыв</h2>
+    <p>${esc(order.product || "Товар")} · ${esc(order.storeName || "")}</p>
+    <form class="form" data-review-form="${esc(order.id)}">
+      <label class="field">Оценка
+        <select name="rating">
+          <option value="5">5 звёзд</option>
+          <option value="4">4 звезды</option>
+          <option value="3">3 звезды</option>
+          <option value="2">2 звезды</option>
+          <option value="1">1 звезда</option>
+        </select>
+      </label>
+      <label class="field">Отзыв<textarea name="text" required placeholder="Напишите отзыв о покупке"></textarea></label>
+      <button class="primary">Отправить отзыв</button>
+    </form>
+    <button class="ghost-button" data-close-modal>${tr("close")}</button>
+  `);
+  document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
+}
+
+async function handleProductReview(event) {
   event.preventDefault();
   const orderId = event.currentTarget.dataset.reviewForm;
   const order = db.orders.find((item) => item.id === orderId);
-  if (!order || order.status !== "completed" || order.reviewLeft) return;
+  if (!order || !orderNeedsReview(order)) return;
+  const data = new FormData(event.currentTarget);
+  const text = String(data.get("text") || "").trim();
+  const rating = Number(data.get("rating") || 5);
+  if (!text) return;
+  if (API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/review`, {
+        method: "POST",
+        body: JSON.stringify({ rating, text })
+      });
+      applyRemoteState(payload);
+      document.querySelector("[data-modal]")?.classList.remove("open");
+      showToast("Отзыв добавлен");
+      renderOrders("completed");
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось добавить отзыв");
+      return;
+    }
+  }
   const store = storeById(order.storeId);
   
   const product = productById(store, order.productId);
   if (!store) return;
-  const data = new FormData(event.currentTarget);
   const review = {
     id: `review-${Date.now()}`,
     serviceDate: new Date().toLocaleDateString("ru-RU"),
-    rating: Number(data.get("rating") || 5),
+    rating,
     product: order.product,
-    text: data.get("text").trim()
+    text
   };
-  if (!review.text) return;
   store.reviewsList = [review, ...(store.reviewsList || [])];
   store.reviews = Number(store.reviews || 0) + 1;
   store.rating = ((Number(store.rating || 5) * (store.reviews - 1)) + review.rating) / store.reviews;
@@ -3966,34 +4055,49 @@ function openProductDispute(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (!orderCanDispute(order)) {
-    showToast("Спор можно открыть только в течение 12 часов после оплаты");
+    showToast("Спор по этому заказу сейчас нельзя открыть");
     return;
   }
-  order.status = "active";
+  if (API_ENABLED && hasApiSession()) {
+    apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/open`, { method: "POST" })
+      .then((payload) => {
+        applyRemoteState(payload);
+        document.querySelector("[data-modal]")?.classList.remove("open");
+        activePrivateLogin = payload.disputePeer || storeById(order.storeId)?.ownerLogin || "admin";
+        showToast("Диспут открыт. Напишите обращение в чате.");
+        renderMessages();
+      })
+      .catch((error) => showToast(error.message || "Не удалось открыть диспут"));
+    return;
+  }
+  order.status = "dispute";
   order.disputeOpen = true;
   order.disputeOpenedAt = Date.now();
-  order.disputeUntil = null;
+  order.disputeThreadId = order.disputeThreadId || `dispute-${order.id}-${Date.now()}`;
+  order.disputeUntil = Date.now() + 24 * 60 * 60 * 1000;
   order.disputeChatClosed = false;
   const store = storeById(order.storeId);
   if (store?.ownerLogin) {
     db.messages.unshift({
-      id: `dispute-product-${Date.now()}`,
+      id: `${order.disputeThreadId}-intro`,
       storeId: order.storeId,
       storeTag: store.tag || store.name,
       toLogin: store.ownerLogin,
       fromLogin: order.login || db.currentUser,
-      subject: `Диспут: ${order.product || order.id}`,
-      body: `Клиент открыл диспут по заказу ${order.id}.`,
+      subject: `Диспут по заказу ${order.id}`,
+      body: `Напишите ваше обращение скоро мы решим вашу проблемы, отправьте фото с места и видео, напишите номер заказа!\n\nЗаказ: ${order.id}`,
       createdAt: Date.now(),
       date: new Date().toLocaleString(),
-      system: "product-dispute"
+      system: "product-dispute",
+      orderId: order.id,
+      disputeThreadId: order.disputeThreadId
     });
   }
   saveDb();
-  showToast("Спор открыт на 12 часов");
-  renderOrders("disputes");
+  activePrivateLogin = store?.ownerLogin || "admin";
+  showToast("Диспут открыт. Напишите обращение в чате.");
+  renderMessages();
 }
-
 function reviewCard(review) {
   return `
     <article class="review-card">
@@ -6534,7 +6638,11 @@ function marketStats() {
 }
 
 function storeDisputes(storeId) {
-  return (db.orders || []).filter((order) => order.type === "product" && order.storeId === storeId && (order.disputeOpen || order.status === "dispute"));
+  return (db.orders || []).filter((order) => (
+    order.type === "product" &&
+    order.storeId === storeId &&
+    (order.disputeOpen || order.status === "dispute" || order.disputeThreadId)
+  ));
 }
 
 function storeRisk(store) {
@@ -8141,10 +8249,49 @@ function shopProductsTab(store, products) {
 
 function shopDisputesTab(store) {
   const disputes = storeDisputes(store.id);
-  return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина.</p></div></section>
-  <section class="seller-dashboard-card seller-wide-card">${disputes.map((order) => `<div class="seller-source"><span>${esc(order.product || order.id)} · ${esc(order.login || "")}</span><strong><button class="ghost-button" data-shop-dispute-close="${esc(order.id)}">Закрыть спор</button></strong></div>`).join("") || `<p>Открытых диспутов нет.</p>`}</section>`;
+  return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина. Войдите в диспут, чтобы клиент увидел магазин в чате.</p></div></section>
+  <section class="seller-dashboard-card seller-wide-card">
+    ${disputes.map((order) => {
+      const messages = disputeMessagesForOrder(order);
+      return `
+        <article class="seller-dispute-card">
+          <div class="seller-card-head">
+            <h3>${esc(order.product || order.id)}</h3>
+            <span>${esc(order.login || "")} · ${Number(order.amountUsd || 0).toFixed(2)} $</span>
+          </div>
+          <p class="desc">Заказ: <strong>${esc(order.id)}</strong> · статус: <strong>${esc(productOrderStatus(order))}</strong></p>
+          <div class="private-chat-list seller-dispute-chat">
+            ${messages.length ? messages.map((message) => privateMessageView(message)).join("") : `<p class="empty-chat">Сообщений по диспуту пока нет.</p>`}
+          </div>
+          ${order.disputeOpen && !order.disputeChatClosed ? `
+            <form class="group-form private-form seller-dispute-form" data-shop-dispute-reply="${esc(order.id)}">
+              <button type="button" class="group-round-button group-attach-button" data-shop-dispute-attach title="Фото или видео">📎</button>
+              <div class="group-input-wrap"><textarea name="body" rows="1" placeholder="Сообщение клиенту"></textarea></div>
+              <input hidden name="attachment" type="file" accept="image/*,video/*,.webp,.gif" data-shop-dispute-attachment>
+              <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+              <div class="group-file-name" data-shop-dispute-file-name></div>
+            </form>
+            <p>
+              <button class="primary" data-shop-dispute-join="${esc(order.id)}">Войти в диспут</button>
+              <button class="ghost-button" data-shop-dispute-close="${esc(order.id)}">Закрыть спор</button>
+            </p>
+          ` : `<p class="notice">Диспут закрыт. История сохранена, писать больше нельзя.</p>`}
+        </article>
+      `;
+    }).join("") || `<p>Открытых диспутов нет.</p>`}
+  </section>`;
 }
 
+function disputeMessagesForOrder(order) {
+  const threadId = order?.disputeThreadId || "";
+  return (db.messages || [])
+    .filter((message) => (
+      (threadId && message.disputeThreadId === threadId) ||
+      (order?.id && message.orderId === order.id) ||
+      (order?.id && String(message.subject || "").includes(order.id))
+    ))
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
   const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
@@ -8577,6 +8724,59 @@ function bindShopPanelActions(store, activeTab) {
         showToast(error.message || "Не удалось закрыть спор");
       }
     };
+  });
+  document.querySelectorAll("[data-shop-dispute-join]").forEach((button) => {
+    button.onclick = async () => {
+      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+      if (!token) return showToast("Войдите в Shop Admin заново");
+      try {
+        const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(button.dataset.shopDisputeJoin)}/join`, {
+          method: "POST",
+          timeoutMs: 15000,
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        applyRemoteState(payload);
+        showToast("Магазин вошёл в диспут");
+        renderShopPanel("disputes");
+      } catch (error) {
+        showToast(error.message || "Не удалось войти в диспут");
+      }
+    };
+  });
+  document.querySelectorAll("[data-shop-dispute-attach]").forEach((button) => {
+    button.onclick = () => button.closest("form")?.querySelector("[data-shop-dispute-attachment]")?.click();
+  });
+  document.querySelectorAll("[data-shop-dispute-attachment]").forEach((input) => {
+    input.onchange = () => {
+      const file = input.files?.[0];
+      const label = input.closest("form")?.querySelector("[data-shop-dispute-file-name]");
+      if (label) label.textContent = file ? file.name : "";
+    };
+  });
+  document.querySelectorAll("[data-shop-dispute-reply]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+      if (!token) return showToast("Войдите в Shop Admin заново");
+      const fd = new FormData(form);
+      const body = String(fd.get("body") || "").trim();
+      const file = fd.get("attachment");
+      const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
+      if (!body && !attachments.length) return;
+      try {
+        const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(form.dataset.shopDisputeReply)}/reply`, {
+          method: "POST",
+          timeoutMs: 15000,
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ body, attachments })
+        });
+        applyRemoteState(payload);
+        showToast("Сообщение отправлено");
+        renderShopPanel("disputes");
+      } catch (error) {
+        showToast(error.message || "Не удалось отправить сообщение");
+      }
+    });
   });
   document.querySelector("[data-shop-payout-request]")?.addEventListener("click", openShopPayoutModal);
 }

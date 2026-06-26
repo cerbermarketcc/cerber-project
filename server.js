@@ -1213,6 +1213,21 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     order.closedAt = now;
     order.closeReason = "Спор закрыт";
     await saveSettingsState({ ...state, orders });
+    const store = await loadStoreWithFallback(order.storeId);
+    await upsertPrivateMessage({
+      id: `dispute-closed-${order.id}-${now}`,
+      storeId: order.storeId,
+      storeTag: store?.name || order.storeName || order.storeId,
+      toLogin: order.login,
+      fromLogin: admin?.login || store?.ownerLogin || store?.id || "admin",
+      subject: `Диспут по заказу ${order.id}`,
+      body: "Диспут закрыт. История переписки сохранена.",
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute-closed",
+      orderId: order.id,
+      disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
+    });
     notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
     res.json({ order, ...(await stateFor(null)) });
   } catch (error) {
@@ -4723,6 +4738,202 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
     }
     await saveSettingsState(state);
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/:id/complete", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
+    if (order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") {
+      return res.status(409).json({ error: "Нельзя завершить заказ с открытым диспутом" });
+    }
+    if (String(order.paymentStatus || "").toLowerCase() !== "paid") {
+      return res.status(400).json({ error: "Заказ ещё не оплачен" });
+    }
+    order.status = "completed";
+    order.paymentStatus = "paid";
+    order.completedAt = Date.now();
+    order.closedAt = order.completedAt;
+    order.closeReason = "Завершено клиентом";
+    await saveSettingsState({ ...state, orders });
+    notifyRealtime("order_completed", { orderId: order.id, storeId: order.storeId });
+    res.json({ order, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/:id/review", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
+    if (!["completed", "closed"].includes(String(order.status || "").toLowerCase())) {
+      return res.status(400).json({ error: "Отзыв можно оставить после завершения сделки" });
+    }
+    if (order.reviewLeft) return res.status(409).json({ error: "Отзыв уже оставлен" });
+    const text = String(req.body.text || "").trim();
+    const rating = Math.max(1, Math.min(5, Number(req.body.rating || 5)));
+    if (!text) return res.status(400).json({ error: "Напишите отзыв" });
+    const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
+    const store = row?.data || await loadStoreWithFallback(order.storeId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const review = {
+      id: `review-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      orderId: order.id,
+      productId: order.productId || "",
+      positionId: order.positionId || "",
+      login: user.login,
+      serviceDate: new Date().toLocaleDateString("ru-RU"),
+      rating,
+      product: order.product || "Товар",
+      text,
+      createdAt: Date.now()
+    };
+    store.reviewsList = [review, ...(Array.isArray(store.reviewsList) ? store.reviewsList : [])];
+    store.reviews = Number(store.reviews || 0) + 1;
+    store.rating = ((Number(store.rating || 5) * (store.reviews - 1)) + rating) / store.reviews;
+    const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id || "") === String(order.productId || ""));
+    if (product) {
+      product.reviewsList = [review, ...(Array.isArray(product.reviewsList) ? product.reviewsList : [])];
+      product.reviews = Number(product.reviews || 0) + 1;
+      product.rating = ((Number(product.rating || 5) * (product.reviews - 1)) + rating) / product.reviews;
+    }
+    order.reviewLeft = true;
+    order.reviewId = review.id;
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveOwnerStoreFallback(store);
+    await saveSettingsState({ ...state, orders });
+    notifyRealtime("order_review_created", { orderId: order.id, storeId: order.storeId });
+    res.json({ review, order, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
+    if (String(order.paymentStatus || "").toLowerCase() !== "paid") return res.status(400).json({ error: "Заказ ещё не оплачен" });
+    if (["completed", "closed", "canceled"].includes(String(order.status || "").toLowerCase()) && !order.disputeOpen) {
+      return res.status(400).json({ error: "Диспут по этому заказу уже нельзя открыть" });
+    }
+    const store = await loadStoreWithFallback(order.storeId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const now = Date.now();
+    const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
+    order.status = "dispute";
+    order.disputeOpen = true;
+    order.disputeOpenedAt = order.disputeOpenedAt || now;
+    order.disputeThreadId = threadId;
+    order.disputeChatClosed = false;
+    order.disputeUntil = now + 24 * 60 * 60 * 1000;
+    await saveSettingsState({ ...state, orders });
+    const intro = "Напишите ваше обращение скоро мы решим вашу проблемы, отправьте фото с места и видео, напишите номер заказа!";
+    await upsertPrivateMessage({
+      id: `${threadId}-intro`,
+      storeId: order.storeId,
+      storeTag: store.name || order.storeName || order.storeId,
+      toLogin: store.ownerLogin || "admin",
+      fromLogin: user.login,
+      subject: `Диспут по заказу ${order.id}`,
+      body: `${intro}\n\nЗаказ: ${order.id}\nТовар: ${order.product || "-"}\nМагазин: ${store.name || order.storeName || "-"}`,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute",
+      orderId: order.id,
+      disputeThreadId: threadId
+    });
+    notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId });
+    res.json({ order, disputePeer: store.ownerLogin || "admin", ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token) return res.status(401).json({ error: "Нет доступа" });
+    const state = await loadSettingsState();
+    const order = (Array.isArray(state.orders) ? state.orders : []).find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || String(order.storeId || "") !== String(token.storeId || "")) return res.status(404).json({ error: "Диспут не найден" });
+    const store = await loadStoreWithFallback(token.storeId);
+    const now = Date.now();
+    const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
+    order.disputeThreadId = threadId;
+    await saveSettingsState(state);
+    await upsertPrivateMessage({
+      id: `${threadId}-shop-join-${now}`,
+      storeId: order.storeId,
+      storeTag: store?.name || order.storeName || order.storeId,
+      toLogin: order.login,
+      fromLogin: store?.ownerLogin || store?.id || "store",
+      subject: `Диспут по заказу ${order.id}`,
+      body: `В чат диспута зашёл магазин ${store?.name || order.storeName || order.storeId}.`,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute-join",
+      orderId: order.id,
+      disputeThreadId: threadId
+    });
+    notifyRealtime("dispute_joined", { orderId: order.id, storeId: order.storeId });
+    res.json({ order, ...(await stateForStoreAdmin(token.storeId)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token) return res.status(401).json({ error: "Нет доступа" });
+    const state = await loadSettingsState();
+    const order = (Array.isArray(state.orders) ? state.orders : []).find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || String(order.storeId || "") !== String(token.storeId || "")) return res.status(404).json({ error: "Диспут не найден" });
+    if (!order.disputeOpen || order.disputeChatClosed) return res.status(409).json({ error: "Диспут закрыт" });
+    const body = String(req.body.body || "").trim();
+    const attachments = normalizeSupportAttachments(req.body.attachments, 4);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const store = await loadStoreWithFallback(token.storeId);
+    const now = Date.now();
+    await upsertPrivateMessage({
+      id: `dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: order.storeId,
+      storeTag: store?.name || order.storeName || order.storeId,
+      toLogin: order.login,
+      fromLogin: store?.ownerLogin || store?.id || "store",
+      subject: `Диспут по заказу ${order.id}`,
+      body,
+      attachments,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute-reply",
+      orderId: order.id,
+      disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
+    });
+    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
+    res.json({ order, ...(await stateForStoreAdmin(token.storeId)) });
   } catch (error) {
     next(error);
   }
