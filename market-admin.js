@@ -621,7 +621,7 @@ function renderDisputes() {
   </tbody></table></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
 }
 
-function disputeDetail(payload) {
+function disputeDetailTable(payload) {
   const d = payload.dispute;
   const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
@@ -640,6 +640,51 @@ function disputeDetail(payload) {
     </form>` : `<p class="muted">Диспут закрыт. Историю можно смотреть, писать нельзя.</p>`}
     <h3>Чат диспута</h3>
     <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
+}
+
+function disputeDetail(payload) {
+  const d = payload.dispute || {};
+  const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const messageHtml = messages.length ? messages.map((message) => {
+    const role = String(message.fromRole || "").toLowerCase();
+    const from = message.fromLogin || (role === "owner" ? "owner" : "system");
+    const own = role === "owner" || sameLogin(from, "cerber-owner") || sameLogin(from, data.admin?.login || "");
+    const attachments = supportAttachmentsHtml(message.attachments || []);
+    return `
+      <article class="admin-dispute-message ${own ? "own" : ""}">
+        <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
+        <div class="admin-dispute-bubble">
+          <div class="admin-dispute-meta">
+            <strong>${esc(from)}</strong>
+            <span>${esc(role || "message")} · ${fmtDate(message.createdAt)}</span>
+          </div>
+          ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
+          ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
+          ${attachments}
+        </div>
+      </article>
+    `;
+  }).join("") : `<p class="muted">Сообщений в диспуте пока нет.</p>`;
+  return `<h2>Диспут ${esc(label)}</h2>
+    <div class="admin-dispute-summary">
+      <p><strong>Заказ:</strong> ${esc(d.id || "-")}</p>
+      <p><strong>Клиент:</strong> ${esc(payload.clientLogin || "-")}</p>
+      <p><strong>Магазин:</strong> ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
+      <p><strong>Сумма:</strong> ${fmtMoney(payload.amount || 0)}</p>
+      <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
+    </div>
+    <div class="admin-dispute-actions">
+      <button class="primary" data-join-dispute="${esc(d.id || "")}">Войти и открыть чат</button>
+      ${d.disputeOpen !== false ? `<button class="ghost" data-close-dispute="${esc(d.id || "")}">Закрыть спор</button>` : ""}
+    </div>
+    <h3>Чат диспута</h3>
+    <div class="admin-dispute-chat">${messageHtml}</div>
+    ${d.disputeOpen !== false && !d.disputeChatClosed ? `<form class="form compact-form admin-dispute-reply" data-admin-dispute-reply="${esc(d.id || "")}">
+      <label class="field">Ответ в чат<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту/магазину"></textarea></label>
+      <label class="field">Фото/видео<input name="attachment" type="file" accept="image/*,video/*,.webp,.gif"></label>
+      <button class="primary" type="submit">Отправить в чат</button>
+    </form>` : `<p class="muted">Диспут закрыт. Историю можно смотреть, писать нельзя.</p>`}`;
 }
 
 function renderBroadcasts() {

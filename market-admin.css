@@ -479,6 +479,102 @@ tr:hover td {
   padding: 12px 0;
 }
 
+.admin-dispute-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0;
+}
+
+.admin-dispute-summary p {
+  margin: 0;
+}
+
+.admin-dispute-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.admin-dispute-chat {
+  display: grid;
+  gap: 12px;
+  max-height: 520px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.admin-dispute-message {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+  max-width: 88%;
+}
+
+.admin-dispute-message.own {
+  grid-template-columns: minmax(0, 1fr) 36px;
+  justify-self: end;
+}
+
+.admin-dispute-message.own .admin-dispute-avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.admin-dispute-message.own .admin-dispute-bubble {
+  grid-column: 1;
+  grid-row: 1;
+  background: rgba(255, 132, 31, 0.12);
+  border-color: rgba(255, 132, 31, 0.28);
+}
+
+.admin-dispute-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+}
+
+.admin-dispute-bubble {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.admin-dispute-bubble p {
+  margin: 0;
+  white-space: normal;
+}
+
+.admin-dispute-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-dispute-meta strong {
+  color: var(--text);
+}
+
+.admin-dispute-reply {
+  margin-top: 12px;
+}
+
 @media (max-width: 980px) {
   .admin-shell {
     grid-template-columns: 1fr;
