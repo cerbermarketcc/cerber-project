@@ -4500,3 +4500,9 @@ details[data-shop-storage-item] .form {
   height: 18px;
   width: 18px;
 }
+.dispute-chat-block,
+.seller-dispute-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}

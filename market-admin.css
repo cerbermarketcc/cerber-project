@@ -472,6 +472,13 @@ tr:hover td {
   word-break: break-all;
 }
 
+.dispute-chat-block,
+.seller-dispute-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}
+
 @media (max-width: 980px) {
   .admin-shell {
     grid-template-columns: 1fr;
