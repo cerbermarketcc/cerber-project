@@ -5556,6 +5556,7 @@ const proverkaHelpText = [
   "/timeroff - остановить таймер",
   "/timekrut номер минуты - номер + таймер одной командой",
   "/stats - топ-30, уровни, сообщения и репутация",
+  "/statusday - кто сколько сообщений написал сегодня",
   "",
   "⭐ Репутация:",
   "Ответь + на чужое сообщение, чтобы дать +1 репутации.",
@@ -5570,6 +5571,7 @@ const proverkaCommands = [
   { command: "timekrut", description: "Случайный номер и таймер" },
   { command: "stats", description: "Статистика и топ чата" },
   { command: "stat", description: "Статистика и топ чата" },
+  { command: "statusday", description: "Сообщения за сегодня" },
   { command: "help", description: "Показать помощь" }
 ];
 let proverkaCommandsSynced = false;
@@ -5696,6 +5698,27 @@ function proverkaScheduleSave(delayMs = 2500) {
     proverkaFlushState().catch((error) => console.error("Proverka stats flush error", error));
   }, delayMs);
   if (typeof proverkaStateSaveTimer.unref === "function") proverkaStateSaveTimer.unref();
+}
+
+function proverkaDayKey(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Chisinau",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function proverkaEnsureDayStats(stats, chatId, date = new Date()) {
+  stats.day = stats.day && typeof stats.day === "object" ? stats.day : {};
+  const today = proverkaDayKey(date);
+  if (stats.day.date !== today) {
+    stats.day = { date: today, chats: {} };
+  }
+  stats.day.chats = stats.day.chats && typeof stats.day.chats === "object" ? stats.day.chats : {};
+  const key = String(chatId);
+  stats.day.chats[key] = stats.day.chats[key] && typeof stats.day.chats[key] === "object" ? stats.day.chats[key] : {};
+  return stats.day.chats[key];
 }
 
 function proverkaUserKey(chatId, userId) {
@@ -5855,11 +5878,28 @@ function proverkaShouldCountMessage(stats, message) {
   return true;
 }
 
+function proverkaCountDayMessage(stats, message) {
+  const user = proverkaEnsureUser(stats, message.chat.id, message.from);
+  if (!user) return;
+  const chatDay = proverkaEnsureDayStats(stats, message.chat.id);
+  const key = String(user.user_id);
+  const old = chatDay[key] || {};
+  chatDay[key] = {
+    user_id: user.user_id,
+    username: user.username,
+    display_name: user.display_name,
+    chat_id: String(message.chat.id),
+    count: Number(old.count || 0) + 1,
+    updated_at: new Date().toISOString()
+  };
+}
+
 async function proverkaCountMessage(stats, message) {
   const user = proverkaEnsureUser(stats, message.chat.id, message.from);
   if (!user) return;
   const oldLevel = Number(user.current_level || 0);
   user.total_messages = Number(user.total_messages || 0) + 1;
+  proverkaCountDayMessage(stats, message);
   const newLevel = proverkaLevelForMessages(user.total_messages);
   user.current_level = newLevel.level;
   user.updated_at = new Date().toISOString();
@@ -5879,6 +5919,27 @@ async function proverkaCountMessage(stats, message) {
       );
     }
   }
+}
+
+function proverkaDayStatsText(stats, chatId) {
+  const chatDay = proverkaEnsureDayStats(stats, chatId);
+  const rows = Object.values(chatDay || {})
+    .map((item) => ({ ...item, count: Number(item.count || 0) }))
+    .filter((item) => item.count > 0)
+    .sort((a, b) => b.count - a.count || String(a.display_name || "").localeCompare(String(b.display_name || "")))
+    .slice(0, 50);
+
+  const date = stats.day?.date || proverkaDayKey();
+  const lines = ["<b>Статистика за день</b>", "<b>Дата:</b> " + proverkaHtml(date), ""];
+  if (!rows.length) {
+    lines.push("Сегодня сообщений пока нет.");
+    return lines.join("\n");
+  }
+
+  rows.forEach((user, index) => {
+    lines.push((index + 1) + ". " + proverkaMentionFromStats(user) + " — <b>" + user.count + "</b> сообщений");
+  });
+  return lines.join("\n");
 }
 
 function proverkaStatsText(stats, chatId, requester) {
@@ -5927,6 +5988,11 @@ async function handleProverkaMessage(state, message) {
   if (["/stats", "/stat", "/стат", "/стата", "/статистика"].includes(command)) {
     if (!stats.settings.stats_enabled) return;
     await proverkaSendMessage(chatId, proverkaStatsText(stats, chatId, message.from));
+    return;
+  }
+
+  if (command === "/statusday") {
+    await proverkaSendMessage(chatId, proverkaDayStatsText(stats, chatId));
     return;
   }
 
