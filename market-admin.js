@@ -1,5 +1,6 @@
 const root = document.getElementById("admin-app");
 const TOKEN_KEY = "cerber_market_admin_token";
+const UI_STATE_KEY = "cerber_market_admin_ui_state";
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
@@ -20,20 +21,55 @@ const supportTopics = [
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 let data = null;
-let section = "Dashboard";
-let query = "";
+let adminUiState = readAdminUiState();
+let section = adminUiState.section || "Dashboard";
+let query = adminUiState.query || "";
+let selectedStoreId = adminUiState.selectedStoreId || "";
+let selectedUserLogin = adminUiState.selectedUserLogin || "";
+let selectedDisputeId = adminUiState.selectedDisputeId || "";
 let realtimeSocket = null;
 let refreshTimer = null;
 let adminLastInteractionAt = 0;
+let adminDetailRestoreNonce = 0;
+
+function readAdminUiState() {
+  try {
+    return JSON.parse(localStorage.getItem(UI_STATE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function persistAdminUiState() {
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify({
+      section,
+      query,
+      selectedStoreId,
+      selectedUserLogin,
+      selectedDisputeId
+    }));
+  } catch {}
+}
 
 function adminIsEditing() {
   const element = document.activeElement;
   return Boolean(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
 }
 
+function adminHasOpenDetail() {
+  return Boolean(
+    root.querySelector("[data-store-detail] form") ||
+    root.querySelector("[data-user-detail] .user-profile") ||
+    root.querySelector("[data-dispute-detail] button")
+  );
+}
+
 function adminCanSilentRender() {
   if (adminIsEditing()) return false;
-  if (Date.now() - adminLastInteractionAt < 5000) return false;
+  if (adminHasOpenDetail()) return false;
+  if (window.scrollY > 80) return false;
+  if (Date.now() - adminLastInteractionAt < 30000) return false;
   return true;
 }
 
@@ -161,7 +197,7 @@ async function refreshData(silent = false) {
   try {
     data = await api("/api/admin/overview");
     if (!silent) renderShell();
-    else if (adminCanSilentRender()) root.querySelector("[data-view]") && (root.querySelector("[data-view]").innerHTML = renderSection(), bindActions(), bindAdminButtonFeedback(root), drawCharts());
+    else if (adminCanSilentRender()) renderCurrentView({ preserveScroll: true });
   } catch (error) {
     if (!silent) renderLogin("Сессия истекла");
   }
@@ -219,6 +255,7 @@ async function load() {
 }
 
 function renderShell() {
+  persistAdminUiState();
   root.innerHTML = `
     <section class="admin-shell">
       <aside class="sidebar">
@@ -238,6 +275,10 @@ function renderShell() {
   `;
   root.querySelectorAll("[data-section]").forEach((button) => button.onclick = () => {
     section = button.dataset.section;
+    selectedStoreId = "";
+    selectedUserLogin = "";
+    selectedDisputeId = "";
+    persistAdminUiState();
     renderShell();
   });
   root.querySelector("[data-logout]").onclick = () => {
@@ -249,14 +290,60 @@ function renderShell() {
   };
   root.querySelector("[data-search]").oninput = (event) => {
     query = event.target.value.toLowerCase();
-    root.querySelector("[data-view]").innerHTML = renderSection();
-    bindActions();
-    bindAdminButtonFeedback(root);
-    drawCharts();
+    persistAdminUiState();
+    renderCurrentView({ preserveScroll: true });
   };
+  restoreAdminDetailPanels();
   bindActions();
   bindAdminButtonFeedback(root);
   drawCharts();
+}
+
+function renderCurrentView({ preserveScroll = false } = {}) {
+  const view = root.querySelector("[data-view]");
+  if (!view) return;
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  view.innerHTML = renderSection();
+  restoreAdminDetailPanels();
+  bindActions();
+  bindAdminButtonFeedback(root);
+  drawCharts();
+  if (preserveScroll) requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
+}
+
+function restoreAdminDetailPanels() {
+  if (!data) return;
+  const storeDetailBox = root.querySelector("[data-store-detail]");
+  if (storeDetailBox && selectedStoreId && data.stores?.some((store) => store.id === selectedStoreId)) {
+    storeDetailBox.innerHTML = storeDetail(selectedStoreId);
+  }
+  const userDetailBox = root.querySelector("[data-user-detail]");
+  if (userDetailBox && selectedUserLogin && userDetailBox.dataset.restoredLogin !== selectedUserLogin) {
+    const nonce = ++adminDetailRestoreNonce;
+    userDetailBox.dataset.restoredLogin = selectedUserLogin;
+    api(`/api/admin/users/${encodeURIComponent(selectedUserLogin)}`)
+      .then((payload) => {
+        if (nonce !== adminDetailRestoreNonce || selectedUserLogin !== userDetailBox.dataset.restoredLogin) return;
+        userDetailBox.innerHTML = userDetail(payload);
+        bindActions();
+        bindAdminButtonFeedback(root);
+      })
+      .catch(() => {});
+  }
+  const disputeDetailBox = root.querySelector("[data-dispute-detail]");
+  if (disputeDetailBox && selectedDisputeId && disputeDetailBox.dataset.restoredDispute !== selectedDisputeId) {
+    const nonce = ++adminDetailRestoreNonce;
+    disputeDetailBox.dataset.restoredDispute = selectedDisputeId;
+    api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}`)
+      .then((payload) => {
+        if (nonce !== adminDetailRestoreNonce || selectedDisputeId !== disputeDetailBox.dataset.restoredDispute) return;
+        disputeDetailBox.innerHTML = disputeDetail(payload);
+        bindActions();
+        bindAdminButtonFeedback(root);
+      })
+      .catch(() => {});
+  }
 }
 
 function bindAdminButtonFeedback(scope = root) {
@@ -837,6 +924,10 @@ function bindActions() {
     }
   });
   root.querySelectorAll("[data-store]").forEach((row) => row.onclick = () => {
+    selectedStoreId = row.dataset.store;
+    selectedUserLogin = "";
+    selectedDisputeId = "";
+    persistAdminUiState();
     root.querySelector("[data-store-detail]").innerHTML = storeDetail(row.dataset.store);
     bindActions();
   });
@@ -893,6 +984,10 @@ function bindActions() {
   });
   root.querySelectorAll("[data-user]").forEach((button) => button.onclick = async () => {
     try {
+      selectedUserLogin = button.dataset.user;
+      selectedStoreId = "";
+      selectedDisputeId = "";
+      persistAdminUiState();
       const payload = await api(`/api/admin/users/${encodeURIComponent(button.dataset.user)}`);
       root.querySelector("[data-user-detail]").innerHTML = userDetail(payload);
       bindActions();
@@ -931,6 +1026,10 @@ function bindActions() {
   });
   root.querySelectorAll("[data-dispute]").forEach((button) => button.onclick = async () => {
     try {
+      selectedDisputeId = button.dataset.dispute;
+      selectedStoreId = "";
+      selectedUserLogin = "";
+      persistAdminUiState();
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.dispute)}`);
       root.querySelector("[data-dispute-detail]").innerHTML = disputeDetail(payload);
       bindActions();
