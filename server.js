@@ -5534,6 +5534,7 @@ const proverkaLevels = [
     "title": "Бог Грязного Подъезда"
   }
 ];
+proverkaLevels.forEach((level) => { level.title = `LVL ${level.level}`; });
 const proverkaDefaultSettings = {
   reputation_enabled: true,
   levels_enabled: true,
@@ -5631,7 +5632,7 @@ function proverkaMentionFromStats(user) {
 }
 
 function proverkaLevelForMessages(totalMessages) {
-  let current = { level: 0, messages: 0, title: "Без уровня" };
+  let current = { level: 0, messages: 0, title: "LVL 0" };
   for (const level of proverkaLevels) {
     if (Number(totalMessages || 0) >= level.messages) current = level;
     else break;
@@ -5735,15 +5736,16 @@ function proverkaEnsureUser(stats, chatId, telegramUser) {
   const key = proverkaUserKey(chatId, userId);
   const now = new Date().toISOString();
   const old = stats.users[key] || {};
-  const level = proverkaLevelForMessages(old.total_messages || 0);
+  const totalMessages = Number(old.total_messages || 0);
+  const level = proverkaLevelForMessages(totalMessages);
   const user = {
     user_id: userId,
     username: String(telegramUser?.username || old.username || ""),
     display_name: proverkaUserName(telegramUser) || old.display_name || userId,
     chat_id: String(chatId),
     reputation: Number(old.reputation || 0),
-    total_messages: Number(old.total_messages || 0),
-    current_level: Number(old.current_level ?? level.level),
+    total_messages: totalMessages,
+    current_level: level.level,
     created_at: old.created_at || now,
     updated_at: now
   };
@@ -5897,27 +5899,20 @@ function proverkaCountDayMessage(stats, message) {
 async function proverkaCountMessage(stats, message) {
   const user = proverkaEnsureUser(stats, message.chat.id, message.from);
   if (!user) return;
-  const oldLevel = Number(user.current_level || 0);
-  user.total_messages = Number(user.total_messages || 0) + 1;
+  const previousMessages = Number(user.total_messages || 0);
+  const oldLevel = proverkaLevelForMessages(previousMessages);
+  user.total_messages = previousMessages + 1;
   proverkaCountDayMessage(stats, message);
   const newLevel = proverkaLevelForMessages(user.total_messages);
   user.current_level = newLevel.level;
   user.updated_at = new Date().toISOString();
 
-  if (stats.settings.levels_enabled && newLevel.level > oldLevel) {
-    const next = proverkaNextLevel(newLevel.level);
+  if (stats.settings.levels_enabled && newLevel.level > oldLevel.level) {
     const who = proverkaMentionFromStats(user);
-    if (next) {
-      await proverkaSendMessage(
-        message.chat.id,
-        `🌑 ${who}, тебе присвоен уровень: <b>${proverkaHtml(newLevel.title)}</b>. Следующий уровень через <b>${next.messages - user.total_messages}</b> сообщений.`
-      );
-    } else {
-      await proverkaSendMessage(
-        message.chat.id,
-        `🌑 ${who}, тебе присвоен максимальный уровень: <b>${proverkaHtml(newLevel.title)}</b>. Дальше только тьма.`
-      );
-    }
+    await proverkaSendMessage(
+      message.chat.id,
+      `${who}, новый уровень: <b>${proverkaHtml(newLevel.title)}</b>!`
+    );
   }
 }
 
@@ -5946,7 +5941,7 @@ function proverkaStatsText(stats, chatId, requester) {
   const users = Object.values(stats.users || {})
     .filter((user) => String(user.chat_id) === String(chatId))
     .sort((a, b) => (
-      Number(b.current_level || 0) - Number(a.current_level || 0) ||
+      proverkaLevelForMessages(b.total_messages || 0).level - proverkaLevelForMessages(a.total_messages || 0).level ||
       Number(b.total_messages || 0) - Number(a.total_messages || 0) ||
       Number(b.reputation || 0) - Number(a.reputation || 0)
     ))
@@ -5957,18 +5952,16 @@ function proverkaStatsText(stats, chatId, requester) {
   users.forEach((user, index) => {
     const level = proverkaLevelForMessages(user.total_messages || 0);
     const rep = Number(user.reputation || 0);
-    lines.push(`${index + 1}. ${proverkaMentionFromStats(user)} — уровень ${level.level}: ${proverkaHtml(level.title)} | сообщений: ${user.total_messages || 0} | репутация: ${rep >= 0 ? "+" : ""}${rep}`);
+    lines.push(`${index + 1}. ${proverkaMentionFromStats(user)} — ${proverkaHtml(level.title)} | сообщений: ${user.total_messages || 0} | репутация: ${rep >= 0 ? "+" : ""}${rep}`);
   });
 
   const requesterStats = requester?.id ? proverkaEnsureUser(stats, chatId, requester) : null;
   if (requesterStats) {
     const level = proverkaLevelForMessages(requesterStats.total_messages || 0);
-    const next = proverkaNextLevel(level.level);
     const rep = Number(requesterStats.reputation || 0);
     lines.push("", "<b>Твоя статистика:</b>");
-    lines.push(`Уровень: ${level.level} — ${proverkaHtml(level.title)}`);
+    lines.push(`Уровень: ${proverkaHtml(level.title)}`);
     lines.push(`Сообщений: ${requesterStats.total_messages || 0}`);
-    lines.push(`До следующего уровня: ${next ? `${next.messages - Number(requesterStats.total_messages || 0)} сообщений` : "максимальный уровень"}`);
     lines.push(`Репутация: ${rep >= 0 ? "+" : ""}${rep}`);
   }
   return lines.join("\n");
