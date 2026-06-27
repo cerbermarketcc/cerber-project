@@ -3494,8 +3494,11 @@ function adminCollectMirrorBots(state) {
     const users = mirror.users && typeof mirror.users === "object" ? Object.values(mirror.users) : [];
     const errors = Array.isArray(mirror.telegramErrors) ? mirror.telegramErrors : [];
     const active = mirror.active !== false && mirror.verified !== false && !mirror.blocked;
-    const creatorLogin = mirror.login || mirror.loginKey || mirror.userId || "";
+    const creatorLogin = String(mirror.login || mirror.loginKey || mirror.userId || mirror.ownerId || "").trim();
     const creatorTelegram = mirror.username ? `@${String(mirror.username).replace(/^@/, "")}` : "";
+    const creatorName = String(mirror.telegramName || [mirror.firstName, mirror.lastName].filter(Boolean).join(" ") || "").trim();
+    const createdAt = Number(mirror.createdAt || mirror.created_at || mirror.registeredAt || 0) || null;
+    const updatedAt = Number(mirror.updatedAt || mirror.lastActivityAt || mirror.seenAt || mirror.lastSeenAt || 0) || null;
     return {
       id: mirror.id || webhookId || `mirror-${index + 1}`,
       source: "mirrorBots",
@@ -3504,19 +3507,24 @@ function adminCollectMirrorBots(state) {
       loginKey: mirror.loginKey || "",
       login: mirror.login || "",
       creatorLogin,
+      createdByLogin: creatorLogin,
       creatorTelegram,
+      createdByTelegram: creatorTelegram,
+      createdByTelegramId: String(mirror.ownerTelegramId || mirror.telegramId || mirror.ownerChatId || mirror.chatId || ""),
+      createdByLabel: [creatorLogin || "telegram", creatorTelegram || creatorName].filter(Boolean).join(" / "),
       chatId: String(mirror.chatId || mirror.ownerChatId || ""),
       ownerTelegramId: String(mirror.ownerTelegramId || mirror.ownerChatId || mirror.chatId || ""),
       username: mirror.username || "",
-      telegramName: mirror.telegramName || "",
+      telegramName: creatorName,
       token,
       botUsername: mirror.botUsername || "",
       botName: mirror.botName || "",
+      displayName: mirror.botUsername ? `@${mirror.botUsername}` : mirror.botName || mirror.id || webhookId || `mirror-${index + 1}`,
       webhookId,
       webhookUrl: mirror.webhookUrl || (token ? mirrorWebhookUrl(token) : ""),
-      createdAt: mirror.createdAt || null,
-      updatedAt: mirror.updatedAt || mirror.lastActivityAt || null,
-      lastActivityAt: mirror.lastActivityAt || mirror.updatedAt || null,
+      createdAt,
+      updatedAt,
+      lastActivityAt: Number(mirror.lastActivityAt || mirror.updatedAt || 0) || updatedAt,
       status: mirror.blocked ? "blocked" : active ? "active" : "disabled",
       active,
       verified: mirror.verified !== false,
@@ -3542,7 +3550,7 @@ function adminCollectMirrorBots(state) {
       })),
       storage: "app_settings.mirrorBots"
     };
-  });
+  }).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 function adminAudienceUsers({ state, profiles, sessions }, filters = {}) {

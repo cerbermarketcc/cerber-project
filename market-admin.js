@@ -933,7 +933,7 @@ function renderMirrorBots() {
     ? smallTable(["Дата", "Действие", "Ошибка"], selected.telegramErrors.map((error) => [fmtDate(error.createdAt), error.action || "-", error.error || "-"]))
     : "<p class='muted'>Ошибок Telegram API нет.</p>";
   const detail = selected ? `<article class="split-card">
-    <h3>Зеркало @${esc(selected.botUsername || selected.botName || "-")}</h3>
+    <h3>Зеркало ${esc(selected.displayName || (selected.botUsername ? `@${selected.botUsername}` : selected.botName || "-"))}</h3>
     <section class="grid">
       ${statCard("Пользователей", selected.usersCount || 0, "в зеркале")}
       ${statCard("Сообщений", selected.sentMessagesCount || 0, "отправлено ботом")}
@@ -941,8 +941,8 @@ function renderMirrorBots() {
       ${statCard("Ошибок API", selected.telegramErrorsCount || 0, "Telegram")}
     </section>
     <div class="mirror-detail">
-      <p><strong>Создал:</strong> ${esc(selected.creatorLogin || selected.loginKey || selected.login || "-")} ${selected.creatorTelegram ? `<span class="muted">(${esc(selected.creatorTelegram)})</span>` : ""}</p>
-      <p><strong>Telegram ID:</strong> ${esc(selected.ownerTelegramId || selected.chatId || "-")} · <strong>Chat ID:</strong> ${esc(selected.chatId || "-")}</p>
+      <p><strong>Создал:</strong> ${esc(selected.createdByLabel || selected.creatorLogin || selected.loginKey || selected.login || "-")}</p>
+      <p><strong>Telegram ID:</strong> ${esc(selected.createdByTelegramId || selected.ownerTelegramId || selected.chatId || "-")} · <strong>Chat ID:</strong> ${esc(selected.chatId || "-")}</p>
       <p><strong>Имя в Telegram:</strong> ${esc(selected.telegramName || "-")} · <strong>Username:</strong> ${esc(selected.username ? `@${selected.username}` : "-")}</p>
       <p><strong>Бот:</strong> ${esc(selected.botUsername ? `@${selected.botUsername}` : selected.botName || "-")} · <strong>Название:</strong> ${esc(selected.botName || "-")}</p>
       <p><strong>Создано:</strong> ${fmtDate(selected.createdAt)} · <strong>Обновлено:</strong> ${fmtDate(selected.updatedAt)} · <strong>Активность:</strong> ${fmtDate(selected.lastActivityAt)}</p>
@@ -963,7 +963,7 @@ function renderMirrorBots() {
     ${statCard("Сообщений", data.bots.sentMessages || 0, "отправлено ботами")}
     ${statCard("Ошибок API", data.bots.errors || 0, "Telegram")}
   </section>
-  <article class="table-card"><table><thead><tr><th>ID</th><th>Создал</th><th>TG username</th><th>Chat ID</th><th>Бот</th><th>Создано</th><th>Активность</th><th>Польз.</th><th>Webhook</th><th>Статус</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.creatorLogin || b.loginKey || b.login || "-")}</td><td>${esc(b.creatorTelegram || (b.username ? `@${b.username}` : "-"))}</td><td>${esc(b.chatId || "-")}</td><td>${esc(b.botUsername ? `@${b.botUsername}` : b.botName || "-")}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td>${Number(b.usersCount || 0)}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${esc(statusLabel(b))}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
+  <article class="table-card"><table><thead><tr><th>ID</th><th>Создал</th><th>TG username</th><th>Telegram ID</th><th>Chat ID</th><th>Бот</th><th>Создано</th><th>Активность</th><th>Польз.</th><th>Webhook</th><th>Статус</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.createdByLogin || b.creatorLogin || b.loginKey || b.login || "-")}</td><td>${esc(b.createdByTelegram || b.creatorTelegram || (b.username ? `@${b.username}` : "-"))}</td><td>${esc(b.createdByTelegramId || b.ownerTelegramId || "-")}</td><td>${esc(b.chatId || "-")}</td><td>${esc(b.displayName || (b.botUsername ? `@${b.botUsername}` : b.botName || "-"))}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td>${Number(b.usersCount || 0)}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${esc(statusLabel(b))}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
 }
 
 function bindActions() {
