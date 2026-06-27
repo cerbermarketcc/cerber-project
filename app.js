@@ -3096,6 +3096,7 @@ function orderCard(order) {
         ${orderCanComplete(order) ? `<button data-order-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
         ${orderCanCloseDispute(order) ? `<button data-order-close-dispute="${esc(order.id)}">Закрыть диспут</button>` : ""}
         ${orderNeedsReview(order) ? `<button data-order-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
+        ${order.reviewLeft ? `<small>Отзыв оставлен</small>` : ""}
         ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
@@ -3176,6 +3177,7 @@ function showProductOrder(orderId) {
     ${orderCanComplete(order) ? `<button class="primary" data-product-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
     ${orderCanCloseDispute(order) ? `<button class="primary" data-product-close-dispute="${esc(order.id)}">Закрыть диспут и оставить отзыв</button>` : ""}
     ${orderNeedsReview(order) ? `<button class="primary" data-product-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
+    ${order.reviewLeft ? `<p class="notice">Отзыв по этому заказу уже оставлен. Детали заказа сохранены.</p>` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
@@ -3195,7 +3197,7 @@ function showProductOrder(orderId) {
   document.querySelector("[data-product-complete]")?.addEventListener("click", (event) => completeProductOrderByClient(event.currentTarget.dataset.productComplete));
   document.querySelector("[data-product-close-dispute]")?.addEventListener("click", (event) => closeProductDisputeByClient(event.currentTarget.dataset.productCloseDispute));
   document.querySelector("[data-product-review]")?.addEventListener("click", (event) => showProductReviewModal(event.currentTarget.dataset.productReview));
-  document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
+  document.querySelectorAll("[data-review-form]").forEach((form) => form.addEventListener("submit", handleProductReview));
 }
 
 async function completeProductOrderByClient(orderId) {
@@ -3269,18 +3271,25 @@ function showProductReviewModal(orderId) {
     </form>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
-  document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
+  document.querySelectorAll("[data-review-form]").forEach((form) => form.addEventListener("submit", handleProductReview));
 }
 
 async function handleProductReview(event) {
   event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector("button[type='submit'], button.primary");
   const orderId = event.currentTarget.dataset.reviewForm;
   const order = db.orders.find((item) => item.id === orderId);
-  if (!order || !orderNeedsReview(order)) return;
-  const data = new FormData(event.currentTarget);
+  if (!order) return showToast("Заказ не найден");
+  if (!orderNeedsReview(order)) {
+    showToast(order.reviewLeft ? "Отзыв уже оставлен" : "Отзыв можно оставить после завершения заказа");
+    return showProductOrder(orderId);
+  }
+  const data = new FormData(form);
   const text = String(data.get("text") || "").trim();
   const rating = Number(data.get("rating") || 5);
-  if (!text) return;
+  if (!text) return showToast("Напишите отзыв");
+  setButtonLoading(submit, true, "Отправляем");
   if (API_ENABLED && hasApiSession()) {
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/review`, {
@@ -3288,12 +3297,12 @@ async function handleProductReview(event) {
         body: JSON.stringify({ rating, text })
       });
       applyRemoteState(payload);
-      document.querySelector("[data-modal]")?.classList.remove("open");
       showToast("Отзыв добавлен");
-      renderOrders("completed");
+      showProductOrder(orderId);
       return;
     } catch (error) {
       showToast(error.message || "Не удалось добавить отзыв");
+      setButtonLoading(submit, false);
       return;
     }
   }
