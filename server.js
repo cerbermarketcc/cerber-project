@@ -24,6 +24,7 @@ const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kk
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
+const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const storeWithdrawalCooldownMs = 3 * 24 * 60 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
@@ -2657,6 +2658,9 @@ async function loadSettingsState() {
   state.telegramBot = state.telegramBot || { users: {}, sentMessages: {} };
   state.telegramBot.users = state.telegramBot.users || {};
   state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
+  state.siteNotifyBot = state.siteNotifyBot || { users: {}, sentMessages: {} };
+  state.siteNotifyBot.users = state.siteNotifyBot.users || {};
+  state.siteNotifyBot.sentMessages = state.siteNotifyBot.sentMessages || {};
   state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
@@ -2723,6 +2727,9 @@ function normalizeSupportAttachments(value, maxItems = 8) {
 
 async function upsertPrivateMessage(message) {
   await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
+  siteNotifyDeliverPrivateMessage(message).catch((error) => {
+    console.error("Site notify bot delivery error", error);
+  });
 }
 
 async function adminLoadMarketplace() {
@@ -4295,6 +4302,163 @@ async function telegramTokenApi(token, method, payload = {}) {
   return body;
 }
 
+function initSiteNotifyBotState(state) {
+  state.siteNotifyBot = state.siteNotifyBot || {};
+  state.siteNotifyBot.users = state.siteNotifyBot.users || {};
+  state.siteNotifyBot.sentMessages = state.siteNotifyBot.sentMessages || {};
+  return state.siteNotifyBot;
+}
+
+function siteNotifyWebhookUrl() {
+  return `${publicBaseUrl}/api/site-notify-bot/webhook`;
+}
+
+async function siteNotifyBotApi(method, payload = {}) {
+  if (!siteNotifyBotToken) {
+    const error = new Error("SITE_NOTIFY_BOT_TOKEN is not configured");
+    error.status = 500;
+    throw error;
+  }
+  return telegramTokenApi(siteNotifyBotToken, method, payload);
+}
+
+async function siteNotifySendMessage(chatId, text) {
+  return siteNotifyBotApi("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  });
+}
+
+function siteNotifyHelpText() {
+  return [
+    "<b>Бот уведомлений CERBER</b>",
+    "",
+    "Войдите в аккаунт сайта:",
+    "<code>/login ваш_логин ваш_пароль</code>",
+    "",
+    "После входа бот будет писать сюда, когда на сайте появится новое личное сообщение.",
+    "",
+    "Команды:",
+    "/status - проверить привязку",
+    "/logout - отключить уведомления"
+  ].join("\n");
+}
+
+async function siteNotifyHandleLogin(state, chatId, telegramUser, text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 3) {
+    await siteNotifySendMessage(chatId, "Формат входа:\n<code>/login логин пароль</code>");
+    return;
+  }
+  const key = loginKey(parts[1]);
+  const password = parts.slice(2).join(" ");
+  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    await siteNotifySendMessage(chatId, "Неверный логин или пароль.");
+    return;
+  }
+  const botState = initSiteNotifyBotState(state);
+  botState.users[String(chatId)] = {
+    chatId: String(chatId),
+    telegramId: String(telegramUser?.id || chatId),
+    username: String(telegramUser?.username || ""),
+    firstName: String(telegramUser?.first_name || ""),
+    lastName: String(telegramUser?.last_name || ""),
+    login: user.login,
+    loginKey: user.login_key,
+    enabled: true,
+    linkedAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  await siteNotifySendMessage(chatId, `Вход выполнен: <b>${botHtml(user.login)}</b>.\nТеперь сюда будут приходить уведомления о новых сообщениях на сайте.`);
+}
+
+async function siteNotifyHandleMessage(state, message) {
+  const chatId = message?.chat?.id;
+  if (!chatId || !message.from || message.from.is_bot) return;
+  const text = String(message.text || "").trim();
+  const botState = initSiteNotifyBotState(state);
+  const chatKey = String(chatId);
+  const linked = botState.users[chatKey];
+
+  if (text === "/start" || text === "/help") {
+    await siteNotifySendMessage(chatId, siteNotifyHelpText());
+    return;
+  }
+  if (text.startsWith("/login")) {
+    await siteNotifyHandleLogin(state, chatId, message.from, text);
+    return;
+  }
+  if (text === "/logout") {
+    delete botState.users[chatKey];
+    await siteNotifySendMessage(chatId, "Уведомления отключены. Чтобы включить снова, отправьте /login логин пароль.");
+    return;
+  }
+  if (text === "/status") {
+    if (linked?.enabled && linked.login) {
+      await siteNotifySendMessage(chatId, `Уведомления включены для аккаунта <b>${botHtml(linked.login)}</b>.`);
+    } else {
+      await siteNotifySendMessage(chatId, "Аккаунт не привязан.\nОтправьте: <code>/login логин пароль</code>");
+    }
+    return;
+  }
+  await siteNotifySendMessage(chatId, linked?.enabled ? "Бот активен. Новые сообщения с сайта будут приходить сюда." : siteNotifyHelpText());
+}
+
+async function siteNotifyEnsureWebhook() {
+  if (!siteNotifyBotToken) return;
+  await siteNotifyBotApi("setMyCommands", {
+    commands: [
+      { command: "login", description: "Войти в аккаунт сайта" },
+      { command: "status", description: "Проверить привязку" },
+      { command: "logout", description: "Отключить уведомления" },
+      { command: "help", description: "Помощь" }
+    ]
+  }).catch((error) => console.error("Site notify setMyCommands error", error));
+  await siteNotifyBotApi("setWebhook", {
+    url: siteNotifyWebhookUrl(),
+    ...(telegramWebhookSecret ? { secret_token: telegramWebhookSecret } : {})
+  }).catch((error) => console.error("Site notify setWebhook error", error));
+}
+
+async function siteNotifyDeliverPrivateMessage(message = {}) {
+  if (!siteNotifyBotToken || !message?.toLogin) return;
+  if (message.fromLogin && sameLogin(message.fromLogin, message.toLogin)) return;
+  const state = await loadSettingsState();
+  const botState = initSiteNotifyBotState(state);
+  const recipients = Object.values(botState.users || {}).filter((item) => (
+    item?.enabled &&
+    item?.chatId &&
+    (sameLogin(item.login, message.toLogin) || sameLogin(item.loginKey, message.toLogin))
+  ));
+  if (!recipients.length) return;
+
+  const sentKeyBase = String(message.id || `${message.toLogin}:${message.createdAt || Date.now()}`);
+  const text = [
+    "<b>У вас на сайте есть новое сообщение!</b>",
+    message.fromLogin ? `От: <b>${botHtml(message.fromLogin)}</b>` : "",
+    "",
+    "Откройте сайт, чтобы прочитать и ответить."
+  ].filter(Boolean).join("\n");
+
+  let changed = false;
+  for (const recipient of recipients) {
+    const sentKey = `${recipient.chatId}:${sentKeyBase}`;
+    if (botState.sentMessages[sentKey]) continue;
+    await siteNotifySendMessage(recipient.chatId, text);
+    botState.sentMessages[sentKey] = Date.now();
+    changed = true;
+  }
+
+  if (changed) {
+    const entries = Object.entries(botState.sentMessages).sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0)).slice(0, 1000);
+    botState.sentMessages = Object.fromEntries(entries);
+    await saveSettingsState(state);
+  }
+}
+
 function dataUrlBlob(value = "") {
   const match = String(value).match(/^data:([^;,]+);base64,(.+)$/);
   if (!match) return null;
@@ -4839,6 +5003,31 @@ app.get("/api/telegram/webhook", (_req, res) => {
     configured: Boolean(telegramBotToken),
     webhook: `${publicBaseUrl}/api/telegram/webhook`
   });
+});
+
+app.get("/api/site-notify-bot/webhook", async (_req, res) => {
+  await siteNotifyEnsureWebhook().catch(() => {});
+  res.json({
+    ok: true,
+    configured: Boolean(siteNotifyBotToken),
+    webhook: siteNotifyWebhookUrl()
+  });
+});
+
+app.post("/api/site-notify-bot/webhook", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!siteNotifyBotToken) return res.status(500).json({ error: "SITE_NOTIFY_BOT_TOKEN is not configured" });
+    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
+      return res.status(401).json({ error: "Bad Telegram secret" });
+    }
+    const state = await loadSettingsState();
+    if (req.body?.message) await siteNotifyHandleMessage(state, req.body.message);
+    await saveSettingsState(state);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/telegram/webhook", async (req, res, next) => {
@@ -6183,6 +6372,7 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
 });
 
 adminRealtimeServer = new WebSocketServer({ server, path: "/api/admin/realtime" });

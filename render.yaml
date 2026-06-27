@@ -29,5 +29,7 @@ services:
         sync: false
       - key: PROVERKA_BOT_TOKEN
         sync: false
+      - key: SITE_NOTIFY_BOT_TOKEN
+        sync: false
       - key: PUBLIC_BASE_URL
         value: "https://cerber-project.onrender.com"
