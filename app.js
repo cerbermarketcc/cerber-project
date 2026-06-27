@@ -8270,7 +8270,7 @@ function shopStorageTab(store, products, stats = {}) {
             return `
               <details class="seller-source" data-shop-storage-item>
                 <summary>
-                  <span>${esc(position.title || product.title || "Товар")} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span>
+                  <span>${esc(position.title || product.title || "Товар")} · ${esc(locationLabel(position))} · ${esc(positionWeightLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span>
                   <strong>${esc(position.status || "ready")}</strong>
                 </summary>
                 <form class="form" data-shop-position-edit data-card-id="${esc(product.id)}" data-position-id="${esc(position.id)}">
