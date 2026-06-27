@@ -1257,6 +1257,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     order.closedAt = now;
     order.closeReason = "Спор закрыт";
     const store = await loadStoreWithFallback(order.storeId);
+    await ensureProductOrderSettlement(state, order, store);
     await notifySiteUser(state, order.login, {
       id: `notice-dispute-closed-${order.id}-${loginKey(order.login)}`,
       eventType: "dispute_closed",
@@ -2977,6 +2978,21 @@ async function restoreExpiredProductReservation(state = {}, order = {}) {
   return true;
 }
 
+async function ensureProductOrderSettlement(state = {}, order = {}, store = null) {
+  if (!order || order.type !== "product") return false;
+  if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
+  if (!adminIsWithdrawableStoreOrder(order)) return false;
+
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const beforeTxCount = state.walletTransactions.length;
+  const hadLedger = Boolean(order.ledgerRecordedAt);
+  const resolvedStore = store || await lifecycleStoreForOrder(state, order.storeId);
+
+  recordProductOrderLedger(order, state, resolvedStore);
+
+  return !hadLedger || state.walletTransactions.length !== beforeTxCount;
+}
+
 async function normalizeServerOrders(state = {}) {
   const now = Date.now();
   let changed = false;
@@ -3036,6 +3052,13 @@ async function normalizeServerOrders(state = {}) {
           title: "Заказ завершён автоматически",
           body: `Заказ ${order.product || order.id} закрыт по таймеру автозавершения.`
         });
+        const autoCompletedOrder = { ...order, status: "completed", completedAt: now, closedAt: now };
+        if (await ensureProductOrderSettlement(state, autoCompletedOrder, store)) {
+          order.ledgerRecordedAt = autoCompletedOrder.ledgerRecordedAt;
+          order.platformCommissionPercent = autoCompletedOrder.platformCommissionPercent;
+          order.platformCommissionUsd = autoCompletedOrder.platformCommissionUsd;
+          order.sellerAmountUsd = autoCompletedOrder.sellerAmountUsd;
+        }
         nextOrders.push({
           ...order,
           status: "completed",
@@ -3046,6 +3069,7 @@ async function normalizeServerOrders(state = {}) {
         continue;
       }
     }
+    if (await ensureProductOrderSettlement(state, order)) changed = true;
     nextOrders.push(order);
   }
   state.orders = nextOrders;
@@ -5872,6 +5896,7 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
     order.closedAt = order.completedAt;
     order.closeReason = "Завершено клиентом";
     const store = await loadStoreWithFallback(order.storeId);
+    await ensureProductOrderSettlement(state, order, store);
     await notifySiteUser(state, user.login, {
       id: `notice-order-completed-${order.id}-${loginKey(user.login)}`,
       eventType: "order_completed",
