@@ -2299,6 +2299,75 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+    state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+    state.ltcBalances = state.ltcBalances || {};
+    const withdrawal = state.walletWithdrawals.find((item) => String(item.id || "") === String(req.params.id || ""));
+    if (!withdrawal) return res.status(404).json({ error: "Заявка на вывод не найдена" });
+    const nextStatus = String(req.body.status || "").trim().toLowerCase();
+    if (!["pending", "processing", "paid", "completed", "rejected", "cancelled", "canceled"].includes(nextStatus)) {
+      return res.status(400).json({ error: "Неверный статус вывода" });
+    }
+    const prevStatus = String(withdrawal.status || "pending").toLowerCase();
+    withdrawal.status = nextStatus;
+    withdrawal.processedAt = Date.now();
+    withdrawal.processedBy = admin.login;
+    withdrawal.adminNote = String(req.body.note || "").trim().slice(0, 500);
+
+    const isRejected = ["rejected", "cancelled", "canceled"].includes(nextStatus);
+    const wasRejected = ["rejected", "cancelled", "canceled"].includes(prevStatus);
+    if (isRejected && !wasRejected && !withdrawal.scope && withdrawal.login && Number(withdrawal.amountLtc || 0) > 0 && !withdrawal.refundedAt) {
+      state.ltcBalances[withdrawal.login] = Number(state.ltcBalances[withdrawal.login] || 0) + Number(withdrawal.amountLtc || 0);
+      withdrawal.refundedAt = Date.now();
+      state.walletTransactions.unshift({
+        id: `tx-refund-${withdrawal.id}`,
+        login: withdrawal.login,
+        type: "withdrawal_refund",
+        title: "Возврат отклонённого вывода LTC",
+        amountLtc: Number(withdrawal.amountLtc || 0),
+        amountUsd: Number(withdrawal.amountUsd || 0),
+        coinId: withdrawal.coinId || "ltc",
+        payCurrency: withdrawal.payCurrency || "ltc",
+        address: withdrawal.address || "",
+        createdAt: withdrawal.refundedAt,
+        date: new Date(withdrawal.refundedAt).toLocaleString("ru-RU"),
+        status: "completed"
+      });
+    }
+
+    const recipientLogin = withdrawal.scope === "owner"
+      ? withdrawal.login || admin.login
+      : withdrawal.scope === "store"
+        ? withdrawal.login || withdrawal.storeId
+        : withdrawal.login;
+    await notifySiteUser(state, recipientLogin, {
+      id: `notice-withdrawal-status-${withdrawal.id}-${nextStatus}-${loginKey(recipientLogin)}`,
+      eventType: "withdrawal_status_changed",
+      withdrawalId: withdrawal.id,
+      storeId: withdrawal.storeId || "",
+      title: "Статус вывода изменён",
+      body: `Заявка ${withdrawal.id}: ${nextStatus}.`
+    });
+    await saveSettingsState(state);
+    await appendAdminLog("withdrawal_status_updated", admin.login, {
+      id: withdrawal.id,
+      scope: withdrawal.scope || "user",
+      login: withdrawal.login || "",
+      storeId: withdrawal.storeId || "",
+      prevStatus,
+      nextStatus
+    });
+    notifyRealtime("wallet_withdrawal_status_updated", { id: withdrawal.id, status: nextStatus, scope: withdrawal.scope || "user" });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/admin/logs", async (req, res, next) => {
   try {
     requireAdmin(req);

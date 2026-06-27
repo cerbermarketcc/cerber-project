@@ -713,9 +713,19 @@ function renderFinance() {
   const bucketCard = (label, rows) => statCard(label, rows?.length || 0, fmtMoney((rows || []).reduce((sum, item) => sum + Number(item.amountUsd || item.priceAmount || 0), 0)));
   const deposits = data.finances.walletDeposits || [];
   const withdrawals = data.finances.walletWithdrawals || [];
+  const withdrawalActions = (w) => {
+    const status = String(w.status || "pending").toLowerCase();
+    if (!["pending", "processing"].includes(status)) {
+      return `<span class="muted">${w.processedAt ? `Обработано ${fmtDate(w.processedAt)}` : "История"}</span>`;
+    }
+    return `<div class="row-actions">
+      <button class="ghost" type="button" data-withdrawal-status="${esc(w.id)}" data-status="paid">Выплачено</button>
+      <button class="ghost danger" type="button" data-withdrawal-status="${esc(w.id)}" data-status="rejected">Отклонить</button>
+    </div>`;
+  };
   return `<section class="grid">${bucketCard("Успешные депозиты", buckets.successful)}${bucketCard("В ожидании", buckets.pending)}${bucketCard("Отмененные", buckets.cancelled)}${bucketCard("Ошибочные", buckets.failed)}</section>
   <article class="table-card"><h3>Пополнения</h3><table><thead><tr><th>ID</th><th>Логин</th><th>Сумма</th><th>Монета</th><th>Статус</th><th>Адрес</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
-  <article class="table-card"><h3>Заявки на вывод</h3><table><thead><tr><th>ID</th><th>Магазин</th><th>Логин</th><th>Сумма</th><th>Адрес</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Владелец сайта" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(8)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span></td><td>${fmtDate(w.createdAt)}</td></tr>`).join("")}</tbody></table></article>`;
+  <article class="table-card"><h3>Заявки на вывод</h3><table><thead><tr><th>ID</th><th>Магазин</th><th>Логин</th><th>Сумма</th><th>Адрес</th><th>Статус</th><th>Дата</th><th>Действия</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Владелец сайта" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(8)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span></td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
 }
 function renderSettings() {
   const owner = data.settings.ownerSettings || {};
@@ -1229,6 +1239,30 @@ function bindActions() {
       button.disabled = false;
       button.textContent = oldText;
     }
+  });
+  root.querySelectorAll("[data-withdrawal-status]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.withdrawalStatus;
+      const status = button.dataset.status;
+      const label = status === "paid" ? "отметить как выплаченную" : "отклонить";
+      if (!id || !status) return;
+      if (!confirm(`Вы уверены, что хотите ${label} заявку ${id}?`)) return;
+      const oldText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Сохраняем...";
+      try {
+        data = await api(`/api/admin/withdrawals/${encodeURIComponent(id)}/status`, {
+          method: "POST",
+          body: JSON.stringify({ status })
+        });
+        toast(status === "paid" ? "Заявка отмечена как выплаченная" : "Заявка отклонена");
+        renderShell();
+      } catch (error) {
+        toast(error.message, true);
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    });
   });
   root.querySelector("[data-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
