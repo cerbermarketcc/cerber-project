@@ -512,7 +512,7 @@ async function stateFor(user) {
       messages: messages?.length || 0
     });
     const settingsData = settings?.data || {};
-    if (normalizeServerOrders(settingsData)) {
+    if (await normalizeServerOrders(settingsData)) {
       saveSettingsState(settingsData).catch((error) => {
         console.error("[stateFor] order normalization save failed", { message: error.message });
       });
@@ -2787,14 +2787,75 @@ function ensureDisputeNumber(state = {}, order = {}) {
   return value;
 }
 
-function normalizeServerOrders(state = {}) {
+async function lifecycleStoreForOrder(state = {}, storeId = "") {
+  const id = String(storeId || "").trim();
+  if (!id) return null;
+  const { data: row } = await supabase.from("stores").select("data").eq("id", id).maybeSingle();
+  return row?.data || (Array.isArray(state.ownerStores) ? state.ownerStores.find((item) => String(item?.id || "") === id) : null) || null;
+}
+
+async function restoreExpiredProductReservation(state = {}, order = {}) {
+  if (order.reservationRestored || order.stockRestoredAt) return false;
+  const store = await lifecycleStoreForOrder(state, order.storeId);
+  if (!store) return false;
+  const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item?.id || "") === String(order.productId || ""));
+  const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item?.id || "") === String(order.positionId || ""));
+  if (!product && !position) return false;
+  if (order.reservedDescription) {
+    if (order.reservedFromPosition && position) {
+      position.deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+      if (!position.deliveryItems.includes(order.reservedDescription)) position.deliveryItems.unshift(order.reservedDescription);
+    } else if (product) {
+      product.deliveryItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+      if (!product.deliveryItems.includes(order.reservedDescription)) product.deliveryItems.unshift(order.reservedDescription);
+    }
+  }
+  if (position) {
+    position.stock = Math.max(0, Number(position.stock || 0)) + 1;
+    order.stockRestoredAt = Date.now();
+  }
+  order.reservationRestored = true;
+  if (store.id) {
+    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    if (Array.isArray(state.ownerStores)) {
+      state.ownerStores = state.ownerStores.map((item) => String(item?.id || "") === String(store.id) ? { ...item, ...store } : item);
+    }
+  }
+  return true;
+}
+
+async function normalizeServerOrders(state = {}) {
   const now = Date.now();
   let changed = false;
   const orders = Array.isArray(state.orders) ? state.orders : [];
-  state.orders = orders.map((order) => {
-    if (!order || order.type !== "product") return order;
+  const nextOrders = [];
+  for (const order of orders) {
+    if (!order || order.type !== "product") {
+      nextOrders.push(order);
+      continue;
+    }
     const status = String(order.status || "").toLowerCase();
     const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+    if (status === "pending_payment" && paymentStatus !== "paid" && order.paymentExpiresAt && now >= Number(order.paymentExpiresAt || 0)) {
+      await restoreExpiredProductReservation(state, order);
+      changed = true;
+      pushSiteNotification(state, order.login, {
+        id: `notice-order-expired-${order.id}-${loginKey(order.login)}`,
+        eventType: "order_expired",
+        orderId: order.id,
+        storeId: order.storeId,
+        title: "Счёт истёк",
+        body: `Бронь на оплату заказа ${order.product || order.id} истекла, товар вернулся на склад.`
+      });
+      nextOrders.push({
+        ...order,
+        status: "canceled",
+        paymentStatus: "expired",
+        canceledAt: now,
+        cancelReason: "Бронь на оплату истекла"
+      });
+      continue;
+    }
     if (status === "active" && paymentStatus === "paid" && !order.disputeOpen) {
       const paidAt = Number(order.paidAt || order.createdAt || now);
       const hours = Math.max(0, Number(order.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24));
@@ -2805,16 +2866,36 @@ function normalizeServerOrders(state = {}) {
       }
       if (autoReleaseAt && now >= autoReleaseAt) {
         changed = true;
-        return {
+        const store = await lifecycleStoreForOrder(state, order.storeId);
+        pushSiteNotification(state, order.login, {
+          id: `notice-order-auto-completed-${order.id}-${loginKey(order.login)}`,
+          eventType: "order_auto_completed",
+          orderId: order.id,
+          storeId: order.storeId,
+          title: "Заказ завершён автоматически",
+          body: `Заказ ${order.product || order.id} завершён по таймеру автозакрытия.`
+        });
+        pushSiteNotification(state, store?.ownerLogin || "admin", {
+          id: `notice-store-order-auto-completed-${order.id}-${loginKey(store?.ownerLogin || "admin")}`,
+          eventType: "store_order_auto_completed",
+          orderId: order.id,
+          storeId: order.storeId,
+          title: "Заказ завершён автоматически",
+          body: `Заказ ${order.product || order.id} закрыт по таймеру автозавершения.`
+        });
+        nextOrders.push({
           ...order,
           status: "completed",
+          completedAt: now,
           closedAt: now,
           closeReason: "Автозакрытие сделки"
-        };
+        });
+        continue;
       }
     }
-    return order;
-  });
+    nextOrders.push(order);
+  }
+  state.orders = nextOrders;
   return changed;
 }
 
@@ -2831,7 +2912,7 @@ async function loadSettingsState() {
   state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
-  if (normalizeServerOrders(state)) {
+  if (await normalizeServerOrders(state)) {
     await saveSettingsState(state);
   }
   return state;
