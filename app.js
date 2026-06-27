@@ -6652,18 +6652,30 @@ function marketStats() {
   };
 }
 
+function orderHasClientDisputeHistory(order) {
+  return Boolean(
+    order?.disputeOpen ||
+    String(order?.status || "").toLowerCase() === "dispute" ||
+    order?.disputeThreadId ||
+    order?.disputeOpenedAt ||
+    order?.disputeNumber ||
+    order?.disputeNo ||
+    disputeMessagesForOrder(order).length
+  );
+}
+
 function storeDisputes(storeId) {
   return (db.orders || []).filter((order) => (
     order.type === "product" &&
     order.storeId === storeId &&
-    (order.disputeOpen || order.status === "dispute" || order.disputeThreadId)
+    orderHasClientDisputeHistory(order)
   ));
 }
 
 function storeRisk(store) {
   const orders = (db.orders || []).filter((order) => order.type === "product" && order.storeId === store.id);
   const total = orders.length || 1;
-  const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute").length;
+  const disputes = orders.filter(orderHasClientDisputeHistory).length;
   const canceled = orders.filter((order) => order.status === "canceled").length;
   const disputePercent = disputes / total * 100;
   const cancelPercent = canceled / total * 100;

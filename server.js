@@ -516,7 +516,11 @@ async function stateFor(user) {
         console.error("[stateFor] order normalization save failed", { message: error.message });
       });
     }
-    const orders = (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy");
+    const allMessages = (messages || []).map((row) => row.data);
+    const orders = hydrateOrdersDisputeHistory(
+      (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
+      allMessages
+    );
     const storesFromDb = Array.isArray(storesResult.data)
       ? storesResult.data.map((row) => row.data)
       : null;
@@ -538,7 +542,6 @@ async function stateFor(user) {
     const userLogin = user?.login || "";
     const userKey = loginKey(userLogin);
     const sameUser = (value) => userKey && loginKey(value) === userKey;
-    const allMessages = (messages || []).map((row) => row.data);
     const privateMessages = user
       ? allMessages.filter((message) => (
         sameUser(message.fromLogin) ||
@@ -849,11 +852,15 @@ async function stateForStoreAdmin(storeId) {
   const id = String(storeId || "");
   const state = await loadSettingsState();
   const orders = Array.isArray(state.orders) ? state.orders : [];
-  const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300)).data || [];
-  payload.state.orders = orders.filter((order) => String(order.storeId || "") === id);
-  payload.state.messages = messages
+  const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
+  const storeMessages = messages
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
+  payload.state.orders = hydrateOrdersDisputeHistory(
+    orders.filter((order) => String(order.storeId || "") === id),
+    storeMessages
+  );
+  payload.state.messages = storeMessages;
   payload.state.walletWithdrawals = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id);
   return payload;
 }
@@ -1917,7 +1924,7 @@ app.get("/api/admin/disputes/:id", async (req, res, next) => {
     requireAdmin(req);
     const data = await adminLoadMarketplace();
     const id = req.params.id;
-    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const order = hydrateOrdersDisputeHistory(data.state.orders || [], data.messages).find((item) => item.id === id || item.exchangeRequestId === id);
     const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
     const dispute = order || request;
     if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
@@ -2539,6 +2546,66 @@ function orderHasDisputeHistory(order = {}) {
     order.disputeChatClosed ||
     order.disputeClosedAt
   );
+}
+
+function messageLooksLikeDispute(message = {}) {
+  const system = String(message.system || "").toLowerCase();
+  const text = `${message.subject || ""} ${message.body || ""}`.toLowerCase();
+  return Boolean(
+    message.disputeThreadId ||
+    system.includes("dispute") ||
+    text.includes("dispute") ||
+    text.includes("диспут") ||
+    text.includes("спор")
+  );
+}
+
+function disputeMessagesForServerOrder(order = {}, messages = []) {
+  const id = String(order.id || order.exchangeRequestId || "");
+  const threadId = String(order.disputeThreadId || "");
+  if (!id && !threadId) return [];
+  return messages
+    .filter((message) => {
+      if (!messageLooksLikeDispute(message)) return false;
+      const messageThreadId = String(message.disputeThreadId || "");
+      const messageOrderId = String(message.orderId || message.exchangeRequestId || "");
+      const subject = String(message.subject || "");
+      return (
+        (threadId && messageThreadId === threadId) ||
+        (id && messageOrderId === id) ||
+        (id && subject.includes(id))
+      );
+    })
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+function hydrateOrderDisputeHistory(order = {}, messages = []) {
+  if (!order || orderHasDisputeHistory(order)) return order;
+  const disputeMessages = disputeMessagesForServerOrder(order, messages);
+  if (!disputeMessages.length) return order;
+  const firstMessage = disputeMessages[0] || {};
+  const lastMessage = disputeMessages[disputeMessages.length - 1] || {};
+  const closedByMessage = disputeMessages.some((message) => {
+    const system = String(message.system || "").toLowerCase();
+    const text = `${message.subject || ""} ${message.body || ""}`.toLowerCase();
+    return system.includes("closed") || text.includes("закрыт");
+  });
+  const threadId = firstMessage.disputeThreadId || lastMessage.disputeThreadId || `dispute-${order.id}`;
+  return {
+    ...order,
+    status: closedByMessage ? (order.status || "completed") : "dispute",
+    disputeOpen: !closedByMessage,
+    disputeThreadId: threadId,
+    disputeOpenedAt: firstMessage.createdAt || order.createdAt || Date.now(),
+    disputeClosedAt: closedByMessage ? (lastMessage.createdAt || order.disputeClosedAt || Date.now()) : order.disputeClosedAt,
+    disputeChatClosed: closedByMessage || order.disputeChatClosed,
+    disputeNumber: order.disputeNumber || disputeNumber({ ...order, disputeThreadId: threadId }),
+    disputeRecovered: true
+  };
+}
+
+function hydrateOrdersDisputeHistory(orders = [], messages = []) {
+  return orders.map((order) => hydrateOrderDisputeHistory(order, messages));
 }
 
 function ensureDisputeNumber(state = {}, order = {}) {
@@ -3191,7 +3258,7 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
 
 function adminBuildOverview(data) {
   const { state, stores, profiles, sessions, messages } = data;
-  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const orders = hydrateOrdersDisputeHistory(Array.isArray(state.orders) ? state.orders : [], messages);
   const exchangeRequests = Array.isArray(state.exchangeRequests) ? state.exchangeRequests : [];
   const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
   const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
