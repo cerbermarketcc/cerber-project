@@ -24,6 +24,7 @@ let turnstileToken = "";
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
 let realtimeRefreshTimer = null;
+let realtimePendingRender = false;
 let lastUserInteractionAt = 0;
 
 const fallbackImage = "assets/cerber-emblem.png";
@@ -1551,13 +1552,36 @@ function prunePersonalStateForCurrentUser() {
 function scheduleRealtimeRefresh() {
   clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = setTimeout(async () => {
-    if (!realtimeCanRenderNow()) {
-      scheduleRealtimeRefresh();
+    const ok = await loadRemoteState();
+    if (!ok) return;
+    if (realtimeCanRenderNow()) {
+      realtimePendingRender = false;
+      renderCurrent();
       return;
     }
-    const ok = await loadRemoteState();
-    if (ok) renderCurrent();
+    realtimePendingRender = true;
+    scheduleRealtimeRender();
   }, 250);
+}
+
+function scheduleRealtimeRender() {
+  clearTimeout(realtimeRefreshTimer);
+  realtimeRefreshTimer = setTimeout(() => {
+    if (!realtimePendingRender) return;
+    if (!realtimeCanRenderNow()) {
+      scheduleRealtimeRender();
+      return;
+    }
+    realtimePendingRender = false;
+    renderCurrent();
+  }, 1000);
+}
+
+function flushRealtimeRender() {
+  if (!realtimePendingRender || !realtimeCanRenderNow()) return;
+  clearTimeout(realtimeRefreshTimer);
+  realtimePendingRender = false;
+  renderCurrent();
 }
 
 function connectRealtime() {
@@ -9299,7 +9323,10 @@ function bindGlobal() {
   });
   document.querySelectorAll("[data-nav-pop], [data-account-pop], [data-modal]").forEach((overlay) => {
     overlay.onclick = (event) => {
-      if (event.target === overlay || event.target.closest("[data-close-modal]") || event.target.closest("[data-close-nav]")) overlay.classList.remove("open");
+      if (event.target === overlay || event.target.closest("[data-close-modal]") || event.target.closest("[data-close-nav]")) {
+        overlay.classList.remove("open");
+        setTimeout(flushRealtimeRender, 50);
+      }
     };
   });
   document.querySelector("[data-theme-toggle]").onclick = (event) => {
