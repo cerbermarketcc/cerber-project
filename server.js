@@ -2298,6 +2298,35 @@ app.delete("/api/admin/stores/:id", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/orders/recover", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const data = await adminLoadMarketplace();
+    const result = recoverProductOrderFromHistory(data.state, data.stores, data.messages, req.body || {});
+    if (result.created) {
+      result.order.recoveredBy = admin.login;
+      await notifySiteUser(data.state, result.order.login, {
+        id: `notice-order-recovered-${result.order.id}-${loginKey(result.order.login)}`,
+        eventType: "order_recovered",
+        orderId: result.order.id,
+        storeId: result.order.storeId,
+        title: "Order restored",
+        body: `Order ${result.order.product || result.order.id} was restored in your orders.`
+      });
+      await saveSettingsState(data.state);
+      await appendAdminLog("order_recovered", admin.login, {
+        orderId: result.order.id,
+        login: result.order.login,
+        storeId: result.order.storeId,
+        disputeThreadId: result.order.disputeThreadId
+      });
+    }
+    res.json({ ...result, overview: adminBuildOverview(await adminLoadMarketplace()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
@@ -3501,6 +3530,94 @@ function recordProductOrderLedger(order, state = {}, store = null) {
     state.ownerBalanceUsd += commissionUsd;
   }
   order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
+}
+
+function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], options = {}) {
+  const orderId = String(options.orderId || "").trim();
+  if (!orderId) {
+    const error = new Error("orderId is required");
+    error.status = 400;
+    throw error;
+  }
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  const existing = state.orders.find((order) => String(order.id || "") === orderId);
+  if (existing) return { order: existing, created: false };
+
+  const relatedMessages = (Array.isArray(messages) ? messages : []).filter((message) => {
+    if (String(message.orderId || "") === orderId) return true;
+    return JSON.stringify(message || {}).includes(orderId);
+  });
+  if (!relatedMessages.length) {
+    const error = new Error("No history found for order");
+    error.status = 404;
+    throw error;
+  }
+
+  const storeId = String(options.storeId || relatedMessages.find((message) => message.storeId)?.storeId || "").trim();
+  const store = stores.find((item) => String(item.id || "") === storeId) || null;
+  const clientLogin = String(
+    options.login ||
+    relatedMessages.find((message) => message.system === "product-dispute")?.fromLogin ||
+    relatedMessages.find((message) => !sameLogin(message.fromLogin, "admin") && !sameLogin(message.fromLogin, "cerber-owner"))?.fromLogin ||
+    relatedMessages.find((message) => message.toLogin)?.toLogin ||
+    ""
+  ).trim();
+  if (!clientLogin) {
+    const error = new Error("Client login could not be inferred");
+    error.status = 400;
+    throw error;
+  }
+
+  const subjectProduct = relatedMessages
+    .map((message) => String(message.subject || ""))
+    .map((subject) => subject.match(/(?:Dispute|Диспут):\s*(.+)$/i)?.[1] || "")
+    .find(Boolean);
+  const productName = String(options.product || subjectProduct || "Recovered product").trim();
+  const products = Array.isArray(store?.products) ? store.products : [];
+  const product = products.find((item) => sameLogin(item.title, productName) || sameLogin(item.id, productName)) || products[0] || {};
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const position = positions.find((item) => sameLogin(item.title, productName)) || positions[0] || {};
+  const createdAt = Number(orderId.match(/^order-(\d+)/)?.[1] || 0) || Math.min(...relatedMessages.map((message) => Number(message.createdAt || Date.now())).filter(Boolean));
+  const disputeMessage = relatedMessages.find((message) => String(message.system || "").includes("dispute")) || relatedMessages[0] || {};
+  const disputeThreadId = String(options.disputeThreadId || relatedMessages.find((message) => message.disputeThreadId)?.disputeThreadId || `dispute-${orderId}-${disputeMessage.createdAt || createdAt}`);
+  const disputeNumberMatch = relatedMessages.map((message) => `${message.subject || ""} ${message.body || ""}`).join("\n").match(/#(\d{1,6})/);
+  const amountUsd = Number(options.amountUsd || position.priceUsd || product.priceUsd || product.amountUsd || product.price || 0);
+
+  const order = {
+    id: orderId,
+    type: "product",
+    login: clientLogin,
+    storeId: storeId || store?.id || "",
+    productId: product.id || "",
+    positionId: position.id || "",
+    product: product.title || productName,
+    storeName: store?.name || storeId || "",
+    status: "dispute",
+    paymentStatus: "paid",
+    paymentProvider: "recovered",
+    createdAt,
+    paidAt: createdAt,
+    amountUsd,
+    ltcAmount: amountUsd > 0 ? amountUsd / 54.2 : 0,
+    location: [position.city, position.district].filter(Boolean).join(", "),
+    productDescription: product.description || "",
+    reservedDescription: String(options.reservedDescription || position.description || product.description || "").trim(),
+    reservedFromPosition: Boolean(position.id),
+    reservedStock: false,
+    autoReleaseHours: Math.max(0, Number(store?.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
+    autoReleaseAt: 0,
+    disputeOpen: true,
+    disputeThreadId,
+    disputeOpenedAt: Number(disputeMessage.createdAt || createdAt),
+    disputeChatClosed: false,
+    disputeNumber: Number(options.disputeNumber || disputeNumberMatch?.[1] || 0) || disputeNumber({ id: orderId, disputeThreadId }),
+    recoveredAt: Date.now(),
+    recoveredFromMessages: relatedMessages.map((message) => message.id).filter(Boolean).slice(0, 20)
+  };
+
+  applyProductOrderCommission(order, state, store);
+  state.orders.unshift(order);
+  return { order, created: true };
 }
 
 function adminPeriods() {
