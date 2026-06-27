@@ -1290,29 +1290,6 @@ function bindActions() {
       toast(error.message, true);
     }
   });
-  root.querySelector("[data-disabled-support-routing-handler]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const selectedRecipients = [...event.currentTarget.querySelectorAll("[data-support-topic-login]")]
-      .map((input) => {
-        const index = input.dataset.supportTopicLogin;
-        const enabled = event.currentTarget.querySelector(`[data-support-topic-enabled="${index}"]`)?.checked;
-        const login = String(input.value || "").trim();
-        const title = input.dataset.supportTopicTitle || `Раздел ${Number(index) + 1}`;
-        const id = input.dataset.supportTopicId || `support-topic-${index}`;
-        return enabled && login ? { id, title, login } : null;
-      })
-      .filter(Boolean);
-    try {
-      data = await api("/api/admin/support-settings", {
-        method: "PUT",
-        body: JSON.stringify({ supportSettings: { recipients: selectedRecipients } })
-      });
-      toast("Разделы поддержки сохранены");
-      renderShell();
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
   root.querySelectorAll("[data-support-reply-form]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
