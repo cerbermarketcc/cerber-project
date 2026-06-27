@@ -2365,7 +2365,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
     if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступной комиссии" });
-    const address = String(req.body.address || "").trim();
+    const address = String(req.body.address || state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
     if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC счет для вывода" });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const request = {
@@ -3935,7 +3935,10 @@ function adminBuildOverview(data) {
     },
     settings: {
       ownerSettings: state.ownerSettings || {},
-      paymentSettings: state.paymentSettings || {},
+      paymentSettings: {
+        ...(state.paymentSettings || {}),
+        platformLtcWallet: state.paymentSettings?.platformLtcWallet || mainLtcWallet || ""
+      },
       adminSecurity: { login: state.adminSecurity?.login || "admin", hasPassword: Boolean(state.adminSecurity?.passwordHash) },
       supportSettings: normalizeSupportSettings(state.supportSettings)
     },
