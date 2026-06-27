@@ -366,10 +366,19 @@ async function verifyCaptcha(token, req) {
   form.set("secret", turnstileSecretKey);
   form.set("response", token);
 
-  const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-    method: "POST",
-    body: form
-  });
+  let response;
+  try {
+    response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(8000)
+    });
+  } catch (error) {
+    console.warn("[captcha] Turnstile verification request failed", { message: error.message });
+    const captchaError = new Error("Капча временно не отвечает, попробуйте ещё раз");
+    captchaError.status = 503;
+    throw captchaError;
+  }
   const result = await response.json().catch(() => ({}));
   if (!result.success) {
     console.warn("[captcha] Turnstile verification failed", {
