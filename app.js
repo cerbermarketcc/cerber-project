@@ -4654,11 +4654,33 @@ function markGroupPresence(login = db.currentUser) {
   });
 }
 
+async function saveGroupPresenceRemote(room = currentGroupRoom()) {
+  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return false;
+  try {
+    const payload = await apiFetch("/api/group/presence", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: JSON.stringify({ room })
+    });
+    if (payload.groupSettings) {
+      db.groupSettings = { ...(db.groupSettings || {}), ...payload.groupSettings };
+      ensureGroupSettings();
+      writeStoredGroupMembers(db.groupSettings.members || []);
+    }
+    return true;
+  } catch (error) {
+    console.error("[group-chat] presence save failed", error);
+    return false;
+  }
+}
+
 function saveGroupPresenceSoon() {
   const now = Date.now();
   if (now - groupPresenceSavedAt < 15000) return;
   groupPresenceSavedAt = now;
-  saveDb();
+  saveGroupPresenceRemote().then((saved) => {
+    if (!saved) saveDb();
+  });
 }
 
 function groupOnlineCount() {
@@ -4670,15 +4692,28 @@ function groupOnlineCount() {
     .length;
 }
 
-function joinGroupChat() {
+async function joinGroupChat() {
   const user = currentUser();
   if (!user) return renderAuth();
   ensureGroupSettings();
-  const wasMember = isGroupMember(user.login);
   rememberGroupMember(user.login);
   markGroupPresence(user.login);
-  if (!wasMember) pushGroupSystemMessage(`${user.login} вступил в ${groupRoomLabel()}.`);
-  saveDb();
+  if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+    try {
+      const payload = await apiFetch("/api/group/join", {
+        method: "POST",
+        timeoutMs: 10000,
+        body: JSON.stringify({ room: currentGroupRoom() })
+      });
+      applyRemoteState(payload);
+    } catch (error) {
+      console.error("[group-chat] join save failed", error);
+      showToast(error.message || "Чат сохранён локально, сервер не ответил");
+      saveDb();
+    }
+  } else {
+    saveDb();
+  }
   renderGroupChat();
 }
 

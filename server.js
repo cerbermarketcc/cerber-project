@@ -1491,11 +1491,12 @@ app.put("/api/state", async (req, res, next) => {
       ...(Array.isArray(state.groupMessages) ? state.groupMessages : [])
     ].reduce((items, message) => {
       if (!message?.id) return items;
+      message.room = groupRoomKey(message.room);
       const index = items.findIndex((item) => String(item?.id || "") === String(message.id));
       if (index >= 0) items[index] = { ...items[index], ...message };
       else items.push(message);
       return items;
-    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-1500);
     const mergedGroupMembers = [
       ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
       ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
@@ -1583,6 +1584,64 @@ app.put("/api/state", async (req, res, next) => {
   }
 });
 
+app.post("/api/group/join", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const room = groupRoomKey(req.body?.room);
+    const state = await loadSettingsState();
+    const groupSettings = state.groupSettings || {};
+    const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
+    const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
+    if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) {
+      members.push(memberKey);
+    }
+    const now = Date.now();
+    groupSettings.members = members;
+    groupSettings.presence = groupSettings.presence || {};
+    groupSettings.presence[memberKey] = now;
+    Object.entries(groupSettings.presence).forEach(([key, value]) => {
+      if (now - Number(value || 0) > 5 * 60 * 1000) delete groupSettings.presence[key];
+    });
+    state.groupSettings = groupSettings;
+    await saveSettingsState(state);
+    notifyRealtime("group_member_joined", { login: user.login, room });
+    res.json(await stateFor(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/group/presence", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const room = groupRoomKey(req.body?.room);
+    const state = await loadSettingsState();
+    const groupSettings = state.groupSettings || {};
+    const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
+    const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
+    if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) members.push(memberKey);
+    const now = Date.now();
+    groupSettings.members = members;
+    groupSettings.presence = groupSettings.presence || {};
+    groupSettings.presence[memberKey] = now;
+    Object.entries(groupSettings.presence).forEach(([key, value]) => {
+      if (now - Number(value || 0) > 5 * 60 * 1000) delete groupSettings.presence[key];
+    });
+    state.groupSettings = groupSettings;
+    await saveSettingsState(state);
+    const onlineCount = Object.entries(groupSettings.presence)
+      .filter(([key, value]) => String(key).toLowerCase().startsWith(`${room}:`) && now - Number(value || 0) < 60 * 1000)
+      .length;
+    res.json({ ok: true, room, onlineCount, groupSettings });
+  } catch (error) {
+    next(error);
+  }
+});
+
 function sanitizeGroupMessagePayload(payload = {}) {
   const body = String(payload.body || "").trim();
   const room = groupRoomKey(payload.room);
@@ -1644,6 +1703,10 @@ app.post("/api/group/messages", async (req, res, next) => {
     if (payload.stickerUrl) message.stickerUrl = payload.stickerUrl;
     state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
     state.groupMessages.push(message);
+    state.groupMessages = state.groupMessages
+      .map((item) => ({ ...item, room: groupRoomKey(item.room) }))
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
+      .slice(-1500);
     await saveSettingsState(state);
     notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
     res.json({ message, ...(await stateFor(user)) });
