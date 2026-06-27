@@ -848,7 +848,17 @@ function signSellerAdminToken(storeId, meta = {}) {
   return `${payload}.${signature}`;
 }
 
-async function stateForStoreAdmin(storeId) {
+function sellerTokenCanAccess(token = {}, ...permissions) {
+  if (token.role !== "staff") return true;
+  const allowed = Array.isArray(token.permissions) ? token.permissions.map(String) : [];
+  return permissions.some((permission) => allowed.includes(permission));
+}
+
+function sellerForbidden(res) {
+  return res.status(403).json({ error: "Нет доступа к этому разделу админки магазина" });
+}
+
+async function stateForStoreAdmin(storeId, token = {}) {
   const payload = await stateFor(null);
   const id = String(storeId || "");
   const state = await loadSettingsState();
@@ -857,12 +867,21 @@ async function stateForStoreAdmin(storeId) {
   const storeMessages = messages
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
-  payload.state.orders = hydrateOrdersDisputeHistory(
+  const storeOrders = hydrateOrdersDisputeHistory(
     orders.filter((order) => String(order.storeId || "") === id),
     storeMessages
   );
-  payload.state.messages = storeMessages;
-  payload.state.walletWithdrawals = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id);
+  const isStaff = token?.role === "staff";
+  payload.state.stores = (payload.state.stores || []).filter((store) => String(store.id || "") === id);
+  payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
+    ? []
+    : isStaff && sellerTokenCanAccess(token, "disputes") && !sellerTokenCanAccess(token, "orders", "clients", "finances")
+      ? storeOrders.filter((order) => order.disputeOpen || order.status === "dispute" || order.disputeThreadId || order.disputeOpenedAt)
+      : storeOrders;
+  payload.state.messages = isStaff && !sellerTokenCanAccess(token, "connect", "disputes") ? [] : storeMessages;
+  payload.state.walletWithdrawals = sellerTokenCanAccess(token, "finances")
+    ? (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id)
+    : [];
   return payload;
 }
 
@@ -1146,7 +1165,8 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     if (ownerLoginOk && password === (store.adminPassword || "")) {
-      return res.json({ token: signSellerAdminToken(store.id, { role: "owner" }), store, staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id)) });
+      const ownerToken = { role: "owner" };
+      return res.json({ token: signSellerAdminToken(store.id, ownerToken), store, staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || password !== String(staff.password || "")) {
@@ -1157,7 +1177,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
       store,
       staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
-      ...(await stateForStoreAdmin(store.id))
+      ...(await stateForStoreAdmin(store.id, { role: "staff", staffLogin: staff.login, permissions }))
     });
   } catch (error) {
     next(error);
@@ -1193,7 +1213,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
-    res.json({ store: mergedStore, ...(await stateForStoreAdmin(mergedStore.id)) });
+    res.json({ store: mergedStore, ...(await stateForStoreAdmin(mergedStore.id, token)) });
   } catch (error) {
     next(error);
   }
@@ -1205,6 +1225,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     const admin = verifyAdminToken(req);
     const sellerToken = admin ? null : verifySellerAdminToken(req);
     if (!admin && !sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    if (sellerToken && !sellerTokenCanAccess(sellerToken, "disputes")) return sellerForbidden(res);
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const order = orders.find((item) => item.id === req.params.id && item.type === "product");
@@ -1275,6 +1296,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     requireDb();
     const sellerToken = verifySellerAdminToken(req);
     if (!sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    if (!sellerTokenCanAccess(sellerToken, "finances")) return sellerForbidden(res);
     const storeId = String(req.body.storeId || sellerToken.storeId || "").trim();
     if (!storeId || storeId !== sellerToken.storeId) return res.status(403).json({ error: "Нет доступа к магазину" });
     const address = String(req.body.address || "").trim();
@@ -1342,7 +1364,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     await saveSettingsState(state);
     await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
-    res.json({ withdrawal: request, ...(await stateForStoreAdmin(storeId)) });
+    res.json({ withdrawal: request, ...(await stateForStoreAdmin(storeId, sellerToken)) });
   } catch (error) {
     next(error);
   }
@@ -5757,6 +5779,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
     requireDb();
     const token = verifySellerAdminToken(req);
     if (!token) return res.status(401).json({ error: "Нет доступа" });
+    if (!sellerTokenCanAccess(token, "disputes")) return sellerForbidden(res);
     const state = await loadSettingsState();
     const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
     const order = hydrateOrdersDisputeHistory(
@@ -5788,7 +5811,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
       disputeThreadId: threadId
     });
     notifyRealtime("dispute_joined", { orderId: order.id, storeId: order.storeId });
-    res.json({ order, ...(await stateForStoreAdmin(token.storeId)) });
+    res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }
@@ -5799,6 +5822,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     requireDb();
     const token = verifySellerAdminToken(req);
     if (!token) return res.status(401).json({ error: "Нет доступа" });
+    if (!sellerTokenCanAccess(token, "disputes")) return sellerForbidden(res);
     const state = await loadSettingsState();
     const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
     const order = hydrateOrdersDisputeHistory(
@@ -5837,7 +5861,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     });
     await saveSettingsState(state);
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
-    res.json({ order, ...(await stateForStoreAdmin(token.storeId)) });
+    res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }
