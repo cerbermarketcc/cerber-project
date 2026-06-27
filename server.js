@@ -2810,6 +2810,13 @@ function adminStoreNetAmount(order, state, store) {
   return Math.max(0, adminOrderAmount(order) - adminPlatformCommission(order, state, store));
 }
 
+function storeCommissionPercentForOrder(store = null) {
+  if (!store) return 0;
+  if (store.commissionPercent != null) return Math.max(0, Number(store.commissionPercent || 0));
+  if (store.platformCommissionPercent != null) return Math.max(0, Number(store.platformCommissionPercent || 0));
+  return 0;
+}
+
 function adminIsUserBlocked(state, login) {
   const key = loginKey(login);
   const record = state.blockedUsers?.[key];
@@ -2991,7 +2998,7 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
 function adminPlatformCommission(order, state, store) {
   const fixed = Number(order?.platformCommissionUsd || 0);
   if (fixed > 0) return fixed;
-  const storeCommission = Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0);
+  const storeCommission = store ? storeCommissionPercentForOrder(store) : Number(order?.platformCommissionPercent || 0);
   return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
 }
 
@@ -3018,13 +3025,76 @@ function requestedWithdrawalUsd(body = {}, availableUsd = 0) {
 function applyProductOrderCommission(order, state = {}, store = null) {
   if (!order) return order;
   const amount = adminOrderAmount(order);
-  const percent = Math.max(0, Number(order.platformCommissionPercent ?? store?.commissionPercent ?? store?.platformCommissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? state.paymentSettings?.platformCommissionPercent ?? 0));
+  const percent = Math.max(0, Number(store ? storeCommissionPercentForOrder(store) : (order.platformCommissionPercent || 0)));
   const fixedCommission = Number(order.platformCommissionUsd || 0);
   const commission = fixedCommission > 0 ? fixedCommission : amount * percent / 100;
   order.platformCommissionPercent = percent;
   order.platformCommissionUsd = Math.max(0, commission);
   order.sellerAmountUsd = Math.max(0, amount - order.platformCommissionUsd);
   return order;
+}
+
+function recordProductOrderLedger(order, state = {}, store = null) {
+  if (!order || order.type !== "product" || String(order.paymentStatus || "").toLowerCase() !== "paid") return;
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  state.storeBalancesUsd = state.storeBalancesUsd || {};
+  state.ownerBalanceUsd = Number(state.ownerBalanceUsd || 0);
+
+  applyProductOrderCommission(order, state, store);
+  const amountUsd = adminOrderAmount(order);
+  const commissionUsd = Math.max(0, Number(order.platformCommissionUsd || 0));
+  const sellerUsd = Math.max(0, Number(order.sellerAmountUsd ?? (amountUsd - commissionUsd)));
+  const createdAt = Number(order.paidAt || order.createdAt || Date.now());
+  const storeId = String(order.storeId || "");
+  const storeTxId = `tx-store-sale-${order.id}`;
+  const ownerTxId = `tx-owner-commission-${order.id}`;
+
+  if (storeId && !state.walletTransactions.some((tx) => tx.id === storeTxId)) {
+    state.walletTransactions.unshift({
+      id: storeTxId,
+      scope: "store",
+      storeId,
+      storeName: store?.name || order.storeName || storeId,
+      login: store?.ownerLogin || order.storeOwnerLogin || storeId,
+      type: "store_sale",
+      title: `Sale: ${order.product || order.id}`,
+      orderId: order.id,
+      amountUsd: sellerUsd,
+      grossUsd: amountUsd,
+      commissionUsd,
+      amountLtc: sellerUsd / 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      createdAt,
+      date: new Date(createdAt).toLocaleString("ru-RU"),
+      status: "completed"
+    });
+    state.storeBalancesUsd[storeId] = Number(state.storeBalancesUsd[storeId] || 0) + sellerUsd;
+  }
+
+  if (commissionUsd > 0 && !state.walletTransactions.some((tx) => tx.id === ownerTxId)) {
+    state.walletTransactions.unshift({
+      id: ownerTxId,
+      scope: "owner",
+      login: "owner",
+      type: "platform_commission",
+      title: `Commission: ${order.product || order.id}`,
+      orderId: order.id,
+      storeId,
+      storeName: store?.name || order.storeName || storeId,
+      amountUsd: commissionUsd,
+      grossUsd: amountUsd,
+      commissionPercent: Number(order.platformCommissionPercent || 0),
+      amountLtc: commissionUsd / 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      createdAt,
+      date: new Date(createdAt).toLocaleString("ru-RU"),
+      status: "completed"
+    });
+    state.ownerBalanceUsd += commissionUsd;
+  }
+  order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
 }
 
 function adminPeriods() {
@@ -3576,6 +3646,7 @@ async function completeProductOrder(order, state, providerPayload = {}) {
     const store = row?.data;
     if (store) {
       applyProductOrderCommission(order, state, store);
+      recordProductOrderLedger(order, state, store);
       if (!wasAlreadyPaid) {
         store.orders = Number(store.orders || 0) + 1;
         const product = (store.products || []).find((item) => item.id === order.productId);
@@ -3603,9 +3674,11 @@ async function completeProductOrder(order, state, providerPayload = {}) {
       }
     } else {
       applyProductOrderCommission(order, state, null);
+      recordProductOrderLedger(order, state, null);
     }
   } else {
     applyProductOrderCommission(order, state, null);
+    recordProductOrderLedger(order, state, null);
   }
 
   await saveSettingsState(state);
@@ -3740,6 +3813,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     };
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
+    recordProductOrderLedger(order, state, store);
     state.ltcBalances[user.login] = Math.max(0, balance - ltcAmount);
     state.orders.unshift(order);
     state.walletTransactions.unshift({
@@ -5268,13 +5342,20 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
     const token = verifySellerAdminToken(req);
     if (!token) return res.status(401).json({ error: "Нет доступа" });
     const state = await loadSettingsState();
-    const order = (Array.isArray(state.orders) ? state.orders : []).find((item) => item.id === req.params.id && item.type === "product");
+    const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
+    const order = hydrateOrdersDisputeHistory(
+      Array.isArray(state.orders) ? state.orders : [],
+      messages.map((row) => row.data)
+    ).find((item) => item.id === req.params.id && item.type === "product");
     if (!order || String(order.storeId || "") !== String(token.storeId || "")) return res.status(404).json({ error: "Диспут не найден" });
     const store = await loadStoreWithFallback(token.storeId);
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
+    order.status = order.disputeChatClosed ? (order.status || "completed") : "dispute";
+    order.disputeOpen = !order.disputeChatClosed;
     order.disputeThreadId = threadId;
+    state.orders = (Array.isArray(state.orders) ? state.orders : []).map((item) => item.id === order.id ? { ...item, ...order } : item);
     await saveSettingsState(state);
     await upsertPrivateMessage({
       id: `${threadId}-shop-join-${now}`,
@@ -5303,9 +5384,13 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     const token = verifySellerAdminToken(req);
     if (!token) return res.status(401).json({ error: "Нет доступа" });
     const state = await loadSettingsState();
-    const order = (Array.isArray(state.orders) ? state.orders : []).find((item) => item.id === req.params.id && item.type === "product");
+    const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
+    const order = hydrateOrdersDisputeHistory(
+      Array.isArray(state.orders) ? state.orders : [],
+      messages.map((row) => row.data)
+    ).find((item) => item.id === req.params.id && item.type === "product");
     if (!order || String(order.storeId || "") !== String(token.storeId || "")) return res.status(404).json({ error: "Диспут не найден" });
-    if (!order.disputeOpen || order.disputeChatClosed) return res.status(409).json({ error: "Диспут закрыт" });
+    if (order.disputeChatClosed || order.disputeOpen === false) return res.status(409).json({ error: "Диспут закрыт" });
     const body = String(req.body.body || "").trim();
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });

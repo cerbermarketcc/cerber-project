@@ -6546,7 +6546,10 @@ function storeSalesUsd(storeId) {
 }
 
 function storeCommissionPercent(store = null) {
-  return Math.max(0, Number(store?.commissionPercent ?? store?.platformCommissionPercent ?? db.ownerSettings?.platformCommissionPercent ?? db.paymentSettings?.platformCommissionPercent ?? 0));
+  if (!store) return 0;
+  if (store.commissionPercent != null) return Math.max(0, Number(store.commissionPercent || 0));
+  if (store.platformCommissionPercent != null) return Math.max(0, Number(store.platformCommissionPercent || 0));
+  return 0;
 }
 
 function paidStoreOrders(storeId) {
