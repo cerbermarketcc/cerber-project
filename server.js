@@ -1817,7 +1817,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     const firstPurchaseAt = dates[0] || null;
     const lastPurchaseAt = dates[dates.length - 1] || null;
     const activeDays = firstPurchaseAt ? Math.max(1, (Date.now() - firstPurchaseAt) / (24 * 60 * 60 * 1000)) : 1;
-    const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const disputes = orders.filter(orderHasDisputeHistory);
     const closedDisputes = orders.filter((order) => !order.disputeOpen && ["closed", "completed"].includes(String(order.status || "").toLowerCase()) && order.disputeUntil);
     const messageTimes = messages.map(adminTimestamp).filter(Boolean);
     const orderTimes = orders.map(adminTimestamp).filter(Boolean);
@@ -2528,6 +2528,19 @@ function disputeNumber(order = {}) {
   return Number(order.disputeNumber || order.disputeNo || stableDisputeNumber(order.disputeThreadId || order.id || Date.now()));
 }
 
+function orderHasDisputeHistory(order = {}) {
+  return Boolean(
+    order.disputeOpen ||
+    String(order.status || "").toLowerCase() === "dispute" ||
+    order.disputeThreadId ||
+    order.disputeOpenedAt ||
+    order.disputeNumber ||
+    order.disputeNo ||
+    order.disputeChatClosed ||
+    order.disputeClosedAt
+  );
+}
+
 function ensureDisputeNumber(state = {}, order = {}) {
   if (order.disputeNumber) return Number(order.disputeNumber);
   const used = new Set((Array.isArray(state.orders) ? state.orders : []).map((item) => Number(item?.disputeNumber || 0)).filter(Boolean));
@@ -3192,7 +3205,7 @@ function adminBuildOverview(data) {
   const storesRequestedUsd = activeWithdrawalUsd(state, "store");
   const activeOrders = productOrders.filter((order) => ["active", "pending_payment", "processing"].includes(String(order.status || "").toLowerCase()));
   const disputes = [
-    ...orders.filter((order) => order.disputeOpen || order.status === "dispute"),
+    ...orders.filter(orderHasDisputeHistory),
     ...exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute")
   ];
   const buyers = new Set(completedOrders.map((order) => loginKey(order.login)).filter(Boolean));
@@ -3221,7 +3234,7 @@ function adminBuildOverview(data) {
   const storeRows = stores.map((store) => {
     const storeOrders = productOrders.filter((order) => order.storeId === store.id);
     const storeCompleted = storeOrders.filter(adminIsPaidProductOrder);
-    const storeDisputes = storeOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const storeDisputes = storeOrders.filter(orderHasDisputeHistory);
     const clients = new Set(storeOrders.map((order) => loginKey(order.login)).filter(Boolean));
     const grossRevenue = storeCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0);
     const commission = storeCompleted.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0);
@@ -3264,7 +3277,7 @@ function adminBuildOverview(data) {
     const login = user.login;
     const userOrders = productOrders.filter((order) => sameLogin(order.login, login));
     const userCompleted = userOrders.filter(adminIsPaidProductOrder);
-    const userDisputes = userOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+    const userDisputes = userOrders.filter(orderHasDisputeHistory);
     const deposits = walletDeposits.filter((deposit) => sameLogin(deposit.login, login));
     return {
       id: user.login_key,

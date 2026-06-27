@@ -615,10 +615,12 @@ function renderDeals() {
 }
 
 function renderDisputes() {
-  const rows = query ? data.disputes.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : data.disputes;
+  const allRows = Array.isArray(data.disputes) ? data.disputes : [];
+  const rows = query ? allRows.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : allRows;
   return `<section class="split"><article class="table-card"><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Срок</th><th></th></tr></thead><tbody>
     ${rows.map((o) => `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Открыть чат</button></td></tr>`).join("")}
-  </tbody></table></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
+    ${!rows.length ? `<tr><td colspan="8">${query && allRows.length ? `Поиск скрывает ${allRows.length} диспут(ов). Очистите поиск сверху.` : "Диспутов пока нет."}</td></tr>` : ""}
+  </tbody></table><p class="muted">Показано: ${rows.length} из ${allRows.length}</p></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
 }
 
 function disputeDetailTable(payload) {
