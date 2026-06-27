@@ -1614,6 +1614,37 @@ app.get("/api/admin/overview", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/private-messages", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const toLogin = String(req.body.toLogin || req.body.login || "").trim();
+    const subject = String(req.body.subject || "Сообщение от сайта").trim();
+    const body = String(req.body.body || req.body.message || "").trim();
+    if (!toLogin || !body) return res.status(400).json({ error: "Укажите получателя и текст сообщения" });
+    const { data: user } = await supabase.from("profiles").select("login,login_key").eq("login_key", loginKey(toLogin)).maybeSingle();
+    if (!user) return res.status(404).json({ error: "Пользователь не найден" });
+    const now = Date.now();
+    const message = {
+      id: `admin-private-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: "site",
+      storeTag: "CERBER",
+      toLogin: user.login,
+      fromLogin: req.body.fromLogin || "CERBER",
+      subject,
+      body,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "admin_private_message",
+      createdBy: admin.login
+    };
+    await upsertPrivateMessage(message);
+    await appendAdminLog("private_message_sent", admin.login, { toLogin: user.login, messageId: message.id });
+    res.json({ ok: true, message });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.put("/api/admin/support-settings", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
