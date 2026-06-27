@@ -1234,7 +1234,8 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     requireDb();
     const admin = verifyAdminToken(req);
     const sellerToken = admin ? null : verifySellerAdminToken(req);
-    if (!admin && !sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    const user = (!admin && !sellerToken) ? await userFromRequest(req) : null;
+    if (!admin && !sellerToken && !user) return res.status(401).json({ error: "Нет доступа" });
     if (sellerToken && !sellerTokenCanAccess(sellerToken, "disputes")) return sellerForbidden(res);
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
@@ -1242,6 +1243,9 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     if (!order) return res.status(404).json({ error: "Заказ не найден" });
     if (sellerToken && String(order.storeId || "") !== String(sellerToken.storeId || "")) {
       return res.status(403).json({ error: "Нет доступа к спору этого магазина" });
+    }
+    if (user && !sameLogin(order.login, user.login)) {
+      return res.status(403).json({ error: "Нет доступа к этому спору" });
     }
     const now = Date.now();
     const publicNumber = ensureDisputeNumber(state, order);
@@ -1275,7 +1279,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
-      fromLogin: admin?.login || store?.ownerLogin || store?.id || "admin",
+      fromLogin: admin?.login || sellerToken?.login || user?.login || store?.ownerLogin || store?.id || "admin",
       subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body: "Диспут закрыт. История переписки сохранена.",
       createdAt: now,
@@ -1285,7 +1289,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
     });
     notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
-    res.json({ order, ...(await stateFor(null)) });
+    res.json({ order, ...(await stateFor(user || null)) });
   } catch (error) {
     next(error);
   }

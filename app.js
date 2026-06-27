@@ -2380,6 +2380,12 @@ function orderCanComplete(order) {
   return ["active", "paid"].includes(String(order.status || "").toLowerCase());
 }
 
+function orderCanCloseDispute(order) {
+  if (!order || order.type !== "product") return false;
+  if (!sameLogin(order.login, db.currentUser)) return false;
+  return Boolean(order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") && !order.disputeChatClosed;
+}
+
 function orderNeedsReview(order) {
   if (!order || order.type !== "product" || order.reviewLeft) return false;
   return ["completed", "closed"].includes(String(order.status || "").toLowerCase());
@@ -3052,6 +3058,9 @@ function renderOrders(tab = activeOrdersTab) {
   document.querySelectorAll("[data-order-complete]").forEach((button) => {
     button.onclick = () => completeProductOrderByClient(button.dataset.orderComplete);
   });
+  document.querySelectorAll("[data-order-close-dispute]").forEach((button) => {
+    button.onclick = () => closeProductDisputeByClient(button.dataset.orderCloseDispute);
+  });
   document.querySelectorAll("[data-order-review]").forEach((button) => {
     button.onclick = () => showProductReviewModal(button.dataset.orderReview);
   });
@@ -3085,6 +3094,7 @@ function orderCard(order) {
         <button data-order-open="${esc(order.exchangeRequestId || order.id)}">Детали</button>
         ${order.status === "pending_payment" ? `<button data-order-cancel="${esc(order.id)}">Отменить</button>` : ""}
         ${orderCanComplete(order) ? `<button data-order-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
+        ${orderCanCloseDispute(order) ? `<button data-order-close-dispute="${esc(order.id)}">Закрыть диспут</button>` : ""}
         ${orderNeedsReview(order) ? `<button data-order-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
         ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
@@ -3164,6 +3174,7 @@ function showProductOrder(orderId) {
       </div>
     ` : ""}
     ${orderCanComplete(order) ? `<button class="primary" data-product-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
+    ${orderCanCloseDispute(order) ? `<button class="primary" data-product-close-dispute="${esc(order.id)}">Закрыть диспут и оставить отзыв</button>` : ""}
     ${orderNeedsReview(order) ? `<button class="primary" data-product-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     <button class="primary" data-close-modal>${tr("close")}</button>
@@ -3182,6 +3193,7 @@ function showProductOrder(orderId) {
   document.querySelector("[data-pay-from-balance]")?.addEventListener("click", (event) => payProductOrderFromBalance(event.currentTarget.dataset.payFromBalance));
   document.querySelector("[data-order-dispute]")?.addEventListener("click", (event) => openProductDispute(event.currentTarget.dataset.orderDispute));
   document.querySelector("[data-product-complete]")?.addEventListener("click", (event) => completeProductOrderByClient(event.currentTarget.dataset.productComplete));
+  document.querySelector("[data-product-close-dispute]")?.addEventListener("click", (event) => closeProductDisputeByClient(event.currentTarget.dataset.productCloseDispute));
   document.querySelector("[data-product-review]")?.addEventListener("click", (event) => showProductReviewModal(event.currentTarget.dataset.productReview));
   document.querySelector("[data-review-form]")?.addEventListener("submit", handleProductReview);
 }
@@ -3206,6 +3218,33 @@ async function completeProductOrderByClient(orderId) {
   order.closedAt = order.completedAt;
   order.closeReason = "Завершено клиентом";
   saveDb();
+  showProductReviewModal(orderId);
+}
+
+async function closeProductDisputeByClient(orderId) {
+  const order = db.orders.find((item) => item.id === orderId);
+  if (!order || !orderCanCloseDispute(order)) return;
+  if (API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/close`, { method: "POST" });
+      applyRemoteState(payload);
+      showToast("Диспут закрыт");
+      showProductReviewModal(orderId);
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось закрыть диспут");
+      return;
+    }
+  }
+  order.status = "completed";
+  order.paymentStatus = "paid";
+  order.disputeOpen = false;
+  order.disputeChatClosed = true;
+  order.disputeClosedAt = Date.now();
+  order.closedAt = order.disputeClosedAt;
+  order.closeReason = "Диспут закрыт клиентом";
+  saveDb();
+  showToast("Диспут закрыт");
   showProductReviewModal(orderId);
 }
 
