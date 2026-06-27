@@ -1221,8 +1221,24 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     order.disputeClosedAt = now;
     order.closedAt = now;
     order.closeReason = "Спор закрыт";
-    await saveSettingsState({ ...state, orders });
     const store = await loadStoreWithFallback(order.storeId);
+    await notifySiteUser(state, order.login, {
+      id: `notice-dispute-closed-${order.id}-${loginKey(order.login)}`,
+      eventType: "dispute_closed",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Диспут закрыт",
+      body: `Диспут #${publicNumber} по заказу ${order.product || order.id} закрыт.`
+    });
+    await notifySiteUser(state, store?.ownerLogin || "admin", {
+      id: `notice-store-dispute-closed-${order.id}-${loginKey(store?.ownerLogin || "admin")}`,
+      eventType: "store_dispute_closed",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Диспут закрыт",
+      body: `Диспут #${publicNumber} по заказу ${order.id} закрыт.`
+    });
+    await saveSettingsState({ ...state, orders });
     await upsertPrivateMessage({
       id: `dispute-closed-${order.id}-${now}`,
       storeId: order.storeId,
@@ -1307,6 +1323,22 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       date: new Date().toLocaleString("ru-RU")
     };
     state.walletWithdrawals.unshift(request);
+    await notifySiteUser(state, store.ownerLogin || store.id, {
+      id: `notice-store-withdrawal-${request.id}-${loginKey(store.ownerLogin || store.id)}`,
+      eventType: "store_withdrawal_requested",
+      withdrawalId: request.id,
+      storeId,
+      title: "Заявка на вывод создана",
+      body: `Запрошен вывод ${amountUsd.toFixed(2)} $ (${request.amountLtc.toFixed(8)} LTC) на ${address}.`
+    });
+    await notifySiteUser(state, "admin", {
+      id: `notice-admin-store-withdrawal-${request.id}`,
+      eventType: "store_withdrawal_requested",
+      withdrawalId: request.id,
+      storeId,
+      title: "Магазин запросил вывод",
+      body: `${store.name || store.id}: ${amountUsd.toFixed(2)} $ на ${address}.`
+    });
     await saveSettingsState(state);
     await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
@@ -1340,6 +1372,13 @@ app.post("/api/support/tickets", async (req, res, next) => {
       replies: []
     };
     state.supportTickets = [ticket, ...(Array.isArray(state.supportTickets) ? state.supportTickets : [])];
+    await notifySiteUser(state, "admin", {
+      id: `notice-support-created-${ticket.id}-admin`,
+      eventType: "support_ticket_created",
+      ticketId: ticket.id,
+      title: "Новое обращение",
+      body: `${user.login}: ${ticket.subject || "Обращение в поддержку"}`
+    });
     await saveSettingsState(state);
     await upsertPrivateMessage({
       id: `${ticket.id}-message`,
@@ -1378,6 +1417,13 @@ app.post("/api/support/tickets/:id/reply", async (req, res, next) => {
     ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
     ticket.replies.push(reply);
     ticket.updatedAt = reply.createdAt;
+    await notifySiteUser(state, ticket.recipientLogin || "admin", {
+      id: `notice-support-user-reply-${ticket.id}-${reply.id}-${loginKey(ticket.recipientLogin || "admin")}`,
+      eventType: "support_ticket_replied",
+      ticketId: ticket.id,
+      title: "Ответ в обращении",
+      body: `${user.login} ответил по обращению: ${ticket.subject || ticket.id}`
+    });
     await saveSettingsState(state);
     await upsertPrivateMessage({
       id: `${ticket.id}-${reply.id}`,
@@ -1672,6 +1718,13 @@ app.post("/api/admin/support-tickets/:id/reply", async (req, res, next) => {
     ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
     ticket.replies.push(reply);
     ticket.updatedAt = Date.now();
+    await notifySiteUser(state, ticket.fromLogin, {
+      id: `notice-support-admin-reply-${ticket.id}-${reply.id}-${loginKey(ticket.fromLogin)}`,
+      eventType: "support_ticket_replied",
+      ticketId: ticket.id,
+      title: "Ответ поддержки",
+      body: `Поддержка ответила по обращению: ${ticket.subject || ticket.id}`
+    });
     await saveSettingsState(state);
     await upsertPrivateMessage({
       id: `${ticket.id}-${reply.id}`,
@@ -1704,6 +1757,13 @@ app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
     ticket.closedAt = Date.now();
     ticket.updatedAt = ticket.closedAt;
     ticket.closedBy = admin.login;
+    await notifySiteUser(state, ticket.fromLogin, {
+      id: `notice-support-closed-${ticket.id}-${loginKey(ticket.fromLogin)}`,
+      eventType: "support_ticket_closed",
+      ticketId: ticket.id,
+      title: "Обращение закрыто",
+      body: `Обращение ${ticket.subject || ticket.id} закрыто. История переписки сохранена.`
+    });
     await saveSettingsState(state);
     await upsertPrivateMessage({
       id: `${ticket.id}-closed`,
@@ -2223,6 +2283,13 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       date: new Date().toLocaleString("ru-RU")
     };
     state.walletWithdrawals.unshift(request);
+    await notifySiteUser(state, admin.login, {
+      id: `notice-owner-withdrawal-${request.id}-${loginKey(admin.login)}`,
+      eventType: "owner_withdrawal_requested",
+      withdrawalId: request.id,
+      title: "Заявка на вывод владельца создана",
+      body: `Запрошен вывод ${amountUsd.toFixed(2)} $ (${request.amountLtc.toFixed(8)} LTC) на ${address}.`
+    });
     await saveSettingsState(state);
     await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, scope: "owner" });
@@ -2754,6 +2821,75 @@ function normalizeSupportAttachments(value, maxItems = 8) {
       url
     };
   }).filter(Boolean);
+}
+
+function pushSiteNotification(state, login, notification = {}) {
+  const cleanLogin = String(login || "").trim();
+  if (!cleanLogin) return null;
+  state.siteNotifications = Array.isArray(state.siteNotifications) ? state.siteNotifications : [];
+  const key = loginKey(cleanLogin);
+  const eventId = String(notification.id || [
+    "notice",
+    notification.eventType || "system",
+    notification.orderId || notification.ticketId || notification.withdrawalId || "",
+    key,
+    notification.unique || ""
+  ].filter(Boolean).join("-"));
+  if (state.siteNotifications.some((item) => String(item.id || "") === eventId && sameLogin(item.login || item.loginKey, cleanLogin))) {
+    return null;
+  }
+  const item = {
+    id: eventId,
+    login: cleanLogin,
+    loginKey: key,
+    title: String(notification.title || "CERBER"),
+    body: String(notification.body || ""),
+    type: notification.type || "popup",
+    eventType: notification.eventType || "system",
+    orderId: notification.orderId || "",
+    storeId: notification.storeId || "",
+    ticketId: notification.ticketId || "",
+    withdrawalId: notification.withdrawalId || "",
+    buttonText: notification.buttonText || "",
+    buttonUrl: notification.buttonUrl || "",
+    createdAt: notification.createdAt || Date.now(),
+    clickedAt: null,
+    closedAt: null
+  };
+  state.siteNotifications.unshift(item);
+  state.siteNotifications = state.siteNotifications.slice(0, 500);
+  return item;
+}
+
+async function notifySiteUser(state, login, notification = {}) {
+  const item = pushSiteNotification(state, login, notification);
+  if (!item || !siteNotifyBotToken) return item;
+  try {
+    const botState = initSiteNotifyBotState(state);
+    const recipients = Object.values(botState.users || {}).filter((user) => (
+      user?.enabled &&
+      user?.chatId &&
+      (sameLogin(user.login, login) || sameLogin(user.loginKey, login))
+    ));
+    const sentKeyBase = `site-notice:${item.id}`;
+    const text = [
+      `<b>${botHtml(item.title)}</b>`,
+      "",
+      botHtml(item.body),
+      item.buttonUrl ? `\n${botHtml(item.buttonUrl)}` : ""
+    ].filter(Boolean).join("\n");
+    for (const recipient of recipients) {
+      const sentKey = `${recipient.chatId}:${sentKeyBase}`;
+      if (botState.sentMessages[sentKey]) continue;
+      await siteNotifySendMessage(recipient.chatId, text);
+      botState.sentMessages[sentKey] = Date.now();
+    }
+    const entries = Object.entries(botState.sentMessages).sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0)).slice(0, 1000);
+    botState.sentMessages = Object.fromEntries(entries);
+  } catch (error) {
+    console.error("Site notification bot delivery error", { login, message: error.message });
+  }
+  return item;
 }
 
 async function upsertPrivateMessage(message) {
@@ -3618,6 +3754,12 @@ async function createWalletDepositRecord(user, options = {}) {
     date: deposit.date,
     status: "processing"
   });
+  await notifySiteUser(state, user.login, {
+    id: `notice-wallet-deposit-created-${deposit.id}-${loginKey(user.login)}`,
+    eventType: "wallet_deposit_created",
+    title: "Счёт пополнения создан",
+    body: `Счёт на пополнение ${amountUsd.toFixed(2)} $ создан и ожидает оплату.`
+  });
   await saveSettingsState({ ...state, walletDeposits: deposits, walletTransactions });
   return deposit;
 }
@@ -3671,6 +3813,34 @@ async function completeProductOrder(order, state, providerPayload = {}) {
           }
         }
         await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+      }
+      if (!wasAlreadyPaid) {
+        await notifySiteUser(state, order.login, {
+          id: `notice-order-paid-${order.id}-${loginKey(order.login)}`,
+          eventType: "order_paid",
+          orderId: order.id,
+          storeId: order.storeId,
+          title: "Оплата получена",
+          body: `Заказ ${order.product || order.id} оплачен и перешёл в активные.`
+        });
+        await notifySiteUser(state, store.ownerLogin || "admin", {
+          id: `notice-store-order-paid-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
+          eventType: "store_order_paid",
+          orderId: order.id,
+          storeId: order.storeId,
+          title: "Новая оплаченная покупка",
+          body: `В магазине ${store.name || store.id} оплатили ${order.product || "товар"} на ${Number(order.amountUsd || 0).toFixed(2)} $.`
+        });
+        if (Number(order.platformCommissionUsd || 0) > 0) {
+          await notifySiteUser(state, "admin", {
+            id: `notice-owner-commission-${order.id}`,
+            eventType: "owner_commission",
+            orderId: order.id,
+            storeId: order.storeId,
+            title: "Начислена комиссия",
+            body: `Комиссия с заказа ${order.id}: ${Number(order.platformCommissionUsd || 0).toFixed(2)} $.`
+          });
+        }
       }
     } else {
       applyProductOrderCommission(order, state, null);
@@ -3727,6 +3897,13 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
       status: "completed"
     });
   }
+
+  await notifySiteUser(state, deposit.login, {
+    id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(deposit.login)}`,
+    eventType: "wallet_deposit_completed",
+    title: "Баланс пополнен",
+    body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено.`
+  });
 
   await saveSettingsState(state);
 }
@@ -3831,6 +4008,32 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     });
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await saveOwnerStoreFallback(store);
+    await notifySiteUser(state, user.login, {
+      id: `notice-order-paid-${order.id}-${loginKey(user.login)}`,
+      eventType: "order_paid",
+      orderId: order.id,
+      storeId,
+      title: "Заказ оплачен",
+      body: `Заказ ${order.product || order.id} оплачен с баланса и перешёл в активные.`
+    });
+    await notifySiteUser(state, store.ownerLogin || "admin", {
+      id: `notice-store-order-paid-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
+      eventType: "store_order_paid",
+      orderId: order.id,
+      storeId,
+      title: "Новая оплаченная покупка",
+      body: `В магазине ${store.name || store.id} оплатили ${order.product || "товар"} на ${priceUsd.toFixed(2)} $.`
+    });
+    if (Number(order.platformCommissionUsd || 0) > 0) {
+      await notifySiteUser(state, "admin", {
+        id: `notice-owner-commission-${order.id}`,
+        eventType: "owner_commission",
+        orderId: order.id,
+        storeId,
+        title: "Начислена комиссия",
+        body: `Комиссия с заказа ${order.id}: ${Number(order.platformCommissionUsd || 0).toFixed(2)} $.`
+      });
+    }
     await saveSettingsState(state);
     notifyRealtime("order_paid", { orderId: order.id, storeId });
     res.json({ order, ...(await stateFor(user)) });
@@ -3940,6 +4143,22 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     }
     position.stock = Math.max(0, Number(position.stock || 0) - 1);
     state.orders.unshift(order);
+    await notifySiteUser(state, user.login, {
+      id: `notice-order-created-${order.id}-${loginKey(user.login)}`,
+      eventType: "order_created",
+      orderId: order.id,
+      storeId,
+      title: "Счёт создан",
+      body: `Счёт на оплату ${order.product || "товара"} создан. Заказ ожидает оплату.`
+    });
+    await notifySiteUser(state, store.ownerLogin || "admin", {
+      id: `notice-store-order-created-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
+      eventType: "store_order_created",
+      orderId: order.id,
+      storeId,
+      title: "Новый заказ ожидает оплату",
+      body: `Клиент ${user.login} создал заказ ${order.product || order.id} в магазине ${store.name || store.id}.`
+    });
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
     await saveOwnerStoreFallback(store);
     await saveSettingsState(state);
@@ -4140,6 +4359,20 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
       createdAt: request.createdAt,
       date: request.date,
       status: "processing"
+    });
+    await notifySiteUser(state, user.login, {
+      id: `notice-wallet-withdrawal-${request.id}-${loginKey(user.login)}`,
+      eventType: "wallet_withdrawal_requested",
+      withdrawalId: request.id,
+      title: "Заявка на вывод создана",
+      body: `Запрошен вывод ${amountLtc.toFixed(8)} LTC на ${address}.`
+    });
+    await notifySiteUser(state, "admin", {
+      id: `notice-admin-wallet-withdrawal-${request.id}`,
+      eventType: "wallet_withdrawal_requested",
+      withdrawalId: request.id,
+      title: "Пользователь запросил вывод",
+      body: `${user.login}: ${amountLtc.toFixed(8)} LTC на ${address}.`
     });
     await saveSettingsState(state);
     notifyRealtime("wallet_withdrawal_created", { id: request.id, login: user.login, kind });
@@ -5229,6 +5462,23 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
     order.completedAt = Date.now();
     order.closedAt = order.completedAt;
     order.closeReason = "Завершено клиентом";
+    const store = await loadStoreWithFallback(order.storeId);
+    await notifySiteUser(state, user.login, {
+      id: `notice-order-completed-${order.id}-${loginKey(user.login)}`,
+      eventType: "order_completed",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Заказ завершён",
+      body: `Заказ ${order.product || order.id} завершён.`
+    });
+    await notifySiteUser(state, store?.ownerLogin || "admin", {
+      id: `notice-store-order-completed-${order.id}-${loginKey(store?.ownerLogin || "admin")}`,
+      eventType: "store_order_completed",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Заказ завершён",
+      body: `Клиент ${user.login} завершил заказ ${order.product || order.id}.`
+    });
     await saveSettingsState({ ...state, orders });
     notifyRealtime("order_completed", { orderId: order.id, storeId: order.storeId });
     res.json({ order, ...(await stateFor(user)) });
@@ -5313,6 +5563,22 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     order.disputeThreadId = threadId;
     order.disputeChatClosed = false;
     order.disputeUntil = now + 24 * 60 * 60 * 1000;
+    await notifySiteUser(state, store.ownerLogin || "admin", {
+      id: `notice-store-dispute-opened-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
+      eventType: "store_dispute_opened",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Открыт диспут",
+      body: `Клиент ${user.login} открыл диспут #${publicNumber} по заказу ${order.product || order.id}.`
+    });
+    await notifySiteUser(state, "admin", {
+      id: `notice-admin-dispute-opened-${order.id}`,
+      eventType: "admin_dispute_opened",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Открыт диспут",
+      body: `Диспут #${publicNumber}: ${user.login}, магазин ${store.name || order.storeName || order.storeId}.`
+    });
     await saveSettingsState({ ...state, orders });
     const intro = "Напишите ваше обращение скоро мы решим вашу проблемы, отправьте фото с места и видео, напишите номер заказа!";
     await upsertPrivateMessage({
@@ -5411,6 +5677,15 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       orderId: order.id,
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
     });
+    await notifySiteUser(state, order.login, {
+      id: `notice-dispute-reply-${order.id}-${now}-${loginKey(order.login)}`,
+      eventType: "dispute_reply",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Новое сообщение в диспуте",
+      body: `Магазин ответил по диспуту заказа ${order.product || order.id}.`
+    });
+    await saveSettingsState(state);
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
     res.json({ order, ...(await stateForStoreAdmin(token.storeId)) });
   } catch (error) {
