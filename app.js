@@ -6618,6 +6618,14 @@ function paidStoreOrders(storeId) {
   });
 }
 
+function heldStoreOrders(storeId) {
+  return (db.orders || []).filter((order) => {
+    if (order.type !== "product" || order.storeId !== storeId) return false;
+    if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
+    return order.disputeOpen || String(order.status || "").toLowerCase() === "dispute";
+  });
+}
+
 function storeBalanceUsd(storeId) {
   const store = storeById(storeId);
   return paidStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
@@ -6684,6 +6692,10 @@ function storeFinanceRows(storeId, store = null) {
       status: order.status || "",
       createdAt: Number(order.paidAt || order.createdAt || 0)
     }));
+}
+
+function storeHeldUsd(storeId, store = null) {
+  return heldStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
 }
 
 function storeMessageRows(store) {
@@ -8403,12 +8415,14 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
   const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
   const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  const heldUsd = storeHeldUsd(store.id, store);
   const requestedUsd = activeWithdrawalUsd("store", store.id);
   const availableUsd = Math.max(0, netUsd - requestedUsd);
   const wallet = store.ltcWallet || storeWallets(store).ltc || "";
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
   <section class="seller-dashboard-stats">
     ${sellerDashStat("К выводу магазину", `${availableUsd.toFixed(2)} $`, `${usdToLtc(availableUsd).toFixed(8)} LTC`)}
+    ${sellerDashStat("Заморожено в диспутах", `${heldUsd.toFixed(2)} $`, "доступно после закрытия спора")}
     ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
     ${sellerDashStat("Валовый оборот", `${grossUsd.toFixed(2)} $`, "до комиссии")}
     ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}

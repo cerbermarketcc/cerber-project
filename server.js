@@ -1319,7 +1319,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const orders = Array.isArray(state.orders) ? state.orders : [];
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
 
-    const completed = orders.filter((order) => order.storeId === storeId && adminIsPaidProductOrder(order));
+    const completed = orders.filter((order) => order.storeId === storeId && adminIsWithdrawableStoreOrder(order));
     const earnedUsd = completed.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
     const lastStoreWithdrawal = state.walletWithdrawals
       .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
@@ -3239,6 +3239,13 @@ function adminIsPaidProductOrder(order) {
   const status = String(order.status || "").toLowerCase();
   const paymentStatus = String(order.paymentStatus || "").toLowerCase();
   return paymentStatus === "paid" || ["active", "completed", "closed", "paid"].includes(status);
+}
+
+function adminIsWithdrawableStoreOrder(order) {
+  if (!adminIsPaidProductOrder(order)) return false;
+  const status = String(order.status || "").toLowerCase();
+  if (order.disputeOpen || ["pending_payment", "canceled", "cancelled", "dispute"].includes(status)) return false;
+  return true;
 }
 
 function adminStoreNetAmount(order, state, store) {
