@@ -6685,7 +6685,7 @@ function storeTodaySalesUsd(storeId) {
 function marketStats() {
   const orders = db.orders || [];
   const productOrders = orders.filter((order) => order.type === "product");
-  const disputes = productOrders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const disputes = productOrders.filter(orderHasClientDisputeHistory);
   const completed = productOrders.filter((order) => ["completed", "closed"].includes(order.status));
   return {
     stores: db.stores.length,
@@ -6792,7 +6792,7 @@ function renderOwnerPanelContent() {
   const stats = marketStats();
   const settings = db.ownerSettings || structuredClone(defaults.ownerSettings);
   const ownerCommissionBalance = ownerPendingCommissionUsd();
-  const disputes = (db.orders || []).filter((order) => order.type === "product" && (order.disputeOpen || order.status === "dispute"));
+  const disputes = (db.orders || []).filter((order) => order.type === "product" && orderHasClientDisputeHistory(order));
   layout(`
     <section class="screen">
       <article class="panel">

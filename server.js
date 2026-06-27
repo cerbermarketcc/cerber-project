@@ -692,16 +692,17 @@ async function telegramUserSummary(user) {
   const exchangeRequests = (Array.isArray(state.exchangeRequests) ? state.exchangeRequests : []).filter((request) => (
     sameLogin(request.fromLogin, login) || sameLogin(request.toLogin, login)
   ));
-  const orderDisputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
-  const exchangeDisputes = exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute");
+  const messageItems = (messageRows || []).map((row) => row.data);
+  const hydratedOrders = hydrateOrdersDisputeHistory(orders, messageItems);
+  const orderDisputes = hydratedOrders.filter(orderHasDisputeHistory);
+  const exchangeDisputes = exchangeRequests.filter(requestHasDisputeHistory);
   const allPurchases = [...orders, ...exchangeRequests];
   const totalPurchaseUsd = allPurchases.reduce((sum, item) => sum + Number(item.amountUsd || item.priceUsd || 0), 0);
   const walletDeposits = (Array.isArray(state.walletDeposits) ? state.walletDeposits : []).filter((deposit) => sameLogin(deposit.login, login));
   const completedDeposits = walletDeposits.filter((deposit) => ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase()));
   const totalDepositUsd = completedDeposits.reduce((sum, deposit) => sum + Number(deposit.amountUsd || deposit.priceAmount || 0), 0);
   const totalDepositLtc = completedDeposits.reduce((sum, deposit) => sum + Number(deposit.amountLtc || deposit.payAmount || 0), 0);
-  const messages = (messageRows || [])
-    .map((row) => row.data)
+  const messages = messageItems
     .filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login))
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   const inboundMessages = messages.filter((message) => sameLogin(message.toLogin, login));
@@ -876,7 +877,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
   payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
     ? []
     : isStaff && sellerTokenCanAccess(token, "disputes") && !sellerTokenCanAccess(token, "orders", "clients", "finances")
-      ? storeOrders.filter((order) => order.disputeOpen || order.status === "dispute" || order.disputeThreadId || order.disputeOpenedAt)
+      ? storeOrders.filter(orderHasDisputeHistory)
       : storeOrders;
   payload.state.messages = isStaff && !sellerTokenCanAccess(token, "connect", "disputes") ? [] : storeMessages;
   payload.state.walletWithdrawals = sellerTokenCanAccess(token, "finances")
@@ -2023,7 +2024,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
         lastPurchaseAt,
         averageIntervalMs: dates.length > 1 ? (dates[dates.length - 1] - dates[0]) / completed.length : 0,
         disputes: disputes.length,
-        openDisputes: disputes.length,
+        openDisputes: disputes.filter(orderHasOpenDispute).length,
         closedDisputes: closedDisputes.length,
         disputeAmount: disputes.reduce((sum, item) => sum + adminOrderAmount(item), 0),
         lastActivityAt
@@ -2125,7 +2126,7 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
     const admin = requireAdmin(req);
     const data = await adminLoadMarketplace();
     const id = req.params.id;
-    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const order = hydrateOrdersDisputeHistory(data.state.orders || [], data.messages).find((item) => item.id === id || item.exchangeRequestId === id);
     const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
     const dispute = order || request;
     if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
@@ -2134,7 +2135,10 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
     const threadId = dispute.disputeThreadId || `dispute-${dispute.id}-${now}`;
     const publicNumber = order ? ensureDisputeNumber(data.state, dispute) : disputeNumber(dispute);
     dispute.disputeThreadId = threadId;
-    if (order) await saveSettingsState(data.state);
+    if (order) {
+      data.state.orders = (Array.isArray(data.state.orders) ? data.state.orders : []).map((item) => item.id === order.id ? { ...item, ...order } : item);
+      await saveSettingsState(data.state);
+    }
     const message = {
       id: `admin-dispute-${id}-${now}`,
       storeId: store?.id || dispute.storeId || "",
@@ -2152,7 +2156,7 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
     await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
     await appendAdminLog("admin_joined_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
     const nextData = await adminLoadMarketplace();
-    const nextOrder = (nextData.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const nextOrder = hydrateOrdersDisputeHistory(nextData.state.orders || [], nextData.messages).find((item) => item.id === id || item.exchangeRequestId === id);
     const nextRequest = (nextData.state.exchangeRequests || []).find((item) => item.id === id);
     const nextDispute = nextOrder || nextRequest || dispute;
     const messages = nextData.messages.filter((item) => (
@@ -2171,7 +2175,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
     const admin = requireAdmin(req);
     const data = await adminLoadMarketplace();
     const id = req.params.id;
-    const order = (data.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const order = hydrateOrdersDisputeHistory(data.state.orders || [], data.messages).find((item) => item.id === id || item.exchangeRequestId === id);
     const request = (data.state.exchangeRequests || []).find((item) => item.id === id);
     const dispute = order || request;
     if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
@@ -2184,7 +2188,10 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
     const threadId = dispute.disputeThreadId || `dispute-${dispute.id}-${now}`;
     const publicNumber = order ? ensureDisputeNumber(data.state, dispute) : disputeNumber(dispute);
     dispute.disputeThreadId = threadId;
-    if (order) await saveSettingsState(data.state);
+    if (order) {
+      data.state.orders = (Array.isArray(data.state.orders) ? data.state.orders : []).map((item) => item.id === order.id ? { ...item, ...order } : item);
+      await saveSettingsState(data.state);
+    }
     await upsertPrivateMessage({
       id: `admin-dispute-reply-${id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: store?.id || dispute.storeId || "",
@@ -2202,7 +2209,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
     });
     await appendAdminLog("admin_replied_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
     const nextData = await adminLoadMarketplace();
-    const nextOrder = (nextData.state.orders || []).find((item) => item.id === id || item.exchangeRequestId === id);
+    const nextOrder = hydrateOrdersDisputeHistory(nextData.state.orders || [], nextData.messages).find((item) => item.id === id || item.exchangeRequestId === id);
     const nextRequest = (nextData.state.exchangeRequests || []).find((item) => item.id === id);
     const nextDispute = nextOrder || nextRequest || dispute;
     const messages = nextData.messages.filter((item) => (
@@ -2798,6 +2805,25 @@ function orderHasDisputeHistory(order = {}) {
     order.disputeNo ||
     order.disputeChatClosed ||
     order.disputeClosedAt
+  );
+}
+
+function orderHasOpenDispute(order = {}) {
+  if (!orderHasDisputeHistory(order)) return false;
+  if (order.disputeChatClosed || order.disputeOpen === false) return false;
+  return !["completed", "closed", "canceled", "cancelled"].includes(String(order.status || "").toLowerCase());
+}
+
+function requestHasDisputeHistory(request = {}) {
+  return Boolean(
+    request.disputeOpen ||
+    String(request.status || "").toLowerCase() === "dispute" ||
+    request.disputeThreadId ||
+    request.disputeOpenedAt ||
+    request.disputeNumber ||
+    request.disputeNo ||
+    request.disputeChatClosed ||
+    request.disputeClosedAt
   );
 }
 
@@ -3763,7 +3789,7 @@ function adminBuildOverview(data) {
   });
   const disputes = [
     ...orders.filter(orderHasDisputeHistory),
-    ...exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute")
+    ...exchangeRequests.filter(requestHasDisputeHistory)
   ];
   const buyers = new Set(completedOrders.map((order) => loginKey(order.login)).filter(Boolean));
   const productsCount = stores.reduce((sum, store) => sum + (Array.isArray(store.products) ? store.products.length : 0), 0);
@@ -5142,8 +5168,8 @@ function botUserStats(state, login) {
   const exchangeRequests = (Array.isArray(state.exchangeRequests) ? state.exchangeRequests : []).filter((request) => (
     sameLogin(request.fromLogin, login) || sameLogin(request.toLogin, login)
   ));
-  const orderDisputes = productOrders.filter((order) => order.disputeOpen || order.status === "dispute");
-  const exchangeDisputes = exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute");
+  const orderDisputes = productOrders.filter(orderHasDisputeHistory);
+  const exchangeDisputes = exchangeRequests.filter(requestHasDisputeHistory);
   const walletTxs = (Array.isArray(state.walletTransactions) ? state.walletTransactions : []).filter((tx) => sameLogin(tx.login, login));
   const completedDeposits = walletTxs.filter((tx) => tx.type === "deposit" && tx.status === "completed");
   return {
