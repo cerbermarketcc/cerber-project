@@ -729,11 +729,13 @@ function renderFinance() {
 }
 function renderSettings() {
   const owner = data.settings.ownerSettings || {};
+  const payment = data.settings.paymentSettings || {};
   return `<article class="split-card"><h2>Глобальные комиссии</h2><form data-settings-form>
     <p class="muted">Комиссия анонимизации — комиссия за смешивание и защиту криптовалютных переводов.</p>
     <div class="row"><label class="field">Комиссия площадки, %<input name="platformCommissionPercent" type="number" step="0.1" value="${esc(owner.platformCommissionPercent || 0)}"></label><label class="field">Комиссия анонимизации, %<input name="swapCommissionPercent" type="number" step="0.1" value="${esc(owner.swapCommissionPercent || 0)}"></label></div>
     <div class="row"><label class="field">Комиссия вывода, %<input name="walletServiceFeePercent" type="number" step="0.1" value="${esc(owner.walletServiceFeePercent || 0)}"></label><label class="field">Автозакрытие сделок, часов<input name="defaultAutoReleaseHours" type="number" min="0" max="168" value="${esc(owner.defaultAutoReleaseHours || 24)}"></label></div>
     <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
+    <label class="field">Platform LTC wallet<input name="platformLtcWallet" value="${esc(payment.platformLtcWallet || "")}" placeholder="ltc1..."></label>
     <button class="primary">Сохранить настройки</button>
   </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
 }
@@ -1268,7 +1270,20 @@ function bindActions() {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
     try {
-      data = await api("/api/admin/settings", { method: "PUT", body: JSON.stringify({ ownerSettings: Object.fromEntries([...fd.entries()].map(([k, v]) => [k, Number(v)])) }) });
+      data = await api("/api/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          ownerSettings: {
+            platformCommissionPercent: Number(fd.get("platformCommissionPercent") || 0),
+            swapCommissionPercent: Number(fd.get("swapCommissionPercent") || 0),
+            walletServiceFeePercent: Number(fd.get("walletServiceFeePercent") || 0),
+            defaultAutoReleaseHours: Number(fd.get("defaultAutoReleaseHours") || 24)
+          },
+          paymentSettings: {
+            platformLtcWallet: String(fd.get("platformLtcWallet") || "").trim()
+          }
+        })
+      });
       toast("Настройки сохранены");
       renderShell();
     } catch (error) {
