@@ -1708,7 +1708,6 @@ async function persistRemoteState() {
           messages: db.messages,
           groupMessages: db.groupMessages,
           groupSettings: db.groupSettings,
-          orders: db.orders,
           exchangeCards: db.exchangeCards,
           exchangeRequests: db.exchangeRequests,
           referrals: db.referrals,

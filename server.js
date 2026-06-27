@@ -1520,7 +1520,7 @@ app.put("/api/state", async (req, res, next) => {
         ...currentSettingsData,
         theme: state.theme || "light",
         lang: state.lang || "ru",
-        orders: Array.isArray(state.orders) ? state.orders : [],
+        orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
         exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
         exchangeRequests: currentSettingsData.exchangeRequests || [],
         groupMessages: mergedGroupMessages,
@@ -1574,7 +1574,7 @@ app.put("/api/state", async (req, res, next) => {
     console.log("[state] saved", {
       user: user.login,
       ignoredStores: Array.isArray(state.stores) ? state.stores.length : 0,
-      orders: Array.isArray(state.orders) ? state.orders.length : 0,
+      ignoredOrders: Array.isArray(state.orders) ? state.orders.length : 0,
       mirrorBots: (currentSettingsData.mirrorBots || []).length
     });
     notifyRealtime("state_updated", { source: "api-state", user: user.login });
