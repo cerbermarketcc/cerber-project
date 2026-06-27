@@ -472,7 +472,7 @@ async function stateFor(user) {
     const seedMs = Date.now() - seedStartedAt;
     const queriesStartedAt = Date.now();
     const messagesQuery = withTimeout(
-      supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
+      supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
       "messages query",
       8000
     );
@@ -3277,7 +3277,10 @@ function adminBuildOverview(data) {
   const totalStoresNetUsd = completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0);
   const ownerRequestedUsd = activeWithdrawalUsd(state, "owner");
   const storesRequestedUsd = activeWithdrawalUsd(state, "store");
-  const activeOrders = productOrders.filter((order) => ["active", "pending_payment", "processing"].includes(String(order.status || "").toLowerCase()));
+  const activeOrders = productOrders.filter((order) => {
+    const status = String(order.status || "").toLowerCase();
+    return ["active", "pending_payment", "processing"].includes(status) || order.disputeOpen || status === "dispute";
+  });
   const disputes = [
     ...orders.filter(orderHasDisputeHistory),
     ...exchangeRequests.filter((request) => request.disputeOpen || request.status === "dispute")

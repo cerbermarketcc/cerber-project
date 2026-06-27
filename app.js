@@ -1217,6 +1217,16 @@ function normalizeOrders(next) {
     const createdAt = order.createdAt || now;
     const age = now - Number(createdAt);
     if (order.type === "product") {
+      const hasDisputeHistory = orderHasClientDisputeHistory(order);
+      if (hasDisputeHistory && !order.disputeChatClosed) {
+        return {
+          ...order,
+          status: "dispute",
+          disputeOpen: true,
+          createdAt,
+          paymentStatus: order.paymentStatus || "paid"
+        };
+      }
       if (order.status === "pending_payment" && order.paymentExpiresAt && now >= Number(order.paymentExpiresAt)) {
         restoreReservedProductItem(order, next);
         return { ...order, status: "canceled", paymentStatus: "expired", canceledAt: now, cancelReason: "Бронь 40 минут истекла" };
@@ -2979,10 +2989,10 @@ function renderOrders(tab = activeOrdersTab) {
   route = "orders";
   activeOrdersTab = tab;
   const orders = userOrders();
-  const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status));
+  const active = orders.filter((order) => ["active", "pending_payment"].includes(order.status) || orderHasClientOpenDispute(order));
   const completed = orders.filter((order) => ["completed", "closed"].includes(order.status) && !order.disputeOpen);
   const canceled = orders.filter((order) => order.status === "canceled");
-  const disputes = orders.filter((order) => order.disputeOpen || order.status === "dispute");
+  const disputes = orders.filter(orderHasClientDisputeHistory);
   const list = tab === "active" ? active : tab === "completed" ? completed : tab === "canceled" ? canceled : tab === "disputes" ? disputes : orders;
   layout(`
     <section class="screen orders-screen">
@@ -6662,6 +6672,12 @@ function orderHasClientDisputeHistory(order) {
     order?.disputeNo ||
     disputeMessagesForOrder(order).length
   );
+}
+
+function orderHasClientOpenDispute(order) {
+  if (!orderHasClientDisputeHistory(order)) return false;
+  if (order?.disputeChatClosed || order?.disputeOpen === false) return false;
+  return !["completed", "closed", "canceled", "cancelled"].includes(String(order?.status || "").toLowerCase());
 }
 
 function storeDisputes(storeId) {
