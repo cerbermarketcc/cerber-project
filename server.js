@@ -893,12 +893,34 @@ function sellerForbidden(res) {
 }
 
 async function stateForStoreAdmin(storeId, token = {}) {
-  const payload = await stateFor(null);
   const id = String(storeId || "");
-  const state = await loadSettingsState();
+  const { data: settings } = await withTimeout(
+    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+    "store-admin app_settings query",
+    4000
+  ).catch((error) => {
+    console.error("[store-admin] app_settings fallback", { message: error.message });
+    return { data: { data: {} } };
+  });
+  const state = settings?.data || {};
   const orders = Array.isArray(state.orders) ? state.orders : [];
-  const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
-  const store = await loadStoreWithFallback(id);
+  const messages = (await withTimeout(
+    supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
+    "store-admin messages query",
+    8000
+  ).catch((error) => {
+    console.error("[store-admin] messages fallback", { message: error.message });
+    return { data: [] };
+  })).data || [];
+  const { data: storeRow } = await withTimeout(
+    supabase.from("stores").select("data").eq("id", id).maybeSingle(),
+    "store-admin store query",
+    8000
+  ).catch((error) => {
+    console.error("[store-admin] store fallback", { storeId: id, message: error.message });
+    return { data: null };
+  });
+  const store = storeRow?.data || (Array.isArray(state.ownerStores) ? state.ownerStores.find((item) => String(item?.id || "") === id) : null);
   const embeddedOrders = Array.isArray(store?.productOrders)
     ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
     : [];
@@ -914,6 +936,13 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const storeMessages = messages
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
+  storeMessages.map((message) => storeSaleLedgerOrderFromMessage(message, store)).filter(Boolean).forEach((order) => {
+    const orderId = String(order?.id || "");
+    if (orderId && !seenOrderIds.has(orderId)) {
+      mergedOrders.push(order);
+      seenOrderIds.add(orderId);
+    }
+  });
   const displayState = { ...state, orders: mergedOrders };
   recoverMissingProductOrdersFromDisputeMessages(displayState, store ? [store] : [], storeMessages).forEach((order) => {
     const orderId = String(order?.id || "");
@@ -931,7 +960,20 @@ async function stateForStoreAdmin(storeId, token = {}) {
     .filter((item) => item.scope === "store" && item.storeId === id && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
   const isStaff = token?.role === "staff";
-  payload.state.stores = store ? [publicStoreForState(store)] : (payload.state.stores || []).filter((store) => String(store.id || "") === id);
+  const payload = {
+    user: null,
+    state: {
+      currentUser: "",
+      stores: store ? [publicStoreForState(store)] : [],
+      orders: [],
+      messages: [],
+      walletWithdrawals: [],
+      walletTransactions: [],
+      siteNotifications: [],
+      supportTickets: [],
+      ownerSettings: {}
+    }
+  };
   if (payload.state.stores[0]) {
     payload.state.stores[0].productOrders = storeOrders;
     payload.state.stores[0].storeFinanceRows = finance.rows;
@@ -2404,6 +2446,75 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     requireDb();
     const targetLogin = loginKey(req.body.login || "gena");
     const targetStoreId = String(req.body.storeId || "testik").trim();
+    if (!targetStoreId) return res.status(400).json({ error: "Не указан магазин" });
+    {
+    const now = Date.now();
+    const amountUsd = Math.max(0, Number(req.body.amountUsd ?? req.body.priceUsd ?? 10));
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Не указана сумма заказа" });
+    const commissionPercent = Math.max(0, Number(req.body.commissionPercent ?? 3));
+    const commissionUsd = Number.isFinite(Number(req.body.commissionUsd))
+      ? Math.max(0, Number(req.body.commissionUsd))
+      : amountUsd * commissionPercent / 100;
+    const sellerAmountUsd = Number.isFinite(Number(req.body.sellerAmountUsd))
+      ? Math.max(0, Number(req.body.sellerAmountUsd))
+      : Math.max(0, amountUsd - commissionUsd);
+    const orderId = String(req.body.orderId || `order-repair-${targetLogin || "user"}-${targetStoreId}-${now}`).trim();
+    const productTitle = String(req.body.productTitle || req.body.product || "Восстановленный заказ").trim();
+    const createdAt = Number(req.body.createdAt || req.body.paidAt || now);
+    const message = {
+      id: `sale-ledger-${orderId}`,
+      system: "store-sale-ledger",
+      kind: "store-sale-ledger",
+      orderId,
+      login: targetLogin || String(req.body.login || "gena"),
+      fromLogin: targetLogin || String(req.body.login || "gena"),
+      storeId: targetStoreId,
+      storeTag: targetStoreId,
+      storeName: String(req.body.storeName || targetStoreId),
+      product: productTitle,
+      productTitle,
+      subject: `Продажа ${productTitle}`,
+      body: String(req.body.body || `Восстановлена оплаченная продажа ${amountUsd.toFixed(2)} USD`),
+      amountUsd,
+      grossUsd: amountUsd,
+      priceUsd: amountUsd,
+      commissionPercent,
+      platformCommissionPercent: commissionPercent,
+      commissionUsd,
+      platformCommissionUsd: commissionUsd,
+      sellerAmountUsd,
+      status: "completed",
+      paymentStatus: "paid",
+      disputeOpen: false,
+      disputeChatClosed: true,
+      closeReason: String(req.body.closeReason || "Dispute closed, order repaired"),
+      createdAt,
+      paidAt: Number(req.body.paidAt || createdAt),
+      completedAt: Number(req.body.completedAt || now),
+      closedAt: Number(req.body.closedAt || now),
+      date: new Date(createdAt).toISOString()
+    };
+    const { error } = await withTimeout(
+      supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" }),
+      "repair ledger message upsert",
+      8000
+    );
+    if (error) throw error;
+    const order = storeSaleLedgerOrderFromMessage(message, {
+      id: targetStoreId,
+      name: String(req.body.storeName || targetStoreId),
+      commissionPercent
+    });
+    notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });
+    return res.json({
+      ok: true,
+      created: true,
+      order,
+      storeBalanceUsd: sellerAmountUsd,
+      ownerBalanceUsd: commissionUsd,
+      ledgerMessage: message
+    });
+    }
     const explicitOrderId = String(req.body.orderId || "").trim();
 
     const { data: storeRow } = await withTimeout(
@@ -3448,6 +3559,43 @@ function adminStoreNetAmount(order, state, store) {
 function storeOrderHeldForPayout(order = {}) {
   const status = String(order.status || "").toLowerCase();
   return Boolean(order.disputeOpen || status === "dispute" || status === "pending_payment" || status === "canceled" || status === "cancelled");
+}
+
+function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
+  if (String(message.system || "") !== "store-sale-ledger") return null;
+  const storeId = String(message.storeId || store?.id || "").trim();
+  if (!storeId) return null;
+  const amountUsd = Number(message.amountUsd || message.grossUsd || 0);
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) return null;
+  const commissionPercent = Math.max(0, Number(message.platformCommissionPercent ?? message.commissionPercent ?? storeCommissionPercentForOrder(store)));
+  const commissionUsd = Number.isFinite(Number(message.platformCommissionUsd ?? message.commissionUsd))
+    ? Math.max(0, Number(message.platformCommissionUsd ?? message.commissionUsd))
+    : amountUsd * commissionPercent / 100;
+  const sellerAmountUsd = Number.isFinite(Number(message.sellerAmountUsd))
+    ? Math.max(0, Number(message.sellerAmountUsd))
+    : Math.max(0, amountUsd - commissionUsd);
+  const createdAt = Number(message.createdAt || Date.now());
+  return {
+    id: String(message.orderId || message.id || `order-ledger-${storeId}-${createdAt}`),
+    type: "product",
+    login: String(message.login || message.fromLogin || "gena"),
+    storeId,
+    storeName: String(message.storeName || store?.name || storeId),
+    product: String(message.product || message.title || "Recovered product"),
+    status: "completed",
+    paymentStatus: "paid",
+    paymentProvider: String(message.paymentProvider || "repaired"),
+    amountUsd,
+    platformCommissionPercent: commissionPercent,
+    platformCommissionUsd: commissionUsd,
+    sellerAmountUsd,
+    paidAt: createdAt,
+    completedAt: Number(message.completedAt || message.closedAt || createdAt),
+    closedAt: Number(message.closedAt || message.completedAt || createdAt),
+    disputeOpen: false,
+    disputeChatClosed: true,
+    closeReason: String(message.closeReason || "Dispute closed, ledger repaired")
+  };
 }
 
 function storeLedgerFinance(state = {}, store = null, orders = []) {
