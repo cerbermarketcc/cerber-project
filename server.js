@@ -912,6 +912,14 @@ async function stateForStoreAdmin(storeId, token = {}) {
     console.error("[store-admin] messages fallback", { message: error.message });
     return { data: [] };
   })).data || [];
+  const ledgerMessages = (await withTimeout(
+    supabase.from("messages").select("data").like("id", "sale-ledger-%").order("created_at", { ascending: false }).limit(300),
+    "store-admin ledger messages query",
+    8000
+  ).catch((error) => {
+    console.error("[store-admin] ledger messages fallback", { message: error.message });
+    return { data: [] };
+  })).data || [];
   const { data: storeRow } = await withTimeout(
     supabase.from("stores").select("data").eq("id", id).maybeSingle(),
     "store-admin store query",
@@ -933,7 +941,15 @@ async function stateForStoreAdmin(storeId, token = {}) {
       seenOrderIds.add(orderId);
     }
   });
-  const storeMessages = messages
+  const messageRows = [...messages];
+  const seenMessageIds = new Set(messageRows.map((row) => String(row?.data?.id || row?.id || "")));
+  ledgerMessages.forEach((row) => {
+    const messageId = String(row?.data?.id || row?.id || "");
+    if (!messageId || seenMessageIds.has(messageId)) return;
+    seenMessageIds.add(messageId);
+    messageRows.push(row);
+  });
+  const storeMessages = messageRows
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
   storeMessages.map((message) => storeSaleLedgerOrderFromMessage(message, store)).filter(Boolean).forEach((order) => {
