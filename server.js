@@ -548,8 +548,8 @@ async function stateFor(user) {
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
       : fallbackStores;
     const embeddedStoreOrders = allStores.flatMap((store) => (
-      Array.isArray(store?.orders)
-        ? store.orders.map((order) => ({ ...order, storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id }))
+      Array.isArray(store?.productOrders)
+        ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id }))
         : []
     ));
     if (embeddedStoreOrders.length) {
@@ -899,8 +899,8 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
   const store = await loadStoreWithFallback(id);
-  const embeddedOrders = Array.isArray(store?.orders)
-    ? store.orders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
+  const embeddedOrders = Array.isArray(store?.productOrders)
+    ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
     : [];
   const mergedOrders = [...orders];
   const seenOrderIds = new Set(mergedOrders.map((order) => String(order?.id || "")));
@@ -1360,7 +1360,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? [...state.orders] : [];
     const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
-    (Array.isArray(store.orders) ? store.orders : []).forEach((order) => {
+    (Array.isArray(store.productOrders) ? store.productOrders : []).forEach((order) => {
       const orderId = String(order?.id || "");
       if (orderId && !seenOrderIds.has(orderId)) {
         orders.push({ ...order, storeId: order.storeId || storeId, storeName: order.storeName || store.name || storeId });
@@ -2393,7 +2393,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const store = storeRow?.data || await loadStoreWithFallback(targetStoreId);
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
     const state = { orders: [], ownerSettings: {}, walletTransactions: [], storeBalancesUsd: {}, ownerBalanceUsd: 0 };
-    state.orders = Array.isArray(store.orders) ? [...store.orders] : [];
+    state.orders = Array.isArray(store.productOrders) ? [...store.productOrders] : [];
     const stores = [store];
     const { data: messageRows } = await withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
@@ -2438,14 +2438,14 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
 
     applyProductOrderCommission(order, state, store);
     order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
-    store.orders = Array.isArray(store.orders) ? store.orders : [];
-    const storeOrderIndex = store.orders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
+    store.productOrders = Array.isArray(store.productOrders) ? store.productOrders : [];
+    const storeOrderIndex = store.productOrders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
     if (storeOrderIndex >= 0) {
-      store.orders[storeOrderIndex] = { ...store.orders[storeOrderIndex], ...order };
+      store.productOrders[storeOrderIndex] = { ...store.productOrders[storeOrderIndex], ...order };
     } else {
-      store.orders.unshift(order);
+      store.productOrders.unshift(order);
     }
-    store.orders = store.orders.slice(0, 500);
+    store.productOrders = store.productOrders.slice(0, 500);
     await supabase.from("stores").upsert({ id: store.id || targetStoreId, data: store }, { onConflict: "id" });
     await saveOwnerStoreFallback(store);
     notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });

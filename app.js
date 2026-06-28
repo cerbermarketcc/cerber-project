@@ -6659,7 +6659,17 @@ function storeCommissionPercent(store = null) {
 }
 
 function paidStoreOrders(storeId) {
-  return (db.orders || []).filter((order) => {
+  const store = storeById(storeId);
+  const orders = [...(db.orders || [])];
+  const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
+  (Array.isArray(store?.productOrders) ? store.productOrders : []).forEach((order) => {
+    const orderId = String(order?.id || "");
+    if (orderId && !seenOrderIds.has(orderId)) {
+      orders.push({ ...order, storeId: order.storeId || storeId, storeName: order.storeName || store?.name || storeId });
+      seenOrderIds.add(orderId);
+    }
+  });
+  return orders.filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
     if (order.disputeOpen || ["pending_payment", "canceled", "dispute"].includes(order.status)) return false;
     return ["active", "completed", "closed"].includes(order.status) || order.paymentStatus === "paid";
@@ -6740,6 +6750,10 @@ function storeFinanceRows(storeId, store = null) {
       status: order.status || "",
       createdAt: Number(order.paidAt || order.createdAt || 0)
     }));
+}
+
+function shopOrderFinanceRows(store) {
+  return storeFinanceRows(store?.id || "", store);
 }
 
 function storeHeldUsd(storeId, store = null) {
