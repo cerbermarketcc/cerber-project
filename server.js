@@ -3069,6 +3069,13 @@ async function ensureProductOrderSettlement(state = {}, order = {}, store = null
   if (!adminIsWithdrawableStoreOrder(order)) return false;
 
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const storeTxId = `tx-store-sale-${order.id}`;
+  const ownerTxId = `tx-owner-commission-${order.id}`;
+  const alreadyHasStoreTx = state.walletTransactions.some((tx) => tx.id === storeTxId);
+  const alreadyHasOwnerTx = state.walletTransactions.some((tx) => tx.id === ownerTxId);
+  if (order.ledgerRecordedAt && (alreadyHasStoreTx || !order.storeId) && (alreadyHasOwnerTx || Number(order.platformCommissionUsd || 0) <= 0)) {
+    return false;
+  }
   const beforeTxCount = state.walletTransactions.length;
   const hadLedger = Boolean(order.ledgerRecordedAt);
   const resolvedStore = store || await lifecycleStoreForOrder(state, order.storeId);
