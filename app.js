@@ -1069,7 +1069,9 @@ function normalizeDb(next) {
       storeGrossUsd: Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : undefined,
       storeCommissionUsd: Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : undefined,
       storeBalanceUsd: Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : undefined,
+      storeHeldUsd: Number.isFinite(Number(store.storeHeldUsd)) ? Number(store.storeHeldUsd) : undefined,
       storeAvailableBalanceUsd: Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Number(store.storeAvailableBalanceUsd) : undefined,
+      storeFinanceRows: Array.isArray(store.storeFinanceRows) ? store.storeFinanceRows : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
@@ -6748,6 +6750,18 @@ function storeClientRows(storeId) {
 }
 
 function storeFinanceRows(storeId, store = null) {
+  if (Array.isArray(store?.storeFinanceRows) && store.storeFinanceRows.length) {
+    return store.storeFinanceRows.map((row) => ({
+      id: row.id || row.orderId || `finance-${Math.random().toString(36).slice(2, 8)}`,
+      title: row.title || `Заказ: ${row.orderId || ""}`,
+      login: row.login || "",
+      grossUsd: Number(row.grossUsd || 0),
+      netUsd: Number(row.netUsd || 0),
+      commissionUsd: Number(row.commissionUsd || 0),
+      status: row.status || "",
+      createdAt: Number(row.createdAt || 0)
+    }));
+  }
   return paidStoreOrders(storeId)
     .slice()
     .sort((a, b) => Number(b.paidAt || b.createdAt || 0) - Number(a.paidAt || a.createdAt || 0))
@@ -6768,6 +6782,7 @@ function shopOrderFinanceRows(store) {
 }
 
 function storeHeldUsd(storeId, store = null) {
+  if (Number.isFinite(Number(store?.storeHeldUsd))) return Number(store.storeHeldUsd);
   return heldStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
 }
 

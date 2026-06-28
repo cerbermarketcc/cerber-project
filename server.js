@@ -926,10 +926,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
     mergedOrders.filter((order) => String(order.storeId || "") === id),
     storeMessages
   );
-  const withdrawableOrders = storeOrders.filter(adminIsWithdrawableStoreOrder);
-  const grossUsd = withdrawableOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
-  const commissionUsd = withdrawableOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0);
-  const netUsd = withdrawableOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+  const finance = storeLedgerFinance(state, store, storeOrders);
   const requestedUsd = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
     .filter((item) => item.scope === "store" && item.storeId === id && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
@@ -937,10 +934,12 @@ async function stateForStoreAdmin(storeId, token = {}) {
   payload.state.stores = store ? [publicStoreForState(store)] : (payload.state.stores || []).filter((store) => String(store.id || "") === id);
   if (payload.state.stores[0]) {
     payload.state.stores[0].productOrders = storeOrders;
-    payload.state.stores[0].storeGrossUsd = grossUsd;
-    payload.state.stores[0].storeCommissionUsd = commissionUsd;
-    payload.state.stores[0].storeBalanceUsd = netUsd;
-    payload.state.stores[0].storeAvailableBalanceUsd = Math.max(0, netUsd - requestedUsd);
+    payload.state.stores[0].storeFinanceRows = finance.rows;
+    payload.state.stores[0].storeGrossUsd = finance.grossUsd;
+    payload.state.stores[0].storeCommissionUsd = finance.commissionUsd;
+    payload.state.stores[0].storeBalanceUsd = finance.netUsd;
+    payload.state.stores[0].storeHeldUsd = finance.heldUsd;
+    payload.state.stores[0].storeAvailableBalanceUsd = Math.max(0, finance.netUsd - requestedUsd);
   }
   payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
     ? []
@@ -1391,8 +1390,8 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
 
-    const completed = orders.filter((order) => order.storeId === storeId && adminIsWithdrawableStoreOrder(order));
-    const earnedUsd = completed.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+    const finance = storeLedgerFinance(state, store, orders.filter((order) => String(order.storeId || "") === storeId));
+    const earnedUsd = finance.netUsd;
     const lastStoreWithdrawal = state.walletWithdrawals
       .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
       .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
@@ -3444,6 +3443,66 @@ function adminIsWithdrawableStoreOrder(order) {
 
 function adminStoreNetAmount(order, state, store) {
   return Math.max(0, adminOrderAmount(order) - adminPlatformCommission(order, state, store));
+}
+
+function storeOrderHeldForPayout(order = {}) {
+  const status = String(order.status || "").toLowerCase();
+  return Boolean(order.disputeOpen || status === "dispute" || status === "pending_payment" || status === "canceled" || status === "cancelled");
+}
+
+function storeLedgerFinance(state = {}, store = null, orders = []) {
+  const storeId = String(store?.id || "");
+  const orderById = new Map((Array.isArray(orders) ? orders : []).map((order) => [String(order?.id || ""), order]));
+  const txs = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .filter((tx) => tx.scope === "store" && String(tx.storeId || "") === storeId && String(tx.type || "") === "store_sale");
+  const rows = [];
+  const seenOrderIds = new Set();
+
+  txs.forEach((tx) => {
+    const orderId = String(tx.orderId || "");
+    if (orderId) seenOrderIds.add(orderId);
+    const order = orderById.get(orderId) || {};
+    rows.push({
+      id: tx.id || `tx-store-sale-${orderId}`,
+      orderId,
+      login: tx.login || order.login || store?.ownerLogin || storeId,
+      title: tx.title || `Sale: ${order.product || orderId}`,
+      grossUsd: Number(tx.grossUsd || order.amountUsd || tx.amountUsd || 0),
+      commissionUsd: Number(tx.commissionUsd || adminPlatformCommission(order, state, store) || 0),
+      netUsd: Number(tx.amountUsd || adminStoreNetAmount(order, state, store) || 0),
+      status: storeOrderHeldForPayout(order) ? "held" : "completed",
+      held: storeOrderHeldForPayout(order),
+      createdAt: Number(tx.createdAt || order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
+    });
+  });
+
+  (Array.isArray(orders) ? orders : [])
+    .filter((order) => String(order.storeId || "") === storeId && adminIsPaidProductOrder(order) && !seenOrderIds.has(String(order.id || "")))
+    .forEach((order) => {
+      rows.push({
+        id: `order-ledger-${order.id}`,
+        orderId: order.id,
+        login: order.login || "",
+        title: `Sale: ${order.product || order.id}`,
+        grossUsd: adminOrderAmount(order),
+        commissionUsd: adminPlatformCommission(order, state, store),
+        netUsd: adminStoreNetAmount(order, state, store),
+        status: storeOrderHeldForPayout(order) ? "held" : "completed",
+        held: storeOrderHeldForPayout(order),
+        createdAt: Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
+      });
+    });
+
+  rows.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const completedRows = rows.filter((row) => !row.held);
+  const heldRows = rows.filter((row) => row.held);
+  return {
+    rows,
+    grossUsd: completedRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0),
+    commissionUsd: completedRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0),
+    netUsd: completedRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0),
+    heldUsd: heldRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0)
+  };
 }
 
 function storeCommissionPercentForOrder(store = null) {
