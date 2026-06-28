@@ -489,7 +489,14 @@ async function stateFor(user) {
       supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
       "app_settings query",
       8000
-    );
+    ).catch((error) => {
+      console.error("[stateFor] app_settings query failed; using empty settings fallback", {
+        message: error.message,
+        status: error.status || 500,
+        ms: Date.now() - queriesStartedAt
+      });
+      return { data: { data: {} }, error: null, failed: true };
+    });
     const [messagesResult, settingsResult] = await Promise.all([
       messagesQuery,
       settingsQuery
@@ -540,6 +547,23 @@ async function stateFor(user) {
     const allStores = storesFromDb
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
       : fallbackStores;
+    const embeddedStoreOrders = allStores.flatMap((store) => (
+      Array.isArray(store?.orders)
+        ? store.orders.map((order) => ({ ...order, storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id }))
+        : []
+    ));
+    if (embeddedStoreOrders.length) {
+      const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
+      orders = hydrateOrdersDisputeHistory([
+        ...orders,
+        ...embeddedStoreOrders.filter((order) => {
+          const id = String(order?.id || "");
+          if (!id || seenOrderIds.has(id)) return false;
+          seenOrderIds.add(id);
+          return true;
+        })
+      ], allMessages);
+    }
     const visibleStores = allStores
       .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
       .map(publicStoreForState);
@@ -874,11 +898,24 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const state = await loadSettingsState();
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const messages = (await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000)).data || [];
+  const store = await loadStoreWithFallback(id);
+  const embeddedOrders = Array.isArray(store?.orders)
+    ? store.orders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
+    : [];
+  const mergedOrders = [...orders];
+  const seenOrderIds = new Set(mergedOrders.map((order) => String(order?.id || "")));
+  embeddedOrders.forEach((order) => {
+    const orderId = String(order?.id || "");
+    if (orderId && !seenOrderIds.has(orderId)) {
+      mergedOrders.push(order);
+      seenOrderIds.add(orderId);
+    }
+  });
   const storeMessages = messages
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
   const storeOrders = hydrateOrdersDisputeHistory(
-    orders.filter((order) => String(order.storeId || "") === id),
+    mergedOrders.filter((order) => String(order.storeId || "") === id),
     storeMessages
   );
   const isStaff = token?.role === "staff";
@@ -1321,7 +1358,15 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const store = row?.data || await loadStoreForAdmin(storeId);
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
     const state = await loadSettingsState();
-    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const orders = Array.isArray(state.orders) ? [...state.orders] : [];
+    const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
+    (Array.isArray(store.orders) ? store.orders : []).forEach((order) => {
+      const orderId = String(order?.id || "");
+      if (orderId && !seenOrderIds.has(orderId)) {
+        orders.push({ ...order, storeId: order.storeId || storeId, storeName: order.storeName || store.name || storeId });
+        seenOrderIds.add(orderId);
+      }
+    });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
 
     const completed = orders.filter((order) => order.storeId === storeId && adminIsWithdrawableStoreOrder(order));
@@ -2340,23 +2385,16 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const targetStoreId = String(req.body.storeId || "testik").trim();
     const explicitOrderId = String(req.body.orderId || "").trim();
 
-    const { data: settingsRow } = await withTimeout(
-      supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-      "repair app_settings query",
+    const { data: storeRow } = await withTimeout(
+      supabase.from("stores").select("data").eq("id", targetStoreId).maybeSingle(),
+      "repair store query",
       8000
     );
-    const state = settingsRow?.data || {};
-    state.orders = Array.isArray(state.orders) ? state.orders : [];
-    const { data: storeRows } = await withTimeout(
-      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
-      "repair stores query",
-      8000
-    );
-    const stores = mergeStoreSources(
-      Array.isArray(storeRows) ? storeRows.map((row) => row.data) : [],
-      state.ownerStores || []
-    );
-    const store = stores.find((item) => String(item?.id || "") === targetStoreId) || null;
+    const store = storeRow?.data || await loadStoreWithFallback(targetStoreId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const state = { orders: [], ownerSettings: {}, walletTransactions: [], storeBalancesUsd: {}, ownerBalanceUsd: 0 };
+    state.orders = Array.isArray(store.orders) ? [...store.orders] : [];
+    const stores = [store];
     const { data: messageRows } = await withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
       "repair messages query",
@@ -2398,30 +2436,24 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     order.closeReason = order.closeReason || "Dispute closed, order repaired";
     order.repairedAt = Date.now();
 
-    await ensureProductOrderSettlement(state, order, store);
-    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
-    state.adminLogs.unshift({
-      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      action: "order_repaired",
-      actor: "repair-endpoint",
-      details: {
-        orderId: order.id,
-        login: order.login,
-        storeId: order.storeId,
-        amountUsd: order.amountUsd,
-        sellerAmountUsd: order.sellerAmountUsd,
-        platformCommissionUsd: order.platformCommissionUsd
-      },
-      createdAt: Date.now()
-    });
-    state.adminLogs = state.adminLogs.slice(0, 500);
-    await saveSettingsState(state);
+    applyProductOrderCommission(order, state, store);
+    order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
+    store.orders = Array.isArray(store.orders) ? store.orders : [];
+    const storeOrderIndex = store.orders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
+    if (storeOrderIndex >= 0) {
+      store.orders[storeOrderIndex] = { ...store.orders[storeOrderIndex], ...order };
+    } else {
+      store.orders.unshift(order);
+    }
+    store.orders = store.orders.slice(0, 500);
+    await supabase.from("stores").upsert({ id: store.id || targetStoreId, data: store }, { onConflict: "id" });
+    await saveOwnerStoreFallback(store);
     notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });
     res.json({
       ok: true,
       created: result.created,
       order,
-      storeBalanceUsd: state.storeBalancesUsd?.[order.storeId] || 0,
+      storeBalanceUsd: Number(order.sellerAmountUsd || 0),
       ownerBalanceUsd: state.ownerBalanceUsd || 0,
       transactions: (state.walletTransactions || []).filter((tx) => tx.orderId === order.id)
     });
