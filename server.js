@@ -3161,7 +3161,6 @@ async function normalizeServerOrders(state = {}) {
         continue;
       }
     }
-    if (await ensureProductOrderSettlement(state, order)) changed = true;
     nextOrders.push(order);
   }
   state.orders = nextOrders;
