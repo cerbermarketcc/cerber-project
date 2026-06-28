@@ -2340,7 +2340,8 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const targetStoreId = String(req.body.storeId || "testik").trim();
     const explicitOrderId = String(req.body.orderId || "").trim();
 
-    const state = await loadSettingsState();
+    const { data: settingsRow } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const state = settingsRow?.data || {};
     state.orders = Array.isArray(state.orders) ? state.orders : [];
     const { data: storeRows } = await supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500);
     const stores = mergeStoreSources(
@@ -2386,15 +2387,23 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     order.repairedAt = Date.now();
 
     await ensureProductOrderSettlement(state, order, store);
-    await saveSettingsState(state);
-    await appendAdminLog("order_repaired", "repair-endpoint", {
-      orderId: order.id,
-      login: order.login,
-      storeId: order.storeId,
-      amountUsd: order.amountUsd,
-      sellerAmountUsd: order.sellerAmountUsd,
-      platformCommissionUsd: order.platformCommissionUsd
+    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
+    state.adminLogs.unshift({
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action: "order_repaired",
+      actor: "repair-endpoint",
+      details: {
+        orderId: order.id,
+        login: order.login,
+        storeId: order.storeId,
+        amountUsd: order.amountUsd,
+        sellerAmountUsd: order.sellerAmountUsd,
+        platformCommissionUsd: order.platformCommissionUsd
+      },
+      createdAt: Date.now()
     });
+    state.adminLogs = state.adminLogs.slice(0, 500);
+    await saveSettingsState(state);
     notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });
     res.json({
       ok: true,
