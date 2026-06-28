@@ -527,7 +527,7 @@ async function stateFor(user) {
       });
     }
     const allMessages = (messages || []).map((row) => row.data);
-    const orders = hydrateOrdersDisputeHistory(
+    let orders = hydrateOrdersDisputeHistory(
       (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
       allMessages
     );
@@ -540,6 +540,19 @@ async function stateFor(user) {
     const allStores = storesFromDb
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
       : fallbackStores;
+    const recoveredOrders = recoverMissingProductOrdersFromDisputeMessages(settingsData, allStores, allMessages);
+    if (recoveredOrders.length) {
+      await normalizeServerOrders(settingsData);
+      await saveSettingsState(settingsData);
+      console.log("[stateFor] recovered missing product orders", {
+        count: recoveredOrders.length,
+        orderIds: recoveredOrders.map((order) => order.id).slice(0, 10)
+      });
+      orders = hydrateOrdersDisputeHistory(
+        (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
+        allMessages
+      );
+    }
     const visibleStores = allStores
       .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
       .map(publicStoreForState);
@@ -1250,7 +1263,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     const now = Date.now();
     const publicNumber = ensureDisputeNumber(state, order);
     order.status = "completed";
-    order.paymentStatus = order.paymentStatus || "paid";
+    order.paymentStatus = "paid";
     order.disputeOpen = false;
     order.disputeChatClosed = true;
     order.disputeClosedAt = now;
@@ -2980,7 +2993,15 @@ async function restoreExpiredProductReservation(state = {}, order = {}) {
 
 async function ensureProductOrderSettlement(state = {}, order = {}, store = null) {
   if (!order || order.type !== "product") return false;
-  if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
+  const status = String(order.status || "").toLowerCase();
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  if (paymentStatus !== "paid") {
+    if (["active", "completed", "closed", "paid"].includes(status)) {
+      order.paymentStatus = "paid";
+    } else {
+      return false;
+    }
+  }
   if (!adminIsWithdrawableStoreOrder(order)) return false;
 
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
@@ -3653,6 +3674,44 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
   applyProductOrderCommission(order, state, store);
   state.orders.unshift(order);
   return { order, created: true };
+}
+
+function recoverMissingProductOrdersFromDisputeMessages(state = {}, stores = [], messages = []) {
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  const existingIds = new Set(state.orders.map((order) => String(order?.id || "")).filter(Boolean));
+  const orderIds = [...new Set((Array.isArray(messages) ? messages : [])
+    .filter(messageLooksLikeDispute)
+    .map((message) => String(message.orderId || "").trim())
+    .filter((id) => id && id.startsWith("order-") && !existingIds.has(id)))];
+
+  const recovered = [];
+  for (const orderId of orderIds) {
+    try {
+      const result = recoverProductOrderFromHistory(state, stores, messages, { orderId });
+      if (result.created) {
+        const disputeMessages = disputeMessagesForServerOrder(result.order, messages);
+        const closedByMessage = disputeMessages.some((message) => {
+          const system = String(message.system || "").toLowerCase();
+          const text = `${message.subject || ""} ${message.body || ""}`.toLowerCase();
+          return system.includes("closed") || text.includes("закрыт") || text.includes("Р·Р°РєСЂС‹С‚");
+        });
+        if (closedByMessage) {
+          const lastMessage = disputeMessages[disputeMessages.length - 1] || {};
+          result.order.status = "completed";
+          result.order.disputeOpen = false;
+          result.order.disputeChatClosed = true;
+          result.order.disputeClosedAt = Number(lastMessage.createdAt || Date.now());
+          result.order.closedAt = result.order.disputeClosedAt;
+        }
+        result.order.recoveredAutomatically = true;
+        recovered.push(result.order);
+        existingIds.add(orderId);
+      }
+    } catch (error) {
+      console.error("[orders] auto recovery skipped", { orderId, message: error.message });
+    }
+  }
+  return recovered;
 }
 
 function adminPeriods() {
