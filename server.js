@@ -2340,16 +2340,28 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const targetStoreId = String(req.body.storeId || "testik").trim();
     const explicitOrderId = String(req.body.orderId || "").trim();
 
-    const { data: settingsRow } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+    const { data: settingsRow } = await withTimeout(
+      supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+      "repair app_settings query",
+      8000
+    );
     const state = settingsRow?.data || {};
     state.orders = Array.isArray(state.orders) ? state.orders : [];
-    const { data: storeRows } = await supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500);
+    const { data: storeRows } = await withTimeout(
+      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+      "repair stores query",
+      8000
+    );
     const stores = mergeStoreSources(
       Array.isArray(storeRows) ? storeRows.map((row) => row.data) : [],
       state.ownerStores || []
     );
     const store = stores.find((item) => String(item?.id || "") === targetStoreId) || null;
-    const { data: messageRows } = await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000);
+    const { data: messageRows } = await withTimeout(
+      supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(300),
+      "repair messages query",
+      8000
+    );
     const messages = (Array.isArray(messageRows) ? messageRows : []).map((row) => row.data);
     const candidateMessages = messages.filter((message) => {
       const orderId = String(message.orderId || "").trim();
