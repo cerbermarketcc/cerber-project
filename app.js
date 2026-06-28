@@ -1066,6 +1066,10 @@ function normalizeDb(next) {
       gallery: Array.isArray(store.gallery) ? store.gallery.slice(0, 5) : [],
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       productOrders: Array.isArray(store.productOrders) ? store.productOrders : [],
+      storeGrossUsd: Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : undefined,
+      storeCommissionUsd: Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : undefined,
+      storeBalanceUsd: Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : undefined,
+      storeAvailableBalanceUsd: Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Number(store.storeAvailableBalanceUsd) : undefined,
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
@@ -6692,6 +6696,7 @@ function heldStoreOrders(storeId) {
 
 function storeBalanceUsd(storeId) {
   const store = storeById(storeId);
+  if (Number.isFinite(Number(store?.storeBalanceUsd))) return Number(store.storeBalanceUsd);
   return paidStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
 }
 
@@ -8480,12 +8485,12 @@ function disputeMessagesForOrder(order) {
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
-  const grossUsd = financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
-  const commissionUsd = financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
-  const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  const grossUsd = Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
+  const commissionUsd = Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
+  const netUsd = Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
   const heldUsd = storeHeldUsd(store.id, store);
   const requestedUsd = activeWithdrawalUsd("store", store.id);
-  const availableUsd = Math.max(0, netUsd - requestedUsd);
+  const availableUsd = Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Math.max(0, Number(store.storeAvailableBalanceUsd)) : Math.max(0, netUsd - requestedUsd);
   const wallet = store.ltcWallet || storeWallets(store).ltc || "";
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
   <section class="seller-dashboard-stats">
@@ -8991,6 +8996,7 @@ function bindShopPanelActions(store, activeTab) {
 }
 
 function shopPayoutAvailableUsd(store) {
+  if (Number.isFinite(Number(store?.storeAvailableBalanceUsd))) return Math.max(0, Number(store.storeAvailableBalanceUsd));
   const financeRows = shopOrderFinanceRows(store);
   const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
   return Math.max(0, netUsd - activeWithdrawalUsd("store", store.id));

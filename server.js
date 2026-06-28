@@ -914,14 +914,33 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const storeMessages = messages
     .map((row) => row.data)
     .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
+  const displayState = { ...state, orders: mergedOrders };
+  recoverMissingProductOrdersFromDisputeMessages(displayState, store ? [store] : [], storeMessages).forEach((order) => {
+    const orderId = String(order?.id || "");
+    if (orderId && !seenOrderIds.has(orderId)) {
+      mergedOrders.push(order);
+      seenOrderIds.add(orderId);
+    }
+  });
   const storeOrders = hydrateOrdersDisputeHistory(
     mergedOrders.filter((order) => String(order.storeId || "") === id),
     storeMessages
   );
+  const withdrawableOrders = storeOrders.filter(adminIsWithdrawableStoreOrder);
+  const grossUsd = withdrawableOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
+  const commissionUsd = withdrawableOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0);
+  const netUsd = withdrawableOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+  const requestedUsd = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
+    .filter((item) => item.scope === "store" && item.storeId === id && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
+    .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
   const isStaff = token?.role === "staff";
-  payload.state.stores = (payload.state.stores || []).filter((store) => String(store.id || "") === id);
+  payload.state.stores = store ? [publicStoreForState(store)] : (payload.state.stores || []).filter((store) => String(store.id || "") === id);
   if (payload.state.stores[0]) {
     payload.state.stores[0].productOrders = storeOrders;
+    payload.state.stores[0].storeGrossUsd = grossUsd;
+    payload.state.stores[0].storeCommissionUsd = commissionUsd;
+    payload.state.stores[0].storeBalanceUsd = netUsd;
+    payload.state.stores[0].storeAvailableBalanceUsd = Math.max(0, netUsd - requestedUsd);
   }
   payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
     ? []
