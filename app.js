@@ -1065,6 +1065,7 @@ function normalizeDb(next) {
       autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || next.ownerSettings.defaultAutoReleaseHours || 24)),
       gallery: Array.isArray(store.gallery) ? store.gallery.slice(0, 5) : [],
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
+      productOrders: Array.isArray(store.productOrders) ? store.productOrders : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
   });
@@ -6660,24 +6661,29 @@ function storeCommissionPercent(store = null) {
 
 function paidStoreOrders(storeId) {
   const store = storeById(storeId);
-  const orders = [...(db.orders || [])];
-  const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
-  (Array.isArray(store?.productOrders) ? store.productOrders : []).forEach((order) => {
-    const orderId = String(order?.id || "");
-    if (orderId && !seenOrderIds.has(orderId)) {
-      orders.push({ ...order, storeId: order.storeId || storeId, storeName: order.storeName || store?.name || storeId });
-      seenOrderIds.add(orderId);
-    }
-  });
-  return orders.filter((order) => {
+  return allStoreOrders(storeId, store).filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
     if (order.disputeOpen || ["pending_payment", "canceled", "dispute"].includes(order.status)) return false;
     return ["active", "completed", "closed"].includes(order.status) || order.paymentStatus === "paid";
   });
 }
 
+function allStoreOrders(storeId, store = null) {
+  const orders = [...(db.orders || [])];
+  const resolvedStore = store || storeById(storeId);
+  const seenOrderIds = new Set(orders.map((order) => String(order?.id || "")));
+  (Array.isArray(resolvedStore?.productOrders) ? resolvedStore.productOrders : []).forEach((order) => {
+    const orderId = String(order?.id || "");
+    if (orderId && !seenOrderIds.has(orderId)) {
+      orders.push({ ...order, storeId: order.storeId || storeId, storeName: order.storeName || resolvedStore?.name || storeId });
+      seenOrderIds.add(orderId);
+    }
+  });
+  return orders;
+}
+
 function heldStoreOrders(storeId) {
-  return (db.orders || []).filter((order) => {
+  return allStoreOrders(storeId).filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
     if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
     return order.disputeOpen || String(order.status || "").toLowerCase() === "dispute";
@@ -6712,7 +6718,7 @@ function ownerPendingCommissionUsd() {
 
 function storeClientRows(storeId) {
   const rows = new Map();
-  (db.orders || [])
+  allStoreOrders(storeId)
     .filter((order) => order.type === "product" && order.storeId === storeId && order.login)
     .forEach((order) => {
       const key = loginKey(order.login);
@@ -7871,7 +7877,7 @@ async function handleExchangeCardCreate(event) {
 }
 
 function sellerDashboardShell(store, standalone = false, activeTab = "dashboard") {
-  const orders = (db.orders || []).filter((order) => order.storeId === store.id);
+  const orders = allStoreOrders(store.id, store).filter((order) => order.storeId === store.id);
   const paidOrders = paidStoreOrders(store.id);
   const today = new Date().toDateString();
   const todayOrders = paidOrders.filter((order) => new Date(Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)).toDateString() === today);

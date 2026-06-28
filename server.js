@@ -920,6 +920,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
   );
   const isStaff = token?.role === "staff";
   payload.state.stores = (payload.state.stores || []).filter((store) => String(store.id || "") === id);
+  if (payload.state.stores[0]) {
+    payload.state.stores[0].productOrders = storeOrders;
+  }
   payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
     ? []
     : isStaff && sellerTokenCanAccess(token, "disputes") && !sellerTokenCanAccess(token, "orders", "clients", "finances")
