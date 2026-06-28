@@ -540,19 +540,6 @@ async function stateFor(user) {
     const allStores = storesFromDb
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
       : fallbackStores;
-    const recoveredOrders = recoverMissingProductOrdersFromDisputeMessages(settingsData, allStores, allMessages);
-    if (recoveredOrders.length) {
-      await normalizeServerOrders(settingsData);
-      await saveSettingsState(settingsData);
-      console.log("[stateFor] recovered missing product orders", {
-        count: recoveredOrders.length,
-        orderIds: recoveredOrders.map((order) => order.id).slice(0, 10)
-      });
-      orders = hydrateOrdersDisputeHistory(
-        (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
-        allMessages
-      );
-    }
     const visibleStores = allStores
       .filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store))
       .map(publicStoreForState);
@@ -2340,6 +2327,83 @@ app.post("/api/admin/orders/recover", async (req, res, next) => {
       });
     }
     res.json({ ...result, overview: adminBuildOverview(await adminLoadMarketplace()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
+  try {
+    verifyCmsAdmin(req);
+    requireDb();
+    const targetLogin = loginKey(req.body.login || "gena");
+    const targetStoreId = String(req.body.storeId || "testik").trim();
+    const explicitOrderId = String(req.body.orderId || "").trim();
+
+    const state = await loadSettingsState();
+    state.orders = Array.isArray(state.orders) ? state.orders : [];
+    const { data: storeRows } = await supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500);
+    const stores = mergeStoreSources(
+      Array.isArray(storeRows) ? storeRows.map((row) => row.data) : [],
+      state.ownerStores || []
+    );
+    const store = stores.find((item) => String(item?.id || "") === targetStoreId) || null;
+    const { data: messageRows } = await supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000);
+    const messages = (Array.isArray(messageRows) ? messageRows : []).map((row) => row.data);
+    const candidateMessages = messages.filter((message) => {
+      const orderId = String(message.orderId || "").trim();
+      if (!orderId.startsWith("order-")) return false;
+      if (!messageLooksLikeDispute(message)) return false;
+      const messageStoreId = String(message.storeId || message.storeTag || "").trim();
+      const relatedToStore = !targetStoreId || messageStoreId === targetStoreId || String(message.subject || "").includes(targetStoreId);
+      const relatedToLogin = [message.fromLogin, message.toLogin, message.login, message.recipientLogin]
+        .some((value) => loginKey(value) === targetLogin);
+      return relatedToStore && relatedToLogin;
+    });
+    const orderId = explicitOrderId || String(candidateMessages[0]?.orderId || "").trim();
+    if (!orderId) return res.status(404).json({ error: "Не найден orderId для восстановления" });
+
+    let result = { order: state.orders.find((order) => String(order.id || "") === orderId), created: false };
+    if (!result.order) {
+      result = recoverProductOrderFromHistory(state, stores, messages, {
+        orderId,
+        login: targetLogin,
+        storeId: targetStoreId
+      });
+    }
+    const order = result.order;
+    order.login = order.login || req.body.login || "gena";
+    order.storeId = order.storeId || targetStoreId;
+    order.storeName = order.storeName || store?.name || targetStoreId;
+    order.status = "completed";
+    order.paymentStatus = "paid";
+    order.disputeOpen = false;
+    order.disputeChatClosed = true;
+    order.disputeClosedAt = Number(order.disputeClosedAt || Date.now());
+    order.completedAt = Number(order.completedAt || order.disputeClosedAt || Date.now());
+    order.closedAt = Number(order.closedAt || order.completedAt || Date.now());
+    order.closeReason = order.closeReason || "Dispute closed, order repaired";
+    order.repairedAt = Date.now();
+
+    await ensureProductOrderSettlement(state, order, store);
+    await saveSettingsState(state);
+    await appendAdminLog("order_repaired", "repair-endpoint", {
+      orderId: order.id,
+      login: order.login,
+      storeId: order.storeId,
+      amountUsd: order.amountUsd,
+      sellerAmountUsd: order.sellerAmountUsd,
+      platformCommissionUsd: order.platformCommissionUsd
+    });
+    notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });
+    res.json({
+      ok: true,
+      created: result.created,
+      order,
+      storeBalanceUsd: state.storeBalancesUsd?.[order.storeId] || 0,
+      ownerBalanceUsd: state.ownerBalanceUsd || 0,
+      transactions: (state.walletTransactions || []).filter((tx) => tx.orderId === order.id)
+    });
   } catch (error) {
     next(error);
   }
