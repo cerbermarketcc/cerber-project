@@ -10,6 +10,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
+const cerberBuildVersion = "telegram-menu-reply-keyboard-2026-07-17";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -5372,71 +5373,67 @@ function createBotCaptcha(chatState) {
 
 function botMainKeyboard() {
   return {
-    inline_keyboard: [
-      [
-        { text: "🔴 Профиль", callback_data: "menu:profile" },
-        { text: "🟡 Диспуты", callback_data: "menu:disputes" }
-      ],
-      [
-        { text: "🟩 Кошелёк", callback_data: "menu:wallet" },
-        { text: "🟢 Tor ссылки", callback_data: "menu:tor" }
-      ],
-      [
-        { text: "🟦 Браузер ссылки", callback_data: "menu:browser" },
-        { text: "🔵 Сообщения", callback_data: "menu:messages" }
-      ],
-      [
-        { text: "⚪ Мои заказы", callback_data: "menu:orders" }
-      ],
-      [
-        { text: "⬜ Удалить бота и очистить историю", callback_data: "menu:delete" }
-      ]
-    ]
+    keyboard: [
+      [{ text: "👤 Профиль" }, { text: "⚖️ Диспуты" }],
+      [{ text: "💼 Кошелёк" }],
+      [{ text: "🛍 Мои заказы" }, { text: "✉️ Сообщения" }],
+      [{ text: "🧅 Тор ссылки" }, { text: "🌐 Браузер ссылки" }],
+      [{ text: "🗑 Удалить бота и очистить историю" }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true
   };
 }
 
 function botMirrorOnlyKeyboard() {
   return {
-    inline_keyboard: [
-      [{ text: "Создать зеркало", callback_data: "mirror:help" }]
-    ]
+    keyboard: [[{ text: "Создать зеркало" }]],
+    resize_keyboard: true,
+    is_persistent: true
   };
+}
+
+function botMirrorCreatedKeyboard(mirror = {}) {
+  const rows = [];
+  const username = String(mirror.botUsername || "").replace(/^@/, "");
+  if (username) rows.push([{ text: "Открыть зеркало" }]);
+  rows.push([{ text: "Добавить ещё зеркало" }]);
+  return { keyboard: rows, resize_keyboard: true, is_persistent: true };
 }
 
 function botMirrorHelpText() {
   return [
     "<b>Создание зеркала CERBER</b>",
-    "1. Создайте нового бота в @BotFather.",
-    "2. Скопируйте API token.",
-    "3. Отправьте сюда команду:",
+    "1. Привяжите аккаунт сайта:",
+    "<code>/login ваш_логин ваш_пароль</code>",
+    "2. Создайте нового бота в @BotFather.",
+    "3. Скопируйте API token.",
+    "4. Отправьте сюда команду:",
     "<code>/mirror 123456:ABCDEF...</code>",
     "",
-    "После сохранения откройте созданного бота. В зеркале будет полное меню сайта."
+    "После сохранения откройте созданного бота. В зеркале будет полное меню сайта, а рассылки владельца будут приходить туда."
   ].join("\n");
 }
 
 function botBackKeyboard() {
-  return { inline_keyboard: [[{ text: "⬅️ В меню", callback_data: "menu:home" }]] };
+  return {
+    keyboard: [[{ text: "В меню" }]],
+    resize_keyboard: true,
+    is_persistent: true
+  };
 }
 
 function botWalletKeyboard() {
   return {
-    inline_keyboard: [
-      [{ text: "🟦 Litecoin LTC", callback_data: "wallet:deposit:ltc" }],
-      [
-        { text: "🟢 USDT TRC-20", callback_data: "wallet:deposit:usdt_trc20" },
-        { text: "🔵 USDT ERC-20", callback_data: "wallet:deposit:usdt_erc20" }
-      ],
-      [
-        { text: "🟣 USDT Solana", callback_data: "wallet:deposit:usdt_sol" },
-        { text: "🔴 TRX", callback_data: "wallet:deposit:trx" }
-      ],
-      [
-        { text: "🟪 Ethereum", callback_data: "wallet:deposit:eth" },
-        { text: "🟨 Solana", callback_data: "wallet:deposit:sol" }
-      ],
-      [{ text: "⬅️ В меню", callback_data: "menu:home" }]
-    ]
+    keyboard: [
+      [{ text: "Litecoin LTC" }],
+      [{ text: "USDT TRC-20" }, { text: "USDT ERC-20" }],
+      [{ text: "USDT Solana" }, { text: "TRX" }],
+      [{ text: "Ethereum" }, { text: "Solana" }],
+      [{ text: "В меню" }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true
   };
 }
 
@@ -5453,6 +5450,28 @@ function botCoinLabel(coinId) {
   return labels[coinId] || String(coinId || "").toUpperCase();
 }
 
+function botCoinIdFromMenuText(text = "") {
+  const normalized = String(text || "").trim().toLowerCase();
+  const map = {
+    "litecoin ltc": "ltc",
+    ltc: "ltc",
+    "usdt trc-20": "usdt_trc20",
+    "usdt erc-20": "usdt_erc20",
+    "usdt solana": "usdt_sol",
+    trx: "trx",
+    tron: "trx",
+    ethereum: "eth",
+    eth: "eth",
+    solana: "sol",
+    sol: "sol"
+  };
+  return map[normalized] || "";
+}
+
+function botMenuTextKey(text = "") {
+  return String(text || "").replace(/^[^\p{L}\p{N}]+/u, "").trim().toLowerCase();
+}
+
 function telegramTokenFromState(state) {
   return state?.__telegramToken || telegramBotToken;
 }
@@ -5463,6 +5482,10 @@ function mirrorWebhookId(token) {
 
 function mirrorWebhookUrl(token) {
   return `${publicBaseUrl}/api/telegram/mirror/${mirrorWebhookId(token)}`;
+}
+
+function mainTelegramWebhookUrl() {
+  return `${publicBaseUrl}/api/telegram/webhook`;
 }
 
 async function telegramApi(method, payload = {}, tokenOverride = "") {
@@ -5485,6 +5508,28 @@ async function telegramApi(method, payload = {}, tokenOverride = "") {
     throw error;
   }
   return body;
+}
+
+async function telegramEnsureWebhook() {
+  if (!telegramBotToken) return null;
+  await telegramApi("setMyCommands", {
+    commands: [
+      { command: "start", description: "Открыть меню CERBER Links" },
+      { command: "mirror", description: "Подключить зеркало от BotFather" },
+      { command: "addmirror", description: "Подключить зеркало от BotFather" }
+    ]
+  }).catch((error) => console.error("Telegram setMyCommands error", error));
+  const payload = {
+    url: mainTelegramWebhookUrl(),
+    allowed_updates: ["message", "callback_query"]
+  };
+  if (telegramWebhookSecret) payload.secret_token = telegramWebhookSecret;
+  await telegramApi("setWebhook", payload);
+  const [me, webhook] = await Promise.all([
+    telegramApi("getMe").catch((error) => ({ ok: false, error: String(error.message || error) })),
+    telegramApi("getWebhookInfo").catch((error) => ({ ok: false, error: String(error.message || error) }))
+  ]);
+  return { me, webhook };
 }
 
 async function telegramTokenApi(token, method, payload = {}) {
@@ -6004,9 +6049,18 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
   const token = text.replace(/^\/(?:mirror|addmirror)\s*/i, "").trim();
   const ownerUsername = message.from?.username || chat.username || "";
   const ownerName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" ").trim();
-  const ownerLoginKey = chat.loginKey || loginKey(ownerUsername || ownerName || String(chatId));
-  const ownerLogin = chat.login || ownerUsername || ownerName || String(chatId);
+  const ownerLoginKey = chat.loginKey || "";
+  const ownerLogin = chat.login || "";
   const ownerTelegramId = String(message.from?.id || chatId);
+  if (!ownerLoginKey) {
+    await botSendMessage(state, chatId, [
+      "Сначала привяжите аккаунт сайта, чтобы зеркало попало в админ-панель и получало рассылки.",
+      "",
+      "Формат:",
+      "<code>/login ваш_логин ваш_пароль</code>"
+    ].join("\n"), botMirrorOnlyKeyboard());
+    return true;
+  }
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
     await botSendMessage(state, chatId, "Отправьте токен зеркала так:\n<code>/mirror 123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
     return true;
@@ -6050,9 +6104,12 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     mirror.users[String(chatId)] = {
       chatId: String(chatId),
       telegramId: ownerTelegramId,
+      login: ownerLogin,
+      loginKey: ownerLoginKey,
       username: ownerUsername,
       firstName: message.from?.first_name || "",
       lastName: message.from?.last_name || "",
+      linkedAt: chat.linkedAt || null,
       firstSeenAt: mirror.users[String(chatId)]?.firstSeenAt || Date.now(),
       lastSeenAt: Date.now()
     };
@@ -6099,7 +6156,9 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       status: "active",
       storage: "app_settings.mirrorBots"
     });
-    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}\n\nОткройте его в Telegram: там будет полное меню CERBER.`, botMirrorOnlyKeyboard()).catch(() => {});
+    const mirrorUsername = String(mirror.botUsername || "").replace(/^@/, "");
+    const mirrorOpenText = mirrorUsername ? `\n\nОткрыть: https://t.me/${botHtml(mirrorUsername)}` : "";
+    await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}${mirrorOpenText}\n\nОткройте его в Telegram: там будет полное меню CERBER.`, botMirrorCreatedKeyboard(mirror)).catch(() => {});
   } catch (error) {
     console.error("[mirror-bot] create failed", {
       userId: ownerLoginKey || "",
@@ -6139,7 +6198,10 @@ async function handleTelegramMessage(state, message) {
   chat.username = message.from?.username || chat.username || "";
   chat.updatedAt = Date.now();
   if (text === "/start") {
-    if (chat.verified) await botShowMenu(state, chatId);
+    if (state.__mirrorId && chat.loginKey) {
+      chat.verified = true;
+      await botShowMenu(state, chatId);
+    } else if (chat.verified) await botShowMenu(state, chatId);
     else await botShowCaptcha(state, chatId);
     return;
   }
@@ -6155,7 +6217,53 @@ async function handleTelegramMessage(state, message) {
     await handleBotMirrorCommand(state, chatId, message, text);
     return;
   }
+  const coinFromMenu = botCoinIdFromMenuText(text);
+  if (coinFromMenu) {
+    chat.pendingDepositCoin = coinFromMenu;
+    await botSendMessage(state, chatId, `Введите сумму пополнения в USD для <b>${botHtml(botCoinLabel(coinFromMenu))}</b>.\nНапример: <code>25</code>`, botBackKeyboard());
+    return;
+  }
   if (await handleBotDepositAmount(state, chatId, text)) return;
+  const menuKey = botMenuTextKey(text);
+  if (menuKey === "в меню" || menuKey === "меню") {
+    await botShowMenu(state, chatId);
+    return;
+  }
+  if (menuKey === "удалить бота и очистить историю") {
+    await clearBotHistory(state, chatId);
+    return;
+  }
+  const user = await botProfileByChat(state, chatId);
+  if (user) {
+    if (menuKey === "профиль") {
+      await botSendMessage(state, chatId, await botMenuText(state, user, "profile"), botBackKeyboard());
+      return;
+    }
+    if (menuKey === "диспуты") {
+      await botSendMessage(state, chatId, await botMenuText(state, user, "disputes"), botBackKeyboard());
+      return;
+    }
+    if (menuKey === "кошелёк" || menuKey === "кошелек") {
+      await botSendMessage(state, chatId, await botMenuText(state, user, "wallet"), botWalletKeyboard());
+      return;
+    }
+    if (menuKey === "мои заказы") {
+      await botSendMessage(state, chatId, await botMenuText(state, user, "orders"), botBackKeyboard());
+      return;
+    }
+    if (menuKey === "сообщения") {
+      await botSendMessage(state, chatId, await botMessagesText(user), botBackKeyboard());
+      return;
+    }
+    if (menuKey === "tor ссылки" || menuKey === "тор ссылки") {
+      await botSendMessage(state, chatId, `<b>Tor ссылки</b>\n${torLinks.map((link) => `<code>${botHtml(link)}</code>`).join("\n")}`, botBackKeyboard());
+      return;
+    }
+    if (menuKey === "браузер ссылки") {
+      await botSendMessage(state, chatId, `<b>Браузер ссылки</b>\n${browserLinks.map((link) => `<code>${botHtml(link)}</code>`).join("\n")}`, botBackKeyboard());
+      return;
+    }
+  }
   await botShowMenu(state, chatId);
 }
 
@@ -6177,9 +6285,33 @@ async function handleTelegramMirrorOnlyMessage(state, message) {
   const chat = telegramChatState(state, chatId);
   chat.username = message.from?.username || chat.username || "";
   chat.updatedAt = Date.now();
+  const menuKey = botMenuTextKey(text);
   if (text === "/start") {
     chat.pendingMirrorToken = false;
     await botSendMessage(state, chatId, botMirrorHelpText(), botMirrorOnlyKeyboard());
+    return;
+  }
+  if (menuKey === "создать зеркало" || menuKey === "добавить ещё зеркало" || menuKey === "добавить еще зеркало") {
+    chat.pendingMirrorToken = true;
+    await botSendMessage(state, chatId, "Отправьте токен вашего Telegram-бота от BotFather.\n\nПример:\n<code>123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
+    return;
+  }
+  if (menuKey === "открыть зеркало") {
+    const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    const mirror = mirrors.find((item) => String(item.ownerChatId || item.chatId || "") === String(chatId) && item.botUsername);
+    if (mirror?.botUsername) {
+      await botSendMessage(state, chatId, `Откройте зеркало: https://t.me/${botHtml(String(mirror.botUsername).replace(/^@/, ""))}`, botMirrorCreatedKeyboard(mirror));
+    } else {
+      await botSendMessage(state, chatId, "Зеркало пока не найдено. Создайте его через токен от BotFather.", botMirrorOnlyKeyboard());
+    }
+    return;
+  }
+  if (text.startsWith("/login")) {
+    chat.verified = true;
+    await handleBotLogin(state, chatId, text);
+    if (chat.loginKey) {
+      await botSendMessage(state, chatId, "Теперь отправьте токен зеркала командой:\n<code>/mirror 123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
+    }
     return;
   }
   if (/^\/(?:mirror|addmirror)\b/i.test(text) || chat.pendingMirrorToken || /^\d+:[A-Za-z0-9_-]{20,}$/.test(text)) {
@@ -6198,11 +6330,44 @@ function findMirrorBotByWebhookId(state, webhookId) {
   }) || null;
 }
 
-app.get("/api/telegram/webhook", (_req, res) => {
+function syncMirrorUserFromTelegramChat(state, mirror, chatId, telegramUser = {}) {
+  if (!mirror || !chatId) return;
+  const userKey = String(chatId);
+  const chat = telegramChatState(state, userKey);
+  mirror.users = mirror.users && typeof mirror.users === "object" ? mirror.users : {};
+  const previous = mirror.users[userKey] || {};
+  const mirrorLogin = chat.login || previous.login || mirror.login || "";
+  const mirrorLoginKey = chat.loginKey || previous.loginKey || previous.login_key || mirror.loginKey || "";
+  if (mirrorLogin) chat.login = mirrorLogin;
+  if (mirrorLoginKey) chat.loginKey = mirrorLoginKey;
+  if ((mirrorLogin || mirrorLoginKey) && !chat.linkedAt) chat.linkedAt = previous.linkedAt || mirror.createdAt || Date.now();
+  chat.verified = true;
+  mirror.users[userKey] = {
+    ...previous,
+    chatId: userKey,
+    telegramId: String(telegramUser.id || previous.telegramId || userKey),
+    login: mirrorLogin,
+    loginKey: mirrorLoginKey,
+    username: telegramUser.username || previous.username || chat.username || "",
+    firstName: telegramUser.first_name || previous.firstName || "",
+    lastName: telegramUser.last_name || previous.lastName || "",
+    linkedAt: chat.linkedAt || previous.linkedAt || null,
+    firstSeenAt: previous.firstSeenAt || Date.now(),
+    lastSeenAt: Date.now()
+  };
+}
+
+app.get("/api/telegram/webhook", async (_req, res) => {
+  const webhookInfo = await telegramEnsureWebhook().catch((error) => ({
+    ok: false,
+    error: String(error.message || error)
+  }));
   res.json({
     ok: true,
+    version: cerberBuildVersion,
     configured: Boolean(telegramBotToken),
-    webhook: `${publicBaseUrl}/api/telegram/webhook`
+    webhook: mainTelegramWebhookUrl(),
+    telegram: webhookInfo
   });
 });
 
@@ -6263,17 +6428,7 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
     const incomingUser = req.body.message?.from || req.body.callback_query?.from || {};
     const incomingChatId = req.body.message?.chat?.id || req.body.callback_query?.message?.chat?.id || incomingUser.id;
     if (incomingChatId) {
-      const userKey = String(incomingChatId);
-      mirror.users[userKey] = {
-        ...(mirror.users[userKey] || {}),
-        chatId: userKey,
-        telegramId: String(incomingUser.id || incomingChatId),
-        username: incomingUser.username || mirror.users[userKey]?.username || "",
-        firstName: incomingUser.first_name || mirror.users[userKey]?.firstName || "",
-        lastName: incomingUser.last_name || mirror.users[userKey]?.lastName || "",
-        firstSeenAt: mirror.users[userKey]?.firstSeenAt || Date.now(),
-        lastSeenAt: Date.now()
-      };
+      syncMirrorUserFromTelegramChat(state, mirror, incomingChatId, incomingUser);
     }
     mirror.lastActivityAt = Date.now();
     mirror.updatedAt = Date.now();
@@ -6283,6 +6438,7 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
         await handleTelegramCallback(state, req.body.callback_query);
       }
       else if (req.body.message) await handleTelegramMessage(state, req.body.message);
+      if (incomingChatId) syncMirrorUserFromTelegramChat(state, mirror, incomingChatId, incomingUser);
     } catch (error) {
       const errorText = String(error.message || error).slice(0, 300);
       mirror.lastTelegramError = errorText;
@@ -7629,6 +7785,7 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
 });
 

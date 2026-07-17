@@ -7,11 +7,18 @@ create table if not exists profiles (
   created_at timestamptz not null default now()
 );
 
+alter table profiles add column if not exists language text not null default 'ru';
+
 create table if not exists sessions (
   token text primary key,
   login_key text not null references profiles(login_key) on delete cascade,
   created_at timestamptz not null default now()
 );
+
+alter table sessions add column if not exists ip text;
+alter table sessions add column if not exists user_agent text;
+create index if not exists sessions_login_key_idx on sessions(login_key);
+create index if not exists sessions_created_at_idx on sessions(created_at);
 
 create table if not exists stores (
   id text primary key,

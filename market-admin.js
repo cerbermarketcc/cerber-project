@@ -92,6 +92,14 @@ function disputeDisplayLabel(item = {}) {
   return `#${disputeDisplayNumber(item)}`;
 }
 
+function loginKey(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
+function sameLogin(a, b) {
+  return loginKey(a) === loginKey(b);
+}
+
 function disputeSearchText(item = {}) {
   const label = disputeDisplayLabel(item);
   return [label, label.replace("#", ""), item.id, item.login, item.fromLogin, item.storeName, item.storeId, item.toLogin, item.status].join(" ").toLowerCase();
@@ -617,76 +625,150 @@ function renderDeals() {
 function renderDisputes() {
   const allRows = Array.isArray(data.disputes) ? data.disputes : [];
   const rows = query ? allRows.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : allRows;
-  return `<section class="split"><article class="table-card"><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Срок</th><th></th></tr></thead><tbody>
-    ${rows.map((o) => `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status off">dispute</span></td><td>${fmtDate(o.disputeUntil || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Открыть чат</button></td></tr>`).join("")}
+  return `<section class="split"><article class="table-card"><div class="admin-table-tools"><button class="ghost" data-create-test-dispute="gena">Создать тестовый диспут gena</button></div><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Открыт</th><th></th></tr></thead><tbody>
+    ${rows.map((o) => {
+      const closed = o.disputeOpen === false || o.disputeChatClosed;
+      return `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td><button class="link-button" data-dispute="${esc(o.id)}">${esc(o.login || o.fromLogin || "-")}</button></td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status ${closed ? "" : "off"}">${closed ? "closed" : "open"}</span></td><td>${fmtDate(o.disputeOpenedAt || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Профиль</button> <button class="primary" data-open-dispute-chat="${esc(o.id)}">Чат</button></td></tr>`;
+    }).join("")}
     ${!rows.length ? `<tr><td colspan="8">${query && allRows.length ? `Поиск скрывает ${allRows.length} диспут(ов). Очистите поиск сверху.` : "Диспутов пока нет."}</td></tr>` : ""}
-  </tbody></table><p class="muted">Показано: ${rows.length} из ${allRows.length}</p></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Открой диспут, чтобы увидеть заказ, клиента, магазин, сумму и переписку.</p></article></section>`;
+  </tbody></table><p class="muted">Показано: ${rows.length} из ${allRows.length}</p></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Нажми на профиль клиента или кнопку “Профиль”, чтобы увидеть всю информацию и действия.</p></article></section>`;
 }
 
-function disputeDetailTable(payload) {
-  const d = payload.dispute;
-  const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
+function adminDisputeMessageHtml(message) {
+  const role = String(message.fromRole || "").toLowerCase();
+  const from = message.fromLogin || (role === "owner" ? "owner" : "system");
+  const own = role === "owner" || sameLogin(from, "cerber-owner") || sameLogin(from, data.admin?.login || "");
+  const attachments = supportAttachmentsHtml(message.attachments || []);
+  return `
+    <article class="admin-dispute-message ${own ? "own" : ""}">
+      <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
+      <div class="admin-dispute-bubble">
+        <div class="admin-dispute-meta">
+          <strong>${esc(from)}</strong>
+          <span>${fmtDate(message.createdAt)}</span>
+        </div>
+        ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
+        ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
+        ${attachments}
+      </div>
+    </article>
+  `;
+}
+
+function disputeChatHtml(payload) {
+  const d = payload.dispute || {};
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
-  return `<h2>Диспут ${esc(label)}</h2>
-    <p class="muted">Заказ: <strong>${esc(d.id)}</strong></p>
-    <p><strong>Клиент:</strong> ${esc(payload.clientLogin || "-")}</p>
-    <p><strong>Магазин:</strong> ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
-    <p><strong>Сумма:</strong> ${fmtMoney(payload.amount)}</p>
-    <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
-    <button class="primary" data-join-dispute="${esc(d.id)}">Войти и открыть чат</button>
-    ${d.disputeOpen !== false ? `<button class="ghost" data-close-dispute="${esc(d.id)}">Закрыть спор</button>` : ""}
-    ${d.disputeOpen !== false && !d.disputeChatClosed ? `<form class="form compact-form" data-admin-dispute-reply="${esc(d.id)}">
-      <label class="field">Ответ клиенту<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту"></textarea></label>
+  const messageHtml = messages.length ? messages.map(adminDisputeMessageHtml).join("") : `<p class="muted">Сообщений в диспуте пока нет.</p>`;
+  return `
+    <div class="admin-dispute-chat">${messageHtml}</div>
+    ${payload.canWrite !== false && d.disputeOpen !== false && !d.disputeChatClosed ? `<form class="form compact-form admin-dispute-reply" data-admin-dispute-reply="${esc(d.id || "")}">
+      <label class="field">Ответ в чат<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту/магазину"></textarea></label>
       <label class="field">Фото/видео<input name="attachment" type="file" accept="image/*,video/*,.webp,.gif"></label>
       <button class="primary" type="submit">Отправить в чат</button>
-    </form>` : `<p class="muted">Диспут закрыт. Историю можно смотреть, писать нельзя.</p>`}
-    <h3>Чат диспута</h3>
-    <div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], messages.map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>`;
+    </form>` : `<p class="muted">Диспут закрыт полностью. Историю можно смотреть, писать больше нельзя.</p>`}
+  `;
+}
+
+function syncDisputeOverviewRow(payload) {
+  if (!data || !Array.isArray(data.disputes) || !payload?.dispute?.id) return;
+  const next = {
+    ...payload.dispute,
+    storeName: payload.store?.name || payload.dispute.storeName || "",
+    storeLogin: payload.storeLogin || payload.dispute.toLogin || "",
+    disputeNumber: payload.disputeNumber || payload.dispute.disputeNumber
+  };
+  const sameDispute = (item) => item?.id === next.id || item?.exchangeRequestId === next.id || next.exchangeRequestId === item?.id;
+  const index = data.disputes.findIndex(sameDispute);
+  if (index >= 0) data.disputes[index] = { ...data.disputes[index], ...next };
+  else data.disputes.unshift(next);
+}
+
+function renderDisputePayload(payload, { openChat = false, closeChat = false } = {}) {
+  if (!payload?.dispute) return;
+  selectedDisputeId = payload.dispute.id || selectedDisputeId;
+  persistAdminUiState();
+  syncDisputeOverviewRow(payload);
+  const box = root.querySelector("[data-dispute-detail]");
+  if (box) {
+    box.dataset.restoredDispute = selectedDisputeId;
+    box.innerHTML = disputeDetail(payload);
+  }
+  if (closeChat) document.querySelector("[data-dispute-modal]")?.remove();
+  else if (openChat || document.querySelector("[data-dispute-modal]")) showDisputeChatModal(payload);
+  bindActions();
+  bindAdminButtonFeedback(root);
 }
 
 function disputeDetail(payload) {
   const d = payload.dispute || {};
   const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
-  const messages = Array.isArray(payload.messages) ? payload.messages : [];
-  const messageHtml = messages.length ? messages.map((message) => {
-    const role = String(message.fromRole || "").toLowerCase();
-    const from = message.fromLogin || (role === "owner" ? "owner" : "system");
-    const own = role === "owner" || sameLogin(from, "cerber-owner") || sameLogin(from, data.admin?.login || "");
-    const attachments = supportAttachmentsHtml(message.attachments || []);
-    return `
-      <article class="admin-dispute-message ${own ? "own" : ""}">
-        <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
-        <div class="admin-dispute-bubble">
-          <div class="admin-dispute-meta">
-            <strong>${esc(from)}</strong>
-            <span>${esc(role || "message")} · ${fmtDate(message.createdAt)}</span>
-          </div>
-          ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
-          ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
-          ${attachments}
-        </div>
-      </article>
-    `;
-  }).join("") : `<p class="muted">Сообщений в диспуте пока нет.</p>`;
+  const closed = payload.canWrite === false || d.disputeOpen === false || d.disputeChatClosed;
   return `<h2>Диспут ${esc(label)}</h2>
     <div class="admin-dispute-summary">
       <p><strong>Заказ:</strong> ${esc(d.id || "-")}</p>
       <p><strong>Клиент:</strong> ${esc(payload.clientLogin || "-")}</p>
+      <p><strong>Дата рега клиента:</strong> ${fmtDate(payload.client?.created_at)}</p>
       <p><strong>Магазин:</strong> ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
       <p><strong>Сумма:</strong> ${fmtMoney(payload.amount || 0)}</p>
-      <p><strong>Статус:</strong> ${esc(d.status || "dispute")}</p>
+      <p><strong>Открыт:</strong> ${fmtDate(payload.openedAt || d.disputeOpenedAt || d.createdAt)}</p>
+      <p><strong>Закрыт:</strong> ${fmtDate(payload.closedAt || d.disputeClosedAt || d.closedAt)}</p>
+      <p><strong>Статус:</strong> ${closed ? "closed" : esc(d.status || "dispute")}</p>
+      <p><strong>Причина закрытия:</strong> ${esc(d.closeReason || d.closedReason || "-")}</p>
     </div>
     <div class="admin-dispute-actions">
-      <button class="primary" data-join-dispute="${esc(d.id || "")}">Войти и открыть чат</button>
-      ${d.disputeOpen !== false ? `<button class="ghost" data-close-dispute="${esc(d.id || "")}">Закрыть спор</button>` : ""}
+      <button class="primary" data-open-dispute-chat="${esc(d.id || "")}">Открыть чат</button>
+      ${!closed ? `<button class="ghost" data-join-dispute="${esc(d.id || "")}">Войти в диспут</button>` : ""}
+      ${!closed ? `<button class="ghost danger" data-close-dispute="${esc(d.id || "")}">Закрыть диспут полностью</button>` : ""}
     </div>
-    <h3>Чат диспута</h3>
-    <div class="admin-dispute-chat">${messageHtml}</div>
-    ${d.disputeOpen !== false && !d.disputeChatClosed ? `<form class="form compact-form admin-dispute-reply" data-admin-dispute-reply="${esc(d.id || "")}">
-      <label class="field">Ответ в чат<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту/магазину"></textarea></label>
-      <label class="field">Фото/видео<input name="attachment" type="file" accept="image/*,video/*,.webp,.gif"></label>
-      <button class="primary" type="submit">Отправить в чат</button>
-    </form>` : `<p class="muted">Диспут закрыт. Историю можно смотреть, писать нельзя.</p>`}`;
+    <h3>Последние сообщения</h3>
+    <div class="admin-dispute-chat">
+      ${(payload.messages || []).slice(-4).length ? (payload.messages || []).slice(-4).map(adminDisputeMessageHtml).join("") : `<p class="muted">Сообщений в диспуте пока нет.</p>`}
+    </div>`;
+}
+
+function showDisputeChatModal(payload) {
+  document.querySelector("[data-dispute-modal]")?.remove();
+  const d = payload.dispute || {};
+  const label = payload.disputeNumber ? `#${payload.disputeNumber}` : disputeDisplayLabel(d);
+  const modal = document.createElement("div");
+  modal.className = "admin-modal open";
+  modal.dataset.disputeModal = "true";
+  modal.innerHTML = `
+    <div class="admin-modal-backdrop" data-close-dispute-modal></div>
+    <section class="admin-modal-panel dispute-chat-modal">
+      <header class="admin-modal-head">
+        <div>
+          <h2>Чат диспута ${esc(label)}</h2>
+          <p class="muted">Клиент: ${esc(payload.clientLogin || "-")} · Магазин: ${esc(payload.store?.name || payload.storeLogin || "-")}</p>
+        </div>
+        <button class="ghost" data-close-dispute-modal>Закрыть</button>
+      </header>
+      ${disputeChatHtml(payload)}
+    </section>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelectorAll("[data-close-dispute-modal]").forEach((button) => button.addEventListener("click", () => modal.remove()));
+  modal.querySelector("[data-admin-dispute-reply]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const attachments = await filesToSupportAttachments(form.querySelector('input[type="file"]'));
+    try {
+      const nextPayload = await api(`/api/admin/disputes/${encodeURIComponent(form.dataset.adminDisputeReply)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ body: formData.get("body"), attachments })
+      });
+      renderDisputePayload(nextPayload, { openChat: true });
+      toast("Сообщение отправлено");
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  requestAnimationFrame(() => {
+    const chat = modal.querySelector(".admin-dispute-chat");
+    if (chat) chat.scrollTop = chat.scrollHeight;
+    modal.querySelector("textarea")?.focus();
+  });
 }
 
 function renderBroadcasts() {
@@ -704,7 +786,7 @@ function renderBroadcasts() {
     <label class="field">Конкретные пользователи<input name="specificLogins" placeholder="login1, login2, login3"></label>
     <button class="primary">Отправить рассылку</button>
   </form></article><article class="table-card"><table><thead><tr><th>Название</th><th>Канал</th><th>Отправлено</th><th>Ошибки</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
-    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0}</span></td><td>${b.stats?.sent || 0}</td><td>${b.stats?.telegramFailed || b.stats?.notDelivered || 0}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
+    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0} / targets ${b.stats?.telegramTargets || 0}</span></td><td>${b.stats?.sent || 0}</td><td>${b.stats?.telegramFailed || b.stats?.notDelivered || 0}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
   </tbody></table></article></section>`;
 }
 
@@ -923,10 +1005,12 @@ function renderMirrorBots() {
     return `${value.slice(0, 8)}...${value.slice(-6)}`;
   };
   const usersTable = selected?.users?.length
-    ? smallTable(["TG ID", "Username", "Имя", "Первый вход", "Последний вход"], selected.users.map((user) => [
+    ? smallTable(["Логин сайта", "TG ID", "Username", "Имя", "Дата рега", "Первый вход", "Последний вход"], selected.users.map((user) => [
+      user.login || user.loginKey || "-",
       user.telegramId || "-",
       user.username ? `@${user.username}` : "-",
       [user.firstName, user.lastName].filter(Boolean).join(" ") || "-",
+      fmtDate(user.registeredAt),
       fmtDate(user.firstSeenAt),
       fmtDate(user.lastSeenAt)
     ]))
@@ -1118,8 +1202,32 @@ function bindActions() {
       selectedUserLogin = "";
       persistAdminUiState();
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.dispute)}`);
-      root.querySelector("[data-dispute-detail]").innerHTML = disputeDetail(payload);
-      bindActions();
+      renderDisputePayload(payload);
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-create-test-dispute]").forEach((button) => button.onclick = async () => {
+    const login = button.dataset.createTestDispute || "gena";
+    try {
+      const result = await api(`/api/admin/test-disputes/${encodeURIComponent(login)}`, { method: "POST" });
+      data = result.overview || data;
+      selectedDisputeId = result.payload?.dispute?.id || "test-dispute-gena";
+      persistAdminUiState();
+      renderShell();
+      if (result.payload) renderDisputePayload(result.payload, { openChat: true });
+      toast(result.createdProfile ? `Тестовый диспут создан. Логин gena, пароль ${result.testPassword}` : "Тестовый диспут gena открыт");
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-open-dispute-chat]").forEach((button) => button.onclick = async (event) => {
+    event.stopPropagation();
+    try {
+      selectedDisputeId = button.dataset.openDisputeChat;
+      persistAdminUiState();
+      const payload = await api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}`);
+      renderDisputePayload(payload, { openChat: true });
     } catch (error) {
       toast(error.message, true);
     }
@@ -1129,11 +1237,8 @@ function bindActions() {
       selectedDisputeId = button.dataset.joinDispute;
       persistAdminUiState();
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}/join`, { method: "POST" });
-      const box = root.querySelector("[data-dispute-detail]");
-      if (box) box.innerHTML = disputeDetail(payload);
-      bindActions();
+      renderDisputePayload(payload, { openChat: true });
       toast("Чат диспута открыт");
-      requestAnimationFrame(() => box?.querySelector("textarea")?.focus());
     } catch (error) {
       toast(error.message, true);
     }
@@ -1143,25 +1248,28 @@ function bindActions() {
     try {
       const disputeId = form.dataset.adminDisputeReply;
       const formData = new FormData(form);
-      const attachments = await filesToSupportAttachments(formData.getAll("attachment"));
+      const attachments = await filesToSupportAttachments(form.querySelector('input[type="file"]'));
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(disputeId)}/reply`, {
         method: "POST",
         body: JSON.stringify({ body: formData.get("body"), attachments })
       });
-      const box = root.querySelector("[data-dispute-detail]");
-      if (box) box.innerHTML = disputeDetail(payload);
-      bindActions();
+      renderDisputePayload(payload, { openChat: Boolean(document.querySelector("[data-dispute-modal]")) });
       toast("Сообщение отправлено клиенту");
-      requestAnimationFrame(() => box?.querySelector("textarea")?.focus());
+      requestAnimationFrame(() => root.querySelector("[data-dispute-detail] textarea")?.focus());
     } catch (error) {
       toast(error.message, true);
     }
   });
   root.querySelectorAll("[data-close-dispute]").forEach((button) => button.onclick = async () => {
+    const reason = prompt("Причина закрытия диспута", "Диспут закрыт владельцем сайта");
+    if (reason === null) return;
     try {
-      await api(`/api/orders/${encodeURIComponent(button.dataset.closeDispute)}/dispute/close`, { method: "POST" });
-      toast("Спор закрыт");
-      await refreshData(true);
+      const payload = await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.closeDispute)}/close`, {
+        method: "POST",
+        body: JSON.stringify({ reason })
+      });
+      renderDisputePayload(payload, { closeChat: true });
+      toast("Диспут закрыт полностью");
     } catch (error) {
       toast(error.message, true);
     }
