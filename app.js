@@ -26,6 +26,8 @@ let realtimeReconnectTimer = null;
 let realtimeRefreshTimer = null;
 let realtimePendingRender = false;
 let lastUserInteractionAt = 0;
+let shopPanelStateRefreshPromise = null;
+let shopPanelLastStateRefreshAt = 0;
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -1597,6 +1599,27 @@ async function refreshRemoteState() {
   if (!API_ENABLED) return;
   const payload = await apiFetch("/api/state", { timeoutMs: 15000 });
   applyRemoteState(payload);
+}
+
+async function refreshShopPanelState(force = false) {
+  if (!API_ENABLED) return false;
+  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  if (!token) return false;
+  const now = Date.now();
+  if (!force && now - shopPanelLastStateRefreshAt < 6000) return false;
+  if (shopPanelStateRefreshPromise) return shopPanelStateRefreshPromise;
+  shopPanelStateRefreshPromise = apiFetch("/api/store-admin/state", {
+    timeoutMs: 15000,
+    headers: { Authorization: `Bearer ${token}` }
+  }).then((payload) => {
+    applyRemoteState(payload);
+    if (payload.store) restoreShopPanelStore(payload.store);
+    shopPanelLastStateRefreshAt = Date.now();
+    return true;
+  }).finally(() => {
+    shopPanelStateRefreshPromise = null;
+  });
+  return shopPanelStateRefreshPromise;
 }
 
 function rememberShopPanelStore(store) {
@@ -7066,16 +7089,17 @@ function orderHasClientOpenDispute(order) {
   return !["completed", "closed", "canceled", "cancelled"].includes(String(order?.status || "").toLowerCase());
 }
 
-function storeDisputes(storeId) {
-  return (db.orders || []).filter((order) => (
+function storeDisputes(storeId, store = null) {
+  const id = String(storeId || "");
+  return allStoreOrders(id, store).filter((order) => (
     order.type === "product" &&
-    order.storeId === storeId &&
+    String(order.storeId || "") === id &&
     orderHasClientDisputeHistory(order)
   ));
 }
 
 function storeRisk(store) {
-  const orders = (db.orders || []).filter((order) => order.type === "product" && order.storeId === store.id);
+  const orders = allStoreOrders(store.id, store).filter((order) => order.type === "product" && String(order.storeId || "") === String(store.id || ""));
   const total = orders.length || 1;
   const disputes = orders.filter(orderHasClientDisputeHistory).length;
   const canceled = orders.filter((order) => order.status === "canceled").length;
@@ -8216,7 +8240,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           ${sellerDashStat("Общий доход", `${salesUsd.toFixed(2)} $`, "Баланс магазина")}
           ${sellerDashStat("Клиентов", clients.length, "Всего покупателей")}
           ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
-          ${sellerDashStat("Диспуты", storeDisputes(store.id).length, "Открытые обращения")}
+          ${sellerDashStat("Диспуты", storeDisputes(store.id, store).length, "Открытые обращения")}
         </section>
 
         <section class="seller-dashboard-grid">
@@ -8677,7 +8701,7 @@ function shopProductsTab(store, products) {
 }
 
 function shopDisputesTab(store) {
-  const disputes = storeDisputes(store.id);
+  const disputes = storeDisputes(store.id, store);
   return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина. Войдите в диспут, чтобы клиент увидел магазин в чате.</p></div></section>
   <section class="seller-dashboard-card seller-wide-card">
     <label class="field seller-dispute-search">Найти диспут<input data-shop-dispute-search placeholder="#535, 535, клиент или ID заказа"></label>
@@ -8887,6 +8911,13 @@ function renderShopPanel(activeTab = "dashboard") {
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
   const store = shopPanelStore();
   if (!store || !token || sessionId !== storeId) return renderShopPanelLogin();
+  refreshShopPanelState().then((updated) => {
+    if (!updated) return;
+    const currentStoreId = shopPanelHashId() || shopPanelSession();
+    if (currentStoreId === storeId) renderShopPanel(activeTab);
+  }).catch((error) => {
+    console.error("[shop-admin] state refresh failed", error);
+  });
   if (!canAccessShopTab(activeTab)) {
     const fallbackTab = firstAllowedShopTab();
     if (fallbackTab === activeTab) return renderShopPanelLogin("Для этого сотрудника не выбраны разделы доступа");

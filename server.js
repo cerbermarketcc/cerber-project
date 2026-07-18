@@ -1339,6 +1339,26 @@ app.post("/api/store-admin/login", async (req, res, next) => {
   }
 });
 
+app.get("/api/store-admin/state", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token || !token.storeId) {
+      return res.status(401).json({ error: "Нет доступа к этой админке" });
+    }
+    const store = await loadStoreWithFallback(token.storeId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    if (token.role === "staff") {
+      const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(token.staffLogin));
+      if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
+      token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
+    }
+    res.json({ store, ...(await stateForStoreAdmin(token.storeId, token)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.put("/api/store-admin/store", async (req, res, next) => {
   try {
     requireDb();
