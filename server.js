@@ -175,7 +175,6 @@ function markAdminLoginAttempt(req, login, ok) {
 }
 
 async function ensureAdminSecurity() {
-  await withTimeout(ensureSeed(), "admin seed", 8000);
   const { data: settings } = await withTimeout(
     supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
     "admin security settings query",
@@ -186,7 +185,11 @@ async function ensureAdminSecurity() {
   if (!state.adminSecurity.passwordHash) {
     state.adminSecurity.passwordHash = await bcrypt.hash(process.env.MARKET_ADMIN_PASSWORD || "admin1212", 12);
     state.adminSecurity.login = "admin";
-    await withTimeout(saveSettingsState(state), "admin security save", 8000);
+    await withTimeout(
+      supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" }),
+      "admin security save",
+      8000
+    );
   }
   return state;
 }
@@ -3662,13 +3665,15 @@ async function upsertPrivateMessage(message) {
 }
 
 async function adminLoadMarketplace() {
-  await ensureSeed();
+  await withTimeout(ensureSeed(), "admin marketplace seed", 5000).catch((error) => {
+    console.error("[admin] seed skipped", { message: error.message });
+  });
   const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
-    supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }),
-    supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }),
-    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-    supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }),
-    supabase.from("sessions").select("login_key,created_at")
+    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 10000),
+    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 10000),
+    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000),
+    withTimeout(supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }), "admin profiles query", 10000),
+    withTimeout(supabase.from("sessions").select("login_key,created_at"), "admin sessions query", 10000)
   ]);
   const state = settings?.data || {};
   const mergedStores = mergeStoreSources((stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), state.ownerStores || []);
