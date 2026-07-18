@@ -392,7 +392,28 @@ function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") 
   return image;
 }
 
-function publicStoreForState(store = {}) {
+function publicStaffMemberForState(member = {}) {
+  const { password, passwordHash, adminPassword, ...item } = member || {};
+  item.hasPassword = Boolean(password || passwordHash || adminPassword);
+  return item;
+}
+
+function stripStoreSecretsForState(item = {}, options = {}) {
+  delete item.adminPassword;
+  delete item.adminPasswordHash;
+  delete item.password;
+  delete item.passwordHash;
+  if (item.panel && typeof item.panel === "object") {
+    item.panel = { ...item.panel };
+    delete item.panel.password;
+  }
+  item.staff = options.includeStaff
+    ? (Array.isArray(item.staff) ? item.staff.map(publicStaffMemberForState) : [])
+    : [];
+  return item;
+}
+
+function publicStoreForState(store = {}, options = {}) {
   const item = { ...store };
   item.image = publicImageForState(item.image || item.avatar, "assets/cerber-emblem.png");
   item.avatar = item.image;
@@ -402,7 +423,7 @@ function publicStoreForState(store = {}) {
     ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 12)
     : [];
   item.products = Array.isArray(item.products) ? item.products.map((product) => publicProductForState(product, item)) : [];
-  return item;
+  return stripStoreSecretsForState(item, options);
 }
 
 function sellerImagePatch(existingValue = "", inputValue = "") {
@@ -1075,7 +1096,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
     user: null,
     state: {
       currentUser: "",
-      stores: store ? [publicStoreForState(store)] : [],
+      stores: store ? [publicStoreForState(store, { includeStaff: true })] : [],
       orders: [],
       messages: [],
       walletWithdrawals: [],
@@ -1304,16 +1325,24 @@ function sellerStorePatch(existing = {}, input = {}) {
   const image = sellerImagePatch(existing.image || existing.avatar, input.image || input.avatar);
   const cover = sellerImagePatch(existing.cover || existing.banner, input.cover || input.banner) || image;
   const existingProducts = Array.isArray(existing.products) ? existing.products : [];
+  const existingStaff = Array.isArray(existing.staff) ? existing.staff : [];
   const staff = Array.isArray(input.staff)
-    ? input.staff.map((member) => ({
-      login: String(member?.login || "").trim(),
-      password: String(member?.password || "").trim(),
-      name: String(member?.name || "").trim(),
-      permissions: Array.isArray(member?.permissions) ? member.permissions.map(String).filter(Boolean) : [],
-      createdAt: Number(member?.createdAt || Date.now()),
-      updatedAt: Number(member?.updatedAt || Date.now())
-    })).filter((member) => member.login && member.password)
-    : (Array.isArray(existing.staff) ? existing.staff : []);
+    ? input.staff.map((member) => {
+      const login = String(member?.login || "").trim();
+      const previous = existingStaff.find((item) => sameLogin(item?.login, login)) || {};
+      const password = String(member?.password || "").trim();
+      const passwordHash = String(member?.passwordHash || previous.passwordHash || "").trim();
+      return {
+        login,
+        password: password || String(previous.password || "").trim(),
+        passwordHash,
+        name: String(member?.name ?? previous.name ?? "").trim(),
+        permissions: Array.isArray(member?.permissions) ? member.permissions.map(String).filter(Boolean) : (Array.isArray(previous.permissions) ? previous.permissions : []),
+        createdAt: Number(member?.createdAt || previous.createdAt || Date.now()),
+        updatedAt: Number(member?.updatedAt || Date.now())
+      };
+    }).filter((member) => member.login && (member.password || member.passwordHash))
+    : existingStaff;
   return {
     ...existing,
     name: String(input.name ?? existing.name ?? "").trim(),
@@ -1399,7 +1428,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       appendAdminLog("store_admin_login", store.ownerLogin || store.id, { storeId: store.id, role: "owner", ...requestSource(req) }).catch((error) => {
         console.error("[store-admin] owner login log failed", { storeId: store.id, message: error.message });
       });
-      return res.json({ token: signSellerAdminToken(store.id, ownerToken), store, staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
+      return res.json({ token: signSellerAdminToken(store.id, ownerToken), store: publicStoreForState(store, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || password !== String(staff.password || "")) {
@@ -1411,7 +1440,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     });
     res.json({
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
-      store,
+      store: publicStoreForState(store, { includeStaff: true }),
       staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
       ...(await stateForStoreAdmin(store.id, { role: "staff", staffLogin: staff.login, permissions }))
     });
