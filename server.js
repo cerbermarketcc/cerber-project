@@ -2509,6 +2509,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       title: "Новое сообщение в диспуте",
       body: `Владелец сайта ответил по диспуту #${publicNumber}.`
     });
+    notifyRealtime("dispute_replied", { orderId: id, storeId: store?.id || dispute.storeId || "", threadId });
     await saveSettingsState(data.state);
     await appendAdminLog("admin_replied_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
     const nextData = await adminLoadMarketplace();
@@ -3700,10 +3701,12 @@ async function adminLoadMarketplace() {
   ]);
   const state = settings?.data || {};
   const mergedStores = mergeStoreSources((stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), state.ownerStores || []);
+  const messageItems = (messages || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 }));
+  recoverMissingProductOrdersFromDisputeMessages(state, mergedStores, messageItems);
   return {
     state,
     stores: mergedStores,
-    messages: (messages || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })),
+    messages: messageItems,
     profiles: profiles || [],
     sessions: sessions || []
   };
@@ -4218,10 +4221,11 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
 function recoverMissingProductOrdersFromDisputeMessages(state = {}, stores = [], messages = []) {
   state.orders = Array.isArray(state.orders) ? state.orders : [];
   const existingIds = new Set(state.orders.map((order) => String(order?.id || "")).filter(Boolean));
+  const recoverableOrderId = (id) => id.startsWith("order-") || id.startsWith("test-dispute-");
   const orderIds = [...new Set((Array.isArray(messages) ? messages : [])
     .filter(messageLooksLikeDispute)
     .map((message) => String(message.orderId || "").trim())
-    .filter((id) => id && id.startsWith("order-") && !existingIds.has(id)))];
+    .filter((id) => id && recoverableOrderId(id) && !existingIds.has(id)))];
 
   const recovered = [];
   for (const orderId of orderIds) {
@@ -6811,7 +6815,6 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     order.disputeChatClosed = false;
     order.disputeThreadId = threadId;
     order.disputeOpenedAt = order.disputeOpenedAt || now;
-    await saveSettingsState({ ...state, orders });
     await upsertPrivateMessage({
       id: `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
@@ -6843,8 +6846,10 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
       title: "Новое сообщение в диспуте",
       body: `Клиент ${user.login} написал по диспуту #${publicNumber}, магазин ${store?.name || order.storeName || order.storeId}.`
     });
-    await saveSettingsState(state);
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
+    await withTimeout(saveSettingsState(state), "client dispute reply state save", 8000).catch((error) => {
+      console.error("[dispute] client reply state save skipped", { orderId: order.id, message: error.message });
+    });
     res.json({ order, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -6936,8 +6941,18 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       title: "Новое сообщение в диспуте",
       body: `Магазин ответил по диспуту заказа ${order.product || order.id}.`
     });
-    await saveSettingsState(state);
+    await notifySiteUser(state, "admin", {
+      id: `notice-store-dispute-reply-owner-${order.id}-${now}`,
+      eventType: "dispute_reply",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Новое сообщение в диспуте",
+      body: `Магазин ${store?.name || order.storeName || order.storeId} ответил по диспуту #${disputeNumber(order)}.`
+    });
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
+    await withTimeout(saveSettingsState(state), "store dispute reply state save", 8000).catch((error) => {
+      console.error("[dispute] store reply state save skipped", { orderId: order.id, message: error.message });
+    });
     res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
