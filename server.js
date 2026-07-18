@@ -1853,7 +1853,7 @@ app.put("/api/state", async (req, res, next) => {
       if (index >= 0) items[index] = { ...items[index], ...message };
       else items.push(message);
       return items;
-    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-1500);
+    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
     const mergedGroupMembers = [
       ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
       ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
@@ -2063,8 +2063,7 @@ app.post("/api/group/messages", async (req, res, next) => {
     state.groupMessages.push(message);
     state.groupMessages = state.groupMessages
       .map((item) => ({ ...item, room: groupRoomKey(item.room) }))
-      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
-      .slice(-1500);
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
     await saveSettingsState(state);
     notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
     res.json({ message, ...(await stateFor(user)) });

@@ -833,6 +833,124 @@ const storedDefaultTranslations = {
   }
 };
 
+Object.assign(uiPhraseTranslations.md, {
+  "Главная": "Acasa",
+  "Магазины": "Magazine",
+  "Заказы": "Comenzi",
+  "Кошелёк": "Portofel",
+  "Кошелек": "Portofel",
+  "Каталог": "Catalog",
+  "Поддержка": "Suport",
+  "Правила": "Reguli",
+  "Фильтры": "Filtre",
+  "Сообщения": "Mesaje",
+  "Диспуты": "Dispute",
+  "Заявки на обмен": "Cereri de schimb",
+  "Обменники": "Schimbatori",
+  "Отзывы": "Recenzii",
+  "Рейтинг": "Rating",
+  "Нет отзывов": "Nu exista recenzii",
+  "Отзывов пока нет.": "Nu exista recenzii.",
+  "Отправить сообщение обменнику": "Trimite mesaj schimbatorului",
+  "Связь с обменником": "Contact cu schimbatorul",
+  "Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.": "Scrieti intrebarea. Dialogul se va deschide in mesajele private cu utilizatorul legat de acest schimbator.",
+  "Тема": "Subiect",
+  "Сообщение": "Mesaj",
+  "Отправить сообщение": "Trimite mesaj",
+  "Вопрос по обмену": "Intrebare despre schimb",
+  "Личные сообщения": "Mesaje private",
+  "Связь": "Contact",
+  "Логин": "Login",
+  "Нет сообщений": "Nu exista mesaje",
+  "Сообщений пока нет": "Nu exista mesaje",
+  "Ничего не найдено": "Nimic gasit",
+  "Обменники пока не добавлены": "Schimbatorii nu au fost adaugati inca",
+  "Новый магазин": "Magazin nou",
+  "Светлая тема": "Tema luminoasa",
+  "Темная тема": "Tema intunecata",
+  "Сменить язык:": "Schimba limba:",
+  "Вступить": "Intra",
+  "Вступить в": "Intra in",
+  "участников": "participanti",
+  "онлайн": "online",
+  "Общий чат": "Chat general",
+  "Русский чат": "Chat rus",
+  "Moldova Chat": "Chat Moldova",
+  "English Chat": "Chat englez",
+  "Фото или видео": "Foto sau video",
+  "Сохранить": "Salveaza",
+  "Закрыть": "Inchide",
+  "Открыть": "Deschide",
+  "Пополнить": "Alimenteaza",
+  "Вывести": "Retrage",
+  "Купить": "Cumpara",
+  "Цена": "Pret",
+  "Товар": "Produs",
+  "Товары": "Produse",
+  "Позиции": "Pozitii",
+  "Доступные позиции": "Pozitii disponibile",
+  "Описание": "Descriere"
+});
+
+Object.assign(uiPhraseTranslations.en, {
+  "Главная": "Home",
+  "Магазины": "Stores",
+  "Заказы": "Orders",
+  "Кошелёк": "Wallet",
+  "Кошелек": "Wallet",
+  "Каталог": "Catalog",
+  "Поддержка": "Support",
+  "Правила": "Rules",
+  "Фильтры": "Filters",
+  "Сообщения": "Messages",
+  "Диспуты": "Disputes",
+  "Заявки на обмен": "Exchange requests",
+  "Обменники": "Exchangers",
+  "Отзывы": "Reviews",
+  "Рейтинг": "Rating",
+  "Нет отзывов": "No reviews",
+  "Отзывов пока нет.": "No reviews yet.",
+  "Отправить сообщение обменнику": "Send message to exchanger",
+  "Связь с обменником": "Contact exchanger",
+  "Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.": "Write your question. The dialog will open in private messages with the user linked to this exchanger.",
+  "Тема": "Subject",
+  "Сообщение": "Message",
+  "Отправить сообщение": "Send message",
+  "Вопрос по обмену": "Exchange question",
+  "Личные сообщения": "Private messages",
+  "Связь": "Contact",
+  "Логин": "Login",
+  "Нет сообщений": "No messages",
+  "Сообщений пока нет": "No messages yet",
+  "Ничего не найдено": "Nothing found",
+  "Обменники пока не добавлены": "No exchangers added yet",
+  "Новый магазин": "New store",
+  "Светлая тема": "Light theme",
+  "Темная тема": "Dark theme",
+  "Сменить язык:": "Change language:",
+  "Вступить": "Join",
+  "Вступить в": "Join",
+  "участников": "members",
+  "онлайн": "online",
+  "Общий чат": "Group chat",
+  "Русский чат": "Russian chat",
+  "Moldova Chat": "Moldova Chat",
+  "English Chat": "English Chat",
+  "Фото или видео": "Photo or video",
+  "Сохранить": "Save",
+  "Закрыть": "Close",
+  "Открыть": "Open",
+  "Пополнить": "Top up",
+  "Вывести": "Withdraw",
+  "Купить": "Buy",
+  "Цена": "Price",
+  "Товар": "Product",
+  "Товары": "Products",
+  "Позиции": "Positions",
+  "Доступные позиции": "Available positions",
+  "Описание": "Description"
+});
+
 function translateUiText(value) {
   const lang = currentLang();
   if (lang === "ru" || value == null) return value;
@@ -1551,8 +1669,10 @@ function mergeMessageLists(remoteMessages = [], localMessages = []) {
       });
       return;
     }
-    const localPrivateMessage = String(message.id || "").startsWith("private-") && Boolean(String(message.body || message.text || "").trim() || (Array.isArray(message.attachments) && message.attachments.length));
-    if (Number(message.createdAt || 0) >= (localPrivateMessage ? keepPrivateLocalAfter : keepLocalAfter)) merged.set(message.id, message);
+    const id = String(message.id || "");
+    const localPrivateMessage = id.startsWith("private-") && Boolean(String(message.body || message.text || "").trim() || (Array.isArray(message.attachments) && message.attachments.length));
+    const localGroupMessage = id.startsWith("group-");
+    if (localGroupMessage || Number(message.createdAt || 0) >= (localPrivateMessage ? keepPrivateLocalAfter : keepLocalAfter)) merged.set(message.id, message);
   });
   return [...merged.values()];
 }
@@ -2906,6 +3026,7 @@ function renderAuth(message = "") {
       </section>
     </main>
   `;
+  applyLanguageDomTranslations(root);
   bindButtonFeedback(root);
   document.querySelector("[data-auth-switch]").onclick = () => {
     authMode = authMode === "login" ? "register" : "login";
@@ -5065,7 +5186,10 @@ function groupMemberLogins(room = currentGroupRoom()) {
 }
 
 function isGroupMember(login = db.currentUser) {
-  return groupMemberLogins().some((item) => sameLogin(item, login));
+  const key = groupRoomMemberKey(login);
+  const members = mergeGroupMembers(db.groupSettings?.members || [], readStoredGroupMembers());
+  return members.some((item) => String(item).toLowerCase() === key.toLowerCase()) ||
+    groupMemberLogins().some((item) => sameLogin(item, login));
 }
 
 function markGroupPresence(login = db.currentUser) {
@@ -5618,6 +5742,8 @@ async function handleGroupMessageSend(event) {
   const file = data.get("attachment");
   const emojiUrls = groupEmojiUrlList(groupEmojiDraft.length ? groupEmojiDraft : groupEmojiDraftFromDom());
   if (!body && (!file || !file.size) && !groupVoiceDraft && !emojiUrls.length) return;
+  rememberGroupMember(user.login);
+  markGroupPresence(user.login);
   if (body && handleGroupCommand(body)) {
     event.currentTarget.reset();
     renderGroupChat();
@@ -10116,7 +10242,7 @@ async function handleGroupWidgetSend(event) {
     type: file.type,
     url: await fileToDataUrl(file)
   }] : (groupWidgetVoiceDraft ? [groupWidgetVoiceDraft] : []);
-  db.groupMessages.push({
+  const message = {
     id: `group-${Date.now()}`,
     fromLogin: user.login,
     room: currentGroupRoom(),
@@ -10125,7 +10251,9 @@ async function handleGroupWidgetSend(event) {
     likes: [],
     createdAt: Date.now(),
     date: new Date().toLocaleString()
-  });
+  };
+  const savedRemote = await sendGroupMessageRemote(message);
+  if (!savedRemote) db.groupMessages.push(message);
   groupWidgetVoiceDraft = null;
   groupWidgetOpen = true;
   markGroupWidgetSeen();
