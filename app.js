@@ -220,6 +220,7 @@ const defaults = {
   },
   orders: [],
   exchangeCards: [],
+  exchangers: [],
   exchangeRequests: [],
   referrals: [],
   referralPayments: [],
@@ -1096,6 +1097,7 @@ function normalizeDb(next) {
   next.groupSettings.members = mergeGroupMembers(next.groupSettings.members);
   if (!next.groupSettings.presence) next.groupSettings.presence = {};
   if (!Array.isArray(next.exchangeCards)) next.exchangeCards = structuredClone(defaults.exchangeCards);
+  if (!Array.isArray(next.exchangers)) next.exchangers = [];
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
   if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
@@ -4851,6 +4853,23 @@ async function handlePrivateMessageSend(event) {
       return;
     }
   }
+  if (API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch("/api/private-messages", {
+        method: "POST",
+        timeoutMs: 15000,
+        body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin })
+      });
+      applyRemoteState(payload);
+      privateVoiceDraft = null;
+      showToast(tr("sent"));
+      renderMessages();
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось отправить сообщение");
+      return;
+    }
+  }
   db.messages.unshift({
     id: `private-${Date.now()}`,
     storeId: disputeOrder?.storeId || "",
@@ -6092,27 +6111,79 @@ function showReferralQr(qrUrl, code, link) {
 function renderExchangeCatalog() {
   route = "exchange";
   const cards = db.exchangeCards.filter((card) => card.active !== false);
+  const exchangers = visibleExchangers();
   layout(`
     <section class="screen exchange-screen">
       <h1>Заявки на обмен</h1>
       <label class="search"><b>⌕</b><input data-exchange-search placeholder="${tr("search")}"></label>
       <section class="exchange-grid" data-exchange-list>
-        ${cards.map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Обменники пока не добавлены</p></article>`}
+        ${exchangeCatalogHtml(exchangers, cards)}
       </section>
     </section>
   `);
+  bindExchangeCatalogCards();
+  document.querySelector("[data-exchange-search]")?.addEventListener("input", (event) => {
+    const q = event.target.value.toLowerCase();
+    const filteredExchangers = exchangers.filter((item) => `${item.name || item.title} ${item.description} ${item.login}`.toLowerCase().includes(q));
+    const filteredCards = cards.filter((card) => `${card.name} ${card.description}`.toLowerCase().includes(q));
+    document.querySelector("[data-exchange-list]").innerHTML = exchangeCatalogHtml(filteredExchangers, filteredCards, "Ничего не найдено");
+    bindExchangeCatalogCards();
+  });
+}
+
+function visibleExchangers() {
+  return (db.exchangers || [])
+    .filter((item) => item && item.status !== "disabled" && item.active !== false && (item.login || item.ownerLogin))
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function exchangeCatalogHtml(exchangers = [], cards = [], emptyText = "Обменники пока не добавлены") {
+  const html = [
+    ...exchangers.map(exchangerCardView),
+    ...cards.map(exchangeCardView)
+  ].join("");
+  return html || `<article class="panel empty-state"><p>${emptyText}</p></article>`;
+}
+
+function bindExchangeCatalogCards() {
+  document.querySelectorAll("[data-exchanger-card]").forEach((button) => {
+    button.onclick = () => renderExchangerProfile(button.dataset.exchangerCard);
+  });
   document.querySelectorAll("[data-exchange-card]").forEach((button) => {
     button.onclick = () => renderExchangeProfile(button.dataset.exchangeCard, "calculator");
   });
-  document.querySelector("[data-exchange-search]")?.addEventListener("input", (event) => {
-    const q = event.target.value.toLowerCase();
-    document.querySelector("[data-exchange-list]").innerHTML = cards
-      .filter((card) => `${card.name} ${card.description}`.toLowerCase().includes(q))
-      .map(exchangeCardView).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
-    document.querySelectorAll("[data-exchange-card]").forEach((button) => {
-      button.onclick = () => renderExchangeProfile(button.dataset.exchangeCard, "calculator");
-    });
-  });
+}
+
+function exchangerById(id) {
+  return (db.exchangers || []).find((item) => String(item.id || "") === String(id || ""));
+}
+
+function exchangerCardView(item) {
+  const name = item.name || item.title || item.login || "Exchange";
+  return `
+    <article class="shop-card exchange-card">
+      <button class="shop-click" data-exchanger-card="${esc(item.id)}">
+        <div class="shop-inner">
+          <div class="shop-head">
+            <div>
+              <div class="shop-title"><h2>${esc(name)}</h2><span class="verify">✓</span></div>
+              <p class="desc">${esc(item.description || "")}</p>
+            </div>
+            <span>${navIcon("messages")}</span>
+          </div>
+          <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}">
+          <div class="rate-row">
+            <span>Логин</span>
+            <strong>${esc(item.login || item.ownerLogin || "")}</strong>
+          </div>
+          <div class="rate-row">
+            <span>Связь</span>
+            <strong>Личные сообщения</strong>
+          </div>
+        </div>
+      </button>
+    </article>
+  `;
 }
 
 function exchangeCardView(card) {
@@ -6149,6 +6220,70 @@ function regionText(regions = []) {
   if (regions.includes("moldova")) labels.push("Молдова");
   if (regions.includes("transnistria")) labels.push("Приднестровье");
   return labels.join(", ") || "Регион не указан";
+}
+
+function renderExchangerProfile(id) {
+  route = "exchange-profile";
+  const item = exchangerById(id);
+  if (!item) return renderExchangeCatalog();
+  const name = item.name || item.title || item.login || "Exchange";
+  layout(`
+    <section class="screen exchange-profile">
+      <article class="panel">
+        <img class="profile-cover" src="${esc(item.image || fallbackImage)}" alt="">
+        <div class="profile-body">
+          <p class="breadcrumbs">Обменники > ${esc(name)}</p>
+          <div class="shop-title"><h1 class="profile-title">${esc(name)}</h1><span class="verify">✓</span></div>
+          <p class="desc">${esc(item.description || "")}</p>
+          <div class="stats exchange-stats">
+            <div class="stat"><strong>${esc(item.login || item.ownerLogin || "")}</strong><span>привязанный логин</span></div>
+            <div class="stat"><strong>ЛС</strong><span>сообщения на сайте</span></div>
+          </div>
+          <button class="primary" data-exchanger-contact="${esc(item.id)}">Отправить сообщение обменнику <span class="green-dot"></span></button>
+        </div>
+      </article>
+      <article class="panel exchange-tool">
+        <h2>Связь с обменником</h2>
+        <p class="desc">Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.</p>
+        <form class="form" data-exchanger-message-form="${esc(item.id)}">
+          <label class="field">Тема<input name="subject" value="Вопрос по обмену"></label>
+          <label class="field">Сообщение<textarea name="body" required></textarea></label>
+          <button class="primary">Отправить сообщение</button>
+        </form>
+      </article>
+    </section>
+  `);
+  document.querySelector("[data-exchanger-contact]")?.addEventListener("click", () => {
+    document.querySelector("[data-exchanger-message-form] textarea")?.focus();
+  });
+  document.querySelector("[data-exchanger-message-form]")?.addEventListener("submit", handleExchangerMessage);
+}
+
+async function handleExchangerMessage(event) {
+  event.preventDefault();
+  if (!API_ENABLED || !hasApiSession()) {
+    showToast("Войдите в аккаунт, чтобы написать обменнику");
+    return;
+  }
+  const form = event.currentTarget;
+  const id = form.dataset.exchangerMessageForm;
+  const fd = new FormData(form);
+  try {
+    const payload = await apiFetch(`/api/exchangers/${encodeURIComponent(id)}/messages`, {
+      method: "POST",
+      timeoutMs: 15000,
+      body: JSON.stringify({
+        subject: fd.get("subject"),
+        body: fd.get("body")
+      })
+    });
+    applyRemoteState(payload);
+    activePrivateLogin = payload.peerLogin || exchangerById(id)?.login || "";
+    showToast(tr("sent"));
+    renderMessages();
+  } catch (error) {
+    showToast(error.message || "Не удалось отправить сообщение");
+  }
 }
 
 function renderExchangeProfile(cardId = activeExchangeId, tab = activeExchangeTab) {

@@ -592,6 +592,7 @@ async function ensureSeed() {
       lang: "ru",
       orders: [],
       exchangeCards: defaultExchangeCards,
+      exchangers: [],
       exchangeRequests: [],
       groupMessages: [],
       groupSettings: {
@@ -802,6 +803,7 @@ async function stateFor(user) {
         messages: privateMessages,
         orders: userOrders,
         exchangeCards: visibleExchangeCards,
+        exchangers: publicExchangersForState(settingsData.exchangers || [], allMessages),
         exchangeRequests: userExchangeRequests,
         groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
         groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
@@ -1877,6 +1879,7 @@ app.put("/api/state", async (req, res, next) => {
         lang: state.lang || "ru",
         orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
         exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
+        exchangers: Array.isArray(currentSettingsData.exchangers) ? currentSettingsData.exchangers : [],
         exchangeRequests: currentSettingsData.exchangeRequests || [],
         groupMessages: mergedGroupMessages,
         groupSettings: mergedGroupSettings,
@@ -2065,6 +2068,91 @@ app.post("/api/group/messages", async (req, res, next) => {
     await saveSettingsState(state);
     notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
     res.json({ message, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchangers/:id/messages", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const exchanger = (Array.isArray(state.exchangers) ? state.exchangers : [])
+      .find((item) => String(item.id || "") === String(req.params.id || "") && item.status !== "disabled" && item.active !== false);
+    if (!exchanger) return res.status(404).json({ error: "Обменник не найден" });
+    const recipient = await findProfileByLogin(exchanger.login || exchanger.ownerLogin);
+    if (!recipient) return res.status(404).json({ error: "Привязанный пользователь обменника не найден" });
+    const body = String(req.body.body || req.body.message || "").trim();
+    const subject = String(req.body.subject || `Вопрос обменнику ${exchanger.title || exchanger.name || recipient.login}`).trim().slice(0, 160);
+    const attachments = normalizeSupportAttachments(req.body.attachments, 4);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const now = Date.now();
+    const message = {
+      id: `exchanger-private-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: `exchanger:${exchanger.id}`,
+      storeTag: exchanger.title || exchanger.name || recipient.login,
+      toLogin: recipient.login,
+      fromLogin: user.login,
+      subject,
+      body,
+      attachments,
+      likes: [],
+      reactions: {},
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "exchanger_private_message",
+      exchangerId: exchanger.id
+    };
+    await upsertPrivateMessage(message);
+    await notifySiteUser(state, recipient.login, {
+      id: `notice-exchanger-message-${message.id}-${loginKey(recipient.login)}`,
+      eventType: "exchanger_message",
+      title: "Новое сообщение обменнику",
+      body: `${user.login}: ${body || "[вложение]"}`,
+      buttonText: "Открыть сообщения"
+    });
+    await saveSettingsState(state);
+    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: exchanger.id });
+    res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/private-messages", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const toLogin = String(req.body.toLogin || req.body.login || "").trim();
+    const recipient = await findProfileByLogin(toLogin);
+    if (!recipient) return res.status(404).json({ error: "Пользователь не найден" });
+    if (sameLogin(recipient.login, user.login)) return res.status(400).json({ error: "Нельзя отправить сообщение самому себе" });
+    const body = String(req.body.body || req.body.message || "").trim();
+    const subject = String(req.body.subject || "").trim().slice(0, 160);
+    const attachments = normalizeSupportAttachments(req.body.attachments, 4);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const now = Date.now();
+    const message = {
+      id: `private-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: "",
+      storeTag: recipient.login,
+      toLogin: recipient.login,
+      fromLogin: user.login,
+      subject,
+      body,
+      attachments,
+      likes: [],
+      reactions: {},
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "private_message"
+    };
+    await upsertPrivateMessage(message);
+    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login });
+    res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -2800,6 +2888,84 @@ app.delete("/api/admin/stores/:id", async (req, res, next) => {
     await appendAdminLog("store_deleted", admin.login, { storeId, name: storeData.name || "" });
     console.log("[admin-store] deleted", { storeId, name: storeData.name || "" });
     notifyRealtime("store_deleted", { storeId, source: "market-admin" });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/exchangers", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    const clean = cleanExchangerPayload(req.body || {});
+    if (!clean.login || !clean.title) return res.status(400).json({ error: "Укажите логин, название и описание обменника" });
+    const profile = await findProfileByLogin(clean.login);
+    if (!profile) return res.status(404).json({ error: "Пользователь с таким логином не найден" });
+    state.exchangers = Array.isArray(state.exchangers) ? state.exchangers : [];
+    const now = Date.now();
+    const idBase = exchangerSlug(clean.title || profile.login || "exchanger") || `exchanger-${now}`;
+    let id = idBase;
+    let counter = 2;
+    while (state.exchangers.some((item) => String(item.id || "") === id)) id = `${idBase}-${counter++}`;
+    const exchanger = {
+      ...clean,
+      id,
+      login: profile.login,
+      ownerLogin: profile.login,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: admin.login
+    };
+    state.exchangers.unshift(exchanger);
+    await saveSettingsState(state);
+    await appendAdminLog("exchanger_created", admin.login, { exchangerId: id, login: profile.login });
+    notifyRealtime("exchanger_created", { exchangerId: id, login: profile.login });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/exchangers/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    state.exchangers = Array.isArray(state.exchangers) ? state.exchangers : [];
+    const index = state.exchangers.findIndex((item) => String(item.id || "") === String(req.params.id || ""));
+    if (index < 0) return res.status(404).json({ error: "Обменник не найден" });
+    const clean = cleanExchangerPayload(req.body || {}, state.exchangers[index]);
+    if (!clean.login || !clean.title) return res.status(400).json({ error: "Укажите логин и название обменника" });
+    const profile = await findProfileByLogin(clean.login);
+    if (!profile) return res.status(404).json({ error: "Пользователь с таким логином не найден" });
+    state.exchangers[index] = {
+      ...state.exchangers[index],
+      ...clean,
+      login: profile.login,
+      ownerLogin: profile.login,
+      updatedAt: Date.now(),
+      updatedBy: admin.login
+    };
+    await saveSettingsState(state);
+    await appendAdminLog("exchanger_updated", admin.login, { exchangerId: req.params.id, login: profile.login, fields: Object.keys(req.body || {}) });
+    notifyRealtime("exchanger_updated", { exchangerId: req.params.id, login: profile.login });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/exchangers/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const state = await loadSettingsState();
+    const before = Array.isArray(state.exchangers) ? state.exchangers : [];
+    const removed = before.find((item) => String(item.id || "") === String(req.params.id || ""));
+    if (!removed) return res.status(404).json({ error: "Обменник не найден" });
+    state.exchangers = before.filter((item) => String(item.id || "") !== String(req.params.id || ""));
+    await saveSettingsState(state);
+    await appendAdminLog("exchanger_deleted", admin.login, { exchangerId: req.params.id, login: removed.login || removed.ownerLogin || "" });
+    notifyRealtime("exchanger_deleted", { exchangerId: req.params.id });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -4921,6 +5087,85 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
   broadcast.stats.telegramSent = telegramSent;
 }
 
+function cleanExchangerPayload(body = {}, existing = {}) {
+  const login = String(body.login ?? existing.login ?? existing.ownerLogin ?? "").trim();
+  const title = String(body.title ?? body.name ?? existing.title ?? existing.name ?? "").trim().slice(0, 120);
+  const description = String(body.description ?? existing.description ?? "").trim().slice(0, 1200);
+  const image = String(body.image ?? existing.image ?? "").trim();
+  const status = String(body.status ?? existing.status ?? "active").trim().toLowerCase() === "disabled" ? "disabled" : "active";
+  const position = Number.isFinite(Number(body.position ?? existing.position)) ? Number(body.position ?? existing.position) : 0;
+  return {
+    ...existing,
+    login,
+    ownerLogin: login,
+    title,
+    name: title,
+    description,
+    image,
+    status,
+    active: status === "active",
+    position
+  };
+}
+
+function exchangerSlug(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яё]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+async function findProfileByLogin(login) {
+  const key = loginKey(login);
+  if (!key) return null;
+  const { data: user } = await supabase.from("profiles").select("login,login_key,name,role,created_at").eq("login_key", key).maybeSingle();
+  return user || null;
+}
+
+function publicExchangersForState(exchangers = []) {
+  return (Array.isArray(exchangers) ? exchangers : [])
+    .filter((item) => item && item.status !== "disabled" && item.active !== false && item.login)
+    .map((item) => ({
+      id: String(item.id || ""),
+      login: String(item.login || item.ownerLogin || ""),
+      title: String(item.title || item.name || item.login || ""),
+      name: String(item.name || item.title || item.login || ""),
+      description: String(item.description || ""),
+      image: String(item.image || ""),
+      position: Number(item.position || 0),
+      createdAt: item.createdAt || null,
+      updatedAt: item.updatedAt || null
+    }))
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function adminExchangersForState(exchangers = [], profiles = []) {
+  const profileByKey = new Map((Array.isArray(profiles) ? profiles : []).map((user) => [loginKey(user.login || user.login_key), user]));
+  return (Array.isArray(exchangers) ? exchangers : [])
+    .map((item) => {
+      const login = String(item.login || item.ownerLogin || "");
+      const profile = profileByKey.get(loginKey(login));
+      return {
+        id: String(item.id || ""),
+        login,
+        loginKey: loginKey(login),
+        userName: profile?.name || "",
+        title: String(item.title || item.name || login || ""),
+        name: String(item.name || item.title || login || ""),
+        description: String(item.description || ""),
+        image: String(item.image || ""),
+        status: item.status || (item.active === false ? "disabled" : "active"),
+        active: item.active !== false && item.status !== "disabled",
+        position: Number(item.position || 0),
+        createdAt: item.createdAt || null,
+        updatedAt: item.updatedAt || null
+      };
+    })
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
 function adminBuildOverview(data) {
   const { state, stores, profiles, sessions, messages } = data;
   const orders = hydrateOrdersDisputeHistory(Array.isArray(state.orders) ? state.orders : [], messages);
@@ -5060,6 +5305,7 @@ function adminBuildOverview(data) {
       activity: adminBucketCharts(sessions.map((session) => ({ createdAt: Date.parse(session.created_at) })))
     },
     stores: storeRows,
+    exchangers: adminExchangersForState(state.exchangers || [], profiles),
     users: userRows,
     deals: [...productOrders, ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
     disputes,

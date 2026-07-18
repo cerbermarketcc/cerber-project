@@ -8,6 +8,7 @@ const API_ORIGIN = IS_LOCAL_ADMIN_HOST ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Боты"];
+nav.splice(2, 0, "Обменники");
 const supportTopics = [
   "Общие вопросы",
   "Ввод/вывод средств",
@@ -394,6 +395,7 @@ function renderSection() {
   if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
   if (section === "Магазины") return renderStores();
+  if (section === "Обменники") return renderExchangers();
   if (section === "Пользователи") return renderUsers();
   if (section === "Сделки") return renderDeals();
   if (section === "Диспуты") return renderDisputes();
@@ -575,6 +577,72 @@ function storeDetail(id) {
       <label class="field">Пароль панели магазина<input name="adminPassword" placeholder="новый пароль магазина"></label>
       <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
       <p><button class="primary">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
+    </form>
+  `;
+}
+
+function exchangerUserOptions() {
+  return (data.users || [])
+    .slice()
+    .sort((a, b) => String(a.login || "").localeCompare(String(b.login || "")))
+    .map((user) => `<option value="${esc(user.login)}">${esc(user.name || user.role || "")}</option>`)
+    .join("");
+}
+
+function renderExchangers() {
+  const rows = filterRows(data.exchangers || [], ["id", "login", "name", "title", "description", "status"]);
+  return `
+    <datalist id="exchanger-users">${exchangerUserOptions()}</datalist>
+    <article class="split-card">
+      <h2>Создать обменник</h2>
+      <p class="muted">Привяжите обменник к уже зарегистрированному логину. Когда клиент нажмет “Отправить сообщение обменнику”, личный диалог откроется именно с этим пользователем.</p>
+      <form data-exchanger-create-form>
+        <div class="row">
+          <label class="field">Логин пользователя<input name="login" list="exchanger-users" placeholder="начните вводить логин" required></label>
+          <label class="field">Название обменника<input name="name" placeholder="Например: Cerber Exchange" required></label>
+        </div>
+        <label class="field">Описание<textarea name="description" placeholder="Условия, направление обмена, рабочее время"></textarea></label>
+        <div class="row">
+          <label class="field">Фото файлом<input name="imageFile" type="file" accept="image/*"></label>
+          <label class="field">Фото URL<input name="image" placeholder="https://..."></label>
+        </div>
+        <div class="row">
+          <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="0"></label>
+          <label class="field">Статус<select name="status"><option value="active">Активен</option><option value="disabled">Скрыт</option></select></label>
+        </div>
+        <button class="primary">Создать обменник</button>
+      </form>
+    </article>
+    <section class="split">
+      <article class="table-card">
+        <table><thead><tr><th>Фото</th><th>Название</th><th>Логин</th><th>Статус</th><th>Позиция</th><th>Создан</th><th></th></tr></thead><tbody>
+          ${rows.map((item) => `<tr><td>${item.image ? `<img src="${esc(item.image)}" alt="" style="width:56px;height:40px;object-fit:cover;border-radius:8px">` : "-"}</td><td><strong>${esc(item.name || item.title || "")}</strong><br><span class="muted">${esc(String(item.description || "").slice(0, 90))}</span></td><td>${esc(item.login || "")}</td><td><span class="status ${item.active ? "" : "off"}">${esc(item.status || "active")}</span></td><td>${Number(item.position || 0)}</td><td>${fmtDate(item.createdAt)}</td><td><button class="ghost" data-exchanger-edit="${esc(item.id)}">Открыть</button></td></tr>`).join("") || `<tr><td colspan="7">Обменников пока нет.</td></tr>`}
+        </tbody></table>
+      </article>
+      <article class="split-card" data-exchanger-detail>
+        <h2>Обменник</h2>
+        <p class="muted">Выберите строку, чтобы изменить название, описание, фото, статус или привязанный логин.</p>
+      </article>
+    </section>
+  `;
+}
+
+function exchangerDetail(id) {
+  const item = (data.exchangers || []).find((row) => String(row.id || "") === String(id || ""));
+  if (!item) return `<h2>Обменник не найден</h2>`;
+  return `
+    <h2>${esc(item.name || item.title || item.id)}</h2>
+    <form data-exchanger-update-form="${esc(item.id)}">
+      <label class="field">Логин пользователя<input name="login" list="exchanger-users" value="${esc(item.login || "")}" required></label>
+      <label class="field">Название<input name="name" value="${esc(item.name || item.title || "")}" required></label>
+      <label class="field">Описание<textarea name="description">${esc(item.description || "")}</textarea></label>
+      <label class="field">Новое фото файлом<input name="imageFile" type="file" accept="image/*"></label>
+      <label class="field">Фото URL<input name="image" value="${esc(item.image || "")}"></label>
+      <div class="row">
+        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(item.position || 0)}"></label>
+        <label class="field">Статус<select name="status"><option value="active" ${item.active ? "selected" : ""}>Активен</option><option value="disabled" ${!item.active ? "selected" : ""}>Скрыт</option></select></label>
+      </div>
+      <p><button class="primary">Сохранить</button> <button class="ghost danger" type="button" data-exchanger-delete="${esc(item.id)}">Удалить</button></p>
     </form>
   `;
 }
@@ -1126,6 +1194,72 @@ function renderMirrorBots() {
 }
 
 function bindActions() {
+  root.querySelector("[data-exchanger-create-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    try {
+      const image = await formImageValue(fd, "imageFile", "image");
+      data = await api("/api/admin/exchangers", {
+        method: "POST",
+        body: JSON.stringify({
+          login: fd.get("login"),
+          name: fd.get("name"),
+          description: fd.get("description"),
+          image,
+          position: Number(fd.get("position") || 0),
+          status: fd.get("status")
+        })
+      });
+      toast("Обменник создан");
+      renderShell();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelectorAll("[data-exchanger-edit]").forEach((button) => {
+    button.onclick = () => {
+      const box = root.querySelector("[data-exchanger-detail]");
+      if (box) box.innerHTML = exchangerDetail(button.dataset.exchangerEdit);
+      bindActions();
+      bindAdminButtonFeedback(root);
+    };
+  });
+  root.querySelectorAll("[data-exchanger-update-form]").forEach((form) => {
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const fd = new FormData(form);
+      try {
+        const image = await formImageValue(fd, "imageFile", "image");
+        data = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            login: fd.get("login"),
+            name: fd.get("name"),
+            description: fd.get("description"),
+            image,
+            position: Number(fd.get("position") || 0),
+            status: fd.get("status")
+          })
+        });
+        toast("Обменник сохранен");
+        renderShell();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
+  root.querySelectorAll("[data-exchanger-delete]").forEach((button) => {
+    button.onclick = async () => {
+      if (!confirm("Удалить обменник из каталога?")) return;
+      try {
+        data = await api(`/api/admin/exchangers/${encodeURIComponent(button.dataset.exchangerDelete)}`, { method: "DELETE" });
+        toast("Обменник удален");
+        renderShell();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
   root.querySelector("[data-create-store-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
