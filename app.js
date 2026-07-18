@@ -590,7 +590,33 @@ Object.assign(text.ru, {
   openFilters: "Открыть фильтры",
   product: "Товар",
   pieces: "шт.",
-  purchases: "покупок"
+  purchases: "покупок",
+  groupChat: "Чат",
+  groupJoinDescription: "Вступите в {room}, чтобы видеть сообщения этого языка, отправлять сообщения и играть в рулетках на призы.",
+  groupJoinMembersHint: "участников будет в чате после вашего входа",
+  groupJoinButton: "Вступить в {room}",
+  groupDefaultTitle: "Общий чат",
+  groupMembers: "участников",
+  groupOnline: "онлайн",
+  groupTitleAria: "Название чата",
+  groupPinned: "Закреплено",
+  groupMedia: "[медиа]",
+  groupRollActive: "Roll активен",
+  groupTimeLeft: "Осталось {time}",
+  groupMutedUntil: "Вы замучены до {time}",
+  groupAttachTitle: "Фото, видео или стикер",
+  groupClearTitle: "Очистить",
+  groupEmojiTitle: "Смайлики",
+  groupMessagePlaceholder: "Сообщение",
+  groupVoiceTitle: "Голосовое",
+  groupWidgetTitle: "Cerber Чат",
+  groupPhotoVideoTitle: "Фото или видео",
+  groupVoiceReady: "Голосовое сообщение готово",
+  groupVoiceRecording: "Идёт запись голоса...",
+  groupMicError: "Не удалось включить микрофон",
+  groupMutedToast: "Вы временно замучены",
+  groupPinnedSystem: "Сообщение от {author} закреплено.",
+  groupLocalSaveError: "Сообщение сохранено локально, сервер не ответил"
 });
 
 Object.assign(text.md, {
@@ -619,7 +645,33 @@ Object.assign(text.md, {
   openFilters: "Deschide filtrele",
   product: "Produs",
   pieces: "buc.",
-  purchases: "cumparari"
+  purchases: "cumparari",
+  groupChat: "Chat",
+  groupJoinDescription: "Intrati in {room} pentru a vedea mesajele acestei limbi, a trimite mesaje si a participa la rulete cu premii.",
+  groupJoinMembersHint: "participanti vor fi in chat dupa intrarea dvs.",
+  groupJoinButton: "Intra in {room}",
+  groupDefaultTitle: "Chat general",
+  groupMembers: "participanti",
+  groupOnline: "online",
+  groupTitleAria: "Denumirea chatului",
+  groupPinned: "Fixat",
+  groupMedia: "[media]",
+  groupRollActive: "Roll activ",
+  groupTimeLeft: "Au ramas {time}",
+  groupMutedUntil: "Sunteti blocat pana la {time}",
+  groupAttachTitle: "Foto, video sau sticker",
+  groupClearTitle: "Sterge",
+  groupEmojiTitle: "Emoji",
+  groupMessagePlaceholder: "Mesaj",
+  groupVoiceTitle: "Mesaj vocal",
+  groupWidgetTitle: "Cerber Chat",
+  groupPhotoVideoTitle: "Foto sau video",
+  groupVoiceReady: "Mesajul vocal este gata",
+  groupVoiceRecording: "Se inregistreaza vocea...",
+  groupMicError: "Nu s-a putut porni microfonul",
+  groupMutedToast: "Sunteti blocat temporar",
+  groupPinnedSystem: "Mesajul de la {author} a fost fixat.",
+  groupLocalSaveError: "Mesajul a fost salvat local, serverul nu a raspuns"
 });
 
 Object.assign(text.en, {
@@ -648,7 +700,33 @@ Object.assign(text.en, {
   openFilters: "Open filters",
   product: "Product",
   pieces: "pcs.",
-  purchases: "purchases"
+  purchases: "purchases",
+  groupChat: "Chat",
+  groupJoinDescription: "Join {room} to see messages in this language, send messages, and play prize roulette.",
+  groupJoinMembersHint: "members will be in the chat after you join",
+  groupJoinButton: "Join {room}",
+  groupDefaultTitle: "Group chat",
+  groupMembers: "members",
+  groupOnline: "online",
+  groupTitleAria: "Chat title",
+  groupPinned: "Pinned",
+  groupMedia: "[media]",
+  groupRollActive: "Roll active",
+  groupTimeLeft: "Left {time}",
+  groupMutedUntil: "You are muted until {time}",
+  groupAttachTitle: "Photo, video, or sticker",
+  groupClearTitle: "Clear",
+  groupEmojiTitle: "Emoji",
+  groupMessagePlaceholder: "Message",
+  groupVoiceTitle: "Voice message",
+  groupWidgetTitle: "Cerber Chat",
+  groupPhotoVideoTitle: "Photo or video",
+  groupVoiceReady: "Voice message is ready",
+  groupVoiceRecording: "Recording voice...",
+  groupMicError: "Could not enable microphone",
+  groupMutedToast: "You are temporarily muted",
+  groupPinnedSystem: "Message from {author} was pinned.",
+  groupLocalSaveError: "Message saved locally, server did not respond"
 });
 
 const uiPhraseTranslations = {
@@ -4306,19 +4384,19 @@ function renderMessages() {
               <button class="private-close-chat" type="button" data-private-close title="Закрыть диалог">×</button>
             </header>
             <div class="private-chat-list" data-private-chat-list>
-              ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+              ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">${esc(tr("noMessages"))}</p>`}
             </div>
             <form class="group-form private-form" data-private-chat-form>
-              <button type="button" class="group-round-button group-attach-button" data-private-attach title="Фото, видео или стикер">📎</button>
+              <button type="button" class="group-round-button group-attach-button" data-private-attach title="${esc(tr("groupAttachTitle"))}">📎</button>
               <div class="group-input-wrap">
-                <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
-                <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="Смайлики">◔</button>
+                <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
+                <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="${esc(tr("groupEmojiTitle"))}">◔</button>
                 <div class="group-sticker-row" data-private-sticker-row hidden>
                   ${siteEmojiPickerHtml("private")}
                 </div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-private-attachment>
-              <button type="button" class="group-round-button group-voice-button" data-private-voice title="Голосовое">🎙</button>
+              <button type="button" class="group-round-button group-voice-button" data-private-voice title="${esc(tr("groupVoiceTitle"))}">🎙</button>
               <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
               <div class="group-file-name" data-private-file-name></div>
             </form>
@@ -4518,15 +4596,15 @@ async function togglePrivateVoiceRecord(event) {
         type: blob.type,
         url: await blobToDataUrl(blob)
       };
-      document.querySelector("[data-private-file-name]").textContent = "Голосовое сообщение готово";
+      document.querySelector("[data-private-file-name]").textContent = tr("groupVoiceReady");
       document.querySelector("[data-private-chat-form]")?.classList.add("has-content");
     };
     privateVoiceRecorder.start();
     button.classList.add("recording");
     button.textContent = "■";
-    document.querySelector("[data-private-file-name]").textContent = "Идёт запись голоса...";
+    document.querySelector("[data-private-file-name]").textContent = tr("groupVoiceRecording");
   } catch {
-    showToast("Не удалось включить микрофон");
+    showToast(tr("groupMicError"));
   }
 }
 
@@ -4657,6 +4735,15 @@ function currentGroupRoom() {
 
 function groupRoomLabel(room = currentGroupRoom()) {
   return ({ ru: "Русский чат", md: "Moldova Chat", en: "English Chat" })[room] || "Чат";
+}
+
+function trFormat(key, values = {}) {
+  return Object.entries(values).reduce((result, [name, value]) => result.split(`{${name}}`).join(String(value)), tr(key));
+}
+
+function groupDisplayTitle(settings = {}) {
+  const title = String(settings.title || "").trim();
+  return !title || title === defaults.groupSettings.title || title === "Общий чат" ? tr("groupDefaultTitle") : title;
 }
 
 function groupRoomMemberKey(login, room = currentGroupRoom()) {
@@ -4829,7 +4916,7 @@ async function sendGroupMessageRemote(message) {
     return true;
   } catch (error) {
     console.error("[group-chat] message save failed", error);
-    showToast(error.message || "Сообщение сохранено локально, сервер не ответил");
+    showToast(error.message || tr("groupLocalSaveError"));
     return false;
   }
 }
@@ -4852,25 +4939,25 @@ function renderGroupFloatingWidget() {
   const messages = visibleGroupMessages().slice(-8);
   return `
     <section class="group-widget ${groupWidgetOpen ? "open" : ""}" data-group-widget>
-      <button class="group-widget-button" data-group-widget-toggle aria-label="Общий чат">
+      <button class="group-widget-button" data-group-widget-toggle aria-label="${esc(tr("groupChat"))}">
         💬
         ${unread ? `<span>${formatGroupWidgetBadge(unread)}</span>` : ""}
       </button>
       ${groupWidgetOpen ? `
         <article class="group-widget-panel">
           <header>
-            <strong>Cerber Чат</strong>
+            <strong>${esc(tr("groupWidgetTitle"))}</strong>
             <button type="button" data-group-widget-toggle>×</button>
           </header>
           <div class="group-widget-list" data-group-widget-list>
-            ${messages.length ? messages.map(groupWidgetMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+            ${messages.length ? messages.map(groupWidgetMessageView).join("") : `<p class="empty-chat">${esc(tr("noMessages"))}</p>`}
           </div>
           <form class="group-widget-form" data-group-widget-form>
-            <button type="button" data-group-widget-attach title="Фото или видео">📎</button>
-            <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
+            <button type="button" data-group-widget-attach title="${esc(tr("groupPhotoVideoTitle"))}">📎</button>
+            <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
             <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-widget-file>
-            <button type="button" data-group-widget-voice title="Голосовое">🎙</button>
-            <button class="group-widget-send" title="Отправить">➤</button>
+            <button type="button" data-group-widget-voice title="${esc(tr("groupVoiceTitle"))}">🎙</button>
+            <button class="group-widget-send" title="${esc(tr("send"))}">➤</button>
             <div data-group-widget-file-name></div>
           </form>
         </article>
@@ -4885,7 +4972,7 @@ function groupWidgetMessageView(msg) {
   return `
     <div class="group-widget-message ${sameLogin(msg.fromLogin, db.currentUser) ? "own" : ""} ${system ? "system" : ""}">
       <span>${esc(system ? "CERBER" : groupMessageAuthor(msg.fromLogin))}</span>
-      <p>${esc(msg.body || (attachments.length ? "[медиа]" : "")).replace(/\n/g, "<br>")}</p>
+      <p>${esc(msg.body || (attachments.length ? tr("groupMedia") : "")).replace(/\n/g, "<br>")}</p>
     </div>
   `;
 }
@@ -4972,12 +5059,12 @@ function renderGroupChat() {
         <article class="group-join-card">
           <span class="group-live-dot"></span>
           <h1>Cerber ${esc(roomLabel)}</h1>
-          <p>Вступите в ${esc(roomLabel)}, чтобы видеть сообщения этого языка, отправлять сообщения и играть в рулетках на призы.</p>
+          <p>${esc(trFormat("groupJoinDescription", { room: roomLabel }))}</p>
           <div class="group-join-stats">
             <strong>${membersCount}</strong>
-            <span>участников будет в чате после вашего входа</span>
+            <span>${esc(tr("groupJoinMembersHint"))}</span>
           </div>
-          <button class="group-join-button" data-group-join>Вступить в ${esc(roomLabel)}</button>
+          <button class="group-join-button" data-group-join>${esc(trFormat("groupJoinButton", { room: roomLabel }))}</button>
         </article>
       </section>
     `);
@@ -5007,55 +5094,55 @@ function renderGroupChat() {
           <div class="group-chat-title">
             <span class="group-live-dot"></span>
             <div>
-              <h2>${esc(settings.title || "Общий чат")}</h2>
-              <p>${esc(roomLabel)} · ${membersCount} участников · ${onlineCount} онлайн</p>
+              <h2>${esc(groupDisplayTitle(settings))}</h2>
+              <p>${esc(roomLabel)} · ${membersCount} ${esc(tr("groupMembers"))} · ${onlineCount} ${esc(tr("groupOnline"))}</p>
             </div>
           </div>
           ${moderator ? `
             <form class="group-title-form" data-group-title-form>
-              <input name="title" value="${esc(settings.title || "Общий чат")}" aria-label="Название чата">
-              <button>Сохранить</button>
+              <input name="title" value="${esc(groupDisplayTitle(settings))}" aria-label="${esc(tr("groupTitleAria"))}">
+              <button>${esc(tr("save"))}</button>
             </form>
           ` : ""}
         </header>
 
         ${pinned ? `
           <section class="group-pinned">
-            <span>Закреплено</span>
-            <p><button class="link-button" data-group-user="${esc(pinned.fromLogin)}">${esc(groupMessageAuthor(pinned.fromLogin))}</button>: ${esc(pinned.body || "[медиа]")}</p>
+            <span>${esc(tr("groupPinned"))}</span>
+            <p><button class="link-button" data-group-user="${esc(pinned.fromLogin)}">${esc(groupMessageAuthor(pinned.fromLogin))}</button>: ${esc(pinned.body || tr("groupMedia"))}</p>
           </section>
         ` : ""}
 
         ${lastRoll ? `
           <section class="group-roll-banner">
-            <strong>Roll активен</strong>
-            <span>Осталось ${Math.floor(rollLeft / 60)}:${String(rollLeft % 60).padStart(2, "0")}</span>
+            <strong>${esc(tr("groupRollActive"))}</strong>
+            <span>${esc(trFormat("groupTimeLeft", { time: `${Math.floor(rollLeft / 60)}:${String(rollLeft % 60).padStart(2, "0")}` }))}</span>
           </section>
         ` : ""}
 
         <section class="group-chat-list" data-group-chat-list>
-          ${messages.length ? messages.map(groupMessageView).join("") : `<p class="empty-chat">Сообщений пока нет</p>`}
+          ${messages.length ? messages.map(groupMessageView).join("") : `<p class="empty-chat">${esc(tr("noMessages"))}</p>`}
         </section>
 
         <footer class="group-compose">
           ${muteUntil > Date.now() ? `
-            <p class="notice">Вы замучены до ${new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+            <p class="notice">${esc(trFormat("groupMutedUntil", { time: new Date(muteUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }))}</p>
           ` : `
             <form class="group-form" data-group-form>
-              <button type="button" class="group-round-button group-attach-button" data-group-attach title="Фото, видео или стикер">📎</button>
+              <button type="button" class="group-round-button group-attach-button" data-group-attach title="${esc(tr("groupAttachTitle"))}">📎</button>
               <div class="group-input-wrap">
                 <div class="group-emoji-draft" data-group-emoji-draft ${groupEmojiDraft.length ? "" : "hidden"}>
                   ${groupInlineEmojiHtml(groupEmojiDraft)}
-                  <button type="button" data-group-emoji-clear title="Очистить">×</button>
+                  <button type="button" data-group-emoji-clear title="${esc(tr("groupClearTitle"))}">×</button>
                 </div>
-                <textarea name="body" rows="1" placeholder="Сообщение"></textarea>
-                <button type="button" class="group-emoji-toggle" data-group-emoji-toggle title="Смайлики">◔</button>
+                <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
+                <button type="button" class="group-emoji-toggle" data-group-emoji-toggle title="${esc(tr("groupEmojiTitle"))}">◔</button>
                 <div class="group-sticker-row" data-group-sticker-row hidden>
                   ${siteEmojiPickerHtml("group")}
                 </div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-group-attachment>
-              <button type="button" class="group-round-button group-voice-button" data-group-voice title="Голосовое">🎙</button>
+              <button type="button" class="group-round-button group-voice-button" data-group-voice title="${esc(tr("groupVoiceTitle"))}">🎙</button>
               <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
               <div class="group-file-name" data-group-file-name></div>
             </form>
@@ -5084,7 +5171,7 @@ function renderGroupChat() {
     const box = document.querySelector("[data-group-emoji-draft]");
     if (!box) return;
     box.hidden = !groupEmojiDraft.length;
-    box.innerHTML = `${groupInlineEmojiHtml(groupEmojiDraft)}<button type="button" data-group-emoji-clear title="Очистить">×</button>`;
+    box.innerHTML = `${groupInlineEmojiHtml(groupEmojiDraft)}<button type="button" data-group-emoji-clear title="${esc(tr("groupClearTitle"))}">×</button>`;
     box.querySelector("[data-group-emoji-clear]")?.addEventListener("click", () => {
       groupEmojiDraft = [];
       renderGroupEmojiDraft();
@@ -5184,15 +5271,15 @@ async function toggleGroupVoiceRecord(event) {
         type: blob.type,
         url: await blobToDataUrl(blob)
       };
-      document.querySelector("[data-group-file-name]").textContent = "Голосовое сообщение готово";
+      document.querySelector("[data-group-file-name]").textContent = tr("groupVoiceReady");
       document.querySelector("[data-group-form]")?.classList.add("has-content");
     };
     groupVoiceRecorder.start();
     button.classList.add("recording");
     button.textContent = "■";
-    document.querySelector("[data-group-file-name]").textContent = "Идёт запись голоса...";
+    document.querySelector("[data-group-file-name]").textContent = tr("groupVoiceRecording");
   } catch {
-    showToast("Не удалось включить микрофон");
+    showToast(tr("groupMicError"));
   }
 }
 
@@ -5227,7 +5314,7 @@ function groupMessageView(msg) {
         ${messageReactionPickerHtml(msg, "group")}
         ${false && moderator ? `
           <div class="group-actions">
-            <button data-group-pin="${esc(msg.id)}">Закрепить</button>
+            <button data-group-pin="${esc(msg.id)}">${esc(tr("groupPinned"))}</button>
             <button data-group-user="${esc(msg.fromLogin)}">ЛС</button>
             <button data-group-delete="${esc(msg.id)}">Удалить у всех</button>
           </div>
@@ -5272,7 +5359,7 @@ async function handleGroupMessageSend(event) {
   if (!user) return renderAuth();
   const muted = groupMuteUntil(user.login);
   if (muted > Date.now()) {
-    showToast("Вы временно замучены");
+    showToast(tr("groupMutedToast"));
     return;
   }
   const data = new FormData(event.currentTarget);
@@ -5338,7 +5425,7 @@ function handleGroupCommand(body) {
       : messages[messages.length - 1];
     if (target) {
       db.groupSettings.pinnedMessageId = target.id;
-      pushGroupSystemMessage(`Сообщение от ${groupMessageAuthor(target.fromLogin)} закреплено.`);
+      pushGroupSystemMessage(trFormat("groupPinnedSystem", { author: groupMessageAuthor(target.fromLogin) }));
       saveDb();
     }
     return true;
@@ -9560,14 +9647,14 @@ async function toggleGroupWidgetVoiceRecord(event) {
         type: blob.type,
         url: await blobToDataUrl(blob)
       };
-      document.querySelector("[data-group-widget-file-name]").textContent = "Голосовое сообщение готово";
+      document.querySelector("[data-group-widget-file-name]").textContent = tr("groupVoiceReady");
     };
     groupWidgetVoiceRecorder.start();
     button.classList.add("recording");
     button.textContent = "■";
-    document.querySelector("[data-group-widget-file-name]").textContent = "Идёт запись голоса...";
+    document.querySelector("[data-group-widget-file-name]").textContent = tr("groupVoiceRecording");
   } catch {
-    showToast("Не удалось включить микрофон");
+    showToast(tr("groupMicError"));
   }
 }
 
