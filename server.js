@@ -2462,6 +2462,23 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       orderId: id,
       disputeThreadId: threadId
     });
+    await notifySiteUser(data.state, dispute.login || dispute.fromLogin || "", {
+      id: `notice-admin-dispute-reply-client-${id}-${now}-${loginKey(dispute.login || dispute.fromLogin || "")}`,
+      eventType: "dispute_reply",
+      orderId: id,
+      storeId: store?.id || dispute.storeId || "",
+      title: "Новое сообщение в диспуте",
+      body: `Владелец сайта ответил по диспуту #${publicNumber}.`
+    });
+    await notifySiteUser(data.state, store?.ownerLogin || dispute.toLogin || "admin", {
+      id: `notice-admin-dispute-reply-store-${id}-${now}-${loginKey(store?.ownerLogin || dispute.toLogin || "admin")}`,
+      eventType: "dispute_reply",
+      orderId: id,
+      storeId: store?.id || dispute.storeId || "",
+      title: "Новое сообщение в диспуте",
+      body: `Владелец сайта ответил по диспуту #${publicNumber}.`
+    });
+    await saveSettingsState(data.state);
     await appendAdminLog("admin_replied_dispute", admin.login, { disputeId: id, disputeNumber: publicNumber });
     const nextData = await adminLoadMarketplace();
     const nextOrder = hydrateOrdersDisputeHistory(nextData.state.orders || [], nextData.messages).find((item) => item.id === id || item.exchangeRequestId === id);
@@ -6731,6 +6748,68 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     });
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId });
     res.json({ order, disputePeer: store.ownerLogin || "admin", disputeNumber: publicNumber, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Диспут не найден" });
+    if (order.disputeChatClosed || order.disputeOpen === false || !orderHasDisputeHistory(order)) return res.status(409).json({ error: "Диспут закрыт" });
+    const body = String(req.body.body || "").trim();
+    const attachments = normalizeSupportAttachments(req.body.attachments, 4);
+    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const store = await loadStoreWithFallback(order.storeId);
+    const now = Date.now();
+    const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
+    const publicNumber = ensureDisputeNumber(state, order);
+    order.status = "dispute";
+    order.disputeOpen = true;
+    order.disputeChatClosed = false;
+    order.disputeThreadId = threadId;
+    order.disputeOpenedAt = order.disputeOpenedAt || now;
+    await saveSettingsState({ ...state, orders });
+    await upsertPrivateMessage({
+      id: `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      storeId: order.storeId,
+      storeTag: store?.name || order.storeName || order.storeId,
+      toLogin: store?.ownerLogin || "admin",
+      fromLogin: user.login,
+      subject: `Диспут #${publicNumber} по заказу ${order.id}`,
+      body,
+      attachments,
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute-reply",
+      orderId: order.id,
+      disputeThreadId: threadId
+    });
+    await notifySiteUser(state, store?.ownerLogin || "admin", {
+      id: `notice-client-dispute-reply-store-${order.id}-${now}-${loginKey(store?.ownerLogin || "admin")}`,
+      eventType: "dispute_reply",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Новое сообщение в диспуте",
+      body: `Клиент ${user.login} написал по диспуту #${publicNumber}.`
+    });
+    await notifySiteUser(state, "admin", {
+      id: `notice-client-dispute-reply-owner-${order.id}-${now}`,
+      eventType: "dispute_reply",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Новое сообщение в диспуте",
+      body: `Клиент ${user.login} написал по диспуту #${publicNumber}, магазин ${store?.name || order.storeName || order.storeId}.`
+    });
+    await saveSettingsState(state);
+    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
+    res.json({ order, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }

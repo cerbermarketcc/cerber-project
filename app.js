@@ -3224,6 +3224,31 @@ function productOrderStatus(order) {
   return "Активный";
 }
 
+function productOrderDisputeChat(order) {
+  if (!orderHasClientDisputeHistory(order)) return "";
+  const messages = disputeMessagesForOrder(order);
+  const canWrite = order.disputeOpen !== false && !order.disputeChatClosed;
+  return `
+    <section class="order-dispute-chat">
+      <h3>Чат диспута ${esc(disputeDisplayLabel(order))}</h3>
+      <div class="private-chat-list order-dispute-chat-list">
+        ${messages.length ? messages.map(privateMessageView).join("") : `<p class="empty-chat">Сообщений в диспуте пока нет.</p>`}
+      </div>
+      ${canWrite ? `
+        <form class="group-form private-form order-dispute-form" data-client-dispute-reply="${esc(order.id)}">
+          <button type="button" class="group-round-button group-attach-button" data-client-dispute-attach title="${esc(tr("groupAttachTitle"))}">📎</button>
+          <div class="group-input-wrap">
+            <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
+          </div>
+          <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-client-dispute-attachment>
+          <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+          <div class="group-file-name" data-client-dispute-file-name></div>
+        </form>
+      ` : `<p class="notice">Диспут закрыт. История сохранена, писать больше нельзя.</p>`}
+    </section>
+  `;
+}
+
 function showProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
@@ -3291,6 +3316,7 @@ function showProductOrder(orderId) {
     ${orderNeedsReview(order) ? `<button class="primary" data-product-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
     ${order.reviewLeft ? `<p class="notice">Отзыв по этому заказу уже оставлен. Детали заказа сохранены.</p>` : ""}
     ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+    ${productOrderDisputeChat(order)}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
   document.querySelectorAll("[data-copy]").forEach((button) => {
@@ -3309,7 +3335,60 @@ function showProductOrder(orderId) {
   document.querySelector("[data-product-complete]")?.addEventListener("click", (event) => completeProductOrderByClient(event.currentTarget.dataset.productComplete));
   document.querySelector("[data-product-close-dispute]")?.addEventListener("click", (event) => closeProductDisputeByClient(event.currentTarget.dataset.productCloseDispute));
   document.querySelector("[data-product-review]")?.addEventListener("click", (event) => showProductReviewModal(event.currentTarget.dataset.productReview));
+  document.querySelector("[data-client-dispute-attach]")?.addEventListener("click", () => document.querySelector("[data-client-dispute-attachment]")?.click());
+  document.querySelector("[data-client-dispute-attachment]")?.addEventListener("change", (event) => {
+    const file = event.currentTarget.files?.[0];
+    const label = document.querySelector("[data-client-dispute-file-name]");
+    if (label) label.textContent = file ? file.name : "";
+  });
+  document.querySelector("[data-client-dispute-reply]")?.addEventListener("submit", sendClientDisputeReply);
   document.querySelectorAll("[data-review-form]").forEach((form) => form.addEventListener("submit", handleProductReview));
+}
+
+async function sendClientDisputeReply(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const orderId = form.dataset.clientDisputeReply;
+  const fd = new FormData(form);
+  const body = String(fd.get("body") || "").trim();
+  const file = fd.get("attachment");
+  const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
+  if (!body && !attachments.length) return;
+  if (API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/reply`, {
+        method: "POST",
+        timeoutMs: 15000,
+        body: JSON.stringify({ body, attachments })
+      });
+      applyRemoteState(payload);
+      showToast("Сообщение отправлено");
+      showProductOrder(orderId);
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось отправить сообщение");
+      return;
+    }
+  }
+  const order = db.orders.find((item) => item.id === orderId);
+  const store = storeById(order?.storeId);
+  db.messages.unshift({
+    id: `client-dispute-reply-${orderId}-${Date.now()}`,
+    storeId: order?.storeId || "",
+    storeTag: store?.name || order?.storeName || "",
+    toLogin: store?.ownerLogin || "admin",
+    fromLogin: db.currentUser,
+    subject: `Диспут ${disputeDisplayLabel(order)} по заказу ${orderId}`,
+    body,
+    attachments,
+    createdAt: Date.now(),
+    date: new Date().toLocaleString(),
+    system: "product-dispute-reply",
+    orderId,
+    disputeThreadId: order?.disputeThreadId || `dispute-${orderId}`
+  });
+  saveDb();
+  showProductOrder(orderId);
 }
 
 async function completeProductOrderByClient(orderId) {
