@@ -2089,6 +2089,8 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const now = Date.now();
+    const review = parseExchangerReviewCommand(body);
+    const savedReview = review ? addExchangerReview(exchanger, user, review) : null;
     const message = {
       id: `exchanger-private-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: `exchanger:${exchanger.id}`,
@@ -2103,7 +2105,8 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
       system: "exchanger_private_message",
-      exchangerId: exchanger.id
+      exchangerId: exchanger.id,
+      ...(savedReview ? { reviewId: savedReview.id, reviewRating: savedReview.rating } : {})
     };
     await upsertPrivateMessage(message);
     await notifySiteUser(state, recipient.login, {
@@ -2114,7 +2117,7 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
       buttonText: "Открыть сообщения"
     });
     await saveSettingsState(state);
-    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: exchanger.id });
+    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: exchanger.id, reviewId: savedReview?.id || "" });
     res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -2134,6 +2137,13 @@ app.post("/api/private-messages", async (req, res, next) => {
     const subject = String(req.body.subject || "").trim().slice(0, 160);
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
+    const state = await loadSettingsState();
+    const review = parseExchangerReviewCommand(body);
+    const linkedExchanger = review
+      ? (Array.isArray(state.exchangers) ? state.exchangers : []).find((item) => item.status !== "disabled" && item.active !== false && sameLogin(item.login || item.ownerLogin, recipient.login))
+      : null;
+    if (review && !linkedExchanger) return res.status(404).json({ error: "У этого пользователя нет активного обменника для отзыва" });
+    const savedReview = review ? addExchangerReview(linkedExchanger, user, review) : null;
     const now = Date.now();
     const message = {
       id: `private-${now}-${crypto.randomBytes(3).toString("hex")}`,
@@ -2148,10 +2158,13 @@ app.post("/api/private-messages", async (req, res, next) => {
       reactions: {},
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
-      system: "private_message"
+      system: savedReview ? "exchanger_review_message" : "private_message",
+      ...(linkedExchanger ? { exchangerId: linkedExchanger.id } : {}),
+      ...(savedReview ? { reviewId: savedReview.id, reviewRating: savedReview.rating } : {})
     };
     await upsertPrivateMessage(message);
-    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login });
+    if (savedReview) await saveSettingsState(state);
+    notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: linkedExchanger?.id || "", reviewId: savedReview?.id || "" });
     res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -5102,6 +5115,7 @@ function cleanExchangerPayload(body = {}, existing = {}) {
     name: title,
     description,
     image,
+    reviews: Array.isArray(existing.reviews) ? existing.reviews : [],
     status,
     active: status === "active",
     position
@@ -5124,6 +5138,64 @@ async function findProfileByLogin(login) {
   return user || null;
 }
 
+function parseExchangerReviewCommand(body = "") {
+  const text = String(body || "").trim();
+  const match = text.match(/^\/reviews(?:\s+|$)([\s\S]*)$/i);
+  if (!match) return null;
+  let rest = String(match[1] || "").trim();
+  const leading = rest.match(/^([1-5])(?:\s+|$)([\s\S]*)$/);
+  const trailing = rest.match(/([\s\S]*?)(?:\s+|^)([1-5])$/);
+  let rating = 0;
+  if (leading) {
+    rating = Number(leading[1]);
+    rest = String(leading[2] || "").trim();
+  } else if (trailing) {
+    rating = Number(trailing[2]);
+    rest = String(trailing[1] || "").trim();
+  }
+  if (!rating || rating < 1 || rating > 5 || !rest) {
+    const error = new Error("Формат отзыва: /reviews текст отзыва 1-5");
+    error.status = 400;
+    throw error;
+  }
+  return { rating, text: rest.slice(0, 1000) };
+}
+
+function exchangerReviewSummary(item = {}) {
+  const reviews = (Array.isArray(item.reviews) ? item.reviews : []).filter((review) => Number(review.rating || 0) >= 1);
+  const count = reviews.length;
+  const rating = count ? reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) / count : 0;
+  return {
+    rating: Number(rating.toFixed(1)),
+    reviewsCount: count,
+    reviews: reviews
+      .slice()
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+      .slice(0, 50)
+  };
+}
+
+function addExchangerReview(exchanger, user, review) {
+  if (!exchanger || !review) return null;
+  exchanger.reviews = Array.isArray(exchanger.reviews) ? exchanger.reviews : [];
+  const authorKey = loginKey(user.login);
+  const now = Date.now();
+  const item = {
+    id: `review-${now}-${crypto.randomBytes(3).toString("hex")}`,
+    fromLogin: user.login,
+    fromLoginKey: authorKey,
+    rating: review.rating,
+    text: review.text,
+    createdAt: now,
+    date: new Date(now).toLocaleString("ru-RU")
+  };
+  const existingIndex = exchanger.reviews.findIndex((entry) => loginKey(entry.fromLogin || entry.fromLoginKey) === authorKey);
+  if (existingIndex >= 0) exchanger.reviews[existingIndex] = item;
+  else exchanger.reviews.unshift(item);
+  exchanger.updatedAt = now;
+  return item;
+}
+
 function publicExchangersForState(exchangers = []) {
   return (Array.isArray(exchangers) ? exchangers : [])
     .filter((item) => item && item.status !== "disabled" && item.active !== false && item.login)
@@ -5136,7 +5208,8 @@ function publicExchangersForState(exchangers = []) {
       image: String(item.image || ""),
       position: Number(item.position || 0),
       createdAt: item.createdAt || null,
-      updatedAt: item.updatedAt || null
+      updatedAt: item.updatedAt || null,
+      ...exchangerReviewSummary(item)
     }))
     .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
@@ -5156,6 +5229,7 @@ function adminExchangersForState(exchangers = [], profiles = []) {
         name: String(item.name || item.title || login || ""),
         description: String(item.description || ""),
         image: String(item.image || ""),
+        ...exchangerReviewSummary(item),
         status: item.status || (item.active === false ? "disabled" : "active"),
         active: item.active !== false && item.status !== "disabled",
         position: Number(item.position || 0),

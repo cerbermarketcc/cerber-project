@@ -6158,6 +6158,37 @@ function exchangerById(id) {
   return (db.exchangers || []).find((item) => String(item.id || "") === String(id || ""));
 }
 
+function exchangerRatingText(item = {}) {
+  const count = Number(item.reviewsCount || 0);
+  const rating = Number(item.rating || 0);
+  return count ? `${rating.toFixed(1)} / 5 · ${count} отзыв${count === 1 ? "" : count < 5 ? "а" : "ов"}` : "Нет отзывов";
+}
+
+function exchangerReviewsHtml(item = {}) {
+  const reviews = Array.isArray(item.reviews) ? item.reviews : [];
+  if (!reviews.length) return `<p class="empty-chat">Отзывов пока нет.</p>`;
+  return reviews.map((review) => `
+    <article class="ref-item">
+      <div>
+        <h3>${"★".repeat(Math.max(1, Math.min(5, Math.round(Number(review.rating || 0)))))}${"☆".repeat(5 - Math.max(1, Math.min(5, Math.round(Number(review.rating || 0)))))} · ${esc(review.fromLogin || "user")}</h3>
+        <p>${esc(review.text || "").replace(/\n/g, "<br>")}</p>
+        <small>${esc(review.date || new Date(Number(review.createdAt || Date.now())).toLocaleString())}</small>
+      </div>
+    </article>
+  `).join("");
+}
+
+function showExchangerReviews(id) {
+  const item = exchangerById(id);
+  if (!item) return;
+  const name = item.name || item.title || item.login || "Exchange";
+  showModal(`
+    <h2>Отзывы: ${esc(name)}</h2>
+    <p class="desc">Рейтинг: <strong>${esc(exchangerRatingText(item))}</strong></p>
+    <div class="requisites-list">${exchangerReviewsHtml(item)}</div>
+  `);
+}
+
 function exchangerCardView(item) {
   const name = item.name || item.title || item.login || "Exchange";
   return `
@@ -6173,12 +6204,12 @@ function exchangerCardView(item) {
           </div>
           <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}">
           <div class="rate-row">
-            <span>Логин</span>
-            <strong>${esc(item.login || item.ownerLogin || "")}</strong>
+            <span>Рейтинг</span>
+            <strong>${esc(exchangerRatingText(item))}</strong>
           </div>
           <div class="rate-row">
-            <span>Связь</span>
-            <strong>Личные сообщения</strong>
+            <span>Отзывы</span>
+            <strong>${Number(item.reviewsCount || 0)}</strong>
           </div>
         </div>
       </button>
@@ -6235,11 +6266,10 @@ function renderExchangerProfile(id) {
           <p class="breadcrumbs">Обменники > ${esc(name)}</p>
           <div class="shop-title"><h1 class="profile-title">${esc(name)}</h1><span class="verify">✓</span></div>
           <p class="desc">${esc(item.description || "")}</p>
-          <div class="stats exchange-stats">
-            <div class="stat"><strong>${esc(item.login || item.ownerLogin || "")}</strong><span>привязанный логин</span></div>
-            <div class="stat"><strong>ЛС</strong><span>сообщения на сайте</span></div>
+          <div class="exchange-actions">
+            <button class="primary" data-exchanger-contact="${esc(item.id)}">Отправить сообщение обменнику <span class="green-dot"></span></button>
+            <button class="ghost-button" data-exchanger-reviews="${esc(item.id)}">Отзывы · ${esc(exchangerRatingText(item))}</button>
           </div>
-          <button class="primary" data-exchanger-contact="${esc(item.id)}">Отправить сообщение обменнику <span class="green-dot"></span></button>
         </div>
       </article>
       <article class="panel exchange-tool">
@@ -6255,6 +6285,9 @@ function renderExchangerProfile(id) {
   `);
   document.querySelector("[data-exchanger-contact]")?.addEventListener("click", () => {
     document.querySelector("[data-exchanger-message-form] textarea")?.focus();
+  });
+  document.querySelector("[data-exchanger-reviews]")?.addEventListener("click", (event) => {
+    showExchangerReviews(event.currentTarget.dataset.exchangerReviews);
   });
   document.querySelector("[data-exchanger-message-form]")?.addEventListener("submit", handleExchangerMessage);
 }
