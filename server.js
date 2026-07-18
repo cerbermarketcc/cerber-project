@@ -2123,6 +2123,22 @@ app.get("/api/admin/overview", async (req, res, next) => {
   }
 });
 
+app.get("/api/admin/payments/payout-config", async (req, res, next) => {
+  try {
+    requireAdmin(req);
+    res.json({
+      nowpaymentsApiKey: Boolean(nowpaymentsApiKey),
+      payoutsEnabled: nowpaymentsPayoutsEnabled,
+      email: Boolean(nowpaymentsEmail),
+      password: Boolean(nowpaymentsPassword),
+      twoFactorSecret: Boolean(nowpaymentsPayout2faSecret),
+      ready: Boolean(nowpaymentsApiKey && nowpaymentsPayoutsEnabled && nowpaymentsEmail && nowpaymentsPassword && nowpaymentsPayout2faSecret)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/admin/private-messages", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
