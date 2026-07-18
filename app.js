@@ -11,6 +11,7 @@ const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const SHOP_PANEL_STAFF_SESSION_KEY = "cerber_shop_panel_staff_v1";
 const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
+const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -28,6 +29,8 @@ let lastUserInteractionAt = 0;
 let shopPanelStateRefreshPromise = null;
 let shopPanelLastStateRefreshAt = 0;
 let activeShopDisputeId = "";
+let syncingLocalDisputeMessages = false;
+const pendingLocalDisputeMessageSyncIds = new Set();
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -1527,6 +1530,7 @@ function applyRemoteState(payload) {
 function mergeMessageLists(remoteMessages = [], localMessages = []) {
   const merged = new Map();
   const keepLocalAfter = Date.now() - 30 * 60 * 1000;
+  const keepPrivateLocalAfter = Date.now() - 24 * 60 * 60 * 1000;
   (Array.isArray(remoteMessages) ? remoteMessages : []).forEach((message) => {
     if (message?.id) merged.set(message.id, message);
   });
@@ -1545,7 +1549,8 @@ function mergeMessageLists(remoteMessages = [], localMessages = []) {
       });
       return;
     }
-    if (Number(message.createdAt || 0) >= keepLocalAfter) merged.set(message.id, message);
+    const localPrivateMessage = String(message.id || "").startsWith("private-") && Boolean(String(message.body || message.text || "").trim() || (Array.isArray(message.attachments) && message.attachments.length));
+    if (Number(message.createdAt || 0) >= (localPrivateMessage ? keepPrivateLocalAfter : keepLocalAfter)) merged.set(message.id, message);
   });
   return [...merged.values()];
 }
@@ -4524,6 +4529,7 @@ function renderMessages() {
     const list = document.querySelector("[data-private-chat-list]");
     if (list) list.scrollTop = list.scrollHeight;
   });
+  if (activePrivateLogin) setTimeout(() => syncLocalPrivateDisputeMessages(activePrivateLogin), 0);
   document.querySelector("[data-private-search-form]")?.addEventListener("submit", handlePrivateSearch);
   document.querySelectorAll("[data-private-open]").forEach((button) => {
     button.onclick = () => {
@@ -4661,6 +4667,81 @@ function activePrivateDisputeOrder(peer = activePrivateLogin) {
     openDisputes.find((order) => conversation.some((message) => message.disputeThreadId && message.disputeThreadId === order.disputeThreadId)) ||
     openDisputes.find((order) => sameLogin(peer, "admin") || sameLogin(peer, order.storeId) || sameLogin(peer, order.storeName) || sameLogin(peer, order.storeTag)) ||
     null;
+}
+
+function readSyncedPrivateDisputeMessageIds() {
+  try {
+    const values = JSON.parse(localStorage.getItem(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY) || "[]");
+    return new Set(Array.isArray(values) ? values.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeSyncedPrivateDisputeMessageIds(ids) {
+  try {
+    localStorage.setItem(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY, JSON.stringify([...ids].slice(-500)));
+  } catch {}
+}
+
+function localPrivateDisputeSyncCandidates(peer, order, userLogin) {
+  const openedAt = Number(order?.disputeOpenedAt || order?.createdAt || 0);
+  const oldestAllowed = Math.max(Date.now() - 24 * 60 * 60 * 1000, openedAt ? openedAt - 5 * 60 * 1000 : 0);
+  return privateConversationMessages(peer, privateVisibleMessages(userLogin), userLogin)
+    .filter((message) => {
+      if (!String(message?.id || "").startsWith("private-")) return false;
+      if (!sameLogin(message.fromLogin, userLogin)) return false;
+      if (!sameLogin(privatePeer(message, userLogin), peer)) return false;
+      if (message.orderId && message.disputeThreadId) return false;
+      if (String(message.system || "").includes("dispute")) return false;
+      if (message.stickerUrl || (Array.isArray(message.emojiUrls) && message.emojiUrls.length)) return false;
+      if (!String(message.body || message.text || "").trim() && !(Array.isArray(message.attachments) && message.attachments.length)) return false;
+      return Number(message.createdAt || 0) >= oldestAllowed;
+    })
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
+    .slice(0, 5);
+}
+
+async function syncLocalPrivateDisputeMessages(peer = activePrivateLogin) {
+  if (syncingLocalDisputeMessages || !peer || !API_ENABLED || !hasApiSession()) return;
+  const user = currentUser();
+  const order = activePrivateDisputeOrder(peer);
+  if (!user || !order) return;
+  const syncedIds = readSyncedPrivateDisputeMessageIds();
+  const candidates = localPrivateDisputeSyncCandidates(peer, order, user.login)
+    .filter((message) => !syncedIds.has(String(message.id)) && !pendingLocalDisputeMessageSyncIds.has(String(message.id)));
+  if (!candidates.length) return;
+  syncingLocalDisputeMessages = true;
+  let changed = false;
+  for (const message of candidates) {
+    const messageId = String(message.id);
+    pendingLocalDisputeMessageSyncIds.add(messageId);
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(order.id)}/dispute/reply`, {
+        method: "POST",
+        timeoutMs: 15000,
+        body: JSON.stringify({
+          body: String(message.body || message.text || "").trim(),
+          attachments: Array.isArray(message.attachments) ? message.attachments : [],
+          toLogin: peer
+        })
+      });
+      syncedIds.add(messageId);
+      applyRemoteState(payload);
+      db.messages = (db.messages || []).filter((item) => item.id !== messageId);
+      changed = true;
+    } catch (error) {
+      console.error("[dispute] local private message sync failed", { messageId, orderId: order.id, message: error.message });
+    } finally {
+      pendingLocalDisputeMessageSyncIds.delete(messageId);
+    }
+  }
+  writeSyncedPrivateDisputeMessageIds(syncedIds);
+  syncingLocalDisputeMessages = false;
+  if (changed) {
+    saveDb();
+    if (route === "messages" && sameLogin(peer, activePrivateLogin)) renderMessages();
+  }
 }
 
 function privateMessageView(msg) {
