@@ -73,6 +73,8 @@ const allowedCorsOrigins = new Set([
   "http://ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+const clientRateLimits = new Map();
+const allowedInlineImageTypes = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
 const cspDirectives = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -270,6 +272,32 @@ function requireAdmin(req) {
 
 function adminClientKey(req, login = "") {
   return `${req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local"}:${loginKey(login)}`;
+}
+
+function clientIp(req) {
+  return String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local").split(",")[0].trim();
+}
+
+function assertClientRateLimit(req, scope, { limit = 30, windowMs = 60 * 1000, identity = "" } = {}) {
+  const now = Date.now();
+  const key = `${scope}:${clientIp(req)}:${loginKey(identity)}`;
+  const record = clientRateLimits.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now > Number(record.resetAt || 0)) {
+    record.count = 0;
+    record.resetAt = now + windowMs;
+  }
+  record.count += 1;
+  clientRateLimits.set(key, record);
+  if (clientRateLimits.size > 5000) {
+    for (const [itemKey, item] of clientRateLimits) {
+      if (now > Number(item.resetAt || 0)) clientRateLimits.delete(itemKey);
+    }
+  }
+  if (record.count > limit) {
+    const error = new Error("Too many requests. Try later.");
+    error.status = 429;
+    throw error;
+  }
 }
 
 function assertAdminRateLimit(req, login) {
@@ -1018,8 +1046,8 @@ async function addTelegramGroupMessage(user, payload = {}) {
   const body = String(payload.body || "").trim();
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 3).map((file) => ({
     name: String(file.name || "file").slice(0, 120),
-    type: String(file.type || "application/octet-stream").slice(0, 80),
-    url: String(file.url || "")
+    type: String(file.type || "image/png").slice(0, 80),
+    url: cleanAttachmentUrl(file.url)
   })).filter((file) => file.url) : [];
 
   if (!body && !attachments.length) {
@@ -1203,6 +1231,7 @@ function verifySellerAdminToken(req) {
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
+    assertClientRateLimit(req, "auth-register", { limit: 5, windowMs: 15 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
     const login = String(req.body.login || "").trim();
@@ -1238,6 +1267,7 @@ app.post("/api/auth/register", async (req, res, next) => {
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     requireDb();
+    assertClientRateLimit(req, "auth-login", { limit: 10, windowMs: 10 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
     const key = loginKey(req.body.login);
@@ -1264,6 +1294,7 @@ app.post("/api/auth/login", async (req, res, next) => {
 app.post("/api/telegram/login", async (req, res, next) => {
   try {
     requireDb();
+    assertClientRateLimit(req, "telegram-login", { limit: 10, windowMs: 10 * 60 * 1000, identity: req.body.login });
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
@@ -1648,6 +1679,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     requireDb();
     const sellerToken = verifySellerAdminToken(req);
     if (!sellerToken) return res.status(401).json({ error: "Нет доступа" });
+    assertClientRateLimit(req, "store-withdrawal", { limit: 5, windowMs: 60 * 1000, identity: sellerToken.storeId });
     if (!sellerTokenCanAccess(sellerToken, "finances")) return sellerForbidden(res);
     const storeId = String(req.body.storeId || sellerToken.storeId || "").trim();
     if (!storeId || storeId !== sellerToken.storeId) return res.status(403).json({ error: "Нет доступа к магазину" });
@@ -2022,9 +2054,8 @@ function sanitizeGroupMessagePayload(payload = {}) {
     return url.replace(/^\//, "");
   }).filter(Boolean) : [];
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 4).map((file, index) => {
-    const url = String(file?.url || "").trim();
-    if (!url || url.length > maxDataImageLength) return null;
-    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
+    const url = cleanAttachmentUrl(file?.url);
+    if (!url) return null;
     return {
       name: String(file?.name || `file-${index + 1}`).slice(0, 120),
       type: String(file?.type || "image/png").slice(0, 80),
@@ -2045,6 +2076,7 @@ app.post("/api/group/messages", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
+    assertClientRateLimit(req, "group-message", { limit: 25, windowMs: 60 * 1000, identity: user.login });
     const payload = sanitizeGroupMessagePayload(req.body || {});
     const message = {
       id: `group-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
@@ -2077,6 +2109,7 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "exchanger-message", { limit: 15, windowMs: 60 * 1000, identity: user.login });
     const state = await loadSettingsState();
     const exchanger = (Array.isArray(state.exchangers) ? state.exchangers : [])
       .find((item) => String(item.id || "") === String(req.params.id || "") && item.status !== "disabled" && item.active !== false);
@@ -2128,6 +2161,7 @@ app.post("/api/private-messages", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "private-message", { limit: 20, windowMs: 60 * 1000, identity: user.login });
     const toLogin = String(req.body.toLogin || req.body.login || "").trim();
     const recipient = await findProfileByLogin(toLogin);
     if (!recipient) return res.status(404).json({ error: "Пользователь не найден" });
@@ -3224,6 +3258,7 @@ app.put("/api/admin/settings", async (req, res, next) => {
 app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
+    assertClientRateLimit(req, "owner-withdrawal", { limit: 5, windowMs: 60 * 1000, identity: admin.login });
     const data = await adminLoadMarketplace();
     const state = data.state;
     const storeById = new Map(data.stores.map((store) => [store.id, store]));
@@ -3744,6 +3779,20 @@ function walletCoinFromRequest(body = {}) {
   return walletCoins.find((coin) => coin.id === requested || coin.payCurrency === requested) || walletCoins[0];
 }
 
+function cleanAttachmentUrl(value = "") {
+  const url = String(value || "").trim();
+  if (!url || url.length > maxDataImageLength) return "";
+  const dataMatch = url.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
+  if (dataMatch) {
+    const mime = String(dataMatch[1] || "").toLowerCase();
+    if (!allowedInlineImageTypes.has(mime)) return "";
+    return url;
+  }
+  if (/^https:\/\/[^\s"'<>]+$/i.test(url)) return url;
+  if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(url)) return url.replace(/^\//, "");
+  return "";
+}
+
 function verifyNowpaymentsSignature(req) {
   if (!nowpaymentsIpnSecret) return true;
   const signature = String(req.headers["x-nowpayments-sig"] || "");
@@ -3752,6 +3801,28 @@ function verifyNowpaymentsSignature(req) {
   const expected = crypto.createHmac("sha512", nowpaymentsIpnSecret).update(body).digest("hex");
   if (signature.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+function nowpaymentsIpnFingerprint(req, kind = "payment") {
+  const body = req.body || {};
+  const id = String(body.payment_id || body.id || body.payout_id || body.withdrawal_id || body.batch_id || body.batchId || "");
+  const orderId = String(body.order_id || body.order || body.orderId || "");
+  const status = String(body.payment_status || body.status || body.payout_status || "").toLowerCase();
+  const raw = JSON.stringify(sortedObject(body));
+  return crypto.createHash("sha256").update(`${kind}:${id}:${orderId}:${status}:${raw}`).digest("hex");
+}
+
+function rememberNowpaymentsIpn(state = {}, fingerprint = "", kind = "payment") {
+  if (!fingerprint) return false;
+  state.nowpaymentsIpnEvents = Array.isArray(state.nowpaymentsIpnEvents) ? state.nowpaymentsIpnEvents : [];
+  if (state.nowpaymentsIpnEvents.some((item) => item.fingerprint === fingerprint)) return false;
+  state.nowpaymentsIpnEvents.unshift({
+    fingerprint,
+    kind,
+    createdAt: Date.now()
+  });
+  state.nowpaymentsIpnEvents = state.nowpaymentsIpnEvents.slice(0, 500);
+  return true;
 }
 
 async function saveSettingsState(state) {
@@ -4160,9 +4231,8 @@ function supportTicketPublic(ticket = {}) {
 function normalizeSupportAttachments(value, maxItems = 8) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, maxItems).map((file, index) => {
-    const url = String(file?.url || "").trim();
-    if (!url || url.length > maxDataImageLength) return null;
-    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url) && !/^https?:\/\//i.test(url)) return null;
+    const url = cleanAttachmentUrl(file?.url);
+    if (!url) return null;
     return {
       name: String(file?.name || `image-${index + 1}`).slice(0, 120),
       type: String(file?.type || "image/png").slice(0, 80),
@@ -6054,6 +6124,7 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
+    assertClientRateLimit(req, "wallet-withdrawal", { limit: 5, windowMs: 60 * 1000, identity: user.login });
     const kind = String(req.body.kind || "ltc_withdraw").trim();
     if (kind !== "ltc_withdraw") return res.status(400).json({ error: "Неизвестный тип вывода" });
 
@@ -6168,6 +6239,7 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
   try {
     requireDb();
     if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
+    const fingerprint = nowpaymentsIpnFingerprint(req, "payment");
     const orderId = String(req.body.order_id || req.body.order || req.body.orderId || "");
     const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
     const paid = ["finished", "confirmed", "sending", "partially_paid"].includes(status);
@@ -6176,6 +6248,7 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
 
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const state = settings?.data || {};
+    if (!rememberNowpaymentsIpn(state, fingerprint, "payment")) return res.json({ ok: true, duplicate: true });
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const order = orders.find((item) => item.id === orderId);
     if (!order) {
@@ -6202,10 +6275,12 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
   try {
     requireDb();
     if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
+    const fingerprint = nowpaymentsIpnFingerprint(req, "payout");
     const payoutId = String(req.body.id || req.body.payout_id || req.body.withdrawal_id || req.body.batch_id || req.body.batchId || "");
     const status = String(req.body.status || req.body.payout_status || "").toLowerCase();
     if (!payoutId) return res.status(400).json({ error: "Unsupported payout callback" });
     const state = await loadSettingsState();
+    if (!rememberNowpaymentsIpn(state, fingerprint, "payout")) return res.json({ ok: true, duplicate: true });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const withdrawal = state.walletWithdrawals.find((item) => (
       String(item.providerPayoutId || "") === payoutId ||
