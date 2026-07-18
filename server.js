@@ -27,7 +27,6 @@ const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
-const storeWithdrawalCooldownMs = 3 * 24 * 60 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const groupChatHiddenSiteEmojiIds = new Set(["024", "025", "026", "027", "028", "029", "030", "031", "032", "033", "034", "035", "036", "037", "038"]);
 const walletCoins = [
@@ -1666,13 +1665,6 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
 
     const finance = storeLedgerFinance(state, store, orders.filter((order) => String(order.storeId || "") === storeId));
     const earnedUsd = finance.netUsd;
-    const lastStoreWithdrawal = state.walletWithdrawals
-      .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
-      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
-    if (lastStoreWithdrawal && Date.now() - Number(lastStoreWithdrawal.createdAt || 0) < storeWithdrawalCooldownMs) {
-      const nextAt = Number(lastStoreWithdrawal.createdAt || 0) + storeWithdrawalCooldownMs;
-      return res.status(429).json({ error: `Вывод магазина доступен раз в 3 дня. Следующий вывод: ${new Date(nextAt).toLocaleString("ru-RU")}` });
-    }
     const requestedUsd = state.walletWithdrawals
       .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
       .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);

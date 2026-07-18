@@ -6833,7 +6833,7 @@ function openWalletWithdrawModal() {
       <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.000001" step="0.000001" max="${esc(max)}" value="${esc(max ? Math.min(max, 0.01).toFixed(6) : "0.000000")}" required></label>
       <label class="field">LTC адрес получателя<input name="address" placeholder="ltc1..." required></label>
       <label class="field">Комментарий<textarea name="note" placeholder="необязательно"></textarea></label>
-      <button class="primary">Создать заявку</button>
+      <button class="primary">Вывести LTC</button>
     </form>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
@@ -6848,7 +6848,7 @@ async function createWalletWithdrawal(event) {
   if (amountLtc <= 0 || amountLtc > userLtcBalance()) return showToast("Недостаточно LTC для вывода");
   if (!address) return showToast("Укажите LTC адрес");
   const submit = event.currentTarget.querySelector("button");
-  setButtonLoading(submit, true, "Создаём заявку");
+  setButtonLoading(submit, true, "Отправляем вывод");
   try {
     if (!API_ENABLED) throw new Error("API недоступен");
     const payload = await apiFetch("/api/wallet/withdrawals", {
@@ -8937,12 +8937,24 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
   const commissionUsd = Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
   const netUsd = Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const monthlyUsd = financeRows
+    .filter((row) => Number(row.createdAt || 0) >= monthStart.getTime() && !["held", "pending", "dispute", "cancelled", "canceled", "rejected"].includes(String(row.status || "").toLowerCase()))
+    .reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
   const heldUsd = storeHeldUsd(store.id, store);
   const requestedUsd = activeWithdrawalUsd("store", store.id);
   const availableUsd = Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Math.max(0, Number(store.storeAvailableBalanceUsd)) : Math.max(0, netUsd - requestedUsd);
   const wallet = store.ltcWallet || storeWallets(store).ltc || "";
+  const withdrawals = (Array.isArray(db.walletWithdrawals) ? db.walletWithdrawals : [])
+    .filter((item) => item.scope === "store" && item.storeId === store.id)
+    .slice()
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
   <section class="seller-dashboard-stats">
+    ${sellerDashStat("Ежемесячный заработок", `${monthlyUsd.toFixed(2)} $`, "за текущий месяц")}
+    ${sellerDashStat("Общий заработок", `${netUsd.toFixed(2)} $`, "не уменьшается после вывода")}
     ${sellerDashStat("К выводу магазину", `${availableUsd.toFixed(2)} $`, `${usdToLtc(availableUsd).toFixed(8)} LTC`)}
     ${sellerDashStat("Заморожено в диспутах", `${heldUsd.toFixed(2)} $`, "доступно после закрытия спора")}
     ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
@@ -8950,14 +8962,18 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
     ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
-    <div class="seller-card-head"><h3>Вывести средства</h3><span>1 раз в 3 дня</span></div>
-    <p class="desc">Баланс магазина: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong>. Вывод идет на LTC кошелек из настроек магазина.</p>
+    <div class="seller-card-head"><h3>Вывести средства</h3><span>доступно каждый день</span></div>
+    <p class="desc">Доступно к выводу: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong>. Общий и месячный заработок остаются в статистике после вывода.</p>
     <p class="desc">LTC кошелек: <strong>${esc(wallet || "не сохранен")}</strong></p>
     <button class="primary" data-shop-payout-request="${esc(store.id)}">Вывести средства</button>
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
     ${financeRows.length ? financeRows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title)} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${Number(tx.netUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
+  </section>
+  <section class="seller-dashboard-card seller-wide-card">
+    <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>
+    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${fmtDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small></span><strong>${Number(item.amountUsd || 0).toFixed(2)} $<br><small>${Number(item.amountLtc || 0).toFixed(8)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
   </section>`;
 }
 function shopStaffTab(store) {
@@ -9487,7 +9503,7 @@ async function requestShopPayout(event) {
     });
     applyRemoteState(payload);
     document.querySelector("[data-modal]")?.classList.remove("open");
-    showToast("Заявка магазина на вывод создана");
+    showToast("Вывод магазина отправлен");
     renderShopPanel("finances");
   } catch (error) {
     showToast(error.message || "Не удалось создать заявку на вывод");
