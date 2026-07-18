@@ -625,7 +625,7 @@ function renderDeals() {
 function renderDisputes() {
   const allRows = Array.isArray(data.disputes) ? data.disputes : [];
   const rows = query ? allRows.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : allRows;
-  return `<section class="split"><article class="table-card"><div class="admin-table-tools"><button class="ghost" data-create-test-dispute="gena">Создать тестовый диспут gena</button></div><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Открыт</th><th></th></tr></thead><tbody>
+  return `<section class="split"><article class="table-card"><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Открыт</th><th></th></tr></thead><tbody>
     ${rows.map((o) => {
       const closed = o.disputeOpen === false || o.disputeChatClosed;
       return `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td><button class="link-button" data-dispute="${esc(o.id)}">${esc(o.login || o.fromLogin || "-")}</button></td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status ${closed ? "" : "off"}">${closed ? "closed" : "open"}</span></td><td>${fmtDate(o.disputeOpenedAt || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Профиль</button> <button class="primary" data-open-dispute-chat="${esc(o.id)}">Чат</button></td></tr>`;
@@ -1203,20 +1203,6 @@ function bindActions() {
       persistAdminUiState();
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(button.dataset.dispute)}`);
       renderDisputePayload(payload);
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
-  root.querySelectorAll("[data-create-test-dispute]").forEach((button) => button.onclick = async () => {
-    const login = button.dataset.createTestDispute || "gena";
-    try {
-      const result = await api(`/api/admin/test-disputes/${encodeURIComponent(login)}`, { method: "POST" });
-      data = result.overview || data;
-      selectedDisputeId = result.payload?.dispute?.id || "test-dispute-gena";
-      persistAdminUiState();
-      renderShell();
-      if (result.payload) renderDisputePayload(result.payload, { openChat: true });
-      toast(result.createdProfile ? `Тестовый диспут создан. Логин gena, пароль ${result.testPassword}` : "Тестовый диспут gena открыт");
     } catch (error) {
       toast(error.message, true);
     }
