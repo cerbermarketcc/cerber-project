@@ -62,7 +62,8 @@ const GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS = new Set([
   "033",
   "034",
   "035",
-  "036"
+  "036",
+  "037"
 ]);
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
@@ -1623,9 +1624,7 @@ async function loadRemoteConfig() {
 }
 
 function siteEmojiPickerHtml(scope) {
-  const emojis = scope === "group"
-    ? SITE_EMOJI_ASSETS.filter((emoji) => !GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS.has(String(emoji.name || "").replace(/^telegram-/, "")))
-    : SITE_EMOJI_ASSETS;
+  const emojis = SITE_EMOJI_ASSETS.filter((emoji) => !GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS.has(String(emoji.name || "").replace(/^telegram-/, "")));
   return emojis.map((emoji) => `
     <button type="button" class="site-emoji-button" data-${scope}-site-emoji="${esc(emoji.url)}" title="${esc(emoji.name)}">
       <img src="${esc(emoji.url)}" alt="">
