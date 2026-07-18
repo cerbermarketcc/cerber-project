@@ -111,6 +111,15 @@ function verifyOwnerPanel(req) {
   }
 }
 
+function requestSource(req) {
+  return {
+    origin: String(req.headers.origin || ""),
+    referer: String(req.headers.referer || ""),
+    host: String(req.headers.host || ""),
+    ip: String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+  };
+}
+
 function adminSecret() {
   return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
 }
@@ -1083,6 +1092,9 @@ app.post("/api/auth/register", async (req, res, next) => {
 
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: key });
+    appendAdminLog("user_registered", login, { login, ...requestSource(req) }).catch((error) => {
+      console.error("[auth] register log failed", { login, message: error.message });
+    });
     res.json({ token, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -1106,6 +1118,9 @@ app.post("/api/auth/login", async (req, res, next) => {
     }
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: user.login_key });
+    appendAdminLog("user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
+      console.error("[auth] login log failed", { login: user.login, message: error.message });
+    });
     res.json({ token, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -1128,6 +1143,9 @@ app.post("/api/telegram/login", async (req, res, next) => {
     }
     const token = crypto.randomBytes(32).toString("hex");
     await supabase.from("sessions").insert({ token, login_key: user.login_key });
+    appendAdminLog("telegram_user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
+      console.error("[auth] telegram login log failed", { login: user.login, message: error.message });
+    });
     res.json({ token, user: publicUser(user), summary: await telegramUserSummary(user) });
   } catch (error) {
     next(error);
@@ -1321,6 +1339,9 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     if (ownerLoginOk && password === (store.adminPassword || "")) {
       const ownerToken = { role: "owner" };
+      appendAdminLog("store_admin_login", store.ownerLogin || store.id, { storeId: store.id, role: "owner", ...requestSource(req) }).catch((error) => {
+        console.error("[store-admin] owner login log failed", { storeId: store.id, message: error.message });
+      });
       return res.json({ token: signSellerAdminToken(store.id, ownerToken), store, staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
@@ -1328,6 +1349,9 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
+    appendAdminLog("store_staff_login", staff.login || store.id, { storeId: store.id, staffLogin: staff.login, role: "staff", ...requestSource(req) }).catch((error) => {
+      console.error("[store-admin] staff login log failed", { storeId: store.id, staffLogin: staff.login, message: error.message });
+    });
     res.json({
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
       store,

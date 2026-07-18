@@ -13,9 +13,8 @@ const SHOP_PANEL_STAFF_SESSION_KEY = "cerber_shop_panel_staff_v1";
 const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
-const API_ORIGIN = location.protocol === "file:"
-  ? PRIMARY_API_ORIGIN
-  : location.origin;
+const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
+const API_ORIGIN = IS_LOCAL_APP_HOST ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const API_ENABLED = location.protocol !== "file:";
 let TURNSTILE_SITE_KEY = "";
@@ -2059,13 +2058,11 @@ function storeAdminPassword(store) {
 }
 
 function sellerAdminLink(store) {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
-  return `${base}/#seller-${store.id}`;
+  return `${PRIMARY_API_ORIGIN}/#seller-${store.id}`;
 }
 
 function shopPanelLink(store) {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
-  return `${base}/#shop-panel-${store.id}`;
+  return `${PRIMARY_API_ORIGIN}/#shop-panel-${store.id}`;
 }
 
 function sellerStores() {
@@ -2538,8 +2535,7 @@ function referralCodeFor(login = db.currentUser) {
 }
 
 function referralLinkFor(login = db.currentUser) {
-  const origin = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
-  return `${origin}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
+  return `${PRIMARY_API_ORIGIN}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
 }
 
 function pendingReferralCode() {
@@ -7532,8 +7528,7 @@ function uniqueExchangeId(name) {
 }
 
 function exchangeAdminLink() {
-  const base = location.protocol === "http:" || location.protocol === "https:" ? location.origin : PRIMARY_API_ORIGIN;
-  return `${base}/#exchange-admin`;
+  return `${PRIMARY_API_ORIGIN}/#exchange-admin`;
 }
 
 function adminCreationNoticeView() {
