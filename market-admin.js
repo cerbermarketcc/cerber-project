@@ -609,7 +609,7 @@ function userDetail(payload) {
     <h3>Покупки</h3>${payload.products.map((p) => `<p>${esc(p.name)} — ${p.count} покупок</p>`).join("") || "<p class='muted'>Покупок нет</p>"}
     <h3>Заказы</h3><div class="table-card">${smallTable(["ID", "Товар", "Сумма", "Статус", "Дата"], payload.orders.map((o) => [o.id, o.product || o.productName || o.productId || "-", fmtMoney(o.amountUsd || o.priceUsd), o.status || o.paymentStatus, fmtDate(o.createdAt)]))}</div>
     <h3>Чаты</h3><div class="table-card">${smallTable(["Дата", "От", "Кому", "Тема", "Сообщение"], payload.messages.slice(0, 80).map((m) => [fmtDate(m.createdAt), m.fromLogin || "-", m.toLogin || "-", m.subject || "-", m.body || m.text || ""]))}</div>
-    <h3>Telegram зеркала</h3><div class="table-card">${smallTable(["Источник", "Кто создал", "Telegram", "Бот", "Дата", "Статус", "Token"], bots.map((b) => [b.source || "-", b.loginKey || b.login || "-", b.username || b.chatId || "-", b.botUsername || "-", fmtDate(b.createdAt), b.blocked ? "blocked" : b.verified ? "active" : "pending", b.token || "-"]))}</div>
+    <h3>Telegram зеркала</h3><div class="table-card">${smallTable(["Источник", "Кто создал", "Telegram", "Бот", "Дата", "Статус"], bots.map((b) => [b.source || "-", b.loginKey || b.login || "-", b.username || b.chatId || "-", b.botUsername || "-", fmtDate(b.createdAt), b.blocked ? "blocked" : b.verified ? "active" : "pending"]))}</div>
   </article>`;
 }
 
@@ -1077,12 +1077,6 @@ function renderMirrorBots() {
   const rows = data.bots.items || [];
   const selected = rows.find((b) => b.id === data.selectedBotId) || rows[0];
   const statusLabel = (bot) => bot.status || (bot.blocked ? "blocked" : bot.active ? "active" : "disabled");
-  const tokenPreview = (token = "") => {
-    const value = String(token || "");
-    if (!value) return "-";
-    if (value.length <= 14) return value;
-    return `${value.slice(0, 8)}...${value.slice(-6)}`;
-  };
   const usersTable = selected?.users?.length
     ? smallTable(["Логин сайта", "TG ID", "Username", "Имя", "Дата рега", "Первый вход", "Последний вход"], selected.users.map((user) => [
       user.login || user.loginKey || "-",
@@ -1112,7 +1106,7 @@ function renderMirrorBots() {
       <p><strong>Бот:</strong> ${esc(selected.botUsername ? `@${selected.botUsername}` : selected.botName || "-")} · <strong>Название:</strong> ${esc(selected.botName || "-")}</p>
       <p><strong>Создано:</strong> ${fmtDate(selected.createdAt)} · <strong>Обновлено:</strong> ${fmtDate(selected.updatedAt)} · <strong>Активность:</strong> ${fmtDate(selected.lastActivityAt)}</p>
       <p><strong>Webhook:</strong> ${selected.webhookOk ? "ok" : "error"} · <code>${esc(selected.webhookUrl || "-")}</code></p>
-      <p><strong>Token:</strong> <code>${esc(tokenPreview(selected.token))}</code> · <strong>Хранилище:</strong> ${esc(selected.storage || "-")}</p>
+      <p><strong>Token:</strong> <code>${esc(selected.tokenMasked || (selected.hasToken ? "скрыт" : "-"))}</code> · <strong>Хранилище:</strong> ${esc(selected.storage || "-")}</p>
       <p><strong>Последняя ошибка:</strong> ${esc(selected.lastTelegramError || "-")}</p>
     </div>
     <h3>Пользователи зеркала</h3>

@@ -60,12 +60,69 @@ let publicRealtimeServer = null;
 let seedReady = false;
 let seedPromise = null;
 const maxDataImageLength = 7_000_000;
+const allowedCorsOrigins = new Set([
+  "https://cerber-project.onrender.com",
+  "https://cerber.to",
+  "https://cerber.love",
+  "https://cerber.vip",
+  "http://u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
+  "http://ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
+  "http://ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+]);
+const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+const cspDirectives = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",
+  "media-src 'self' data: blob: https:",
+  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://cerber.love https://cerber.vip wss://cerber-project.onrender.com wss://cerber.to wss://cerber.love wss://cerber.vip https://api.telegram.org",
+  "frame-src https://challenges.cloudflare.com",
+  "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
+].join("; ");
+
+function isAllowedCorsOrigin(origin = "") {
+  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin);
+}
+
+function maskSecret(value = "") {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.length <= 10) return "********";
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
+function adminPublicBot(bot = {}) {
+  const { token, ...publicBot } = bot;
+  return {
+    ...publicBot,
+    hasToken: Boolean(publicBot.hasToken || token),
+    tokenMasked: publicBot.tokenMasked || maskSecret(token)
+  };
+}
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  const origin = String(req.headers.origin || "");
+  if (!origin) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (isAllowedCorsOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-admin-password, x-owner-password, x-telegram-bot-api-secret-token");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
+  res.setHeader("Content-Security-Policy", cspDirectives);
+  if (req.secure || String(req.headers["x-forwarded-proto"] || "").includes("https")) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  }
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -2250,7 +2307,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
       deposits,
       products: Array.from(products.entries()).map(([name, count]) => ({ name, count })),
       messages,
-      bots: userBots
+      bots: userBots.map(adminPublicBot)
     });
   } catch (error) {
     next(error);
@@ -3794,7 +3851,7 @@ function adminStoreNetAmount(order, state, store) {
 
 function storeOrderHeldForPayout(order = {}) {
   const status = String(order.status || "").toLowerCase();
-  return Boolean(order.disputeOpen || status === "dispute" || status === "pending_payment" || status === "canceled" || status === "cancelled");
+  return Boolean(order.disputeOpen || ["active", "processing", "pending_payment", "dispute", "canceled", "cancelled"].includes(status));
 }
 
 function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
@@ -4357,6 +4414,8 @@ function adminCollectBots(state) {
       blocked: Boolean(value.blocked || value.isBlocked || value.deleted),
       status: value.blocked || value.isBlocked || value.deleted ? "blocked" : value.verified === false ? "disabled" : "active",
       storage: source,
+      hasToken: Boolean(token),
+      tokenMasked: maskSecret(token),
       token,
       source
     });
@@ -4414,7 +4473,8 @@ function adminCollectMirrorBots(state) {
       ownerTelegramId: String(mirror.ownerTelegramId || mirror.ownerChatId || mirror.chatId || ""),
       username: mirror.username || "",
       telegramName: creatorName,
-      token,
+      hasToken: Boolean(token),
+      tokenMasked: maskSecret(token),
       botUsername: mirror.botUsername || "",
       botName: mirror.botName || "",
       displayName: mirror.botUsername ? `@${mirror.botUsername}` : mirror.botName || mirror.id || webhookId || `mirror-${index + 1}`,
