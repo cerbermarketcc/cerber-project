@@ -27,6 +27,14 @@ services:
         sync: false
       - key: NOWPAYMENTS_LTC_WALLET
         sync: false
+      - key: NOWPAYMENTS_PAYOUTS_ENABLED
+        sync: false
+      - key: NOWPAYMENTS_EMAIL
+        sync: false
+      - key: NOWPAYMENTS_PASSWORD
+        sync: false
+      - key: NOWPAYMENTS_PAYOUT_2FA_SECRET
+        sync: false
       - key: PROVERKA_BOT_TOKEN
         sync: false
       - key: SITE_NOTIFY_BOT_TOKEN

@@ -20,6 +20,10 @@ const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
+const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED || "").toLowerCase() === "true";
+const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
+const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
+const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber-project.onrender.com";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -1687,10 +1691,34 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       payCurrency: "ltc",
       address,
       status: "pending",
-      provider: "manual",
+      provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU")
     };
+    if (nowpaymentsPayoutsEnabled) {
+      try {
+        const payoutResult = await createNowpaymentsLtcPayout({
+          amountLtc: request.amountLtc,
+          address,
+          description: `CERBER store withdrawal ${store.name || store.id} / ${request.id}`
+        });
+        request.status = payoutResult.verification ? "processing" : "creating";
+        request.provider = "nowpayments";
+        request.providerPayoutId = payoutResult.payoutId;
+        request.providerPayload = {
+          payoutId: payoutResult.payoutId,
+          payout: payoutResult.payout,
+          verification: payoutResult.verification
+        };
+        request.autoPayoutAt = Date.now();
+        request.requiresProviderVerification = !payoutResult.verification;
+      } catch (error) {
+        request.status = "pending";
+        request.provider = "manual";
+        request.autoPayoutError = String(error?.message || error).slice(0, 500);
+        request.autoPayoutErrorAt = Date.now();
+      }
+    }
     state.walletWithdrawals.unshift(request);
     await notifySiteUser(state, store.ownerLogin || store.id, {
       id: `notice-store-withdrawal-${request.id}-${loginKey(store.ownerLogin || store.id)}`,
@@ -3365,6 +3393,130 @@ async function nowpaymentsJson(pathname, payload) {
     throw error;
   }
   return body;
+}
+
+function base32ToBuffer(value = "") {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = String(value || "").toUpperCase().replace(/[^A-Z2-7]/g, "");
+  let bits = "";
+  for (const char of clean) {
+    const index = alphabet.indexOf(char);
+    if (index >= 0) bits += index.toString(2).padStart(5, "0");
+  }
+  const bytes = [];
+  for (let index = 0; index + 8 <= bits.length; index += 8) {
+    bytes.push(parseInt(bits.slice(index, index + 8), 2));
+  }
+  return Buffer.from(bytes);
+}
+
+function totpCode(secret = "", timestamp = Date.now()) {
+  const key = base32ToBuffer(secret);
+  if (!key.length) return "";
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(timestamp / 30000)));
+  const hmac = crypto.createHmac("sha1", key).update(counter).digest();
+  const offset = hmac[hmac.length - 1] & 0xf;
+  const code = ((hmac[offset] & 0x7f) << 24)
+    | ((hmac[offset + 1] & 0xff) << 16)
+    | ((hmac[offset + 2] & 0xff) << 8)
+    | (hmac[offset + 3] & 0xff);
+  return String(code % 1000000).padStart(6, "0");
+}
+
+async function nowpaymentsRequest(pathname, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.apiKey !== false ? { "x-api-key": nowpaymentsApiKey } : {}),
+    ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+  };
+  const response = await fetch(`https://api.nowpayments.io/v1/${pathname}`, {
+    method: options.method || "POST",
+    headers,
+    ...(Object.prototype.hasOwnProperty.call(options, "body") ? { body: JSON.stringify(options.body || {}) } : {}),
+    signal: AbortSignal.timeout(nowpaymentsTimeoutMs)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.message || body.error || "NOWPayments API error");
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  return body;
+}
+
+async function nowpaymentsPayoutToken() {
+  if (!nowpaymentsEmail || !nowpaymentsPassword) {
+    const error = new Error("NOWPAYMENTS_EMAIL/PASSWORD не настроены для автоматического вывода");
+    error.status = 500;
+    throw error;
+  }
+  const auth = await nowpaymentsRequest("auth", {
+    apiKey: false,
+    body: { email: nowpaymentsEmail, password: nowpaymentsPassword }
+  });
+  const token = auth.token || auth.jwt || auth.access_token || "";
+  if (!token) {
+    const error = new Error("NOWPayments не вернул JWT token для payout");
+    error.status = 502;
+    error.body = auth;
+    throw error;
+  }
+  return token;
+}
+
+function nowpaymentsPayoutId(payload = {}) {
+  return String(
+    payload.id ||
+    payload.payout_id ||
+    payload.batch_id ||
+    payload.batchId ||
+    payload.withdrawal_id ||
+    payload.withdrawalId ||
+    payload.withdrawals?.[0]?.id ||
+    payload.withdrawals?.[0]?.withdrawal_id ||
+    ""
+  );
+}
+
+async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", description = "" } = {}) {
+  if (!nowpaymentsPayoutsEnabled) {
+    const error = new Error("Автоматические NOWPayments payouts выключены");
+    error.status = 503;
+    throw error;
+  }
+  if (!nowpaymentsApiKey) {
+    const error = new Error("NOWPAYMENTS_API_KEY не настроен на сервере");
+    error.status = 500;
+    throw error;
+  }
+  const token = await nowpaymentsPayoutToken();
+  await nowpaymentsRequest("payout/validate-address", {
+    body: { address, currency: "ltc", extra_id: null }
+  });
+  const payout = await nowpaymentsRequest("payout", {
+    token,
+    body: {
+      payout_description: description || "CERBER store withdrawal",
+      ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/payout-ipn`,
+      withdrawals: [{
+        address,
+        currency: "ltc",
+        amount: Number(amountLtc),
+        ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/payout-ipn`
+      }]
+    }
+  });
+  const payoutId = nowpaymentsPayoutId(payout);
+  let verification = null;
+  if (payoutId && nowpaymentsPayout2faSecret) {
+    verification = await nowpaymentsRequest(`payout/${encodeURIComponent(payoutId)}/verify`, {
+      token,
+      body: { verification_code: totpCode(nowpaymentsPayout2faSecret) }
+    });
+  }
+  return { payout, payoutId, verification };
 }
 
 async function createNowpaymentsWalletPayment(paymentPayload) {
@@ -5692,6 +5844,43 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     if (!paid) return res.json({ ok: true, ignored: status });
     await completeProductOrder(order, { ...state, orders }, req.body);
 
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
+  try {
+    requireDb();
+    if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
+    const payoutId = String(req.body.id || req.body.payout_id || req.body.withdrawal_id || req.body.batch_id || req.body.batchId || "");
+    const status = String(req.body.status || req.body.payout_status || "").toLowerCase();
+    if (!payoutId) return res.status(400).json({ error: "Unsupported payout callback" });
+    const state = await loadSettingsState();
+    state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+    const withdrawal = state.walletWithdrawals.find((item) => (
+      String(item.providerPayoutId || "") === payoutId ||
+      String(item.providerPayload?.payoutId || "") === payoutId ||
+      String(item.providerPayload?.payout?.id || "") === payoutId ||
+      String(item.providerPayload?.payout?.batch_id || "") === payoutId
+    ));
+    if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found" });
+    withdrawal.providerStatus = status || withdrawal.providerStatus || "";
+    withdrawal.providerStatusPayload = req.body;
+    withdrawal.providerUpdatedAt = Date.now();
+    if (["finished", "sending"].includes(status)) {
+      withdrawal.status = "paid";
+      withdrawal.processedAt = Date.now();
+      withdrawal.processedBy = "nowpayments";
+    } else if (["failed", "rejected", "cancelled", "canceled"].includes(status)) {
+      withdrawal.status = status === "rejected" ? "rejected" : "failed";
+      withdrawal.failedAt = Date.now();
+    } else if (status) {
+      withdrawal.status = status;
+    }
+    await saveSettingsState(state);
+    notifyRealtime("wallet_withdrawal_status_updated", { id: withdrawal.id, status: withdrawal.status, scope: withdrawal.scope || "user" });
     res.json({ ok: true });
   } catch (error) {
     next(error);
