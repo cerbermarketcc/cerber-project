@@ -175,32 +175,40 @@ function markAdminLoginAttempt(req, login, ok) {
 }
 
 async function ensureAdminSecurity() {
-  await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
+  await withTimeout(ensureSeed(), "admin seed", 8000);
+  const { data: settings } = await withTimeout(
+    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+    "admin security settings query",
+    8000
+  );
   const state = settings?.data || {};
   state.adminSecurity = state.adminSecurity || {};
   if (!state.adminSecurity.passwordHash) {
     state.adminSecurity.passwordHash = await bcrypt.hash(process.env.MARKET_ADMIN_PASSWORD || "admin1212", 12);
     state.adminSecurity.login = "admin";
-    await saveSettingsState(state);
+    await withTimeout(saveSettingsState(state), "admin security save", 8000);
   }
   return state;
 }
 
 async function appendAdminLog(action, actor = "admin", details = {}) {
-  const state = await loadSettingsState();
-  state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
-  state.adminLogs.unshift({
-    id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    action,
-    actor,
-    details,
-    createdAt: Date.now()
-  });
-  state.adminLogs = state.adminLogs.slice(0, 500);
-  await saveSettingsState(state);
-  console.log(`[admin-log] ${action}`, { actor, ...details });
-  notifyRealtime(action, details);
+  try {
+    const state = await withTimeout(loadSettingsState(), "admin log state load", 6000);
+    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
+    state.adminLogs.unshift({
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action,
+      actor,
+      details,
+      createdAt: Date.now()
+    });
+    state.adminLogs = state.adminLogs.slice(0, 500);
+    await withTimeout(saveSettingsState(state), "admin log save", 6000);
+    console.log(`[admin-log] ${action}`, { actor, ...details });
+    notifyRealtime(action, details);
+  } catch (error) {
+    console.error("[admin-log] skipped", { action, actor, message: error.message });
+  }
 }
 
 function notifyAdminRealtime(type = "update", details = {}) {
@@ -1865,9 +1873,9 @@ app.post("/api/admin/login", async (req, res, next) => {
     const password = String(req.body.password || "");
     const ok = loginKey(login) === loginKey(expectedLogin) && await bcrypt.compare(password, state.adminSecurity.passwordHash);
     markAdminLoginAttempt(req, login, ok);
-    await appendAdminLog(ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
+    appendAdminLog(ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
       ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || ""
-    });
+    }).catch((error) => console.error("[admin-login] log failed", { message: error.message }));
     if (!ok) return res.status(401).json({ error: "Неверный логин или пароль" });
     res.json({ token: signAdminToken(expectedLogin, "admin"), admin: { login: expectedLogin, role: "admin" } });
   } catch (error) {
