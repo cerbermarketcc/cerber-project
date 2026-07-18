@@ -4626,6 +4626,22 @@ function privateConversationMessages(peer, messages = privateVisibleMessages(), 
   return messages.filter((msg) => sameLogin(privatePeer(msg, login), peer)).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
+function activePrivateDisputeOrder(peer = activePrivateLogin) {
+  const user = currentUser();
+  if (!user || !peer) return null;
+  const conversation = privateConversationMessages(peer, privateVisibleMessages(user.login), user.login);
+  const disputeOrderIds = new Set(conversation
+    .filter((message) => message.disputeThreadId || String(message.system || "").includes("dispute"))
+    .map((message) => String(message.orderId || ""))
+    .filter(Boolean));
+  const openDisputes = (db.orders || [])
+    .filter((order) => sameLogin(order.login, user.login) && orderHasClientOpenDispute(order))
+    .sort((a, b) => Number(b.disputeOpenedAt || b.createdAt || 0) - Number(a.disputeOpenedAt || a.createdAt || 0));
+  return openDisputes.find((order) => disputeOrderIds.has(String(order.id || ""))) ||
+    openDisputes.find((order) => conversation.some((message) => message.disputeThreadId && message.disputeThreadId === order.disputeThreadId)) ||
+    null;
+}
+
 function privateMessageView(msg) {
   const own = sameLogin(msg.fromLogin, db.currentUser);
   const likes = Array.isArray(msg.likes) ? msg.likes : [];
@@ -4715,18 +4731,37 @@ async function handlePrivateMessageSend(event) {
     type: file.type,
     url: await fileToDataUrl(file)
   }] : (privateVoiceDraft ? [privateVoiceDraft] : []);
+  const disputeOrder = activePrivateDisputeOrder(activePrivateLogin);
+  if (disputeOrder && API_ENABLED && hasApiSession()) {
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(disputeOrder.id)}/dispute/reply`, {
+        method: "POST",
+        timeoutMs: 15000,
+        body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin })
+      });
+      applyRemoteState(payload);
+      privateVoiceDraft = null;
+      showToast("Сообщение отправлено");
+      renderMessages();
+      return;
+    } catch (error) {
+      showToast(error.message || "Не удалось отправить сообщение в диспут");
+      return;
+    }
+  }
   db.messages.unshift({
     id: `private-${Date.now()}`,
-    storeId: "",
-    storeTag: activePrivateLogin,
+    storeId: disputeOrder?.storeId || "",
+    storeTag: disputeOrder?.storeName || activePrivateLogin,
     toLogin: activePrivateLogin,
     fromLogin: db.currentUser,
-    subject: "",
+    subject: disputeOrder ? `Диспут ${disputeDisplayLabel(disputeOrder)} по заказу ${disputeOrder.id}` : "",
     body,
     attachments,
     likes: [],
     createdAt: Date.now(),
-    date: new Date().toLocaleString()
+    date: new Date().toLocaleString(),
+    ...(disputeOrder ? { system: "product-dispute-reply", orderId: disputeOrder.id, disputeThreadId: disputeOrder.disputeThreadId } : {})
   });
   privateVoiceDraft = null;
   saveDb();

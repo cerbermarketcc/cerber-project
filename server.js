@@ -6810,6 +6810,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
+    const replyToLogin = String(req.body.toLogin || "").trim() || store?.ownerLogin || "admin";
     order.status = "dispute";
     order.disputeOpen = true;
     order.disputeChatClosed = false;
@@ -6819,7 +6820,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
       id: `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
-      toLogin: store?.ownerLogin || "admin",
+      toLogin: replyToLogin,
       fromLogin: user.login,
       subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body,
