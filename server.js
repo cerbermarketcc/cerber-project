@@ -2238,6 +2238,120 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/disputes/test", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const data = await adminLoadMarketplace();
+    const state = data.state || {};
+    state.orders = Array.isArray(state.orders) ? state.orders : [];
+    const targetLogin = String(req.body.login || "").trim();
+    const targetStoreId = String(req.body.storeId || "").trim();
+    if (!targetLogin) return res.status(400).json({ error: "Выберите логин клиента" });
+    if (!targetStoreId) return res.status(400).json({ error: "Выберите магазин" });
+
+    const profile = (data.profiles || []).find((item) => sameLogin(item.login, targetLogin));
+    if (!profile) return res.status(404).json({ error: "Клиент не найден" });
+    const store = (data.stores || []).find((item) => String(item.id || "") === targetStoreId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+
+    const now = Date.now();
+    const productTitle = String(req.body.productTitle || req.body.product || "Тестовый товар").trim();
+    const amountUsd = Math.max(0, Number(req.body.amountUsd || 10));
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму диспута" });
+    const products = Array.isArray(store.products) ? store.products : [];
+    const product = products.find((item) => sameLogin(item.title, productTitle) || sameLogin(item.id, productTitle)) || products[0] || {};
+    const positions = Array.isArray(product.positions) ? product.positions : [];
+    const position = positions[0] || {};
+    const cleanLogin = profile.login || targetLogin;
+    const orderId = `test-dispute-${loginKey(cleanLogin) || "user"}-${loginKey(store.id) || "store"}-${now}`;
+    const threadId = `dispute-${orderId}-${now}`;
+    const order = {
+      id: orderId,
+      type: "product",
+      login: cleanLogin,
+      storeId: store.id,
+      productId: product.id || "test-product",
+      positionId: position.id || "test-position",
+      product: product.title || productTitle,
+      storeName: store.name || store.tag || store.id,
+      status: "dispute",
+      paymentStatus: "paid",
+      paymentProvider: "admin-test",
+      createdAt: now,
+      paidAt: now,
+      amountUsd,
+      priceUsd: amountUsd,
+      ltcAmount: amountUsd / 54.2,
+      location: [position.city, position.district].filter(Boolean).join(", ") || "Тестовая позиция",
+      productDescription: product.description || "Тестовый диспут создан владельцем сайта",
+      reservedDescription: String(position.description || product.description || "Тестовая позиция").trim(),
+      reservedFromPosition: Boolean(position.id),
+      reservedStock: false,
+      autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
+      autoReleaseAt: 0,
+      disputeOpen: true,
+      disputeThreadId: threadId,
+      disputeOpenedAt: now,
+      disputeUntil: now + 24 * 60 * 60 * 1000,
+      disputeChatClosed: false,
+      createdByAdmin: admin.login || "admin",
+      testDispute: true
+    };
+    const publicNumber = ensureDisputeNumber(state, order);
+    applyProductOrderCommission(order, state, store);
+    state.orders.unshift(order);
+
+    await notifySiteUser(state, cleanLogin, {
+      id: `notice-test-dispute-client-${order.id}-${loginKey(cleanLogin)}`,
+      eventType: "test_dispute_opened",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Открыт тестовый диспут",
+      body: `Владелец сайта создал тестовый диспут #${publicNumber} по магазину ${store.name || store.id}.`
+    });
+    await notifySiteUser(state, store.ownerLogin || "admin", {
+      id: `notice-test-dispute-store-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
+      eventType: "store_dispute_opened",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Открыт тестовый диспут",
+      body: `Тестовый диспут #${publicNumber}: клиент ${cleanLogin}, товар ${order.product}.`
+    });
+    await notifySiteUser(state, "admin", {
+      id: `notice-test-dispute-owner-${order.id}`,
+      eventType: "admin_dispute_opened",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Открыт тестовый диспут",
+      body: `Диспут #${publicNumber}: ${cleanLogin}, магазин ${store.name || store.id}.`
+    });
+
+    await saveSettingsState(state);
+    const message = {
+      id: `${threadId}-intro`,
+      storeId: order.storeId,
+      storeTag: store.name || store.tag || store.id,
+      toLogin: store.ownerLogin || "admin",
+      fromLogin: cleanLogin,
+      subject: `Диспут #${publicNumber} по заказу ${order.id}`,
+      body: String(req.body.body || "Тестовый диспут создан владельцем сайта для проверки логики чата.").trim(),
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      system: "product-dispute",
+      orderId: order.id,
+      disputeThreadId: threadId
+    };
+    await upsertPrivateMessage(message);
+    await appendAdminLog("test_dispute_created", admin.login, { disputeId: order.id, disputeNumber: publicNumber, login: cleanLogin, storeId: store.id });
+    notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId, testDispute: true });
+    const overview = adminBuildOverview(await adminLoadMarketplace());
+    res.json({ dispute: order, order, request: null, store, clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [message], overview });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/admin/disputes/:id", async (req, res, next) => {
   try {
     requireAdmin(req);
@@ -2463,8 +2577,9 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
   try {
     verifyCmsAdmin(req);
     requireDb();
-    const targetLogin = loginKey(req.body.login || "gena");
-    const targetStoreId = String(req.body.storeId || "testik").trim();
+    const targetLogin = loginKey(req.body.login || "");
+    const targetStoreId = String(req.body.storeId || "").trim();
+    if (!targetLogin) return res.status(400).json({ error: "Не указан логин" });
     if (!targetStoreId) return res.status(400).json({ error: "Не указан магазин" });
     {
     const now = Date.now();
@@ -2485,8 +2600,8 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       system: "store-sale-ledger",
       kind: "store-sale-ledger",
       orderId,
-      login: targetLogin || String(req.body.login || "gena"),
-      fromLogin: targetLogin || String(req.body.login || "gena"),
+      login: targetLogin,
+      fromLogin: targetLogin,
       storeId: targetStoreId,
       storeTag: targetStoreId,
       storeName: String(req.body.storeName || targetStoreId),
@@ -2574,7 +2689,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       });
     }
     const order = result.order;
-    order.login = order.login || req.body.login || "gena";
+    order.login = order.login || req.body.login || targetLogin;
     order.storeId = order.storeId || targetStoreId;
     order.storeName = order.storeName || store?.name || targetStoreId;
     order.status = "completed";
@@ -3597,7 +3712,7 @@ function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
   return {
     id: String(message.orderId || message.id || `order-ledger-${storeId}-${createdAt}`),
     type: "product",
-    login: String(message.login || message.fromLogin || "gena"),
+    login: String(message.login || message.fromLogin || "user"),
     storeId,
     storeName: String(message.storeName || store?.name || storeId),
     product: String(message.product || message.title || "Recovered product"),

@@ -625,13 +625,91 @@ function renderDeals() {
 function renderDisputes() {
   const allRows = Array.isArray(data.disputes) ? data.disputes : [];
   const rows = query ? allRows.filter((item) => disputeSearchText(item).includes(query.replace(/^#/, ""))) : allRows;
-  return `<section class="split"><article class="table-card"><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Открыт</th><th></th></tr></thead><tbody>
+  return `<section class="split"><article class="table-card"><div class="admin-table-actions"><button class="primary" data-create-test-dispute>Создать тестовый диспут</button></div><table><thead><tr><th>Диспут</th><th>Заказ</th><th>Клиент</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Открыт</th><th></th></tr></thead><tbody>
     ${rows.map((o) => {
       const closed = o.disputeOpen === false || o.disputeChatClosed;
       return `<tr><td><strong>${esc(disputeDisplayLabel(o))}</strong></td><td>${esc(o.id)}</td><td><button class="link-button" data-dispute="${esc(o.id)}">${esc(o.login || o.fromLogin || "-")}</button></td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td><span class="status ${closed ? "" : "off"}">${closed ? "closed" : "open"}</span></td><td>${fmtDate(o.disputeOpenedAt || o.createdAt)}</td><td><button class="ghost" data-dispute="${esc(o.id)}">Профиль</button> <button class="primary" data-open-dispute-chat="${esc(o.id)}">Чат</button></td></tr>`;
     }).join("")}
     ${!rows.length ? `<tr><td colspan="8">${query && allRows.length ? `Поиск скрывает ${allRows.length} диспут(ов). Очистите поиск сверху.` : "Диспутов пока нет."}</td></tr>` : ""}
   </tbody></table><p class="muted">Показано: ${rows.length} из ${allRows.length}</p></article><article class="split-card" data-dispute-detail><h2>Диспут</h2><p class="muted">Нажми на профиль клиента или кнопку “Профиль”, чтобы увидеть всю информацию и действия.</p></article></section>`;
+}
+
+function selectOptions(items, valueGetter, labelGetter, emptyText) {
+  const options = (Array.isArray(items) ? items : [])
+    .map((item) => ({ value: String(valueGetter(item) || "").trim(), label: String(labelGetter(item) || "").trim() }))
+    .filter((item) => item.value)
+    .sort((a, b) => a.label.localeCompare(b.label, "ru"))
+    .map((item) => `<option value="${esc(item.value)}">${esc(item.label)}</option>`)
+    .join("");
+  return `<option value="">${esc(emptyText)}</option>${options}`;
+}
+
+function showTestDisputeModal() {
+  document.querySelector("[data-test-dispute-modal]")?.remove();
+  const users = Array.isArray(data.users) ? data.users : [];
+  const stores = Array.isArray(data.stores) ? data.stores : [];
+  const modal = document.createElement("div");
+  modal.className = "admin-modal";
+  modal.dataset.testDisputeModal = "true";
+  modal.innerHTML = `
+    <div class="admin-modal-backdrop" data-close-test-dispute-modal></div>
+    <section class="admin-modal-panel">
+      <header class="admin-modal-head">
+        <div>
+          <h2>Создать тестовый диспут</h2>
+          <p class="muted">Выбери клиента и магазин. После сохранения диспут появится у клиента, владельца и в панели магазина.</p>
+        </div>
+        <button class="ghost" type="button" data-close-test-dispute-modal>Закрыть</button>
+      </header>
+      <form class="form" data-test-dispute-form>
+        <div class="row">
+          <label class="field">Логин клиента
+            <select name="login" required>${selectOptions(users, (u) => u.login, (u) => `${u.login || ""}${u.role ? ` · ${u.role}` : ""}`, "Выберите логин")}</select>
+          </label>
+          <label class="field">Магазин
+            <select name="storeId" required>${selectOptions(stores, (s) => s.id, (s) => `${s.name || s.id}${s.ownerLogin ? ` · ${s.ownerLogin}` : ""}`, "Выберите магазин")}</select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">Сумма, USD<input name="amountUsd" type="number" min="0.01" step="0.01" value="10"></label>
+          <label class="field">Товар<input name="productTitle" value="Тестовый товар"></label>
+        </div>
+        <label class="field">Первое сообщение<textarea name="body" rows="3">Тестовый диспут создан владельцем сайта для проверки логики чата.</textarea></label>
+        <div class="admin-form-actions">
+          <button class="primary" type="submit">Создать диспут</button>
+          <button class="ghost" type="button" data-close-test-dispute-modal>Отмена</button>
+        </div>
+      </form>
+    </section>
+  `;
+  document.body.appendChild(modal);
+  bindAdminButtonFeedback(modal);
+  const close = () => modal.remove();
+  modal.querySelectorAll("[data-close-test-dispute-modal]").forEach((button) => button.addEventListener("click", close));
+  modal.querySelector("[data-test-dispute-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const payload = await api("/api/admin/disputes/test", {
+        method: "POST",
+        body: JSON.stringify(Object.fromEntries(new FormData(form).entries()))
+      });
+      if (payload.overview) data = payload.overview;
+      selectedDisputeId = payload.dispute?.id || "";
+      selectedStoreId = "";
+      selectedUserLogin = "";
+      persistAdminUiState();
+      close();
+      renderShell();
+      renderDisputePayload(payload, { openChat: true });
+      toast("Тестовый диспут создан");
+    } catch (error) {
+      toast(error.message, true);
+      button.disabled = false;
+    }
+  });
 }
 
 function adminDisputeMessageHtml(message) {
@@ -1195,6 +1273,7 @@ function bindActions() {
       toast(error.message, true);
     }
   });
+  root.querySelector("[data-create-test-dispute]")?.addEventListener("click", showTestDisputeModal);
   root.querySelectorAll("[data-dispute]").forEach((button) => button.onclick = async () => {
     try {
       selectedDisputeId = button.dataset.dispute;
