@@ -818,6 +818,15 @@ const uiPhraseTranslations = {
   }
 };
 
+const storedDefaultTranslations = {
+  md: {
+    "Новый магазин": "Magazin nou"
+  },
+  en: {
+    "Новый магазин": "New store"
+  }
+};
+
 function translateUiText(value) {
   const lang = currentLang();
   if (lang === "ru" || value == null) return value;
@@ -873,7 +882,14 @@ function localizedValue(entity = {}, field = "") {
   const translations = entity.translations || entity.i18n || {};
   if (translations?.[lang]?.[field]) return translations[lang][field];
   if (translations?.[field]?.[lang]) return translations[field][lang];
-  return entity[field] || "";
+  return translateStoredDefaultValue(entity[field] || "");
+}
+
+function translateStoredDefaultValue(value) {
+  const source = String(value || "");
+  if (!source.trim()) return source;
+  const dictionary = storedDefaultTranslations[currentLang()] || {};
+  return dictionary[source.trim()] || source;
 }
 
 function applyCmsTextOverrides(overrides) {

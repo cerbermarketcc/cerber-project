@@ -2216,6 +2216,8 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
         ownerLogin: login,
         name: login,
         short: "Новый магазин",
+        shortMd: "Magazin nou",
+        shortEn: "New store",
         description: "",
         image: "assets/cerber-emblem.png",
         cover: "assets/market-banner.png",
