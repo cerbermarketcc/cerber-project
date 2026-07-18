@@ -1695,30 +1695,10 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU")
     };
-    if (nowpaymentsPayoutsEnabled) {
-      try {
-        const payoutResult = await createNowpaymentsLtcPayout({
-          amountLtc: request.amountLtc,
-          address,
-          description: `CERBER store withdrawal ${store.name || store.id} / ${request.id}`
-        });
-        request.status = payoutResult.verification ? "processing" : "creating";
-        request.provider = "nowpayments";
-        request.providerPayoutId = payoutResult.payoutId;
-        request.providerPayload = {
-          payoutId: payoutResult.payoutId,
-          payout: payoutResult.payout,
-          verification: payoutResult.verification
-        };
-        request.autoPayoutAt = Date.now();
-        request.requiresProviderVerification = !payoutResult.verification;
-      } catch (error) {
-        request.status = "pending";
-        request.provider = "manual";
-        request.autoPayoutError = String(error?.message || error).slice(0, 500);
-        request.autoPayoutErrorAt = Date.now();
-      }
-    }
+    await attachNowpaymentsPayoutToWithdrawal(request, {
+      address,
+      description: `CERBER store withdrawal ${store.name || store.id} / ${request.id}`
+    });
     state.walletWithdrawals.unshift(request);
     await notifySiteUser(state, store.ownerLogin || store.id, {
       id: `notice-store-withdrawal-${request.id}-${loginKey(store.ownerLogin || store.id)}`,
@@ -3091,10 +3071,14 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       payCurrency: "ltc",
       address,
       status: "pending",
-      provider: "manual",
+      provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU")
     };
+    await attachNowpaymentsPayoutToWithdrawal(request, {
+      address,
+      description: `CERBER owner commission withdrawal / ${request.id}`
+    });
     state.walletWithdrawals.unshift(request);
     await notifySiteUser(state, admin.login, {
       id: `notice-owner-withdrawal-${request.id}-${loginKey(admin.login)}`,
@@ -3533,6 +3517,35 @@ async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", descrip
     });
   }
   return { payout, payoutId, verification };
+}
+
+async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", description = "" } = {}) {
+  if (!withdrawal) return withdrawal;
+  withdrawal.provider = nowpaymentsPayoutsEnabled ? "nowpayments" : "manual";
+  if (!nowpaymentsPayoutsEnabled) return withdrawal;
+  try {
+    const payoutResult = await createNowpaymentsLtcPayout({
+      amountLtc: withdrawal.amountLtc,
+      address: address || withdrawal.address || "",
+      description
+    });
+    withdrawal.status = payoutResult.verification ? "processing" : "creating";
+    withdrawal.provider = "nowpayments";
+    withdrawal.providerPayoutId = payoutResult.payoutId;
+    withdrawal.providerPayload = {
+      payoutId: payoutResult.payoutId,
+      payout: payoutResult.payout,
+      verification: payoutResult.verification
+    };
+    withdrawal.autoPayoutAt = Date.now();
+    withdrawal.requiresProviderVerification = !payoutResult.verification;
+  } catch (error) {
+    withdrawal.status = "pending";
+    withdrawal.provider = "manual";
+    withdrawal.autoPayoutError = String(error?.message || error).slice(0, 500);
+    withdrawal.autoPayoutErrorAt = Date.now();
+  }
+  return withdrawal;
 }
 
 async function createNowpaymentsWalletPayment(paymentPayload) {

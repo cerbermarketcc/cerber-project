@@ -432,7 +432,7 @@ function renderDashboard() {
     </section>
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
-      <p class="muted">Доступно к выводу: <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Вывод создается на LTC счет площадки из настроек.</p>
+      <p class="muted">Доступно к выводу: <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Комиссия начисляется автоматически с покупок клиентов, вывод отправляется на LTC счет площадки.</p>
       <form data-owner-withdraw-form>
         <div class="row">
           <label class="field">Сумма USD<input name="amountUsd" type="number" min="0.01" step="0.01" max="${esc(s.ownerWithdrawableUsd || 0)}" value="${esc(Number(s.ownerWithdrawableUsd || 0).toFixed(2))}"></label>
