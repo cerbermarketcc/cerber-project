@@ -2694,7 +2694,10 @@ function layout(content) {
       </header>
       ${content}
     </main>
-    <button class="menu" data-menu aria-label="Меню"><span></span><span></span><span></span></button>
+    <section class="quick-actions" aria-label="Quick actions">
+      <button class="quick-action quick-support" data-route="support" aria-label="Support" title="Support">${navIcon("support")}</button>
+      <button class="quick-action menu" data-menu aria-label="Menu" title="Menu"><span></span><span></span><span></span></button>
+    </section>
     <section class="dock">
       <button class="theme-toggle" data-theme-toggle>
         <span>${db.theme === "dark" ? tr("themeDark") : tr("themeLight")}</span>
@@ -2935,6 +2938,9 @@ function renderHome() {
   const stores = homeStores(activeHomeTab);
   const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
+    <section class="feed home-mirrors-first">
+      ${officialMirrorsView()}
+    </section>
     <section class="hero">
       <h1>${topTitleView()}</h1>
       <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
@@ -2944,8 +2950,7 @@ function renderHome() {
         <button class="tab ${activeHomeTab === "new" ? "active" : ""}" data-home-tab="new">${tr("new")}</button>
       </div>
     </section>
-    <section class="feed">
-      ${officialMirrorsView()}
+    <section class="feed home-feed">
       <div class="store-feed" data-feed>${cards}</div>
     </section>
   `);
@@ -3413,8 +3418,6 @@ function renderFilters() {
 function storeCard(store) {
   const storeName = localizedValue(store, "name");
   const storeShort = localizedValue(store, "short");
-  const newLabel = db.lang === "en" ? "New" : db.lang === "md" ? "Nou" : "Новый";
-  const isNewStore = storeInPlacement(store, "NEW");
   const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "md" ? "Oprit" : "Остановлен";
   const isStopped = storeIsStopped(store);
   return `
@@ -3424,7 +3427,6 @@ function storeCard(store) {
           <div class="shop-head">
             <div>
               <div class="shop-title"><h2>${esc(storeName)}</h2><span class="verify">✓</span></div>
-              ${isNewStore ? `<span class="new-store-badge">${esc(newLabel)}</span>` : ""}
               ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
               <p class="desc">${esc(storeShort)}</p>
             </div>
