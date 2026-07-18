@@ -105,6 +105,57 @@ function adminPublicBot(bot = {}) {
   };
 }
 
+async function hashPanelPassword(password = "") {
+  const value = String(password || "");
+  if (!value) return "";
+  return bcrypt.hash(value, 12);
+}
+
+async function verifyPanelPassword(password = "", passwordHash = "", legacyPassword = "") {
+  const value = String(password || "");
+  const hash = String(passwordHash || "");
+  if (hash) {
+    try {
+      if (await bcrypt.compare(value, hash)) return true;
+    } catch {
+      return false;
+    }
+  }
+  const legacy = String(legacyPassword || "");
+  return Boolean(legacy && value === legacy);
+}
+
+async function normalizeStoreSecrets(store = {}) {
+  const item = { ...store };
+  const legacyAdminPassword = String(item.adminPassword || "").trim();
+  if (legacyAdminPassword) {
+    item.adminPasswordHash = await hashPanelPassword(legacyAdminPassword);
+  }
+  delete item.adminPassword;
+  item.staff = await Promise.all((Array.isArray(item.staff) ? item.staff : []).map(async (member) => {
+    const staffItem = { ...member };
+    const legacyPassword = String(staffItem.password || "").trim();
+    if (legacyPassword) {
+      staffItem.passwordHash = await hashPanelPassword(legacyPassword);
+    }
+    delete staffItem.password;
+    return staffItem;
+  }));
+  return item;
+}
+
+function storeSecretsSnapshot(store = {}) {
+  return JSON.stringify({
+    adminPassword: store.adminPassword || "",
+    adminPasswordHash: store.adminPasswordHash || "",
+    staff: (Array.isArray(store.staff) ? store.staff : []).map((member) => ({
+      login: member?.login || "",
+      password: member?.password || "",
+      passwordHash: member?.passwordHash || ""
+    }))
+  });
+}
+
 app.use((req, res, next) => {
   const origin = String(req.headers.origin || "");
   if (!origin) {
@@ -1331,7 +1382,7 @@ function sellerStorePatch(existing = {}, input = {}) {
       const login = String(member?.login || "").trim();
       const previous = existingStaff.find((item) => sameLogin(item?.login, login)) || {};
       const password = String(member?.password || "").trim();
-      const passwordHash = String(member?.passwordHash || previous.passwordHash || "").trim();
+      const passwordHash = String(previous.passwordHash || "").trim();
       return {
         login,
         password: password || String(previous.password || "").trim(),
@@ -1360,6 +1411,7 @@ function sellerStorePatch(existing = {}, input = {}) {
     autoReleaseHours: Math.min(168, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
     ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
     adminPassword: String(input.adminPassword ?? existing.adminPassword ?? "").trim(),
+    adminPasswordHash: String(input.adminPassword ? "" : existing.adminPasswordHash || "").trim(),
     staff,
     updatedAt: Date.now()
   };
@@ -1423,7 +1475,8 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
-    if (ownerLoginOk && password === (store.adminPassword || "")) {
+    if (ownerLoginOk && await verifyPanelPassword(password, store.adminPasswordHash, store.adminPassword)) {
+      await persistStoreSecretMigration(store);
       const ownerToken = { role: "owner" };
       appendAdminLog("store_admin_login", store.ownerLogin || store.id, { storeId: store.id, role: "owner", ...requestSource(req) }).catch((error) => {
         console.error("[store-admin] owner login log failed", { storeId: store.id, message: error.message });
@@ -1431,9 +1484,10 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       return res.json({ token: signSellerAdminToken(store.id, ownerToken), store: publicStoreForState(store, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
-    if (!staff || password !== String(staff.password || "")) {
+    if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
+    await persistStoreSecretMigration(store);
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     appendAdminLog("store_staff_login", staff.login || store.id, { storeId: store.id, staffLogin: staff.login, role: "staff", ...requestSource(req) }).catch((error) => {
       console.error("[store-admin] staff login log failed", { storeId: store.id, staffLogin: staff.login, message: error.message });
@@ -1463,7 +1517,7 @@ app.get("/api/store-admin/state", async (req, res, next) => {
       if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
-    res.json({ store, ...(await stateForStoreAdmin(token.storeId, token)) });
+    res.json({ store: publicStoreForState(store, { includeStaff: true }), ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }
@@ -1483,7 +1537,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
-    const mergedStore = sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token));
+    const mergedStore = await normalizeStoreSecrets(sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token)));
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
     await saveOwnerStoreFallback(mergedStore);
     console.log("[store-admin] store saved", {
@@ -1498,7 +1552,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
-    res.json({ store: mergedStore, ...(await stateForStoreAdmin(mergedStore.id, token)) });
+    res.json({ store: publicStoreForState(mergedStore, { includeStaff: true }), ...(await stateForStoreAdmin(mergedStore.id, token)) });
   } catch (error) {
     next(error);
   }
@@ -2240,19 +2294,21 @@ app.post("/api/owner/stores", async (req, res, next) => {
     requireDb();
     verifyOwnerPanel(req);
     const store = adminBuildStoreFromBody(req.body || {});
-    if (!store.name || !store.ownerLogin || !store.adminPassword) {
+    const panelPassword = String(req.body?.adminPassword || store.adminPassword || "").trim();
+    if (!store.name || !store.ownerLogin || !panelPassword) {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
+    const protectedStore = await normalizeStoreSecrets(store);
     const { data: savedRow, error: storeError } = await supabase
       .from("stores")
-      .upsert({ id: store.id, data: store }, { onConflict: "id" })
+      .upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" })
       .select("id,data")
       .single();
     if (storeError) {
       console.error("[owner-store] db save failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: storeError.message });
       throw storeError;
     }
-    const savedStore = savedRow?.data || store;
+    const savedStore = savedRow?.data || protectedStore;
     const { data: readBack, error: readBackError } = await supabase.from("stores").select("id,data").eq("id", savedStore.id).maybeSingle();
     if (readBackError || !readBack?.data) {
       console.error("[owner-store] db readback failed", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, error: readBackError?.message || "missing row" });
@@ -2263,9 +2319,9 @@ app.post("/api/owner/stores", async (req, res, next) => {
     await saveOwnerStoreFallback(readBack.data);
     await clearDeletedStoreTombstone(savedStore.id);
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
-    res.json({ store: readBack.data, panel: adminStorePanelLinks(readBack.data), verifiedSaved: Boolean(savedRow?.id), verifiedReadBack: true });
+    res.json({ store: publicStoreForState(readBack.data, { includeStaff: true }), panel: adminStorePanelLinks(readBack.data, panelPassword), verifiedSaved: Boolean(savedRow?.id), verifiedReadBack: true });
     Promise.resolve().then(async () => {
-      await adminEnsureSellerProfile(savedStore.ownerLogin, savedStore.adminPassword, savedStore.ownerLogin);
+      await adminEnsureSellerProfile(savedStore.ownerLogin, panelPassword, savedStore.ownerLogin);
       await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
       console.log("[owner-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
     }).catch((error) => {
@@ -2391,8 +2447,12 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
         reviewsList: []
       };
       store.ownerLogin = login;
-      store.adminPassword = String(storePassword || store.adminPassword || "123");
-      await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+      const panelPassword = String(storePassword || store.adminPassword || "123").trim();
+      if (panelPassword) await adminEnsureSellerProfile(login, panelPassword, login);
+      store.adminPassword = panelPassword;
+      const protectedStore = await normalizeStoreSecrets(store);
+      await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
+      await saveOwnerStoreFallback(protectedStore);
     }
 
     await appendAdminLog("user_updated", admin.login, { login, role, name: name || "", sellerPanel: Boolean(role === "seller" || storePassword) });
@@ -2510,7 +2570,7 @@ app.post("/api/admin/disputes/test", async (req, res, next) => {
     await appendAdminLog("test_dispute_created", admin.login, { disputeId: order.id, disputeNumber: publicNumber, login: cleanLogin, storeId: store.id });
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId, testDispute: true });
     const overview = adminBuildOverview(await adminLoadMarketplace());
-    res.json({ dispute: order, order, request: null, store, clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [message], overview });
+    res.json({ dispute: order, order, request: null, store: publicStoreForState(store, { includeStaff: true }), clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [message], overview });
   } catch (error) {
     next(error);
   }
@@ -2534,7 +2594,7 @@ app.get("/api/admin/disputes/:id", async (req, res, next) => {
       message.orderId === id ||
       message.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute, order, request, store, clientLogin, storeLogin, amount: adminOrderAmount(dispute), disputeNumber: disputeNumber(dispute), messages });
+    res.json({ dispute, order, request, store: publicStoreForState(store, { includeStaff: true }), clientLogin, storeLogin, amount: adminOrderAmount(dispute), disputeNumber: disputeNumber(dispute), messages });
   } catch (error) {
     next(error);
   }
@@ -2583,7 +2643,7 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
       item.orderId === id ||
       item.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store, clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store, { includeStaff: true }), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
   } catch (error) {
     next(error);
   }
@@ -2654,7 +2714,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       item.orderId === id ||
       item.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store, clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store, { includeStaff: true }), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
   } catch (error) {
     next(error);
   }
@@ -2664,19 +2724,21 @@ app.post("/api/admin/stores", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     const store = adminBuildStoreFromBody(req.body || {});
-    if (!store.name || !store.ownerLogin || !store.adminPassword) {
+    const panelPassword = String(req.body?.adminPassword || store.adminPassword || "").trim();
+    if (!store.name || !store.ownerLogin || !panelPassword) {
       return res.status(400).json({ error: "Укажите название магазина, логин владельца и пароль панели" });
     }
     const { data: existing } = await supabase.from("stores").select("id").eq("id", store.id).maybeSingle();
     if (existing) return res.status(409).json({ error: "Магазин с таким ID уже существует" });
-    await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
-    await clearDeletedStoreTombstone(store.id);
-    const panel = adminStorePanelLinks(store);
-    await appendAdminLog("store_created", admin.login, { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
-    console.log("[admin-store] created", { storeId: store.id, ownerLogin: store.ownerLogin, panelUrl: panel.shopPanelUrl });
-    notifyRealtime("store_created", { storeId: store.id, ownerLogin: store.ownerLogin, source: "market-admin" });
-    res.json({ store, panel, overview: adminBuildOverview(await adminLoadMarketplace()) });
+    await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
+    const protectedStore = await normalizeStoreSecrets(store);
+    await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
+    await clearDeletedStoreTombstone(protectedStore.id);
+    const panel = adminStorePanelLinks(protectedStore, panelPassword);
+    await appendAdminLog("store_created", admin.login, { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
+    console.log("[admin-store] created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
+    notifyRealtime("store_created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, source: "market-admin" });
+    res.json({ store: publicStoreForState(protectedStore, { includeStaff: true }), panel, overview: adminBuildOverview(await adminLoadMarketplace()) });
   } catch (error) {
     next(error);
   }
@@ -2688,13 +2750,15 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     const { data: row } = await supabase.from("stores").select("data").eq("id", req.params.id).maybeSingle();
     if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = adminBuildStoreFromBody(req.body || {}, row.data);
-    if (store.ownerLogin) await adminEnsureSellerProfile(store.ownerLogin, store.adminPassword, store.ownerLogin);
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
-    await clearDeletedStoreTombstone(store.id);
-    await appendAdminLog("store_updated", admin.login, { storeId: store.id, fields: Object.keys(req.body || {}) });
-    console.log("[admin-store] updated", { storeId: store.id, fields: Object.keys(req.body || {}) });
-    notifyRealtime("store_updated", { storeId: store.id, source: "market-admin" });
-    res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(store) });
+    const panelPassword = String(req.body?.adminPassword || "").trim();
+    if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
+    const protectedStore = await normalizeStoreSecrets(store);
+    await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
+    await clearDeletedStoreTombstone(protectedStore.id);
+    await appendAdminLog("store_updated", admin.login, { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
+    console.log("[admin-store] updated", { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
+    notifyRealtime("store_updated", { storeId: protectedStore.id, source: "market-admin" });
+    res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(protectedStore, panelPassword) });
   } catch (error) {
     next(error);
   }
@@ -2925,7 +2989,7 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
     await appendAdminLog("product_updated", admin.login, { storeId: store.id, productId: product.id });
     console.log("[product] updated", { storeId: store.id, productId: product.id });
     notifyRealtime("product_updated", { storeId: store.id, productId: product.id });
-    res.json({ store });
+    res.json({ store: publicStoreForState(store, { includeStaff: true }) });
   } catch (error) {
     next(error);
   }
@@ -2942,7 +3006,7 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
     await appendAdminLog("product_deleted", admin.login, { storeId: store.id, productId: req.params.productId });
     console.log("[product] deleted", { storeId: store.id, productId: req.params.productId });
     notifyRealtime("product_deleted", { storeId: store.id, productId: req.params.productId });
-    res.json({ store });
+    res.json({ store: publicStoreForState(store, { includeStaff: true }) });
   } catch (error) {
     next(error);
   }
@@ -3388,6 +3452,20 @@ async function saveOwnerStoreFallback(store = {}) {
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
   console.log("[owner-store] fallback saved", { storeId: store.id, ownerStores: state.ownerStores.length });
+}
+
+async function persistStoreSecretMigration(store = {}) {
+  if (!store.id) return store;
+  const before = storeSecretsSnapshot(store);
+  const normalized = await normalizeStoreSecrets(store);
+  const after = storeSecretsSnapshot(normalized);
+  if (before === after) return store;
+  await supabase.from("stores").upsert({ id: normalized.id, data: normalized }, { onConflict: "id" });
+  await saveOwnerStoreFallback(normalized);
+  Object.keys(store).forEach((key) => delete store[key]);
+  Object.assign(store, normalized);
+  console.log("[store-admin] secrets migrated", { storeId: normalized.id });
+  return store;
 }
 
 async function removeOwnerStoreFallback(storeId) {
@@ -4062,12 +4140,12 @@ function adminLegacyStorePlacements(store = null) {
   return placements.length ? placements : ["stores"];
 }
 
-function adminStorePanelLinks(store) {
+function adminStorePanelLinks(store, passwordOverride = "") {
   return {
     shopPanelUrl: `${publicBaseUrl}/#shop-panel-${store.id}`,
     sellerPanelUrl: `${publicBaseUrl}/#seller-${store.id}`,
     login: store.ownerLogin || store.id,
-    password: store.adminPassword || ""
+    password: String(passwordOverride || "")
   };
 }
 
@@ -4098,6 +4176,8 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const ownerLogin = String(body.ownerLogin || body.login || existing?.ownerLogin || "").trim();
   const name = String(body.name || existing?.name || ownerLogin || "New store").trim();
   const id = existing?.id || adminSlug(body.id || name || ownerLogin, "store");
+  const inputAdminPassword = String(body.adminPassword || "").trim();
+  const fallbackAdminPassword = existing ? String(existing.adminPassword || "").trim() : "123";
   const countries = adminNormalizeStoreRegions(body.countries || body.regions || existing?.countries);
   const placementInput = body.placements ?? body.placement ?? existing?.placements ?? existing?.placement ?? adminLegacyStorePlacements(existing);
   const placements = adminNormalizeStorePlacements(placementInput);
@@ -4121,7 +4201,8 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     short: String(body.short || existing?.short || "").trim(),
     description: String(body.description || existing?.description || "").trim(),
     ownerLogin,
-    adminPassword: String(body.adminPassword || existing?.adminPassword || "123").trim(),
+    adminPassword: inputAdminPassword || fallbackAdminPassword,
+    adminPasswordHash: inputAdminPassword ? "" : String(existing?.adminPasswordHash || "").trim(),
     image,
     avatar: image,
     cover,
