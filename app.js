@@ -27,6 +27,7 @@ let realtimePendingRender = false;
 let lastUserInteractionAt = 0;
 let shopPanelStateRefreshPromise = null;
 let shopPanelLastStateRefreshAt = 0;
+let activeShopDisputeId = "";
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -6914,8 +6915,9 @@ function paidStoreOrders(storeId) {
   const store = storeById(storeId);
   return allStoreOrders(storeId, store).filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
-    if (order.disputeOpen || ["pending_payment", "canceled", "dispute"].includes(order.status)) return false;
-    return ["active", "completed", "closed"].includes(order.status) || order.paymentStatus === "paid";
+    const status = String(order.status || "").toLowerCase();
+    if (order.disputeOpen || ["active", "pending_payment", "processing", "canceled", "cancelled", "dispute"].includes(status)) return false;
+    return ["completed", "closed", "paid"].includes(status);
   });
 }
 
@@ -6937,7 +6939,8 @@ function heldStoreOrders(storeId) {
   return allStoreOrders(storeId).filter((order) => {
     if (order.type !== "product" || order.storeId !== storeId) return false;
     if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
-    return order.disputeOpen || String(order.status || "").toLowerCase() === "dispute";
+    const status = String(order.status || "").toLowerCase();
+    return order.disputeOpen || ["active", "pending_payment", "processing", "dispute"].includes(status);
   });
 }
 
@@ -8698,39 +8701,23 @@ function shopProductsTab(store, products) {
 
 function shopDisputesTab(store) {
   const disputes = storeDisputes(store.id, store);
-  return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина. Войдите в диспут, чтобы клиент увидел магазин в чате.</p></div></section>
-  <section class="seller-dashboard-card seller-wide-card">
-    <label class="field seller-dispute-search">Найти диспут<input data-shop-dispute-search placeholder="#535, 535, клиент или ID заказа"></label>
-    ${disputes.map((order) => {
-      const messages = disputeMessagesForOrder(order);
-      const label = disputeDisplayLabel(order);
-      const searchText = [label, String(label).replace("#", ""), order.id, order.login, order.product, order.storeName, productOrderStatus(order)].join(" ").toLowerCase();
-      return `
-        <article class="seller-dispute-card" data-shop-dispute-card data-search-text="${esc(searchText)}" data-order-id="${esc(order.id)}">
-          <div class="seller-card-head">
-            <h3>${esc(label)} · ${esc(order.product || order.id)}</h3>
-            <span>${esc(order.login || "")} · ${Number(order.amountUsd || 0).toFixed(2)} $</span>
-          </div>
-          <p class="desc">Номер диспута: <strong>${esc(label)}</strong> · заказ: <strong>${esc(order.id)}</strong> · статус: <strong>${esc(productOrderStatus(order))}</strong></p>
-          <div class="private-chat-list seller-dispute-chat">
-            ${messages.length ? messages.map((message) => privateMessageView(message)).join("") : `<p class="empty-chat">Сообщений по диспуту пока нет.</p>`}
-          </div>
-          ${order.disputeOpen && !order.disputeChatClosed ? `
-            <form class="group-form private-form seller-dispute-form" data-shop-dispute-reply="${esc(order.id)}">
-              <button type="button" class="group-round-button group-attach-button" data-shop-dispute-attach title="Фото или видео">📎</button>
-              <div class="group-input-wrap"><textarea name="body" rows="1" placeholder="Сообщение клиенту"></textarea></div>
-              <input hidden name="attachment" type="file" accept="image/*,video/*,.webp,.gif" data-shop-dispute-attachment>
-              <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
-              <div class="group-file-name" data-shop-dispute-file-name></div>
-            </form>
-            <p>
-              <button class="primary" data-shop-dispute-join="${esc(order.id)}">Войти в диспут</button>
-              <button class="ghost-button" data-shop-dispute-close="${esc(order.id)}">Закрыть спор</button>
-            </p>
-          ` : `<p class="notice">Диспут закрыт. История сохранена, писать больше нельзя.</p>`}
-        </article>
-      `;
-    }).join("") || `<p>Открытых диспутов нет.</p>`}
+  const selectedId = activeShopDisputeId && disputes.some((order) => order.id === activeShopDisputeId)
+    ? activeShopDisputeId
+    : disputes[0]?.id || "";
+  activeShopDisputeId = selectedId;
+  const selected = disputes.find((order) => order.id === selectedId) || null;
+  return `<section class="seller-dashboard-hero"><div><h2>Диспуты</h2><p>Споры по заказам этого магазина. Деньги доступны магазину только после полного закрытия диспута.</p></div></section>
+  <section class="shop-dispute-layout">
+    <article class="seller-dashboard-card seller-wide-card">
+      <label class="field seller-dispute-search">Поиск диспута<input data-shop-dispute-search placeholder="#535, клиент, заказ или товар"></label>
+      <div class="shop-dispute-table">
+        <div class="shop-dispute-head"><span>Диспут</span><span>Клиент</span><span>Сумма</span><span>Статус</span><span></span></div>
+        ${disputes.map((order) => shopDisputeRow(order, order.id === selectedId)).join("") || `<p>Открытых диспутов нет.</p>`}
+      </div>
+    </article>
+    <article class="seller-dashboard-card seller-wide-card shop-dispute-detail" data-shop-dispute-detail>
+      ${selected ? shopDisputeDetail(selected, store) : `<h2>Диспут</h2><p class="desc">Выберите диспут, чтобы увидеть профиль, действия и чат.</p>`}
+    </article>
   </section>`;
 }
 
@@ -8743,6 +8730,127 @@ function disputeMessagesForOrder(order) {
       (order?.id && String(message.subject || "").includes(order.id))
     ))
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+function shopDisputeRow(order, active = false) {
+  const label = disputeDisplayLabel(order);
+  const closed = order.disputeOpen === false || order.disputeChatClosed;
+  const searchText = [label, String(label).replace("#", ""), order.id, order.login, order.product, order.storeName, productOrderStatus(order)].join(" ").toLowerCase();
+  return `<button class="shop-dispute-row ${active ? "active" : ""}" data-shop-dispute-card data-search-text="${esc(searchText)}" data-shop-dispute-select="${esc(order.id)}">
+    <strong>${esc(label)}<small>${esc(order.product || order.id)}</small></strong>
+    <span>${esc(order.login || "-")}</span>
+    <span>${Number(order.amountUsd || 0).toFixed(2)} $</span>
+    <span class="status-pill">${closed ? "closed" : "open"}</span>
+    <span>Профиль</span>
+  </button>`;
+}
+
+function shopDisputeMessageHtml(message, store = null) {
+  const from = message.fromLogin || "system";
+  const own = sameLogin(from, store?.ownerLogin) || sameLogin(from, store?.id);
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  return `<article class="admin-dispute-message ${own ? "own" : ""}">
+    <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
+    <div class="admin-dispute-bubble">
+      <div class="admin-dispute-meta"><strong>${esc(from)}</strong><span>${esc(message.date || new Date(Number(message.createdAt || Date.now())).toLocaleString())}</span></div>
+      ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
+      ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
+      ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
+    </div>
+  </article>`;
+}
+
+function shopDisputeChatHtml(order, store = null) {
+  const messages = disputeMessagesForOrder(order);
+  const closed = order.disputeOpen === false || order.disputeChatClosed;
+  return `<div class="admin-dispute-chat">${messages.length ? messages.map((message) => shopDisputeMessageHtml(message, store)).join("") : `<p class="empty-chat">Сообщений по диспуту пока нет.</p>`}</div>
+    ${!closed ? `<form class="form compact-form admin-dispute-reply" data-shop-dispute-reply="${esc(order.id)}">
+      <label class="field">Ответ в чат<textarea name="body" rows="3" placeholder="Напишите сообщение клиенту/владельцу"></textarea></label>
+      <label class="field">Фото/видео<input name="attachment" type="file" accept="image/*,video/*,.webp,.gif"></label>
+      <button class="primary" type="submit">Отправить в чат</button>
+    </form>` : `<p class="notice">Диспут закрыт полностью. Историю можно смотреть, писать больше нельзя.</p>`}`;
+}
+
+function shopDisputeDetail(order, store = null) {
+  const label = disputeDisplayLabel(order);
+  const closed = order.disputeOpen === false || order.disputeChatClosed;
+  const messages = disputeMessagesForOrder(order);
+  return `<h2>Диспут ${esc(label)}</h2>
+    <div class="admin-dispute-summary">
+      <p><strong>Заказ:</strong> ${esc(order.id || "-")}</p>
+      <p><strong>Клиент:</strong> ${esc(order.login || "-")}</p>
+      <p><strong>Магазин:</strong> ${esc(store?.name || order.storeName || order.storeId || "-")}</p>
+      <p><strong>Сумма:</strong> ${Number(order.amountUsd || 0).toFixed(2)} $</p>
+      <p><strong>Открыт:</strong> ${esc(order.disputeOpenedAt || order.createdAt ? new Date(Number(order.disputeOpenedAt || order.createdAt)).toLocaleString() : "-")}</p>
+      <p><strong>Закрыт:</strong> ${esc(order.disputeClosedAt || order.closedAt ? new Date(Number(order.disputeClosedAt || order.closedAt)).toLocaleString() : "-")}</p>
+      <p><strong>Статус:</strong> ${closed ? "closed" : esc(order.status || "dispute")}</p>
+      <p><strong>Деньги:</strong> ${closed ? "доступны после пересчета баланса" : "заморожены до закрытия диспута"}</p>
+    </div>
+    <div class="admin-dispute-actions">
+      <button class="primary" data-shop-dispute-chat="${esc(order.id)}">Открыть чат</button>
+      ${!closed ? `<button class="ghost-button" data-shop-dispute-join="${esc(order.id)}">Войти в диспут</button>` : ""}
+      ${!closed ? `<button class="ghost-button danger" data-shop-dispute-close="${esc(order.id)}">Закрыть диспут полностью</button>` : ""}
+    </div>
+    <h3>Последние сообщения</h3>
+    <div class="admin-dispute-chat">
+      ${messages.slice(-4).length ? messages.slice(-4).map((message) => shopDisputeMessageHtml(message, store)).join("") : `<p class="empty-chat">Сообщений по диспуту пока нет.</p>`}
+    </div>`;
+}
+
+function showShopDisputeChatModal(orderId) {
+  const store = shopPanelStore() || sellerAdminStore();
+  const order = storeDisputes(store?.id || "", store).find((item) => item.id === orderId);
+  if (!order) return showToast("Диспут не найден");
+  showModal(`
+    <div class="admin-modal-head">
+      <div><h2>Чат диспута ${esc(disputeDisplayLabel(order))}</h2><p class="desc">Клиент: ${esc(order.login || "-")} · Магазин: ${esc(store?.name || order.storeName || "-")}</p></div>
+      <button class="ghost-button" data-close-modal>Закрыть</button>
+    </div>
+    ${shopDisputeChatHtml(order, store)}
+  `, "dispute-chat-modal shop-dispute-modal");
+  bindShopDisputeModalActions(store);
+  requestAnimationFrame(() => {
+    const chat = document.querySelector("[data-modal] .admin-dispute-chat");
+    if (chat) chat.scrollTop = chat.scrollHeight;
+    document.querySelector("[data-modal] textarea")?.focus();
+  });
+}
+
+async function submitShopDisputeReply(form) {
+  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  if (!token) return showToast("Войдите в Shop Admin заново");
+  const fd = new FormData(form);
+  const body = String(fd.get("body") || "").trim();
+  const file = fd.get("attachment");
+  const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
+  if (!body && !attachments.length) return;
+  try {
+    const disputeId = form.dataset.shopDisputeReply;
+    const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(disputeId)}/reply`, {
+      method: "POST",
+      timeoutMs: 15000,
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ body, attachments })
+    });
+    applyRemoteState(payload);
+    activeShopDisputeId = disputeId;
+    showToast("Сообщение отправлено");
+    if (document.querySelector("[data-modal].open .shop-dispute-modal")) {
+      renderShopPanel("disputes");
+      requestAnimationFrame(() => showShopDisputeChatModal(disputeId));
+    } else {
+      renderShopPanel("disputes");
+    }
+  } catch (error) {
+    showToast(error.message || "Не удалось отправить сообщение");
+  }
+}
+
+function bindShopDisputeModalActions() {
+  document.querySelector("[data-modal] [data-shop-dispute-reply]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitShopDisputeReply(event.currentTarget);
+  });
 }
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const grossUsd = Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
@@ -8925,10 +9033,17 @@ function renderShopPanel(activeTab = "dashboard") {
     <main class="shop-panel-page">
       ${html}
     </main>
+    <div class="modal-backdrop" data-modal></div>
     <div class="toast"></div>
   `;
   document.querySelectorAll("[data-shop-tab]").forEach((button) => {
     button.onclick = () => renderShopPanel(button.dataset.shopTab);
+  });
+  document.querySelector("[data-modal]")?.addEventListener("click", (event) => {
+    const overlay = event.currentTarget;
+    if (event.target === overlay || event.target.closest("[data-close-modal]")) {
+      overlay.classList.remove("open");
+    }
   });
   document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", () => {
     try {
@@ -9174,6 +9289,17 @@ function bindShopPanelActions(store, activeTab) {
     });
   });
 
+  document.querySelectorAll("[data-shop-dispute-select]").forEach((button) => {
+    button.onclick = () => {
+      activeShopDisputeId = button.dataset.shopDisputeSelect || "";
+      renderShopPanel("disputes");
+    };
+  });
+
+  document.querySelectorAll("[data-shop-dispute-chat]").forEach((button) => {
+    button.onclick = () => showShopDisputeChatModal(button.dataset.shopDisputeChat || "");
+  });
+
   document.querySelectorAll("[data-shop-dispute-close]").forEach((button) => {
     button.onclick = async () => {
       const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
@@ -9187,6 +9313,7 @@ function bindShopPanelActions(store, activeTab) {
           }
         });
         applyRemoteState(payload);
+        activeShopDisputeId = button.dataset.shopDisputeClose || activeShopDisputeId;
         showToast("Спор закрыт");
         renderShopPanel("disputes");
       } catch (error) {
@@ -9206,57 +9333,21 @@ function bindShopPanelActions(store, activeTab) {
         });
         const disputeId = button.dataset.shopDisputeJoin;
         applyRemoteState(payload);
+        activeShopDisputeId = disputeId;
         showToast("Магазин вошёл в диспут");
         renderShopPanel("disputes");
         requestAnimationFrame(() => {
-          const card = Array.from(document.querySelectorAll("[data-shop-dispute-card]")).find((item) => item.dataset.orderId === disputeId);
-          card?.scrollIntoView({ behavior: "smooth", block: "center" });
-          card?.querySelector("textarea")?.focus();
+          document.querySelector("[data-shop-dispute-detail] textarea")?.focus();
         });
       } catch (error) {
         showToast(error.message || "Не удалось войти в диспут");
       }
     };
   });
-  document.querySelectorAll("[data-shop-dispute-attach]").forEach((button) => {
-    button.onclick = () => button.closest("form")?.querySelector("[data-shop-dispute-attachment]")?.click();
-  });
-  document.querySelectorAll("[data-shop-dispute-attachment]").forEach((input) => {
-    input.onchange = () => {
-      const file = input.files?.[0];
-      const label = input.closest("form")?.querySelector("[data-shop-dispute-file-name]");
-      if (label) label.textContent = file ? file.name : "";
-    };
-  });
   document.querySelectorAll("[data-shop-dispute-reply]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
-      if (!token) return showToast("Войдите в Shop Admin заново");
-      const fd = new FormData(form);
-      const body = String(fd.get("body") || "").trim();
-      const file = fd.get("attachment");
-      const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
-      if (!body && !attachments.length) return;
-      try {
-        const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(form.dataset.shopDisputeReply)}/reply`, {
-          method: "POST",
-          timeoutMs: 15000,
-          headers: { Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ body, attachments })
-        });
-        const disputeId = form.dataset.shopDisputeReply;
-        applyRemoteState(payload);
-        showToast("Сообщение отправлено");
-        renderShopPanel("disputes");
-        requestAnimationFrame(() => {
-          const card = Array.from(document.querySelectorAll("[data-shop-dispute-card]")).find((item) => item.dataset.orderId === disputeId);
-          card?.scrollIntoView({ behavior: "smooth", block: "center" });
-          card?.querySelector("textarea")?.focus();
-        });
-      } catch (error) {
-        showToast(error.message || "Не удалось отправить сообщение");
-      }
+      await submitShopDisputeReply(form);
     });
   });
   document.querySelector("[data-shop-payout-request]")?.addEventListener("click", openShopPayoutModal);

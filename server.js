@@ -1479,6 +1479,9 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
     });
     notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
+    if (sellerToken) {
+      return res.json({ order, ...(await stateForStoreAdmin(sellerToken.storeId, sellerToken)) });
+    }
     res.json({ order, ...(await stateFor(user || null)) });
   } catch (error) {
     next(error);
@@ -3775,8 +3778,7 @@ function adminOrderAmount(order) {
 
 function adminIsPaidProductOrder(order) {
   const status = String(order.status || "").toLowerCase();
-  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
-  return paymentStatus === "paid" || ["active", "completed", "closed", "paid"].includes(status);
+  return ["completed", "closed", "paid"].includes(status);
 }
 
 function adminIsWithdrawableStoreOrder(order) {

@@ -4744,3 +4744,189 @@ details[data-shop-storage-item] .form {
   gap: 12px;
   padding: 12px 0;
 }
+
+.shop-dispute-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 16px;
+}
+
+.shop-dispute-table {
+  display: grid;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.shop-dispute-head,
+.shop-dispute-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(110px, 0.8fr) minmax(90px, 0.6fr) minmax(86px, 0.6fr) minmax(86px, 0.5fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 720px;
+}
+
+.shop-dispute-head {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.shop-dispute-row {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  color: var(--ink);
+  text-align: left;
+}
+
+.shop-dispute-row.active,
+.shop-dispute-row:hover {
+  border-color: var(--accent);
+}
+
+.shop-dispute-row strong {
+  display: grid;
+  gap: 4px;
+}
+
+.shop-dispute-row small {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.shop-dispute-detail h2,
+.shop-dispute-detail h3 {
+  margin-top: 0;
+}
+
+.admin-dispute-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0;
+}
+
+.admin-dispute-summary p {
+  margin: 0;
+}
+
+.admin-dispute-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.admin-dispute-chat {
+  display: grid;
+  gap: 12px;
+  max-height: 520px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.admin-dispute-message {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+  max-width: 88%;
+}
+
+.admin-dispute-message.own {
+  grid-template-columns: minmax(0, 1fr) 36px;
+  justify-self: end;
+}
+
+.admin-dispute-message.own .admin-dispute-avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.admin-dispute-message.own .admin-dispute-bubble {
+  grid-column: 1;
+  grid-row: 1;
+  border-color: rgba(255, 132, 31, 0.35);
+  background: rgba(255, 132, 31, 0.12);
+}
+
+.admin-dispute-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+}
+
+.admin-dispute-bubble {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+}
+
+.admin-dispute-bubble p {
+  margin: 0;
+  white-space: normal;
+}
+
+.admin-dispute-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-dispute-meta strong {
+  color: var(--ink);
+}
+
+.admin-dispute-reply {
+  margin-top: 12px;
+}
+
+.modal.dispute-chat-modal {
+  width: min(920px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+}
+
+.modal.dispute-chat-modal .admin-dispute-chat {
+  max-height: min(48vh, 520px);
+}
+
+.admin-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.admin-modal-head h2,
+.admin-modal-head p {
+  margin: 0;
+}
+
+@media (max-width: 980px) {
+  .shop-dispute-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-dispute-summary {
+    grid-template-columns: 1fr;
+  }
+}
