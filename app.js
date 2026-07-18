@@ -4662,6 +4662,7 @@ function activePrivateDisputeOrder(peer = activePrivateLogin) {
     .sort((a, b) => Number(b.disputeOpenedAt || b.createdAt || 0) - Number(a.disputeOpenedAt || a.createdAt || 0));
   return openDisputes.find((order) => disputeOrderIds.has(String(order.id || ""))) ||
     openDisputes.find((order) => conversation.some((message) => message.disputeThreadId && message.disputeThreadId === order.disputeThreadId)) ||
+    openDisputes.find((order) => sameLogin(peer, "admin") || sameLogin(peer, order.storeId) || sameLogin(peer, order.storeName) || sameLogin(peer, order.storeTag)) ||
     null;
 }
 
