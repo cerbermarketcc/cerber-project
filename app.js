@@ -68,7 +68,9 @@ const GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS = new Set([
   "033",
   "034",
   "035",
-  "036"
+  "036",
+  "037",
+  "038"
 ]);
 const scheduledRollTimers = new Set();
 const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
@@ -4654,7 +4656,7 @@ function currentGroupRoom() {
 }
 
 function groupRoomLabel(room = currentGroupRoom()) {
-  return ({ ru: "русский чат", md: "moldova chat", en: "english chat" })[room] || "чат";
+  return ({ ru: "Русский чат", md: "Moldova Chat", en: "English Chat" })[room] || "Чат";
 }
 
 function groupRoomMemberKey(login, room = currentGroupRoom()) {
