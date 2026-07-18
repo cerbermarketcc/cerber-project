@@ -175,21 +175,38 @@ function markAdminLoginAttempt(req, login, ok) {
 }
 
 async function ensureAdminSecurity() {
+  const fallbackLogin = process.env.MARKET_ADMIN_LOGIN || "admin";
+  const fallbackPassword = process.env.MARKET_ADMIN_PASSWORD || "admin1212";
   const { data: settings } = await withTimeout(
     supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
     "admin security settings query",
-    8000
-  );
+    3000
+  ).catch((error) => {
+    console.error("[admin-login] settings skipped", { message: error.message });
+    return { data: null };
+  });
+  const canPersistSecurity = Boolean(settings?.data);
   const state = settings?.data || {};
   state.adminSecurity = state.adminSecurity || {};
   if (!state.adminSecurity.passwordHash) {
-    state.adminSecurity.passwordHash = await bcrypt.hash(process.env.MARKET_ADMIN_PASSWORD || "admin1212", 12);
-    state.adminSecurity.login = "admin";
-    await withTimeout(
-      supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" }),
-      "admin security save",
-      8000
-    );
+    state.adminSecurity.login = state.adminSecurity.login || fallbackLogin;
+    state.adminSecurity.plainPassword = fallbackPassword;
+    if (canPersistSecurity) bcrypt.hash(fallbackPassword, 12).then((passwordHash) => {
+      const nextState = {
+        ...state,
+        adminSecurity: {
+          ...state.adminSecurity,
+          passwordHash
+        }
+      };
+      delete nextState.adminSecurity.plainPassword;
+      return withTimeout(
+        supabase.from("app_settings").upsert({ id: "main", data: nextState }, { onConflict: "id" }),
+        "admin security save",
+        8000
+      );
+    }).catch((error) => console.error("[admin-login] security save skipped", { message: error.message }));
+    delete state.adminSecurity.passwordHash;
   }
   return state;
 }
@@ -1874,7 +1891,10 @@ app.post("/api/admin/login", async (req, res, next) => {
     const state = await ensureAdminSecurity();
     const expectedLogin = state.adminSecurity?.login || "admin";
     const password = String(req.body.password || "");
-    const ok = loginKey(login) === loginKey(expectedLogin) && await bcrypt.compare(password, state.adminSecurity.passwordHash);
+    const passwordOk = state.adminSecurity?.passwordHash
+      ? await bcrypt.compare(password, state.adminSecurity.passwordHash)
+      : password === String(state.adminSecurity?.plainPassword || "");
+    const ok = loginKey(login) === loginKey(expectedLogin) && passwordOk;
     markAdminLoginAttempt(req, login, ok);
     appendAdminLog(ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
       ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || ""
@@ -3671,7 +3691,10 @@ async function adminLoadMarketplace() {
   const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
     withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 10000),
     withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 10000),
-    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000),
+    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000).catch((error) => {
+      console.error("[admin] settings fallback", { message: error.message });
+      return { data: { data: {} } };
+    }),
     withTimeout(supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }), "admin profiles query", 10000),
     withTimeout(supabase.from("sessions").select("login_key,created_at"), "admin sessions query", 10000)
   ]);
