@@ -1726,17 +1726,17 @@ app.post("/api/telegram/login", async (req, res, next) => {
 app.get("/api/telegram/wallet/address", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
-    if (!user) return res.status(401).json({ error: "РЎРµСЃСЃРёСЏ РЅРµ РЅР°Р№РґРµРЅР°" });
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const coin = walletCoinFromRequest({ coinId: req.query.coinId || "ltc" });
     if (coin.id !== "ltc") {
-      return res.status(400).json({ error: "РџРѕСЃС‚РѕСЏРЅРЅС‹Р№ Р°РґСЂРµСЃ СЃРµР№С‡Р°СЃ РґРѕСЃС‚СѓРїРµРЅ С‚РѕР»СЊРєРѕ РґР»СЏ LTC" });
+      return res.status(400).json({ error: "Постоянный адрес сейчас доступен только для LTC" });
     }
     res.json({
       address: mainLtcWallet,
       coinId: coin.id,
       payCurrency: coin.payCurrency,
       login: user.login,
-      note: "РџРѕСЃС‚РѕСЏРЅРЅС‹Р№ LTC Р°РґСЂРµСЃ РґР»СЏ РїРѕРїРѕР»РЅРµРЅРёСЏ Р±Р°Р»Р°РЅСЃР°"
+      note: "Постоянный LTC адрес для пополнения баланса"
     });
   } catch (error) {
     next(error);
@@ -5713,7 +5713,7 @@ function recoverMissingProductOrdersFromDisputeMessages(state = {}, stores = [],
         const closedByMessage = disputeMessages.some((message) => {
           const system = String(message.system || "").toLowerCase();
           const text = `${message.subject || ""} ${message.body || ""}`.toLowerCase();
-          return system.includes("closed") || text.includes("закрыт") || text.includes("Р·Р°РєСЂС‹С‚");
+          return system.includes("closed") || text.includes("закрыт");
         });
         if (closedByMessage) {
           const lastMessage = disputeMessages[disputeMessages.length - 1] || {};
@@ -9788,7 +9788,7 @@ const server = app.listen(port, () => {
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
 });
 
-adminRealtimeServer = new WebSocketServer({ server, path: "/api/admin/realtime" });
+adminRealtimeServer = new WebSocketServer({ noServer: true });
 adminRealtimeServer.on("connection", (socket, req) => {
   const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
   const token = url.searchParams.get("token") || "";
@@ -9800,7 +9800,29 @@ adminRealtimeServer.on("connection", (socket, req) => {
   socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
 });
 
-publicRealtimeServer = new WebSocketServer({ server, path: "/api/realtime" });
+publicRealtimeServer = new WebSocketServer({ noServer: true });
 publicRealtimeServer.on("connection", (socket) => {
   socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
+});
+
+server.on("upgrade", (req, socket, head) => {
+  let pathname = "";
+  try {
+    pathname = new URL(req.url || "", `http://${req.headers.host || "localhost"}`).pathname;
+  } catch {
+    socket.destroy();
+    return;
+  }
+  const target = pathname === "/api/admin/realtime"
+    ? adminRealtimeServer
+    : pathname === "/api/realtime"
+      ? publicRealtimeServer
+      : null;
+  if (!target) {
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(req, socket, head, (ws) => {
+    target.emit("connection", ws, req);
+  });
 });

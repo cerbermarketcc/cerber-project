@@ -628,7 +628,13 @@ Object.assign(text.ru, {
   groupMicError: "Не удалось включить микрофон",
   groupMutedToast: "Вы временно замучены",
   groupPinnedSystem: "Сообщение от {author} закреплено.",
-  groupLocalSaveError: "Сообщение сохранено локально, сервер не ответил"
+  groupLocalSaveError: "Сообщение сохранено локально, сервер не ответил",
+  privateSearchHint: "Введите логин пользователя, чтобы сразу открыть личный диалог.",
+  privateLoginPlaceholder: "Логин пользователя",
+  privateDialogs: "Мои диалоги",
+  privateDialog: "Личный диалог",
+  privateCloseDialog: "Закрыть диалог",
+  attachment: "Вложение"
 });
 
 Object.assign(text.md, {
@@ -683,7 +689,13 @@ Object.assign(text.md, {
   groupMicError: "Nu s-a putut porni microfonul",
   groupMutedToast: "Sunteti blocat temporar",
   groupPinnedSystem: "Mesajul de la {author} a fost fixat.",
-  groupLocalSaveError: "Mesajul a fost salvat local, serverul nu a raspuns"
+  groupLocalSaveError: "Mesajul a fost salvat local, serverul nu a raspuns",
+  privateSearchHint: "Introduceti loginul utilizatorului pentru a deschide imediat dialogul privat.",
+  privateLoginPlaceholder: "Login utilizator",
+  privateDialogs: "Dialogurile mele",
+  privateDialog: "Dialog privat",
+  privateCloseDialog: "Inchide dialogul",
+  attachment: "Atasament"
 });
 
 Object.assign(text.en, {
@@ -738,7 +750,13 @@ Object.assign(text.en, {
   groupMicError: "Could not enable microphone",
   groupMutedToast: "You are temporarily muted",
   groupPinnedSystem: "Message from {author} was pinned.",
-  groupLocalSaveError: "Message saved locally, server did not respond"
+  groupLocalSaveError: "Message saved locally, server did not respond",
+  privateSearchHint: "Enter a username to open a private dialog immediately.",
+  privateLoginPlaceholder: "Username",
+  privateDialogs: "My dialogs",
+  privateDialog: "Private dialog",
+  privateCloseDialog: "Close dialog",
+  attachment: "Attachment"
 });
 
 const uiPhraseTranslations = {
@@ -1661,7 +1679,7 @@ async function apiFetch(path, options = {}) {
       return await apiFetchOnce(apiUrl(path, origin), options);
     } catch (error) {
       lastError = error;
-      const canRetry = origin !== PRIMARY_API_ORIGIN && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|РЎРµСЂРІРµСЂ/i.test(String(error.message || error));
+      const canRetry = origin !== PRIMARY_API_ORIGIN && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
       if (!canRetry) throw error;
     }
   }
@@ -3613,7 +3631,7 @@ function productOrderDisputeChat(order) {
             <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
           </div>
           <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-client-dispute-attachment>
-          <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+          <button class="group-round-button group-send-button" title="${tr("send")}">&#10148;</button>
           <div class="group-file-name" data-client-dispute-file-name></div>
         </form>
       ` : `<p class="notice">Диспут закрыт. История сохранена, писать больше нельзя.</p>`}
@@ -4823,16 +4841,16 @@ function renderMessages() {
       <article class="panel private-search-panel">
         <div>
           <h2>${tr("messages")}</h2>
-          <p>Введите логин пользователя, чтобы сразу открыть личный диалог.</p>
+          <p>${tr("privateSearchHint")}</p>
         </div>
         <form class="private-search" data-private-search-form>
-          <input name="login" placeholder="Логин пользователя" autocomplete="off" required>
-          <button class="primary">Найти</button>
+          <input name="login" placeholder="${esc(tr("privateLoginPlaceholder"))}" autocomplete="off" required>
+          <button class="primary">${tr("search")}</button>
         </form>
       </article>
       <div class="private-layout ${activePrivateLogin ? "has-active" : "is-list-only"}">
         <aside class="private-list">
-          <h3>Мои диалоги</h3>
+          <h3>${tr("privateDialogs")}</h3>
           ${conversations.length ? conversations.map((chat) => `
             <button class="${sameLogin(chat.login, activePrivateLogin) ? "active" : ""}" data-private-open="${esc(chat.login)}">
               <span>${esc(chat.login)}</span>
@@ -4846,25 +4864,25 @@ function renderMessages() {
               ${privateAvatarHtml(activePrivateLogin, exchangerForLogin(activePrivateLogin))}
               <div>
                 <h3>${esc(activePrivateLogin)}</h3>
-                <p>Личный диалог</p>
+                <p>${tr("privateDialog")}</p>
               </div>
-              <button class="private-close-chat" type="button" data-private-close title="Закрыть диалог">×</button>
+              <button class="private-close-chat" type="button" data-private-close title="${esc(tr("privateCloseDialog"))}">&times;</button>
             </header>
             <div class="private-chat-list" data-private-chat-list>
               ${activeMessages.length ? activeMessages.map(privateMessageView).join("") : `<p class="empty-chat">${esc(tr("noMessages"))}</p>`}
             </div>
             <form class="group-form private-form" data-private-chat-form>
-              <button type="button" class="group-round-button group-attach-button" data-private-attach title="${esc(tr("groupAttachTitle"))}">📎</button>
+              <button type="button" class="group-round-button group-attach-button" data-private-attach title="${esc(tr("groupAttachTitle"))}">&#128206;</button>
               <div class="group-input-wrap">
                 <textarea name="body" rows="1" placeholder="${esc(tr("groupMessagePlaceholder"))}"></textarea>
-                <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="${esc(tr("groupEmojiTitle"))}">◔</button>
+                <button type="button" class="group-emoji-toggle" data-private-emoji-toggle title="${esc(tr("groupEmojiTitle"))}">&#9786;</button>
                 <div class="group-sticker-row" data-private-sticker-row hidden>
                   ${siteEmojiPickerHtml("private")}
                 </div>
               </div>
               <input hidden name="attachment" type="file" accept="image/*,video/*,audio/*,.webp,.gif" data-private-attachment>
-              <button type="button" class="group-round-button group-voice-button" data-private-voice title="${esc(tr("groupVoiceTitle"))}">🎙</button>
-              <button class="group-round-button group-send-button" title="${tr("send")}">➤</button>
+              <button type="button" class="group-round-button group-voice-button" data-private-voice title="${esc(tr("groupVoiceTitle"))}">&#127908;</button>
+              <button class="group-round-button group-send-button" title="${tr("send")}">&#10148;</button>
               <div class="group-file-name" data-private-file-name></div>
             </form>
           </article>
@@ -4987,7 +5005,7 @@ function privateConversations(messages, login = db.currentUser) {
     if (!current || Number(msg.createdAt || 0) > Number(current.createdAt || 0)) {
       map.set(loginKey(peer), {
         login: peer,
-        preview: msg.body || msg.subject || "Вложение",
+        preview: msg.body || msg.subject || tr("attachment"),
         createdAt: msg.createdAt || 0
       });
     }
