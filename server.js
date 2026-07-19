@@ -448,6 +448,23 @@ function groupMemberEntryKey(value) {
   return cleanLogin ? `${groupRoomKey(room)}:${cleanLogin}` : "";
 }
 
+function normalizeGroupSettings(settings = {}) {
+  const normalized = {
+    title: String(settings.title || "Общий чат"),
+    pinnedMessageId: String(settings.pinnedMessageId || ""),
+    mutedUntil: settings.mutedUntil && typeof settings.mutedUntil === "object" ? settings.mutedUntil : {},
+    rollTimers: Array.isArray(settings.rollTimers) ? settings.rollTimers : [],
+    members: [],
+    presence: settings.presence && typeof settings.presence === "object" ? settings.presence : {},
+    widgetSeenAt: settings.widgetSeenAt && typeof settings.widgetSeenAt === "object" ? settings.widgetSeenAt : {}
+  };
+  (Array.isArray(settings.members) ? settings.members : []).forEach((entry) => {
+    const key = groupMemberEntryKey(entry);
+    if (key && !normalized.members.some((item) => groupMemberEntryKey(item) === key)) normalized.members.push(key);
+  });
+  return normalized;
+}
+
 function publicUser(row) {
   return row ? { login: row.login, name: row.name, role: row.role } : null;
 }
@@ -658,7 +675,10 @@ async function ensureSeed() {
         title: "Общий чат",
         pinnedMessageId: "",
         mutedUntil: {},
-        rollTimers: []
+        rollTimers: [],
+        members: [],
+        presence: {},
+        widgetSeenAt: {}
       },
       referrals: [],
       referralPayments: [],
@@ -866,7 +886,7 @@ async function stateFor(user) {
         exchangers: publicExchangersForState(settingsData.exchangers || [], allMessages),
         exchangeRequests: userExchangeRequests,
         groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
-        groupSettings: settingsData.groupSettings || { title: "Общий чат", pinnedMessageId: "", mutedUntil: {}, rollTimers: [] },
+        groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
         referrals: settingsData.referrals || [],
         referralPayments: settingsData.referralPayments || [],
         referralCodes: settingsData.referralCodes || {},
@@ -2010,8 +2030,8 @@ app.put("/api/state", async (req, res, next) => {
     const state = req.body.state || {};
     const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const currentSettingsData = currentSettings?.data || {};
-    const currentGroupSettings = currentSettingsData.groupSettings || {};
-    const incomingGroupSettings = state.groupSettings || {};
+    const currentGroupSettings = normalizeGroupSettings(currentSettingsData.groupSettings || {});
+    const incomingGroupSettings = normalizeGroupSettings(state.groupSettings || {});
     const mergedGroupMessages = [
       ...(Array.isArray(currentSettingsData.groupMessages) ? currentSettingsData.groupMessages : []),
       ...(Array.isArray(state.groupMessages) ? state.groupMessages : [])
@@ -2118,7 +2138,7 @@ app.post("/api/group/join", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const room = groupRoomKey(req.body?.room);
     const state = await loadSettingsState();
-    const groupSettings = state.groupSettings || {};
+    const groupSettings = normalizeGroupSettings(state.groupSettings || {});
     const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
     const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
     if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) {
@@ -2147,7 +2167,7 @@ app.post("/api/group/presence", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const room = groupRoomKey(req.body?.room);
     const state = await loadSettingsState();
-    const groupSettings = state.groupSettings || {};
+    const groupSettings = normalizeGroupSettings(state.groupSettings || {});
     const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
     const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
     if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) members.push(memberKey);

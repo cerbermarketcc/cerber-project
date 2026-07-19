@@ -216,7 +216,11 @@ const defaults = {
   groupSettings: {
     title: "Общий чат",
     pinnedMessageId: "",
-    mutedUntil: {}
+    mutedUntil: {},
+    rollTimers: [],
+    members: [],
+    presence: {},
+    widgetSeenAt: {}
   },
   orders: [],
   exchangeCards: [],
@@ -5304,11 +5308,16 @@ function groupMemberLogins(room = currentGroupRoom()) {
     .map(groupMemberLoginFromKey);
 }
 
-function isGroupMember(login = db.currentUser) {
-  const key = groupRoomMemberKey(login);
+function isGroupMemberInRoom(login = db.currentUser, room = currentGroupRoom()) {
+  const key = groupRoomMemberKey(login, room);
   const members = mergeGroupMembers(db.groupSettings?.members || [], readStoredGroupMembers());
   return members.some((item) => String(item).toLowerCase() === key.toLowerCase()) ||
-    groupMemberLogins().some((item) => sameLogin(item, login));
+    groupMemberLogins(room).some((item) => sameLogin(item, login));
+}
+
+function isGroupMember(login = db.currentUser) {
+  const members = mergeGroupMembers(db.groupSettings?.members || [], readStoredGroupMembers());
+  return isGroupMemberInRoom(login) || members.some((item) => sameLogin(groupMemberLoginFromKey(item), login));
 }
 
 function markGroupPresence(login = db.currentUser) {
@@ -5525,13 +5534,13 @@ function startGroupChatRefresh() {
     const text = form?.querySelector("textarea")?.value || "";
     if (text.trim() || groupVoiceRecorder?.state === "recording" || groupVoiceDraft || groupEmojiDraft.length) return;
     const before = JSON.stringify({
-      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]),
       settings: db.groupSettings
     });
     const ok = await loadRemoteSession();
     if (!ok || route !== "group-chat") return;
     const after = JSON.stringify({
-      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]).slice(-40),
+      messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]),
       settings: db.groupSettings
     });
     if (before !== after) renderGroupChat();
@@ -5565,6 +5574,7 @@ function renderGroupChat() {
     document.querySelector("[data-group-join]")?.addEventListener("click", joinGroupChat);
     return;
   }
+  if (!isGroupMemberInRoom(user.login)) rememberGroupMember(user.login);
   markGroupPresence(user.login);
   saveGroupPresenceSoon();
   const settings = db.groupSettings || structuredClone(defaults.groupSettings);
@@ -5598,6 +5608,9 @@ function renderGroupChat() {
               <button>${esc(tr("save"))}</button>
             </form>
           ` : ""}
+          <nav class="group-room-tabs" aria-label="${esc(tr("groupChat"))}">
+            ${["ru", "md", "en"].map((room) => `<button type="button" class="${room === currentGroupRoom() ? "active" : ""}" data-group-room="${room}">${room === "en" ? "ENG" : room.toUpperCase()}</button>`).join("")}
+          </nav>
         </header>
 
         ${pinned ? `
@@ -5712,6 +5725,16 @@ function renderGroupChat() {
   renderGroupEmojiDraft();
   syncGroupComposer();
   document.querySelector("[data-group-title-form]")?.addEventListener("submit", handleGroupTitleSave);
+  document.querySelectorAll("[data-group-room]").forEach((button) => {
+    button.onclick = () => {
+      db.lang = button.dataset.groupRoom;
+      rememberGroupMember(user.login);
+      markGroupPresence(user.login);
+      saveDb();
+      saveGroupPresenceRemote(button.dataset.groupRoom).catch(() => {});
+      renderGroupChat();
+    };
+  });
   document.querySelectorAll("[data-group-user]").forEach((button) => {
     button.onclick = () => openPrivateMessageModal(button.dataset.groupUser);
   });
