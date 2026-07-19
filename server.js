@@ -242,6 +242,18 @@ function sessionSource(req) {
   };
 }
 
+async function createUserSession(req, loginKeyValue = "") {
+  const token = crypto.randomBytes(32).toString("hex");
+  const { error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue, ...sessionSource(req) });
+  if (error) {
+    console.error("[auth] session insert failed", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
+    const sessionError = new Error("Не удалось создать сессию. Попробуйте войти заново.");
+    sessionError.status = 500;
+    throw sessionError;
+  }
+  return token;
+}
+
 function adminSecret() {
   return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
 }
@@ -1287,8 +1299,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     }).select("*").single();
     if (error) throw error;
 
-    const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: key, ...sessionSource(req) });
+    const token = await createUserSession(req, key);
     appendAdminLog("user_registered", login, { login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
@@ -1314,8 +1325,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
-    const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
+    const token = await createUserSession(req, user.login_key);
     appendAdminLog("user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
@@ -1340,8 +1350,7 @@ app.post("/api/auth/restore-session", async (req, res, next) => {
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
-    const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
+    const token = await createUserSession(req, user.login_key);
     appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] restore session log failed", { login: user.login, message: error.message });
     });
@@ -1366,8 +1375,7 @@ app.post("/api/telegram/login", async (req, res, next) => {
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
-    const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
+    const token = await createUserSession(req, user.login_key);
     appendAdminLog("telegram_user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] telegram login log failed", { login: user.login, message: error.message });
     });

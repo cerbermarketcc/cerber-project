@@ -2108,14 +2108,8 @@ function clearSession() {
 function clearApiSession() {
   try {
     localStorage.removeItem(API_TOKEN_KEY);
-    if (API_ENABLED) {
-      db.currentUser = "";
-      localStorage.removeItem(SESSION_KEY);
-      saveAuth();
-      localStorage.setItem(STORE_KEY, JSON.stringify(db));
-    }
   } catch {
-    // Ignore storage errors; the next render will still ask for a fresh login.
+    // Ignore storage errors; the current screen will decide whether to ask for login.
   }
 }
 
@@ -6508,22 +6502,38 @@ async function handleExchangerMessage(event) {
   const form = event.currentTarget;
   const id = form.dataset.exchangerMessageForm;
   const fd = new FormData(form);
+  const messagePayload = {
+    subject: fd.get("subject"),
+    body: fd.get("body")
+  };
+  const sendMessage = () => apiFetch(`/api/exchangers/${encodeURIComponent(id)}/messages`, {
+    method: "POST",
+    timeoutMs: 15000,
+    body: JSON.stringify(messagePayload)
+  });
   try {
-    const payload = await apiFetch(`/api/exchangers/${encodeURIComponent(id)}/messages`, {
-      method: "POST",
-      timeoutMs: 15000,
-      body: JSON.stringify({
-        subject: fd.get("subject"),
-        body: fd.get("body")
-      })
-    });
+    const payload = await sendMessage();
     applyRemoteState(payload);
     activePrivateLogin = payload.peerLogin || exchangerById(id)?.login || "";
     showToast(tr("sent"));
     renderMessages();
   } catch (error) {
     if (error.sessionExpired || /Сессия не найдена|Сессия истекла|session/i.test(String(error.message || ""))) {
-      showToast("Сессия истекла. Войдите снова, чтобы написать обменнику.");
+      const restored = await ensureApiSession();
+      if (restored) {
+        try {
+          const payload = await sendMessage();
+          applyRemoteState(payload);
+          activePrivateLogin = payload.peerLogin || exchangerById(id)?.login || "";
+          showToast(tr("sent"));
+          renderMessages();
+          return;
+        } catch (retryError) {
+          showToast(retryError.message || "Не удалось отправить сообщение");
+          return;
+        }
+      }
+      showToast("Сессия сайта истекла. Войдите заново один раз, чтобы написать обменнику.");
       return;
     }
     showToast(error.message || "Не удалось отправить сообщение");
