@@ -5735,7 +5735,7 @@ function assertExchangerReviewAllowed(exchanger, user, now = Date.now()) {
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
   const latestAt = Number(latestOwnReview?.createdAt || 0);
   if (latestAt && now - latestAt < exchangerReviewCooldownMs) {
-    const error = new Error(`Отзыв этому обменнику можно оставить раз в 6 часов. Осталось: ${formatShortDurationRu(exchangerReviewCooldownMs - (now - latestAt))}`);
+    const error = new Error(`Вы уже оставили отзыв этому обменнику. Новый отзыв можно оставить через ${formatShortDurationRu(exchangerReviewCooldownMs - (now - latestAt))}.`);
     error.status = 429;
     throw error;
   }

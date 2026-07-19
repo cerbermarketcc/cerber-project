@@ -860,7 +860,7 @@ Object.assign(uiPhraseTranslations.md, {
   "Оставить отзыв": "Lasa recenzie",
   "Оценка": "Nota",
   "Отзыв": "Recenzie",
-  "Отзыв сохранен": "Recenzia a fost salvata",
+  "Спасибо! Отзыв успешно оставлен.": "Multumim! Recenzia a fost lasata cu succes.",
   "Войдите в аккаунт, чтобы оставить отзыв": "Intrati in cont ca sa lasati o recenzie",
   "Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв.": "Sesiunea site-ului a expirat. Intrati din nou o data ca sa lasati o recenzie.",
   "Не удалось сохранить отзыв": "Recenzia nu a putut fi salvata",
@@ -932,7 +932,7 @@ Object.assign(uiPhraseTranslations.en, {
   "Оставить отзыв": "Leave review",
   "Оценка": "Rating",
   "Отзыв": "Review",
-  "Отзыв сохранен": "Review saved",
+  "Спасибо! Отзыв успешно оставлен.": "Thank you! Review submitted successfully.",
   "Войдите в аккаунт, чтобы оставить отзыв": "Log in to leave a review",
   "Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв.": "Site session expired. Log in once more to leave a review.",
   "Не удалось сохранить отзыв": "Could not save review",
@@ -6658,7 +6658,7 @@ async function handleExchangerReview(event) {
   try {
     const payload = await sendReview();
     applyRemoteState(payload);
-    showToast(tr("Отзыв сохранен"));
+    showToast(tr("Спасибо! Отзыв успешно оставлен."));
     form.reset();
     renderExchangerProfile(id);
   } catch (error) {
@@ -6668,7 +6668,7 @@ async function handleExchangerReview(event) {
         try {
           const payload = await sendReview();
           applyRemoteState(payload);
-          showToast(tr("Отзыв сохранен"));
+          showToast(tr("Спасибо! Отзыв успешно оставлен."));
           form.reset();
           renderExchangerProfile(id);
           return;
