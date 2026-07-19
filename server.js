@@ -789,7 +789,8 @@ async function stateFor(user) {
         sameUser(message.fromLogin) ||
         sameUser(message.toLogin) ||
         sameUser(message.login) ||
-        sameUser(message.recipientLogin)
+        sameUser(message.recipientLogin) ||
+        (Array.isArray(message.disputeParticipants) && message.disputeParticipants.some((item) => loginKey(item) === userKey))
       ))
       : [];
     const userOrders = user
@@ -900,6 +901,26 @@ async function userFromRequest(req) {
 function privatePeer(message, login) {
   if (sameLogin(message.fromLogin, login)) return message.toLogin || message.storeTag || message.storeId || "system";
   return message.fromLogin || message.storeTag || message.storeId || "system";
+}
+
+function disputeParticipantLogins(order = {}, store = null) {
+  return Array.from(new Set([
+    order.login,
+    order.fromLogin,
+    order.toLogin,
+    order.storeOwnerLogin,
+    store?.ownerLogin,
+    "admin"
+  ].map((value) => String(value || "").trim()).filter(Boolean).map((value) => loginKey(value))));
+}
+
+function attachDisputeParticipants(message = {}, order = {}, store = null) {
+  return {
+    ...message,
+    clientLogin: order.login || order.fromLogin || message.fromLogin || "",
+    storeLogin: store?.ownerLogin || order.storeOwnerLogin || order.toLogin || "",
+    disputeParticipants: disputeParticipantLogins(order, store)
+  };
 }
 
 function publicGroupMessage(message) {
@@ -1613,7 +1634,8 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     if (sellerToken && !sellerTokenCanAccess(sellerToken, "disputes")) return sellerForbidden(res);
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    const found = await findProductOrderForDispute(state, req.params.id);
+    const order = found.order;
     if (!order) return res.status(404).json({ error: "Заказ не найден" });
     if (sellerToken && String(order.storeId || "") !== String(sellerToken.storeId || "")) {
       return res.status(403).json({ error: "Нет доступа к спору этого магазина" });
@@ -1630,7 +1652,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     order.disputeClosedAt = now;
     order.closedAt = now;
     order.closeReason = "Спор закрыт";
-    const store = await loadStoreWithFallback(order.storeId);
+    const store = found.store || await loadStoreWithFallback(order.storeId);
     await ensureProductOrderSettlement(state, order, store);
     await notifySiteUser(state, order.login, {
       id: `notice-dispute-closed-${order.id}-${loginKey(order.login)}`,
@@ -1648,8 +1670,10 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       title: "Диспут закрыт",
       body: `Диспут #${publicNumber} по заказу ${order.id} закрыт.`
     });
-    await saveSettingsState({ ...state, orders });
-    await upsertPrivateMessage({
+    order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
+    await syncProductOrderEverywhere(state, order, store);
+    await saveSettingsState({ ...state, orders: state.orders });
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `dispute-closed-${order.id}-${now}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
@@ -1662,7 +1686,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       system: "product-dispute-closed",
       orderId: order.id,
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
-    });
+    }, order, store));
     notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
     if (sellerToken) {
       return res.json({ order, ...(await stateForStoreAdmin(sellerToken.storeId, sellerToken)) });
@@ -2735,11 +2759,12 @@ app.post("/api/admin/disputes/test", async (req, res, next) => {
       orderId: order.id,
       disputeThreadId: threadId
     };
-    await upsertPrivateMessage(message);
+    const sharedMessage = attachDisputeParticipants(message, order, store);
+    await upsertPrivateMessage(sharedMessage);
     await appendAdminLog("test_dispute_created", admin.login, { disputeId: order.id, disputeNumber: publicNumber, login: cleanLogin, storeId: store.id });
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId, testDispute: true });
     const overview = adminBuildOverview(await adminLoadMarketplace());
-    res.json({ dispute: order, order, request: null, store: publicStoreForState(store, { includeStaff: true }), clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [message], overview });
+    res.json({ dispute: order, order, request: null, store: publicStoreForState(store, { includeStaff: true }), clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [sharedMessage], overview });
   } catch (error) {
     next(error);
   }
@@ -2840,7 +2865,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       data.state.orders = (Array.isArray(data.state.orders) ? data.state.orders : []).map((item) => item.id === order.id ? { ...item, ...order } : item);
       await saveSettingsState(data.state);
     }
-    await upsertPrivateMessage({
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `admin-dispute-reply-${id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: store?.id || dispute.storeId || "",
       storeTag: store?.tag || store?.name || "",
@@ -2854,7 +2879,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       system: "admin-dispute-reply",
       orderId: id,
       disputeThreadId: threadId
-    });
+    }, order, store));
     await notifySiteUser(data.state, dispute.login || dispute.fromLogin || "", {
       id: `notice-admin-dispute-reply-client-${id}-${now}-${loginKey(dispute.login || dispute.fromLogin || "")}`,
       eventType: "dispute_reply",
@@ -4205,6 +4230,44 @@ async function lifecycleStoreForOrder(state = {}, storeId = "") {
   if (!id) return null;
   const { data: row } = await supabase.from("stores").select("data").eq("id", id).maybeSingle();
   return row?.data || (Array.isArray(state.ownerStores) ? state.ownerStores.find((item) => String(item?.id || "") === id) : null) || null;
+}
+
+async function syncProductOrderEverywhere(state = {}, order = {}, store = null) {
+  if (!order?.id) return order;
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  const index = state.orders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
+  if (index >= 0) state.orders[index] = { ...state.orders[index], ...order };
+  else state.orders.unshift(order);
+
+  const resolvedStore = store || await lifecycleStoreForOrder(state, order.storeId);
+  if (resolvedStore?.id) {
+    resolvedStore.productOrders = Array.isArray(resolvedStore.productOrders) ? resolvedStore.productOrders : [];
+    const storeOrderIndex = resolvedStore.productOrders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
+    if (storeOrderIndex >= 0) resolvedStore.productOrders[storeOrderIndex] = { ...resolvedStore.productOrders[storeOrderIndex], ...order };
+    else resolvedStore.productOrders.unshift({ ...order, storeId: order.storeId || resolvedStore.id, storeName: order.storeName || resolvedStore.name || resolvedStore.id });
+    resolvedStore.productOrders = resolvedStore.productOrders.slice(0, 500);
+    await supabase.from("stores").upsert({ id: resolvedStore.id, data: resolvedStore }, { onConflict: "id" });
+    await saveOwnerStoreFallback(resolvedStore);
+  }
+  return order;
+}
+
+async function findProductOrderForDispute(state = {}, orderId = "") {
+  const id = String(orderId || "").trim();
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  let order = state.orders.find((item) => String(item?.id || "") === id && (item.type === "product" || item.storeId));
+  if (order) return { order, store: await lifecycleStoreForOrder(state, order.storeId), source: "state" };
+  const { data: storeRows } = await supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500);
+  const stores = mergeStoreSources((storeRows || []).map((row) => row.data), state.ownerStores || []);
+  for (const store of stores) {
+    order = (Array.isArray(store?.productOrders) ? store.productOrders : []).find((item) => String(item?.id || "") === id);
+    if (order) {
+      order = { ...order, type: order.type || "product", storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id };
+      await syncProductOrderEverywhere(state, order, store);
+      return { order, store, source: "store" };
+    }
+  }
+  return { order: null, store: null, source: "" };
 }
 
 async function restoreExpiredProductReservation(state = {}, order = {}) {
@@ -7796,6 +7859,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     order.disputeThreadId = threadId;
     order.disputeChatClosed = false;
     order.disputeUntil = now + 24 * 60 * 60 * 1000;
+    order.storeOwnerLogin = store.ownerLogin || order.storeOwnerLogin || "";
     await notifySiteUser(state, store.ownerLogin || "admin", {
       id: `notice-store-dispute-opened-${order.id}-${loginKey(store.ownerLogin || "admin")}`,
       eventType: "store_dispute_opened",
@@ -7812,9 +7876,10 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
       title: "Открыт диспут",
       body: `Диспут #${publicNumber}: ${user.login}, магазин ${store.name || order.storeName || order.storeId}.`
     });
-    await saveSettingsState({ ...state, orders });
+    await syncProductOrderEverywhere(state, order, store);
+    await saveSettingsState({ ...state, orders: state.orders });
     const intro = "Напишите ваше обращение скоро мы решим вашу проблемы, отправьте фото с места и видео, напишите номер заказа!";
-    await upsertPrivateMessage({
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `${threadId}-intro`,
       storeId: order.storeId,
       storeTag: store.name || order.storeName || order.storeId,
@@ -7827,7 +7892,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
       system: "product-dispute",
       orderId: order.id,
       disputeThreadId: threadId
-    });
+    }, order, store));
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId });
     res.json({ order, disputePeer: store.ownerLogin || "admin", disputeNumber: publicNumber, ...(await stateFor(user)) });
   } catch (error) {
@@ -7842,13 +7907,14 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    const found = await findProductOrderForDispute(state, req.params.id);
+    const order = found.order;
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Диспут не найден" });
     if (order.disputeChatClosed || order.disputeOpen === false || !orderHasDisputeHistory(order)) return res.status(409).json({ error: "Диспут закрыт" });
     const body = String(req.body.body || "").trim();
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
-    const store = await loadStoreWithFallback(order.storeId);
+    const store = found.store || await loadStoreWithFallback(order.storeId);
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
@@ -7858,7 +7924,8 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     order.disputeChatClosed = false;
     order.disputeThreadId = threadId;
     order.disputeOpenedAt = order.disputeOpenedAt || now;
-    await upsertPrivateMessage({
+    order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
@@ -7872,7 +7939,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
       system: "product-dispute-reply",
       orderId: order.id,
       disputeThreadId: threadId
-    });
+    }, order, store));
     await notifySiteUser(state, store?.ownerLogin || "admin", {
       id: `notice-client-dispute-reply-store-${order.id}-${now}-${loginKey(store?.ownerLogin || "admin")}`,
       eventType: "dispute_reply",
@@ -7890,6 +7957,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
       body: `Клиент ${user.login} написал по диспуту #${publicNumber}, магазин ${store?.name || order.storeName || order.storeId}.`
     });
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
+    await syncProductOrderEverywhere(state, order, store);
     await withTimeout(saveSettingsState(state), "client dispute reply state save", 8000).catch((error) => {
       console.error("[dispute] client reply state save skipped", { orderId: order.id, message: error.message });
     });
@@ -7919,9 +7987,10 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
     order.status = order.disputeChatClosed ? (order.status || "completed") : "dispute";
     order.disputeOpen = !order.disputeChatClosed;
     order.disputeThreadId = threadId;
-    state.orders = (Array.isArray(state.orders) ? state.orders : []).map((item) => item.id === order.id ? { ...item, ...order } : item);
+    order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
+    await syncProductOrderEverywhere(state, order, store);
     await saveSettingsState(state);
-    await upsertPrivateMessage({
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `${threadId}-shop-join-${now}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
@@ -7934,7 +8003,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
       system: "product-dispute-join",
       orderId: order.id,
       disputeThreadId: threadId
-    });
+    }, order, store));
     notifyRealtime("dispute_joined", { orderId: order.id, storeId: order.storeId });
     res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
@@ -7961,7 +8030,8 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = await loadStoreWithFallback(token.storeId);
     const now = Date.now();
-    await upsertPrivateMessage({
+    order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
+    await upsertPrivateMessage(attachDisputeParticipants({
       id: `dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
@@ -7975,7 +8045,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       system: "product-dispute-reply",
       orderId: order.id,
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
-    });
+    }, order, store));
     await notifySiteUser(state, order.login, {
       id: `notice-dispute-reply-${order.id}-${now}-${loginKey(order.login)}`,
       eventType: "dispute_reply",
@@ -7993,6 +8063,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       body: `Магазин ${store?.name || order.storeName || order.storeId} ответил по диспуту #${disputeNumber(order)}.`
     });
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
+    await syncProductOrderEverywhere(state, order, store);
     await withTimeout(saveSettingsState(state), "store dispute reply state save", 8000).catch((error) => {
       console.error("[dispute] store reply state save skipped", { orderId: order.id, message: error.message });
     });
