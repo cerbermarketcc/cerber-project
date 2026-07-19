@@ -32,6 +32,7 @@ let activeShopPanelTab = "dashboard";
 let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
+const syncedReferralCodes = new Set();
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -2876,6 +2877,27 @@ function addReferralDeposit(referralLogin, amount) {
     date: new Date().toLocaleString()
   });
   saveDb();
+}
+
+async function syncReferralCodeRemote(code = referralCodeFor()) {
+  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY) || !code) return false;
+  if (syncedReferralCodes.has(code)) return false;
+  syncedReferralCodes.add(code);
+  try {
+    const payload = await apiFetch("/api/referrals/claim-code", {
+      method: "POST",
+      timeoutMs: 15000,
+      body: JSON.stringify({ code })
+    });
+    applyRemoteState(payload);
+    const resolved = Number(payload.resolved || 0);
+    if (resolved > 0) showToast(`Рефералы обновлены: +${resolved}`);
+    return resolved > 0;
+  } catch (error) {
+    syncedReferralCodes.delete(code);
+    console.error("[referrals] code sync failed", error);
+    return false;
+  }
 }
 
 function referralStatsForCurrentUser() {
@@ -6299,6 +6321,9 @@ function renderReferrals(tab = activeReferralTab) {
   const link = referralLinkFor();
   const linkHost = new URL(link).host;
   const { refs, payments, totalDeposits, totalEarned, activeRefs } = referralStatsForCurrentUser();
+  syncReferralCodeRemote(code).then((synced) => {
+    if (synced && route === "referrals") renderReferrals(activeReferralTab);
+  }).catch(() => {});
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(link)}`;
   layout(`
     <section class="screen referral-screen">

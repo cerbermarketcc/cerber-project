@@ -1021,6 +1021,46 @@ function applyReferralRegistration(state = {}, newLogin = "", refCode = "") {
   return referral;
 }
 
+function queuePendingReferralRegistration(state = {}, newLogin = "", refCode = "") {
+  const code = String(refCode || "").trim();
+  const newKey = loginKey(newLogin);
+  if (!code || !newKey) return null;
+  state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
+  state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
+  if (state.referrals.some((item) => sameLogin(item.login, newLogin))) return null;
+  const existing = state.pendingReferrals.find((item) => String(item.code || "") === code && sameLogin(item.login, newLogin));
+  if (existing) return existing;
+  const item = {
+    id: `pending-ref-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+    code,
+    login: newLogin,
+    loginKey: newKey,
+    createdAt: Date.now(),
+    date: new Date().toLocaleString("ru-RU")
+  };
+  state.pendingReferrals.unshift(item);
+  state.pendingReferrals = state.pendingReferrals.slice(0, 500);
+  return item;
+}
+
+function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode = "") {
+  const code = String(refCode || "").trim();
+  if (!code || !referrerLogin) return [];
+  state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
+  const resolved = [];
+  const remaining = [];
+  state.pendingReferrals.forEach((item) => {
+    if (String(item.code || "") !== code) {
+      remaining.push(item);
+      return;
+    }
+    const referral = applyReferralRegistration(state, item.login, code);
+    if (referral) resolved.push(referral);
+  });
+  state.pendingReferrals = remaining;
+  return resolved;
+}
+
 function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sourceId = "") {
   const amount = Number(amountUsd || 0);
   if (!referralLogin || amount <= 0) return null;
@@ -1471,6 +1511,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
     const referral = applyReferralRegistration(state, login, referralCode);
+    if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode);
     const { data: user, error } = await supabase.from("profiles").insert({
       login,
       login_key: key,
@@ -1514,7 +1555,8 @@ app.post("/api/auth/login", async (req, res, next) => {
     }
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
     const repairedReferral = referralCode ? applyReferralRegistration(state, user.login, referralCode) : null;
-    if (repairedReferral) {
+    const pendingReferral = !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode) : null;
+    if (repairedReferral || pendingReferral) {
       await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
         console.error("[auth] login referral repair delayed", { login: user.login, message: saveError.message });
         saveReferralRegistrationAsync(user.login, referralCode).catch((retryError) => {
@@ -1987,6 +2029,28 @@ app.get("/api/session", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     res.json(await stateFor(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/referrals/claim-code", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const code = String(req.body.code || req.body.ref || "").trim();
+    if (!code) return res.status(400).json({ error: "Укажите реферальный код" });
+    const state = await loadSettingsState();
+    state.referralCodes = state.referralCodes || {};
+    const key = loginKey(user.login);
+    const existingOwner = Object.entries(state.referralCodes).find(([ownerKey, value]) => String(value || "").trim() === code && ownerKey !== key);
+    if (existingOwner) return res.status(409).json({ error: "Этот реферальный код уже занят" });
+    state.referralCodes[key] = code;
+    const resolved = resolvePendingReferralsForCode(state, user.login, code);
+    await saveSettingsState(state);
+    notifyRealtime("referral_code_claimed", { login: user.login, code, resolved: resolved.length });
+    res.json({ ok: true, code, resolved: resolved.length, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
