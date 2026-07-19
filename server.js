@@ -233,6 +233,13 @@ function requestSource(req) {
   };
 }
 
+function sessionSource(req) {
+  return {
+    ip: clientIp(req).slice(0, 120),
+    user_agent: String(req.headers["user-agent"] || "").slice(0, 500)
+  };
+}
+
 function adminSecret() {
   return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
 }
@@ -1254,7 +1261,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (error) throw error;
 
     const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: key });
+    await supabase.from("sessions").insert({ token, login_key: key, ...sessionSource(req) });
     appendAdminLog("user_registered", login, { login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
@@ -1281,7 +1288,7 @@ app.post("/api/auth/login", async (req, res, next) => {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: user.login_key });
+    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
     appendAdminLog("user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
@@ -1307,7 +1314,7 @@ app.post("/api/telegram/login", async (req, res, next) => {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const token = crypto.randomBytes(32).toString("hex");
-    await supabase.from("sessions").insert({ token, login_key: user.login_key });
+    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
     appendAdminLog("telegram_user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] telegram login log failed", { login: user.login, message: error.message });
     });
