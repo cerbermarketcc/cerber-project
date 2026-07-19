@@ -847,6 +847,12 @@ Object.assign(uiPhraseTranslations.md, {
   "Диспуты": "Dispute",
   "Заявки на обмен": "Cereri de schimb",
   "Обменники": "Schimbatori",
+  "Каталог обменников": "Catalog de schimbatori",
+  "обменников": "schimbatori",
+  "отзывов": "recenzii",
+  "рейтинг": "rating",
+  "Написать обменнику": "Trimite mesaj",
+  "Активный обменный каталог": "Catalog activ de schimb",
   "Отзывы": "Recenzii",
   "Рейтинг": "Rating",
   "Нет отзывов": "Nu exista recenzii",
@@ -906,6 +912,12 @@ Object.assign(uiPhraseTranslations.en, {
   "Диспуты": "Disputes",
   "Заявки на обмен": "Exchange requests",
   "Обменники": "Exchangers",
+  "Каталог обменников": "Exchange catalog",
+  "обменников": "exchangers",
+  "отзывов": "reviews",
+  "рейтинг": "rating",
+  "Написать обменнику": "Message exchanger",
+  "Активный обменный каталог": "Active exchange catalog",
   "Отзывы": "Reviews",
   "Рейтинг": "Rating",
   "Нет отзывов": "No reviews",
@@ -6331,10 +6343,23 @@ function renderExchangeCatalog() {
   route = "exchange";
   const cards = db.exchangeCards.filter((card) => card.active !== false);
   const exchangers = visibleExchangers();
+  const totalReviews = exchangers.reduce((sum, item) => sum + Number(item.reviewsCount || 0), 0);
+  const bestRating = exchangers.reduce((max, item) => Math.max(max, Number(item.rating || 0)), 0);
   layout(`
     <section class="screen exchange-screen">
-      <h1>Заявки на обмен</h1>
-      <label class="search"><b>⌕</b><input data-exchange-search placeholder="${tr("search")}"></label>
+      <section class="exchange-hero">
+        <div>
+          <p class="eyebrow">${tr("Обменники")}</p>
+          <h1>${tr("Заявки на обмен")}</h1>
+          <p>${tr("Каталог обменников")}</p>
+        </div>
+        <div class="exchange-hero-stats">
+          <span><strong>${exchangers.length}</strong> ${tr("обменников")}</span>
+          <span><strong>${totalReviews}</strong> ${tr("отзывов")}</span>
+          <span><strong>${bestRating ? bestRating.toFixed(1) : "-"}</strong> ${tr("рейтинг")}</span>
+        </div>
+      </section>
+      <label class="search exchange-search"><b>⌕</b><input data-exchange-search placeholder="${tr("search")}"></label>
       <section class="exchange-grid" data-exchange-list>
         ${exchangeCatalogHtml(exchangers, cards)}
       </section>
@@ -6353,7 +6378,10 @@ function renderExchangeCatalog() {
 function visibleExchangers() {
   return (db.exchangers || [])
     .filter((item) => item && item.status !== "disabled" && item.active !== false && (item.login || item.ownerLogin))
-    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) ||
+      Number(b.rating || 0) - Number(a.rating || 0) ||
+      Number(b.reviewsCount || 0) - Number(a.reviewsCount || 0) ||
+      Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 function exchangeCatalogHtml(exchangers = [], cards = [], emptyText = "Обменники пока не добавлены") {
@@ -6410,25 +6438,35 @@ function showExchangerReviews(id) {
 
 function exchangerCardView(item) {
   const name = item.name || item.title || item.login || "Exchange";
+  const rating = Number(item.rating || 0);
+  const reviews = Number(item.reviewsCount || 0);
+  const avatar = item.avatar || item.image || fallbackImage;
+  const description = String(item.description || "").trim();
   return `
-    <article class="shop-card exchange-card">
+    <article class="shop-card exchange-card exchanger-catalog-card">
       <button class="shop-click" data-exchanger-card="${esc(item.id)}">
         <div class="shop-inner">
-          <div class="shop-head">
-            <div>
-              <div class="shop-title"><h2>${esc(name)}</h2><span class="verify">✓</span></div>
-              <p class="desc">${esc(item.description || "")}</p>
+          <div class="exchanger-cover">
+            <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}">
+            <span class="exchanger-rating-badge">${rating ? rating.toFixed(1) : "new"} ★</span>
+          </div>
+          <div class="exchanger-card-body">
+            <div class="exchanger-title-row">
+              <img class="exchanger-avatar" src="${esc(avatar)}" alt="${esc(name)}">
+              <div>
+                <div class="shop-title"><h2>${esc(name)}</h2><span class="verify">✓</span></div>
+                <p>@${esc(item.login || item.ownerLogin || "")}</p>
+              </div>
             </div>
-            <span>${navIcon("messages")}</span>
-          </div>
-          <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}">
-          <div class="rate-row">
-            <span>Рейтинг</span>
-            <strong>${esc(exchangerRatingText(item))}</strong>
-          </div>
-          <div class="rate-row">
-            <span>Отзывы</span>
-            <strong>${Number(item.reviewsCount || 0)}</strong>
+            <p class="desc">${esc(description || tr("Активный обменный каталог"))}</p>
+            <div class="exchanger-meta-grid">
+              <span><b>${rating ? rating.toFixed(1) : "-"}</b><small>${tr("рейтинг")}</small></span>
+              <span><b>${reviews}</b><small>${tr("отзывов")}</small></span>
+            </div>
+            <div class="exchanger-card-action">
+              <span>${tr("Написать обменнику")}</span>
+              ${navIcon("messages")}
+            </div>
           </div>
         </div>
       </button>
