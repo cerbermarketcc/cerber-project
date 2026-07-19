@@ -3322,6 +3322,9 @@ async function handleAuth(event) {
         registerReferral(payload.user?.login || login);
         saveDb();
         authMode = "login";
+        loadRemoteSession().then(() => {
+          if (db.currentUser && route !== "auth") renderCurrent();
+        }).catch(() => {});
         return renderCurrent();
       } catch (error) {
         resetCaptcha();

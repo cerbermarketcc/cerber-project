@@ -1054,6 +1054,47 @@ function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sour
   return payment;
 }
 
+function authStateForUser(user, state = {}) {
+  const publicProfile = publicUser(user);
+  const login = user?.login || "";
+  const key = loginKey(login);
+  return {
+    user: publicProfile,
+    state: {
+      currentUser: login,
+      theme: state.theme || "light",
+      lang: state.lang || "ru",
+      users: publicProfile ? [publicProfile] : [],
+      stores: [],
+      messages: [],
+      orders: [],
+      exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards : defaultExchangeCards,
+      exchangers: publicExchangersForState(state.exchangers || []),
+      exchangeRequests: [],
+      groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
+      groupSettings: normalizeGroupSettings(state.groupSettings || {}),
+      referrals: Array.isArray(state.referrals) ? state.referrals.filter((item) => sameLogin(item.referrerLogin, login) || sameLogin(item.login, login)) : [],
+      referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments.filter((item) => sameLogin(item.referrerLogin, login)) : [],
+      referralCodes: key && state.referralCodes?.[key] ? { [key]: state.referralCodes[key] } : {},
+      balances: key ? { [key]: Number(state.balances?.[key] || state.balances?.[login] || 0), [login]: Number(state.balances?.[login] || state.balances?.[key] || 0) } : {},
+      ltcBalances: key ? { [key]: Number(state.ltcBalances?.[key] || state.ltcBalances?.[login] || 0), [login]: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0) } : {},
+      walletTransactions: [],
+      walletDeposits: [],
+      walletWithdrawals: [],
+      siteNotifications: [],
+      broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : [],
+      supportSettings: { recipients: [] },
+      supportTickets: [],
+      userFilters: Array.isArray(state.userFilters) ? state.userFilters : [],
+      blockedUsers: state.blockedUsers || {},
+      ownerSettings: state.ownerSettings || {},
+      paymentSettings: state.paymentSettings || {},
+      referralPeriod: state.referralPeriod || {},
+      filters: state.filters || {}
+    }
+  };
+}
+
 async function telegramUserSummary(user) {
   await ensureSeed();
   const [{ data: settings }, { data: messageRows }] = await Promise.all([
@@ -1402,13 +1443,15 @@ app.post("/api/auth/register", async (req, res, next) => {
       role: "user"
     }).select("*").single();
     if (error) throw error;
-    await saveSettingsState(state);
+    await withTimeout(saveSettingsState(state), "register referral save", 6000).catch((saveError) => {
+      console.error("[auth] referral save delayed", { login, message: saveError.message });
+    });
 
     const token = await createUserSession(req, key);
     appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
-    res.json({ token, ...(await stateFor(user)) });
+    res.json({ token, ...authStateForUser(user, state) });
   } catch (error) {
     next(error);
   }
