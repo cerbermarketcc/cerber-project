@@ -782,7 +782,8 @@ async function stateFor(user) {
     if (user?.login) {
       const beforeCode = settingsData.referralCodes?.[loginKey(user.login)] || "";
       const ensuredCode = ensureReferralCodeForState(settingsData, user.login);
-      if (ensuredCode && ensuredCode !== beforeCode) {
+      const resolvedPending = resolvePendingReferralsForLogin(settingsData, user.login);
+      if ((ensuredCode && ensuredCode !== beforeCode) || resolvedPending.length) {
         saveSettingsState(settingsData).catch((error) => {
           console.error("[stateFor] referral code save failed", { message: error.message });
         });
@@ -1043,6 +1044,14 @@ function queuePendingReferralRegistration(state = {}, newLogin = "", refCode = "
   return item;
 }
 
+function referralCodePrefix(refCode = "") {
+  return String(refCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).toLowerCase();
+}
+
+function referralLoginPrefix(login = "") {
+  return String(login || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).toLowerCase();
+}
+
 function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode = "") {
   const code = String(refCode || "").trim();
   if (!code || !referrerLogin) return [];
@@ -1058,6 +1067,22 @@ function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode 
     if (referral) resolved.push(referral);
   });
   state.pendingReferrals = remaining;
+  return resolved;
+}
+
+function resolvePendingReferralsForLogin(state = {}, referrerLogin = "") {
+  const ownerPrefix = referralLoginPrefix(referrerLogin);
+  if (!ownerPrefix) return [];
+  state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
+  const codes = [...new Set(state.pendingReferrals
+    .map((item) => String(item.code || "").trim())
+    .filter((code) => referralCodePrefix(code) === ownerPrefix))];
+  const resolved = [];
+  codes.forEach((code) => {
+    state.referralCodes = state.referralCodes || {};
+    state.referralCodes[loginKey(referrerLogin)] = code;
+    resolved.push(...resolvePendingReferralsForCode(state, referrerLogin, code));
+  });
   return resolved;
 }
 
@@ -1099,11 +1124,29 @@ async function saveReferralRegistrationAsync(login = "", refCode = "") {
   if (!login || !code) return null;
   const state = await loadSettingsState();
   ensureReferralCodeForState(state, login);
-  const referral = applyReferralRegistration(state, login, code);
+  const referral = await applyReferralRegistrationWithPrefixFallback(state, login, code);
   if (!referral) return null;
   await saveSettingsState(state);
   notifyRealtime("referral_registered", { login, referrerLogin: referral.referrerLogin });
   return referral;
+}
+
+async function applyReferralRegistrationWithPrefixFallback(state = {}, newLogin = "", refCode = "") {
+  const direct = applyReferralRegistration(state, newLogin, refCode);
+  if (direct) return direct;
+  const prefix = referralCodePrefix(refCode);
+  if (!prefix) return null;
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("login,login_key")
+    .ilike("login_key", `${prefix}%`)
+    .limit(5);
+  const candidates = (profiles || []).filter((profile) => !sameLogin(profile.login || profile.login_key, newLogin));
+  if (candidates.length !== 1) return null;
+  const ownerKey = loginKey(candidates[0].login_key || candidates[0].login);
+  state.referralCodes = state.referralCodes || {};
+  state.referralCodes[ownerKey] = String(refCode || "").trim();
+  return applyReferralRegistration(state, newLogin, refCode);
 }
 
 function authStateForUser(user, state = {}) {
@@ -1510,7 +1553,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     const passwordHash = await bcrypt.hash(password, 12);
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
-    const referral = applyReferralRegistration(state, login, referralCode);
+    const referral = await applyReferralRegistrationWithPrefixFallback(state, login, referralCode);
     if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode);
     const { data: user, error } = await supabase.from("profiles").insert({
       login,
@@ -1554,7 +1597,7 @@ app.post("/api/auth/login", async (req, res, next) => {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
-    const repairedReferral = referralCode ? applyReferralRegistration(state, user.login, referralCode) : null;
+    const repairedReferral = referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode) : null;
     const pendingReferral = !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode) : null;
     if (repairedReferral || pendingReferral) {
       await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
