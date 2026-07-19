@@ -62,6 +62,8 @@ let adminRealtimeServer = null;
 let publicRealtimeServer = null;
 let seedReady = false;
 let seedPromise = null;
+let financeMirrorPromise = null;
+const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
 const allowedCorsOrigins = new Set([
   "https://cerber-project.onrender.com",
@@ -3865,6 +3867,9 @@ async function saveSettingsState(state) {
   };
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
+  if (state && (state.orders || state.walletDeposits || state.walletWithdrawals || state.walletTransactions)) {
+    scheduleFinanceMirror(next);
+  }
 }
 
 async function savePublicStoresCache(stores = []) {
@@ -3876,6 +3881,155 @@ async function savePublicStoresCache(stores = []) {
   state.publicStoresCache = nextCache;
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+}
+
+function dbTimestamp(value) {
+  if (!value) return null;
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) return new Date(number).toISOString();
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : null;
+}
+
+function nullableLoginKey(value) {
+  const key = loginKey(value);
+  return key || null;
+}
+
+function nullableText(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function mirrorTableUnavailable(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+  return code === "42P01" || code === "PGRST205" || /does not exist|Could not find the table/i.test(message);
+}
+
+async function mirrorUpsert(table, rows, onConflict = "id") {
+  if (!supabase || disabledMirrorTables.has(table)) return;
+  const payload = (Array.isArray(rows) ? rows : [rows]).filter(Boolean);
+  if (!payload.length) return;
+  const { error } = await supabase.from(table).upsert(payload, { onConflict });
+  if (error) {
+    if (mirrorTableUnavailable(error)) {
+      disabledMirrorTables.add(table);
+      return;
+    }
+    console.warn("[finance-mirror] upsert skipped", { table, message: error.message, code: error.code || "" });
+  }
+}
+
+function orderMirrorRow(order = {}) {
+  if (!order?.id) return null;
+  return {
+    id: String(order.id),
+    login_key: nullableLoginKey(order.login || order.loginKey),
+    store_id: nullableText(order.storeId),
+    type: String(order.type || (order.storeId ? "product" : "exchange")),
+    status: String(order.status || "pending_payment"),
+    payment_status: String(order.paymentStatus || order.payment_status || "pending"),
+    amount_usd: Number(order.amountUsd || order.priceUsd || order.totalUsd || order.total || order.price || 0) || 0,
+    seller_amount_usd: Number(order.sellerAmountUsd || 0) || 0,
+    platform_commission_usd: Number(order.platformCommissionUsd || 0) || 0,
+    data: order,
+    created_at: dbTimestamp(order.createdAt || order.date) || new Date().toISOString(),
+    paid_at: dbTimestamp(order.paidAt),
+    closed_at: dbTimestamp(order.closedAt || order.completedAt),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function walletDepositMirrorRow(deposit = {}) {
+  if (!deposit?.id) return null;
+  return {
+    id: String(deposit.id),
+    login_key: nullableLoginKey(deposit.login || deposit.loginKey),
+    provider: String(deposit.provider || "nowpayments"),
+    provider_payment_id: nullableText(deposit.paymentId || deposit.providerPaymentId),
+    status: String(deposit.status || "pending"),
+    amount_usd: Number(deposit.amountUsd || 0) || 0,
+    amount_ltc: Number(deposit.amountLtc || deposit.amountLtcExpected || 0) || 0,
+    coin_id: String(deposit.coinId || "ltc"),
+    pay_currency: String(deposit.payCurrency || "ltc"),
+    data: deposit,
+    created_at: dbTimestamp(deposit.createdAt || deposit.date) || new Date().toISOString(),
+    completed_at: dbTimestamp(deposit.completedAt || deposit.paidAt),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function walletWithdrawalMirrorRow(withdrawal = {}) {
+  if (!withdrawal?.id) return null;
+  return {
+    id: String(withdrawal.id),
+    scope: String(withdrawal.scope || "user"),
+    login_key: nullableLoginKey(withdrawal.login || withdrawal.loginKey),
+    store_id: nullableText(withdrawal.storeId),
+    provider: String(withdrawal.provider || "manual"),
+    provider_payout_id: nullableText(withdrawal.providerPayoutId || withdrawal.providerPayload?.payoutId || withdrawal.providerPayload?.payout?.id),
+    idempotency_key: nullableText(withdrawal.idempotencyKey),
+    request_signature: nullableText(withdrawal.requestSignature),
+    status: String(withdrawal.status || "pending"),
+    amount_usd: Number(withdrawal.amountUsd || 0) || 0,
+    amount_ltc: Number(withdrawal.amountLtc || 0) || 0,
+    address: String(withdrawal.address || ""),
+    data: withdrawal,
+    created_at: dbTimestamp(withdrawal.createdAt || withdrawal.date) || new Date().toISOString(),
+    processed_at: dbTimestamp(withdrawal.processedAt || withdrawal.paidAt),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function ledgerMirrorRow(entry = {}) {
+  if (!entry?.id) return null;
+  return {
+    id: String(entry.id),
+    scope: String(entry.scope || "user"),
+    login_key: nullableLoginKey(entry.login || entry.loginKey),
+    store_id: nullableText(entry.storeId),
+    order_id: nullableText(entry.orderId),
+    withdrawal_id: String(entry.type || "").includes("withdrawal") ? nullableText(String(entry.id || "").replace(/^tx-/, "")) : null,
+    kind: String(entry.type || entry.kind || "transaction"),
+    amount_usd: Number(entry.amountUsd || 0) || 0,
+    amount_ltc: Number(entry.amountLtc || 0) || 0,
+    data: entry,
+    created_at: dbTimestamp(entry.createdAt || entry.date) || new Date().toISOString()
+  };
+}
+
+async function mirrorFinanceStateToTables(state = {}) {
+  if (!supabase) return;
+  await mirrorUpsert("orders", (Array.isArray(state.orders) ? state.orders : []).map(orderMirrorRow));
+  await mirrorUpsert("wallet_deposits", (Array.isArray(state.walletDeposits) ? state.walletDeposits : []).map(walletDepositMirrorRow));
+  await mirrorUpsert("wallet_withdrawals", (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).map(walletWithdrawalMirrorRow));
+  await mirrorUpsert("ledger_entries", (Array.isArray(state.walletTransactions) ? state.walletTransactions : []).map(ledgerMirrorRow));
+}
+
+function scheduleFinanceMirror(state = {}) {
+  if (!supabase || disabledMirrorTables.size >= 5) return;
+  financeMirrorPromise = (financeMirrorPromise || Promise.resolve())
+    .then(() => mirrorFinanceStateToTables(state))
+    .catch((error) => console.warn("[finance-mirror] skipped", { message: error.message }));
+}
+
+async function mirrorPaymentIpnEvent(req, fingerprint = "", kind = "payment") {
+  if (!fingerprint || !supabase || disabledMirrorTables.has("payment_ipn_events")) return;
+  const body = req.body || {};
+  const { error } = await supabase.from("payment_ipn_events").upsert({
+    fingerprint,
+    provider: "nowpayments",
+    kind,
+    provider_event_id: nullableText(body.payment_id || body.id || body.payout_id || body.withdrawal_id || body.batch_id || body.batchId),
+    order_id: nullableText(body.order_id || body.order || body.orderId),
+    status: nullableText(body.payment_status || body.status || body.payout_status),
+    payload: body
+  }, { onConflict: "fingerprint" });
+  if (error) {
+    if (mirrorTableUnavailable(error)) disabledMirrorTables.add("payment_ipn_events");
+    else console.warn("[finance-mirror] ipn event skipped", { message: error.message, code: error.code || "" });
+  }
 }
 
 async function clearDeletedStoreTombstone(storeId) {
@@ -6311,6 +6465,9 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
     const state = settings?.data || {};
     if (!rememberNowpaymentsIpn(state, fingerprint, "payment")) return res.json({ ok: true, duplicate: true });
+    mirrorPaymentIpnEvent(req, fingerprint, "payment").catch((error) => {
+      console.warn("[finance-mirror] payment ipn event skipped", { message: error.message });
+    });
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const order = orders.find((item) => item.id === orderId);
     if (!order) {
@@ -6343,6 +6500,9 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
     if (!payoutId) return res.status(400).json({ error: "Unsupported payout callback" });
     const state = await loadSettingsState();
     if (!rememberNowpaymentsIpn(state, fingerprint, "payout")) return res.json({ ok: true, duplicate: true });
+    mirrorPaymentIpnEvent(req, fingerprint, "payout").catch((error) => {
+      console.warn("[finance-mirror] payout ipn event skipped", { message: error.message });
+    });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const withdrawal = state.walletWithdrawals.find((item) => (
       String(item.providerPayoutId || "") === payoutId ||
