@@ -1671,6 +1671,7 @@ async function apiFetch(path, options = {}) {
 function applyRemoteState(payload) {
   if (!payload) return;
   const previousCurrentUser = db?.currentUser || "";
+  const rememberedReferralCodes = { ...(db?.referralCodes || {}) };
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
   const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
   const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
@@ -1683,6 +1684,12 @@ function applyRemoteState(payload) {
   if (payload.user) db.currentUser = payload.user.login;
   else if (previousCurrentUser && payload.state && !payload.state.currentUser) db.currentUser = previousCurrentUser;
   normalizeDb(db);
+  const activeReferralKey = loginKey(db.currentUser || previousCurrentUser || payload.user?.login || "");
+  const rememberedReferralCode = activeReferralKey ? rememberedReferralCodes[activeReferralKey] : "";
+  if (activeReferralKey && rememberedReferralCode && db.referralCodes?.[activeReferralKey] !== rememberedReferralCode) {
+    db.referralCodes[activeReferralKey] = rememberedReferralCode;
+    syncedReferralCodes.delete(rememberedReferralCode);
+  }
   rememberedUsers.forEach((savedUser) => {
     if (savedUser?.login && !db.users.some((user) => sameLogin(user.login, savedUser.login))) db.users.push(savedUser);
   });
@@ -2829,7 +2836,9 @@ function referralLinkFor(login = db.currentUser) {
     : currentHost.includes("onrender.com")
       ? "https://cerber.to"
       : location.origin;
-  return `${base}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
+  const owner = loginKey(login);
+  const ownerParam = owner ? `&r=${encodeURIComponent(owner)}` : "";
+  return `${base}/?ref=${encodeURIComponent(referralCodeFor(login))}${ownerParam}`;
 }
 
 function pendingReferralCode() {
@@ -2839,6 +2848,16 @@ function pendingReferralCode() {
     return fromUrl;
   }
   return localStorage.getItem("cerber_pending_ref_v1") || "";
+}
+
+function pendingReferralOwner() {
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get("r") || params.get("referrer") || params.get("u");
+  if (fromUrl) {
+    localStorage.setItem("cerber_pending_ref_owner_v1", fromUrl);
+    return fromUrl;
+  }
+  return localStorage.getItem("cerber_pending_ref_owner_v1") || "";
 }
 
 function registerReferral(newLogin) {
@@ -2858,6 +2877,7 @@ function registerReferral(newLogin) {
     earned: 0
   });
   localStorage.removeItem("cerber_pending_ref_v1");
+  localStorage.removeItem("cerber_pending_ref_owner_v1");
 }
 
 function addReferralDeposit(referralLogin, amount) {
@@ -3336,7 +3356,7 @@ async function handleAuth(event) {
       try {
         const payload = await apiFetch("/api/auth/register", {
           method: "POST",
-          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode() })
+          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() })
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
@@ -3366,7 +3386,7 @@ async function handleAuth(event) {
     try {
       const payload = await apiFetch("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode() })
+        body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() })
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);

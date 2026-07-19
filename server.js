@@ -1022,20 +1022,23 @@ function applyReferralRegistration(state = {}, newLogin = "", refCode = "") {
   return referral;
 }
 
-function queuePendingReferralRegistration(state = {}, newLogin = "", refCode = "") {
+function queuePendingReferralRegistration(state = {}, newLogin = "", refCode = "", referrerLogin = "") {
   const code = String(refCode || "").trim();
   const newKey = loginKey(newLogin);
+  const referrerKey = loginKey(referrerLogin);
   if (!code || !newKey) return null;
   state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
   state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
   if (state.referrals.some((item) => sameLogin(item.login, newLogin))) return null;
   const existing = state.pendingReferrals.find((item) => String(item.code || "") === code && sameLogin(item.login, newLogin));
+  if (existing && referrerKey && !existing.referrerLogin) existing.referrerLogin = referrerKey;
   if (existing) return existing;
   const item = {
     id: `pending-ref-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
     code,
     login: newLogin,
     loginKey: newKey,
+    referrerLogin: referrerKey,
     createdAt: Date.now(),
     date: new Date().toLocaleString("ru-RU")
   };
@@ -1072,11 +1075,12 @@ function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode 
 
 function resolvePendingReferralsForLogin(state = {}, referrerLogin = "") {
   const ownerPrefix = referralLoginPrefix(referrerLogin);
-  if (!ownerPrefix) return [];
+  const ownerKey = loginKey(referrerLogin);
+  if (!ownerPrefix || !ownerKey) return [];
   state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
   const codes = [...new Set(state.pendingReferrals
     .map((item) => String(item.code || "").trim())
-    .filter((code) => referralCodePrefix(code) === ownerPrefix))];
+    .filter((code) => referralCodePrefix(code) === ownerPrefix || state.pendingReferrals.some((item) => String(item.code || "").trim() === code && loginKey(item.referrerLogin) === ownerKey)))];
   const resolved = [];
   codes.forEach((code) => {
     state.referralCodes = state.referralCodes || {};
@@ -1119,19 +1123,69 @@ function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sour
   return payment;
 }
 
-async function saveReferralRegistrationAsync(login = "", refCode = "") {
+async function settleProductReferralReward(state = {}, order = {}) {
+  if (!order || order.type !== "product") return null;
+  const sourceId = `product-order:${order.id}`;
+  const amountUsd = adminOrderAmount(order);
+  const payment = applyReferralReward(state, order.login, amountUsd, sourceId);
+  if (!payment) return null;
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const txId = `tx-referral-reward-${order.id}`;
+  if (!state.walletTransactions.some((tx) => tx.id === txId)) {
+    state.walletTransactions.unshift({
+      id: txId,
+      scope: "user",
+      login: payment.referrerLogin,
+      type: "referral_reward",
+      title: `Referral reward: ${order.product || order.id}`,
+      orderId: order.id,
+      storeId: order.storeId || "",
+      storeName: order.storeName || "",
+      referralLogin: payment.referralLogin,
+      amountUsd: payment.reward,
+      grossUsd: amountUsd,
+      percent: payment.percent || 3,
+      sourceId,
+      amountLtc: Number(payment.reward || 0) / 54.2,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      createdAt: Date.now(),
+      date: new Date().toLocaleString("ru-RU"),
+      status: "completed"
+    });
+  }
+  await notifySiteUser(state, payment.referrerLogin, {
+    id: `notice-referral-product-${payment.id}-${loginKey(payment.referrerLogin)}`,
+    eventType: "referral_reward",
+    orderId: order.id,
+    storeId: order.storeId || "",
+    title: "Referral reward",
+    body: `+${Number(payment.reward || 0).toFixed(2)} $ for ${Number(amountUsd || 0).toFixed(2)} $ purchase by ${payment.referralLogin}.`
+  });
+  return payment;
+}
+
+async function saveReferralRegistrationAsync(login = "", refCode = "", referrerLogin = "") {
   const code = String(refCode || "").trim();
   if (!login || !code) return null;
   const state = await loadSettingsState();
   ensureReferralCodeForState(state, login);
-  const referral = await applyReferralRegistrationWithPrefixFallback(state, login, code);
+  const referral = await applyReferralRegistrationWithPrefixFallback(state, login, code, referrerLogin);
   if (!referral) return null;
   await saveSettingsState(state);
   notifyRealtime("referral_registered", { login, referrerLogin: referral.referrerLogin });
   return referral;
 }
 
-async function applyReferralRegistrationWithPrefixFallback(state = {}, newLogin = "", refCode = "") {
+async function applyReferralRegistrationWithPrefixFallback(state = {}, newLogin = "", refCode = "", referrerLogin = "") {
+  const explicitOwnerKey = loginKey(referrerLogin);
+  const code = String(refCode || "").trim();
+  if (explicitOwnerKey && code && !sameLogin(explicitOwnerKey, newLogin)) {
+    state.referralCodes = state.referralCodes || {};
+    state.referralCodes[explicitOwnerKey] = code;
+    const explicit = applyReferralRegistration(state, newLogin, code);
+    if (explicit) return explicit;
+  }
   const direct = applyReferralRegistration(state, newLogin, refCode);
   if (direct) return direct;
   const prefix = referralCodePrefix(refCode);
@@ -1289,7 +1343,7 @@ async function telegramUserSummary(user) {
     },
     referral: {
       code: referralCode,
-      link: `${referralPublicBaseUrl}/?ref=${encodeURIComponent(referralCode)}`
+      link: `${referralPublicBaseUrl}/?ref=${encodeURIComponent(referralCode)}&r=${encodeURIComponent(key)}`
     },
     messages: {
       count: inboundMessages.length,
@@ -1547,14 +1601,15 @@ app.post("/api/auth/register", async (req, res, next) => {
 
     const key = loginKey(login);
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
+    const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
     const { data: existing } = await supabase.from("profiles").select("login_key").eq("login_key", key).maybeSingle();
     if (existing) return res.status(409).json({ error: "Такой логин уже есть" });
 
     const passwordHash = await bcrypt.hash(password, 12);
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
-    const referral = await applyReferralRegistrationWithPrefixFallback(state, login, referralCode);
-    if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode);
+    const referral = await applyReferralRegistrationWithPrefixFallback(state, login, referralCode, referralOwnerLogin);
+    if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode, referralOwnerLogin);
     const { data: user, error } = await supabase.from("profiles").insert({
       login,
       login_key: key,
@@ -1565,7 +1620,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (error) throw error;
     await withTimeout(saveSettingsState(state), "register referral save", 6000).catch((saveError) => {
       console.error("[auth] referral save delayed", { login, message: saveError.message });
-      saveReferralRegistrationAsync(login, referralCode).catch((retryError) => {
+      saveReferralRegistrationAsync(login, referralCode, referralOwnerLogin).catch((retryError) => {
         console.error("[auth] referral save retry failed", { login, message: retryError.message });
       });
     });
@@ -1597,12 +1652,13 @@ app.post("/api/auth/login", async (req, res, next) => {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
-    const repairedReferral = referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode) : null;
-    const pendingReferral = !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode) : null;
+    const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
+    const repairedReferral = referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode, referralOwnerLogin) : null;
+    const pendingReferral = !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode, referralOwnerLogin) : null;
     if (repairedReferral || pendingReferral) {
       await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
         console.error("[auth] login referral repair delayed", { login: user.login, message: saveError.message });
-        saveReferralRegistrationAsync(user.login, referralCode).catch((retryError) => {
+        saveReferralRegistrationAsync(user.login, referralCode, referralOwnerLogin).catch((retryError) => {
           console.error("[auth] login referral repair retry failed", { login: user.login, message: retryError.message });
         });
       });
@@ -2972,6 +3028,12 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     const dates = completed.map(adminTimestamp).filter(Boolean).sort((a, b) => a - b);
     const purchaseTotal = completed.reduce((sum, item) => sum + adminOrderAmount(item), 0);
     const successfulDeposits = deposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase()));
+    const referrals = Array.isArray(data.state.referrals) ? data.state.referrals : [];
+    const referralPayments = Array.isArray(data.state.referralPayments) ? data.state.referralPayments : [];
+    const invitedUsers = referrals.filter((item) => sameLogin(item.referrerLogin, login));
+    const invitedBy = referrals.find((item) => sameLogin(item.login, login))?.referrerLogin || "";
+    const userReferralPayments = referralPayments.filter((item) => sameLogin(item.referrerLogin, login));
+    const referralEarned = userReferralPayments.reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0);
     const firstPurchaseAt = dates[0] || null;
     const lastPurchaseAt = dates[dates.length - 1] || null;
     const activeDays = firstPurchaseAt ? Math.max(1, (Date.now() - firstPurchaseAt) / (24 * 60 * 60 * 1000)) : 1;
@@ -2989,6 +3051,11 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
         visits: data.messages.filter((message) => sameLogin(message.fromLogin, login)).length,
         totalDeposits: successfulDeposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
         totalPurchases: purchaseTotal,
+        invitedBy,
+        invitedCount: invitedUsers.length,
+        referralEarned,
+        referralProductEarned: userReferralPayments.filter((item) => String(item.sourceId || "").startsWith("product-order:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0),
+        referralDepositEarned: userReferralPayments.filter((item) => String(item.sourceId || "").startsWith("wallet-deposit:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0),
         averageDailySpend: purchaseTotal / activeDays,
         averageMonthlySpend: (purchaseTotal / activeDays) * 30,
         averageCheck: completed.length ? purchaseTotal / completed.length : 0,
@@ -3004,6 +3071,8 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
       },
       orders,
       deposits,
+      referrals: invitedUsers,
+      referralPayments: userReferralPayments,
       products: Array.from(products.entries()).map(([name, count]) => ({ name, count })),
       messages,
       bots: userBots.map(adminPublicBot)
@@ -4804,18 +4873,24 @@ async function ensureProductOrderSettlement(state = {}, order = {}, store = null
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const storeTxId = `tx-store-sale-${order.id}`;
   const ownerTxId = `tx-owner-commission-${order.id}`;
+  const referralSourceId = `product-order:${order.id}`;
   const alreadyHasStoreTx = state.walletTransactions.some((tx) => tx.id === storeTxId);
   const alreadyHasOwnerTx = state.walletTransactions.some((tx) => tx.id === ownerTxId);
-  if (order.ledgerRecordedAt && (alreadyHasStoreTx || !order.storeId) && (alreadyHasOwnerTx || Number(order.platformCommissionUsd || 0) <= 0)) {
+  const alreadyHasReferralTx = Array.isArray(state.referralPayments) && state.referralPayments.some((tx) => String(tx.sourceId || "") === referralSourceId);
+  const hasReferral = Array.isArray(state.referrals) && state.referrals.some((item) => sameLogin(item.login, order.login));
+  if (order.ledgerRecordedAt && (alreadyHasStoreTx || !order.storeId) && (alreadyHasOwnerTx || Number(order.platformCommissionUsd || 0) <= 0) && (alreadyHasReferralTx || !hasReferral)) {
     return false;
   }
   const beforeTxCount = state.walletTransactions.length;
+  const beforeReferralCount = Array.isArray(state.referralPayments) ? state.referralPayments.length : 0;
   const hadLedger = Boolean(order.ledgerRecordedAt);
   const resolvedStore = store || await lifecycleStoreForOrder(state, order.storeId);
 
   recordProductOrderLedger(order, state, resolvedStore);
+  await settleProductReferralReward(state, order);
 
-  return !hadLedger || state.walletTransactions.length !== beforeTxCount;
+  const afterReferralCount = Array.isArray(state.referralPayments) ? state.referralPayments.length : 0;
+  return !hadLedger || state.walletTransactions.length !== beforeTxCount || afterReferralCount !== beforeReferralCount;
 }
 
 async function normalizeServerOrders(state = {}) {
@@ -6112,11 +6187,14 @@ function adminBuildOverview(data) {
   const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
   const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+  const referrals = Array.isArray(state.referrals) ? state.referrals : [];
+  const referralPayments = Array.isArray(state.referralPayments) ? state.referralPayments : [];
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
   const completedOrders = productOrders.filter(adminIsPaidProductOrder);
   const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
   const totalStoresNetUsd = completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0);
+  const totalReferralRewardsUsd = referralPayments.reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0);
   const ownerRequestedUsd = activeWithdrawalUsd(state, "owner");
   const storesRequestedUsd = activeWithdrawalUsd(state, "store");
   const activeOrders = productOrders.filter((order) => {
@@ -6198,6 +6276,9 @@ function adminBuildOverview(data) {
     const userCompleted = userOrders.filter(adminIsPaidProductOrder);
     const userDisputes = userOrders.filter(orderHasDisputeHistory);
     const deposits = walletDeposits.filter((deposit) => sameLogin(deposit.login, login));
+    const invitedUsers = referrals.filter((item) => sameLogin(item.referrerLogin, login));
+    const referralEarned = referralPayments.filter((item) => sameLogin(item.referrerLogin, login)).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0);
+    const invitedBy = referrals.find((item) => sameLogin(item.login, login))?.referrerLogin || "";
     return {
       id: user.login_key,
       number: index + 1,
@@ -6209,6 +6290,9 @@ function adminBuildOverview(data) {
       purchaseUsd: userCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       balance: adminMoney(state.balances?.[login] || state.balances?.[user.login_key]),
       balanceLtc: adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[user.login_key]),
+      invitedBy,
+      invitedCount: invitedUsers.length,
+      referralEarned,
       disputes: userDisputes.length,
       deposits: deposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
       status: adminPublicUserStatus(state, login),
@@ -6223,7 +6307,9 @@ function adminBuildOverview(data) {
       totalSales: completedOrders.length,
       totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       totalCommission: totalCommissionUsd,
-      ownerWithdrawableUsd: Math.max(0, totalCommissionUsd - ownerRequestedUsd),
+      totalReferralRewards: totalReferralRewardsUsd,
+      ownerNetAfterReferrals: Math.max(0, totalCommissionUsd - totalReferralRewardsUsd),
+      ownerWithdrawableUsd: Math.max(0, totalCommissionUsd - totalReferralRewardsUsd - ownerRequestedUsd),
       storesWithdrawableUsd: Math.max(0, totalStoresNetUsd - storesRequestedUsd),
       newUsers: periods.find((period) => period.id === "day")?.newUsers || 0,
       totalUsers: profiles.length,
@@ -6252,6 +6338,14 @@ function adminBuildOverview(data) {
       walletDeposits,
       walletTransactions,
       walletWithdrawals,
+      referrals,
+      referralPayments,
+      referralTotals: {
+        count: referrals.length,
+        rewardsUsd: totalReferralRewardsUsd,
+        productRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("product-order:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0),
+        depositRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("wallet-deposit:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0)
+      },
       balances: state.balances || {},
       ltcBalances: state.ltcBalances || {},
       depositsByStatus: {

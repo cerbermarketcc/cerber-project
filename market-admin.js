@@ -425,7 +425,9 @@ function renderDashboard() {
       ${statCard("Продажи", s.totalSales, "закрытые сделки")}
       ${statCard("Оборот", fmtMoney(s.totalTurnover), "всё время")}
       ${statCard("Комиссия", fmtMoney(s.totalCommission), "доход площадки")}
-      ${statCard("К выводу владельцу", fmtMoney(s.ownerWithdrawableUsd || s.totalCommission || 0), "комиссии магазинов")}
+      ${statCard("Рефералам", fmtMoney(s.totalReferralRewards || 0), "3% начисления")}
+      ${statCard("Чистая комиссия", fmtMoney(s.ownerNetAfterReferrals || s.totalCommission || 0), "после рефералов")}
+      ${statCard("К выводу владельцу", fmtMoney(s.ownerWithdrawableUsd || 0), "комиссии минус рефералы")}
       ${statCard("К выводу магазинам", fmtMoney(s.storesWithdrawableUsd || 0), "чистый доход продавцов")}
       ${statCard("Новые пользователи", s.newUsers, "за сутки")}
       ${statCard("Всего пользователей", s.totalUsers, `${s.usersWithPurchase} с покупкой`)}
@@ -649,11 +651,10 @@ function exchangerDetail(id) {
 
 function renderUsers() {
   const rows = filterRows(data.users, ["login", "name", "role", "status"]);
-  return `<article class="table-card"><table><thead><tr><th>№</th><th>Пользователь</th><th>Роль</th><th>Статус</th><th>Регистрация</th><th>Покупки</th><th>Сумма</th><th>Баланс</th><th>Диспуты</th><th>Действие</th></tr></thead><tbody>
-    ${rows.map((u) => `<tr><td>${u.number}</td><td><strong>${esc(u.login)}</strong><br><span class="muted">${esc(u.name)}</span></td><td>${esc(u.role)}</td><td><span class="status ${u.status === "blocked" ? "off" : ""}">${esc(u.status)}</span></td><td>${fmtDate(u.registeredAt)}</td><td>${u.purchases}</td><td>${fmtMoney(u.purchaseUsd)}</td><td>${fmtMoney(u.balance)}</td><td>${u.disputes}</td><td><button class="ghost" data-user="${esc(u.login)}">Открыть</button></td></tr>`).join("")}
+  return `<article class="table-card"><table><thead><tr><th>#</th><th>User</th><th>Role</th><th>Status</th><th>Registered</th><th>Purchases</th><th>Spent</th><th>Balance</th><th>Ref +</th><th>Ref income</th><th>Invited by</th><th>Disputes</th><th>Action</th></tr></thead><tbody>
+    ${rows.map((u) => `<tr><td>${u.number}</td><td><strong>${esc(u.login)}</strong><br><span class="muted">${esc(u.name)}</span></td><td>${esc(u.role)}</td><td><span class="status ${u.status === "blocked" ? "off" : ""}">${esc(u.status)}</span></td><td>${fmtDate(u.registeredAt)}</td><td>${u.purchases}</td><td>${fmtMoney(u.purchaseUsd)}</td><td>${fmtMoney(u.balance)}</td><td>${Number(u.invitedCount || 0)}</td><td>${fmtMoney(u.referralEarned || 0)}</td><td>${esc(u.invitedBy || "-")}</td><td>${u.disputes}</td><td><button class="ghost" data-user="${esc(u.login)}">Open</button></td></tr>`).join("")}
   </tbody></table></article><div data-user-detail></div>`;
 }
-
 function userDetail(payload) {
   const u = payload.user;
   const s = payload.summary;
@@ -668,6 +669,8 @@ function userDetail(payload) {
       ${statCard("Баланс", fmtMoney(payload.balanceUsd || 0), `${Number(payload.balanceLtc || 0).toFixed(6)} LTC`)}
       ${statCard("Пополнения", fmtMoney(s.totalDeposits), "все успешные")}
       ${statCard("Покупки", fmtMoney(s.totalPurchases), `${payload.orders.length} заказов`)}
+      ${statCard("Referral income", fmtMoney(s.referralEarned || 0), `${Number(s.invitedCount || 0)} invited`)}
+      ${statCard("Invited by", s.invitedBy || "-", "referrer")}
       ${statCard("Средний чек", fmtMoney(s.averageCheck), "по покупкам")}
       ${statCard("Расход/день", fmtMoney(s.averageDailySpend || 0), "с первой покупки")}
       ${statCard("Расход/месяц", fmtMoney(s.averageMonthlySpend || 0), "расчетно")}
@@ -942,20 +945,24 @@ function renderFinance() {
   const bucketCard = (label, rows) => statCard(label, rows?.length || 0, fmtMoney((rows || []).reduce((sum, item) => sum + Number(item.amountUsd || item.priceAmount || 0), 0)));
   const deposits = data.finances.walletDeposits || [];
   const withdrawals = data.finances.walletWithdrawals || [];
+  const referralPayments = data.finances.referralPayments || [];
+  const referralTotals = data.finances.referralTotals || {};
   const withdrawalActions = (w) => {
     const status = String(w.status || "pending").toLowerCase();
     if (!["pending", "processing"].includes(status)) {
-      return `<span class="muted">${w.processedAt ? `Обработано ${fmtDate(w.processedAt)}` : "История"}</span>`;
+      return `<span class="muted">${w.processedAt ? `Processed ${fmtDate(w.processedAt)}` : "History"}</span>`;
     }
     return `<div class="row-actions">
-      <button class="ghost" type="button" data-withdrawal-status="${esc(w.id)}" data-status="paid">Выплачено</button>
-      <button class="ghost danger" type="button" data-withdrawal-status="${esc(w.id)}" data-status="rejected">Отклонить</button>
+      <button class="ghost" type="button" data-withdrawal-status="${esc(w.id)}" data-status="paid">Paid</button>
+      <button class="ghost danger" type="button" data-withdrawal-status="${esc(w.id)}" data-status="rejected">Reject</button>
     </div>`;
   };
-  return `<section class="grid">${bucketCard("Успешные депозиты", buckets.successful)}${bucketCard("В ожидании", buckets.pending)}${bucketCard("Отмененные", buckets.cancelled)}${bucketCard("Ошибочные", buckets.failed)}</section>
-  <article class="table-card"><h3>Пополнения</h3><table><thead><tr><th>ID</th><th>Логин</th><th>Сумма</th><th>Монета</th><th>Статус</th><th>Адрес</th><th>Дата</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
-  <article class="table-card"><h3>Заявки на вывод</h3><table><thead><tr><th>ID</th><th>Магазин</th><th>Логин</th><th>Сумма</th><th>Адрес</th><th>Статус</th><th>Дата</th><th>Действия</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Владелец сайта" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(8)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span></td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
+  return `<section class="grid">${bucketCard("Successful deposits", buckets.successful)}${bucketCard("Pending", buckets.pending)}${bucketCard("Cancelled", buckets.cancelled)}${bucketCard("Failed", buckets.failed)}${statCard("Referral rewards", fmtMoney(referralTotals.rewardsUsd || 0), `${Number(referralTotals.count || 0)} refs`)}${statCard("From purchases", fmtMoney(referralTotals.productRewardsUsd || 0), "product orders")}</section>
+  <article class="table-card"><h3>Referral rewards</h3><table><thead><tr><th>ID</th><th>Inviter</th><th>Referral</th><th>Base</th><th>Reward</th><th>Source</th><th>Date</th></tr></thead><tbody>${referralPayments.slice(0, 160).map((p) => `<tr><td>${esc(p.id)}</td><td>${esc(p.referrerLogin || "")}</td><td>${esc(p.referralLogin || "")}</td><td>${fmtMoney(p.amount || p.amountUsd || 0)}</td><td>${fmtMoney(p.reward || 0)}</td><td>${esc(p.sourceId || "")}</td><td>${fmtDate(p.createdAt || p.date)}</td></tr>`).join("")}</tbody></table></article>
+  <article class="table-card"><h3>Deposits</h3><table><thead><tr><th>ID</th><th>Login</th><th>Amount</th><th>Coin</th><th>Status</th><th>Address</th><th>Date</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
+  <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(8)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span></td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
 }
+
 function renderSettings() {
   const owner = data.settings.ownerSettings || {};
   const payment = data.settings.paymentSettings || {};
