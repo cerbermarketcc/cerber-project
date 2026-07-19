@@ -552,9 +552,6 @@ function storeDetail(id) {
       <div class="row">
         <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
-      <div class="row">
-        <label class="field">Баннер URL<input name="cover" value="${esc(store.cover || "")}"></label>
-      </div>
       <label class="field">Пароль панели продавца<input name="adminPassword" placeholder="оставить пустым, если не менять"></label>
       <div class="checks">
         <label><input name="region_moldova" type="checkbox" ${countries.includes("moldova") ? "checked" : ""}> Молдова</label>
@@ -605,11 +602,9 @@ function renderExchangers() {
         <label class="field">Описание<textarea name="description" placeholder="Условия, направление обмена, рабочее время"></textarea></label>
         <div class="row">
           <label class="field">Фото каталога файлом<input name="imageFile" type="file" accept="image/*"></label>
-          <label class="field">Фото каталога URL<input name="image" placeholder="https://..."></label>
         </div>
         <div class="row">
           <label class="field">Аватарка чата файлом<input name="avatarFile" type="file" accept="image/*"></label>
-          <label class="field">Аватарка чата URL<input name="avatar" placeholder="https://..."></label>
         </div>
         <div class="row">
           <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="0"></label>
@@ -642,9 +637,7 @@ function exchangerDetail(id) {
       <label class="field">Название<input name="name" value="${esc(item.name || item.title || "")}" required></label>
       <label class="field">Описание<textarea name="description">${esc(item.description || "")}</textarea></label>
       <label class="field">Новое фото каталога файлом<input name="imageFile" type="file" accept="image/*"></label>
-      <label class="field">Фото каталога URL<input name="image" value="${esc(item.image || "")}"></label>
       <label class="field">Новая аватарка чата файлом<input name="avatarFile" type="file" accept="image/*"></label>
-      <label class="field">Аватарка чата URL<input name="avatar" value="${esc(item.avatar || "")}"></label>
       <div class="row">
         <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(item.position || 0)}"></label>
         <label class="field">Статус<select name="status"><option value="active" ${item.active ? "selected" : ""}>Активен</option><option value="disabled" ${!item.active ? "selected" : ""}>Скрыт</option></select></label>
@@ -930,7 +923,7 @@ function renderBroadcasts() {
     <label class="field">Фото файлом<input name="photoFile" type="file" accept="image/*"></label>
     <label class="field">Заголовок<input name="title" required></label>
     <label class="field">Текст<textarea name="body" required></textarea></label>
-    <div class="row"><label class="field">Фото URL<input name="photoUrl" placeholder="https://..."></label><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label></div>
+    <div class="row"><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label></div>
     <div class="row"><label class="field">Текст кнопки<input name="buttonText" placeholder="Открыть"></label><label class="field">Ссылка кнопки<input name="buttonUrl" placeholder="https://..."></label></div>
     <div class="row"><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label><label class="field">Кому отправить<select name="audience"><option value="all">Всем пользователям</option><option value="online">Онлайн пользователям</option><option value="buyers">С покупками</option><option value="no_purchases">Без покупок</option><option value="balance">С балансом</option><option value="custom">По фильтрам ниже</option></select></label></div>
     <div class="row"><label class="field">Мин. сумма покупок<input name="minPurchase" type="number" step="0.01" placeholder="1"></label><label class="field">Макс. сумма покупок<input name="maxPurchase" type="number" step="0.01" placeholder="1000"></label></div>
@@ -1262,16 +1255,16 @@ function bindActions() {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
     try {
-      const image = await formImageValue(fd, "imageFile", "image");
-      const avatar = await formImageValue(fd, "avatarFile", "avatar");
+      const image = await formImageValue(fd, "imageFile");
+      const avatar = await formImageValue(fd, "avatarFile");
       data = await api("/api/admin/exchangers", {
         method: "POST",
         body: JSON.stringify({
           login: fd.get("login"),
           name: fd.get("name"),
           description: fd.get("description"),
-          image,
-          avatar,
+          image: image || undefined,
+          avatar: avatar || undefined,
           position: Number(fd.get("position") || 0),
           status: fd.get("status")
         })
@@ -1295,16 +1288,16 @@ function bindActions() {
       event.preventDefault();
       const fd = new FormData(form);
       try {
-        const image = await formImageValue(fd, "imageFile", "image");
-        const avatar = await formImageValue(fd, "avatarFile", "avatar");
+        const image = await formImageValue(fd, "imageFile");
+        const avatar = await formImageValue(fd, "avatarFile");
         data = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
           method: "PATCH",
           body: JSON.stringify({
             login: fd.get("login"),
             name: fd.get("name"),
             description: fd.get("description"),
-            image,
-            avatar,
+            image: image || undefined,
+            avatar: avatar || undefined,
             position: Number(fd.get("position") || 0),
             status: fd.get("status")
           })
@@ -1391,15 +1384,15 @@ function bindActions() {
     if (fd.get("placement_stores")) placements.push("stores");
     try {
       const image = await formImageValue(fd, "imageFile");
-      const cover = await formImageValue(fd, "coverFile", "cover");
+      const cover = await formImageValue(fd, "coverFile");
       data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
           description: fd.get("description"),
-          image,
-          cover,
+          image: image || undefined,
+          cover: cover || undefined,
           status: fd.get("status"),
           placement: placements[0] || "stores",
           placements,
@@ -1540,7 +1533,7 @@ function bindActions() {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget).entries());
     const formData = new FormData(event.currentTarget);
-    const photoUrl = await formImageValue(formData, "photoFile", "photoUrl");
+    const photoUrl = await formImageValue(formData, "photoFile");
     const filters = {
       audience: body.audience,
       minPurchase: body.minPurchase,
