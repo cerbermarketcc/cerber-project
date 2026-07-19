@@ -245,6 +245,7 @@ body[data-theme="dark"] .logo {
   grid-row: 1;
   font-size: 13px;
   letter-spacing: 2px;
+  white-space: nowrap;
 }
 
 .balance span {
@@ -3408,6 +3409,310 @@ body[data-theme="dark"] .mirror-row {
   border: 0;
   background: transparent;
   font-size: 24px;
+}
+
+@media (max-width: 560px) {
+  html,
+  body {
+    width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    font-size: 15px;
+  }
+
+  .app {
+    min-height: 100svh;
+    padding-bottom: calc(190px + var(--safe-bottom));
+  }
+
+  .topbar {
+    gap: 10px;
+    min-height: 86px;
+  }
+
+  .logo {
+    width: min(178px, 45vw);
+    height: 46px;
+  }
+
+  .balance {
+    grid-template-columns: minmax(0, 1fr) 38px;
+    min-width: 178px;
+    max-width: 48vw;
+    min-height: 56px;
+    padding: 7px 7px 7px 14px;
+  }
+
+  .balance strong {
+    font-size: 12px;
+    letter-spacing: 1.6px;
+    line-height: 1.1;
+  }
+
+  .balance span {
+    font-size: 11px;
+  }
+
+  .balance .avatar,
+  .avatar {
+    width: 36px;
+    height: 36px;
+  }
+
+  .feed,
+  .screen,
+  .wallet-screen,
+  .exchange-screen,
+  .referral-screen {
+    width: 100%;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-bottom: calc(190px + var(--safe-bottom));
+  }
+
+  .screen > h1,
+  .referral-screen > h1,
+  .wallet-hero h1 {
+    margin-top: 22px;
+    font-size: clamp(30px, 9vw, 40px);
+    line-height: 1.08;
+    letter-spacing: 0;
+  }
+
+  .stats,
+  .ref-summary-grid,
+  .seller-dashboard-stats,
+  .analytics-summary,
+  .exchange-hero-stats,
+  .exchange-stats,
+  .product-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .stats {
+    margin: 22px 0;
+    padding-top: 18px;
+  }
+
+  .stat,
+  .ref-summary-grid article,
+  .seller-dash-stat,
+  .analytics-summary div,
+  .exchange-hero-stats div,
+  .exchange-stats .stat {
+    min-width: 0;
+    min-height: 96px;
+    padding: 14px 12px;
+    border-radius: 18px;
+    overflow: hidden;
+  }
+
+  .stat span,
+  .ref-summary-grid span,
+  .seller-dash-stat span,
+  .seller-dash-stat small,
+  .analytics-summary span,
+  .exchange-hero-stats span,
+  .exchange-stats span {
+    display: block;
+    max-width: 100%;
+    font-size: 13px;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+
+  .stat strong,
+  .ref-summary-grid strong,
+  .seller-dash-stat strong,
+  .analytics-summary strong,
+  .exchange-hero-stats strong,
+  .exchange-stats strong {
+    max-width: 100%;
+    font-size: clamp(24px, 8vw, 34px);
+    line-height: 1.08;
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .ref-summary-grid {
+    margin-bottom: 24px;
+  }
+
+  .ref-summary-grid article {
+    align-content: space-between;
+  }
+
+  .referral-tabs,
+  .pill-tabs,
+  .order-tabs {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(132px, 1fr);
+    gap: 10px;
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scroll-snap-type: x proximity;
+  }
+
+  .referral-tabs button,
+  .pill-tabs button,
+  .order-tabs button {
+    min-width: 0;
+    min-height: 52px;
+    padding: 0 16px;
+    white-space: nowrap;
+    scroll-snap-align: start;
+  }
+
+  .ref-card,
+  .ref-terms,
+  .analytics-card,
+  .wallet-balance-card,
+  .wallet-convert-card,
+  .wallet-transactions,
+  .panel,
+  .modal {
+    border-radius: 20px;
+  }
+
+  .ref-card,
+  .ref-terms,
+  .analytics-card {
+    padding: 18px;
+  }
+
+  .ref-card-head,
+  .ref-terms,
+  .ref-item,
+  .wallet-balance-row,
+  .wallet-actions,
+  .ref-section-head {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  .ref-card h2,
+  .ref-section-head h2,
+  .details-title,
+  .empty-ref h3 {
+    font-size: 24px;
+    line-height: 1.15;
+  }
+
+  .ref-card p,
+  .empty-ref p {
+    font-size: 15px;
+  }
+
+  .ref-card-head span {
+    justify-self: start;
+  }
+
+  .ref-link-row {
+    grid-template-columns: 1fr 48px;
+  }
+
+  .ref-link-row button:first-child {
+    grid-column: 1 / -1;
+    min-height: 56px;
+    font-size: 13px;
+  }
+
+  .ref-link-row .primary {
+    min-width: 0;
+  }
+
+  .period-picker {
+    grid-template-columns: 1fr;
+  }
+
+  input,
+  textarea,
+  select,
+  .primary,
+  .ghost-button {
+    max-width: 100%;
+  }
+
+  .dock {
+    left: 12px;
+    right: 12px;
+    bottom: calc(10px + var(--safe-bottom));
+    width: auto;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    transform: none;
+  }
+
+  .theme-toggle,
+  .language {
+    width: 100%;
+  }
+
+  .quick-actions {
+    bottom: calc(98px + var(--safe-bottom));
+  }
+
+  .quick-action {
+    width: 54px;
+    height: 54px;
+  }
+
+  .chat-launcher {
+    right: 16px;
+    bottom: calc(102px + var(--safe-bottom));
+  }
+}
+
+@media (max-width: 380px) {
+  .topbar {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .logo {
+    width: min(148px, 42vw);
+  }
+
+  .balance {
+    min-width: 154px;
+    max-width: 52vw;
+    padding-left: 12px;
+  }
+
+  .balance strong {
+    font-size: 11px;
+    letter-spacing: 1.2px;
+  }
+
+  .feed,
+  .screen,
+  .wallet-screen,
+  .exchange-screen,
+  .referral-screen {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .stat,
+  .ref-summary-grid article,
+  .seller-dash-stat,
+  .analytics-summary div,
+  .exchange-hero-stats div,
+  .exchange-stats .stat {
+    padding: 12px 10px;
+  }
 }
 
 .divider {
