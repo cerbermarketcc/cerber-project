@@ -2912,7 +2912,6 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
       publicStoresCacheAt: Date.now(),
       deletedStoreIds: [],
       exchangeCards: [],
-      exchangers: [],
       exchangeRequests: [],
       storeApplications: []
     });
@@ -2920,6 +2919,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
     await appendAdminLog("marketplace_data_cleared", admin.login, {
       stores: "deleted",
       exchangeCards: "cleared",
+      exchangers: "preserved",
       exchangeRequests: "cleared",
       storeApplications: "cleared"
     });
@@ -3543,7 +3543,7 @@ app.delete("/api/admin/exchangers/:id", async (req, res, next) => {
     const removed = before.find((item) => String(item.id || "") === String(req.params.id || ""));
     if (!removed) return res.status(404).json({ error: "Обменник не найден" });
     state.exchangers = before.filter((item) => String(item.id || "") !== String(req.params.id || ""));
-    await saveSettingsState(state);
+    await saveSettingsState(state, { allowEmptyExchangers: true });
     await appendAdminLog("exchanger_deleted", admin.login, { exchangerId: req.params.id, login: removed.login || removed.ownerLogin || "" });
     notifyRealtime("exchanger_deleted", { exchangerId: req.params.id });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
@@ -4369,16 +4369,25 @@ function rememberNowpaymentsIpn(state = {}, fingerprint = "", kind = "payment") 
   return true;
 }
 
-async function saveSettingsState(state) {
+async function saveSettingsState(state, options = {}) {
   const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
   const currentData = currentSettings?.data || {};
+  const incomingExchangers = Array.isArray(state?.exchangers) ? state.exchangers : null;
+  const currentExchangers = Array.isArray(currentData.exchangers) ? currentData.exchangers : [];
+  const preserveExistingExchangers = !options.allowEmptyExchangers
+    && incomingExchangers
+    && incomingExchangers.length === 0
+    && currentExchangers.length > 0;
   const next = {
     ...currentData,
     ...(state || {}),
     telegramBot: state?.telegramBot || { users: {}, sentMessages: {} },
     mirrorBots: Array.isArray(state?.mirrorBots) ? state.mirrorBots : (currentData.mirrorBots || []),
     ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores : (currentData.ownerStores || []),
-    publicStoresCache: Array.isArray(state?.publicStoresCache) ? state.publicStoresCache : (currentData.publicStoresCache || [])
+    publicStoresCache: Array.isArray(state?.publicStoresCache) ? state.publicStoresCache : (currentData.publicStoresCache || []),
+    exchangers: preserveExistingExchangers
+      ? currentExchangers
+      : (incomingExchangers || currentExchangers)
   };
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
