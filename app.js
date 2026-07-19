@@ -1607,7 +1607,7 @@ async function apiFetchOnce(path, options = {}) {
       const error = new Error(message);
       error.status = response.status;
       if (response.status === 401 && /Сессия не найдена|session/i.test(String(message))) {
-        clearSession();
+        clearApiSession();
         error.sessionExpired = true;
         error.message = "Сессия истекла. Войдите снова.";
       }
@@ -2095,6 +2095,14 @@ function clearSession() {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
   } catch {
     saveDb();
+  }
+}
+
+function clearApiSession() {
+  try {
+    localStorage.removeItem(API_TOKEN_KEY);
+  } catch {
+    // The visible account can stay open even when the server token is expired.
   }
 }
 
@@ -6457,8 +6465,7 @@ async function handleExchangerMessage(event) {
     renderMessages();
   } catch (error) {
     if (error.sessionExpired || /Сессия не найдена|Сессия истекла|session/i.test(String(error.message || ""))) {
-      authMode = "login";
-      renderAuth("Сессия истекла. Войдите снова, чтобы написать обменнику.");
+      showToast("Сессия истекла. Войдите снова, чтобы написать обменнику.");
       return;
     }
     showToast(error.message || "Не удалось отправить сообщение");
