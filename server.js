@@ -32,6 +32,7 @@ const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
+const exchangerReviewCooldownMs = 6 * 60 * 60 * 1000;
 const groupChatHiddenSiteEmojiIds = new Set(["024", "025", "026", "027", "028", "029", "030", "031", "032", "033", "034", "035", "036", "037", "038"]);
 const walletCoins = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC" },
@@ -2287,6 +2288,35 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
     await saveSettingsState(state);
     notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: exchanger.id, reviewId: savedReview?.id || "" });
     res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchangers/:id/reviews", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "exchanger-review", { limit: 8, windowMs: 60 * 60 * 1000, identity: user.login });
+    const state = await loadSettingsState();
+    const exchanger = (Array.isArray(state.exchangers) ? state.exchangers : [])
+      .find((item) => String(item.id || "") === String(req.params.id || "") && item.status !== "disabled" && item.active !== false);
+    if (!exchanger) return res.status(404).json({ error: "Обменник не найден" });
+    const rating = Number(req.body.rating || req.body.score || 0);
+    const text = String(req.body.text || req.body.body || req.body.message || "").trim();
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5 || !text) {
+      return res.status(400).json({ error: "Выберите оценку от 1 до 5 и напишите текст отзыва" });
+    }
+    const savedReview = addExchangerReview(exchanger, user, { rating: Math.round(rating), text: text.slice(0, 1000) });
+    await saveSettingsState(state);
+    notifyRealtime("exchanger_review_created", {
+      id: savedReview.id,
+      exchangerId: exchanger.id,
+      fromLogin: user.login,
+      rating: savedReview.rating
+    });
+    res.json({ ok: true, review: savedReview, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -5677,11 +5707,46 @@ function exchangerReviewSummary(item = {}) {
   };
 }
 
+function formatShortDurationRu(ms = 0) {
+  const totalMinutes = Math.max(1, Math.ceil(Number(ms || 0) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours && minutes) return `${hours} ч ${minutes} мин`;
+  if (hours) return `${hours} ч`;
+  return `${minutes} мин`;
+}
+
+function assertExchangerReviewAllowed(exchanger, user, now = Date.now()) {
+  const authorKey = loginKey(user?.login || user?.login_key);
+  const ownerKey = loginKey(exchanger?.login || exchanger?.ownerLogin);
+  if (!authorKey) {
+    const error = new Error("Сессия не найдена");
+    error.status = 401;
+    throw error;
+  }
+  if (ownerKey && authorKey === ownerKey) {
+    const error = new Error("Нельзя оставить отзыв своему обменнику");
+    error.status = 400;
+    throw error;
+  }
+  const reviews = Array.isArray(exchanger?.reviews) ? exchanger.reviews : [];
+  const latestOwnReview = reviews
+    .filter((entry) => loginKey(entry.fromLogin || entry.fromLoginKey) === authorKey)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
+  const latestAt = Number(latestOwnReview?.createdAt || 0);
+  if (latestAt && now - latestAt < exchangerReviewCooldownMs) {
+    const error = new Error(`Отзыв этому обменнику можно оставить раз в 6 часов. Осталось: ${formatShortDurationRu(exchangerReviewCooldownMs - (now - latestAt))}`);
+    error.status = 429;
+    throw error;
+  }
+}
+
 function addExchangerReview(exchanger, user, review) {
   if (!exchanger || !review) return null;
   exchanger.reviews = Array.isArray(exchanger.reviews) ? exchanger.reviews : [];
   const authorKey = loginKey(user.login);
   const now = Date.now();
+  assertExchangerReviewAllowed(exchanger, user, now);
   const item = {
     id: `review-${now}-${crypto.randomBytes(3).toString("hex")}`,
     fromLogin: user.login,
@@ -5691,9 +5756,7 @@ function addExchangerReview(exchanger, user, review) {
     createdAt: now,
     date: new Date(now).toLocaleString("ru-RU")
   };
-  const existingIndex = exchanger.reviews.findIndex((entry) => loginKey(entry.fromLogin || entry.fromLoginKey) === authorKey);
-  if (existingIndex >= 0) exchanger.reviews[existingIndex] = item;
-  else exchanger.reviews.unshift(item);
+  exchanger.reviews.unshift(item);
   exchanger.updatedAt = now;
   return item;
 }

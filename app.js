@@ -857,6 +857,13 @@ Object.assign(uiPhraseTranslations.md, {
   "Рейтинг": "Rating",
   "Нет отзывов": "Nu exista recenzii",
   "Отзывов пока нет.": "Nu exista recenzii.",
+  "Оставить отзыв": "Lasa recenzie",
+  "Оценка": "Nota",
+  "Отзыв": "Recenzie",
+  "Отзыв сохранен": "Recenzia a fost salvata",
+  "Войдите в аккаунт, чтобы оставить отзыв": "Intrati in cont ca sa lasati o recenzie",
+  "Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв.": "Sesiunea site-ului a expirat. Intrati din nou o data ca sa lasati o recenzie.",
+  "Не удалось сохранить отзыв": "Recenzia nu a putut fi salvata",
   "Отправить сообщение обменнику": "Trimite mesaj schimbatorului",
   "Связь с обменником": "Contact cu schimbatorul",
   "Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.": "Scrieti intrebarea. Dialogul se va deschide in mesajele private cu utilizatorul legat de acest schimbator.",
@@ -922,6 +929,13 @@ Object.assign(uiPhraseTranslations.en, {
   "Рейтинг": "Rating",
   "Нет отзывов": "No reviews",
   "Отзывов пока нет.": "No reviews yet.",
+  "Оставить отзыв": "Leave review",
+  "Оценка": "Rating",
+  "Отзыв": "Review",
+  "Отзыв сохранен": "Review saved",
+  "Войдите в аккаунт, чтобы оставить отзыв": "Log in to leave a review",
+  "Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв.": "Site session expired. Log in once more to leave a review.",
+  "Не удалось сохранить отзыв": "Could not save review",
   "Отправить сообщение обменнику": "Send message to exchanger",
   "Связь с обменником": "Contact exchanger",
   "Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.": "Write your question. The dialog will open in private messages with the user linked to this exchanger.",
@@ -6408,7 +6422,7 @@ function exchangerById(id) {
 function exchangerRatingText(item = {}) {
   const count = Number(item.reviewsCount || 0);
   const rating = Number(item.rating || 0);
-  return count ? `${rating.toFixed(1)} / 5 · ${count} отзыв${count === 1 ? "" : count < 5 ? "а" : "ов"}` : "Нет отзывов";
+  return count ? `${rating.toFixed(1)} / 5 · ${count} ${tr("отзывов")}` : tr("Нет отзывов");
 }
 
 function exchangerReviewsHtml(item = {}) {
@@ -6430,8 +6444,8 @@ function showExchangerReviews(id) {
   if (!item) return;
   const name = item.name || item.title || item.login || "Exchange";
   showModal(`
-    <h2>Отзывы: ${esc(name)}</h2>
-    <p class="desc">Рейтинг: <strong>${esc(exchangerRatingText(item))}</strong></p>
+    <h2>${tr("Отзывы")}: ${esc(name)}</h2>
+    <p class="desc">${tr("Рейтинг")}: <strong>${esc(exchangerRatingText(item))}</strong></p>
     <div class="requisites-list">${exchangerReviewsHtml(item)}</div>
   `);
 }
@@ -6520,22 +6534,38 @@ function renderExchangerProfile(id) {
       <article class="panel">
         <img class="profile-cover" src="${esc(item.image || fallbackImage)}" alt="">
         <div class="profile-body">
-          <p class="breadcrumbs">Обменники > ${esc(name)}</p>
+          <p class="breadcrumbs">${tr("Обменники")} > ${esc(name)}</p>
           <div class="shop-title"><h1 class="profile-title">${esc(name)}</h1><span class="verify">✓</span></div>
           <p class="desc">${esc(item.description || "")}</p>
           <div class="exchange-actions">
-            <button class="primary" data-exchanger-contact="${esc(item.id)}">Отправить сообщение обменнику <span class="green-dot"></span></button>
-            <button class="ghost-button" data-exchanger-reviews="${esc(item.id)}">Отзывы · ${esc(exchangerRatingText(item))}</button>
+            <button class="primary" data-exchanger-contact="${esc(item.id)}">${tr("Отправить сообщение обменнику")} <span class="green-dot"></span></button>
+            <button class="ghost-button" data-exchanger-reviews="${esc(item.id)}">${tr("Отзывы")} · ${esc(exchangerRatingText(item))}</button>
           </div>
         </div>
       </article>
       <article class="panel exchange-tool">
-        <h2>Связь с обменником</h2>
-        <p class="desc">Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.</p>
+        <h2>${tr("Связь с обменником")}</h2>
+        <p class="desc">${tr("Напишите вопрос. Диалог откроется в личных сообщениях с пользователем, который привязан к этому обменнику.")}</p>
         <form class="form" data-exchanger-message-form="${esc(item.id)}">
-          <label class="field">Тема<input name="subject" value="Вопрос по обмену"></label>
-          <label class="field">Сообщение<textarea name="body" required></textarea></label>
-          <button class="primary">Отправить сообщение</button>
+          <label class="field">${tr("Тема")}<input name="subject" value="${esc(tr("Вопрос по обмену"))}"></label>
+          <label class="field">${tr("Сообщение")}<textarea name="body" required></textarea></label>
+          <button class="primary">${tr("Отправить сообщение")}</button>
+        </form>
+      </article>
+      <article class="panel exchange-tool">
+        <h2>${tr("Оставить отзыв")}</h2>
+        <form class="form" data-exchanger-review-form="${esc(item.id)}">
+          <label class="field">${tr("Оценка")}
+            <select name="rating" required>
+              <option value="5">5</option>
+              <option value="4">4</option>
+              <option value="3">3</option>
+              <option value="2">2</option>
+              <option value="1">1</option>
+            </select>
+          </label>
+          <label class="field">${tr("Отзыв")}<textarea name="text" required maxlength="1000"></textarea></label>
+          <button class="primary">${tr("Оставить отзыв")}</button>
         </form>
       </article>
     </section>
@@ -6547,6 +6577,7 @@ function renderExchangerProfile(id) {
     showExchangerReviews(event.currentTarget.dataset.exchangerReviews);
   });
   document.querySelector("[data-exchanger-message-form]")?.addEventListener("submit", handleExchangerMessage);
+  document.querySelector("[data-exchanger-review-form]")?.addEventListener("submit", handleExchangerReview);
 }
 
 async function handleExchangerMessage(event) {
@@ -6598,6 +6629,58 @@ async function handleExchangerMessage(event) {
       return;
     }
     showToast(error.message || "Не удалось отправить сообщение");
+  }
+}
+
+async function handleExchangerReview(event) {
+  event.preventDefault();
+  if (!API_ENABLED || !currentUser()) {
+    showToast(tr("Войдите в аккаунт, чтобы оставить отзыв"));
+    return;
+  }
+  const sessionReady = await ensureApiSession();
+  if (!sessionReady) {
+    showToast(tr("Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв."));
+    return;
+  }
+  const form = event.currentTarget;
+  const id = form.dataset.exchangerReviewForm;
+  const fd = new FormData(form);
+  const reviewPayload = {
+    rating: Number(fd.get("rating") || 0),
+    text: fd.get("text")
+  };
+  const sendReview = () => apiFetch(`/api/exchangers/${encodeURIComponent(id)}/reviews`, {
+    method: "POST",
+    timeoutMs: 15000,
+    body: JSON.stringify(reviewPayload)
+  });
+  try {
+    const payload = await sendReview();
+    applyRemoteState(payload);
+    showToast(tr("Отзыв сохранен"));
+    form.reset();
+    renderExchangerProfile(id);
+  } catch (error) {
+    if (error.sessionExpired || /Сессия не найдена|Сессия истекла|session/i.test(String(error.message || ""))) {
+      const restored = await ensureApiSession();
+      if (restored) {
+        try {
+          const payload = await sendReview();
+          applyRemoteState(payload);
+          showToast(tr("Отзыв сохранен"));
+          form.reset();
+          renderExchangerProfile(id);
+          return;
+        } catch (retryError) {
+          showToast(retryError.message || tr("Не удалось сохранить отзыв"));
+          return;
+        }
+      }
+      showToast(tr("Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв."));
+      return;
+    }
+    showToast(error.message || tr("Не удалось сохранить отзыв"));
   }
 }
 
