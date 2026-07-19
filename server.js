@@ -1709,6 +1709,14 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const availableUsd = Math.max(0, earnedUsd - requestedUsd);
     if (availableUsd <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
     const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
+    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "store", identity: storeId, amountUsd, address });
+    const existingWithdrawal = findReusableWithdrawal(state, {
+      scope: "store",
+      storeId,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      signature: withdrawalRequest.signature
+    });
+    if (existingWithdrawal) return res.json({ withdrawal: existingWithdrawal, reused: true, ...(await stateForStoreAdmin(storeId, sellerToken)) });
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
     if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступного баланса" });
 
@@ -1724,6 +1732,8 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       coinId: "ltc",
       payCurrency: "ltc",
       address,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      requestSignature: withdrawalRequest.signature,
       status: "pending",
       provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
@@ -3273,6 +3283,14 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     const address = String(req.body.address || state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
     if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC счет для вывода" });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "owner", identity: admin.login, amountUsd, address });
+    const existingWithdrawal = findReusableWithdrawal(state, {
+      scope: "owner",
+      login: admin.login,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      signature: withdrawalRequest.signature
+    });
+    if (existingWithdrawal) return res.json(adminBuildOverview(data));
     const request = {
       id: `owner-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       kind: "ltc_withdraw",
@@ -3283,6 +3301,8 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       coinId: "ltc",
       payCurrency: "ltc",
       address,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      requestSignature: withdrawalRequest.signature,
       status: "pending",
       provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
@@ -4677,6 +4697,32 @@ function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
       return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
     })
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
+function withdrawalRequestFingerprint(req, { scope = "", identity = "", amountUsd = 0, amountLtc = 0, address = "" } = {}) {
+  const idempotencyKey = String(req.headers["x-idempotency-key"] || req.body?.idempotencyKey || "").trim().slice(0, 160);
+  const amountPart = Number(amountUsd || 0) > 0 ? Number(amountUsd || 0).toFixed(8) : Number(amountLtc || 0).toFixed(8);
+  const signature = crypto.createHash("sha256")
+    .update([scope, loginKey(identity), String(address || "").trim().toLowerCase(), amountPart].join(":"))
+    .digest("hex");
+  return { idempotencyKey, signature };
+}
+
+function reusableWithdrawalStatuses(status = "") {
+  return !["cancelled", "canceled", "rejected", "failed"].includes(String(status || "").toLowerCase());
+}
+
+function findReusableWithdrawal(state = {}, { scope = "", login = "", storeId = "", idempotencyKey = "", signature = "", windowMs = 2 * 60 * 1000 } = {}) {
+  const now = Date.now();
+  return (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).find((item) => {
+    if (!reusableWithdrawalStatuses(item.status)) return false;
+    if (scope && item.scope !== scope) return false;
+    if (storeId && String(item.storeId || "") !== String(storeId || "")) return false;
+    if (login && !sameLogin(item.login || item.loginKey, login)) return false;
+    if (idempotencyKey && String(item.idempotencyKey || "") === idempotencyKey) return true;
+    if (signature && String(item.requestSignature || "") === signature && now - Number(item.createdAt || 0) <= windowMs) return true;
+    return false;
+  });
 }
 
 function requestedWithdrawalUsd(body = {}, availableUsd = 0) {
@@ -6141,6 +6187,13 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
     const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
     if (amountLtc > balance) return res.status(400).json({ error: "Недостаточно LTC для вывода" });
 
+    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "user", identity: user.login, amountLtc, address });
+    const existingWithdrawal = findReusableWithdrawal(state, {
+      login: user.login,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      signature: withdrawalRequest.signature
+    });
+    if (existingWithdrawal) return res.json({ withdrawal: existingWithdrawal, reused: true, ...(await stateFor(user)) });
     const request = {
       id: `withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
       kind,
@@ -6151,6 +6204,8 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
       coinId: "ltc",
       payCurrency: "ltc",
       address,
+      idempotencyKey: withdrawalRequest.idempotencyKey,
+      requestSignature: withdrawalRequest.signature,
       note,
       status: "pending",
       provider: "manual",

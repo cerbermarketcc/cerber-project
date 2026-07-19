@@ -17,14 +17,23 @@
 - [x] Фильтр опасных вложений в Telegram group helpers.
 - [x] Fingerprint-журнал NOWPayments payment IPN.
 - [x] Fingerprint-журнал NOWPayments payout IPN.
+- [x] Idempotency/fingerprint для вывода пользователя.
+- [x] Idempotency/fingerprint для вывода магазина.
+- [x] Idempotency/fingerprint для вывода владельца.
+- [x] SQL-заготовка таблицы `orders`.
+- [x] SQL-заготовка таблицы `wallet_deposits`.
+- [x] SQL-заготовка таблицы `wallet_withdrawals`.
+- [x] SQL-заготовка таблицы `ledger_entries`.
+- [x] SQL-заготовка таблицы `payment_ipn_events`.
 - [x] Блокировка пользователя проверяется при логине.
 - [x] Блокировка пользователя проверяется при запросах с активной сессией.
 
 ## Нужно сделать следующим проходом
 
+- [ ] Применить `supabase-schema.sql` в Supabase SQL Editor.
 - [ ] Перенести заказы из общего JSON-state в таблицу `orders`.
-- [ ] Перенести выводы в таблицу `wallet_withdrawals`.
-- [ ] Перенести пополнения в таблицу `wallet_deposits`.
+- [ ] Перенести выводы из общего JSON-state в таблицу `wallet_withdrawals`.
+- [ ] Перенести пополнения из общего JSON-state в таблицу `wallet_deposits`.
 - [ ] Добавить транзакционную обработку оплат и выводов.
 - [ ] Добавить idempotency key на создание выводов со стороны клиента.
 - [ ] Проверить каждый `/api/admin/*` маршрут на роль и права.
