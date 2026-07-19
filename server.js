@@ -244,7 +244,12 @@ function sessionSource(req) {
 
 async function createUserSession(req, loginKeyValue = "") {
   const token = crypto.randomBytes(32).toString("hex");
-  const { error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue, ...sessionSource(req) });
+  const row = { token, login_key: loginKeyValue, ...sessionSource(req) };
+  let { error } = await supabase.from("sessions").insert(row);
+  if (error && /ip|user_agent|schema cache|column/i.test(String(error.message || ""))) {
+    console.warn("[auth] session source columns unavailable, retrying minimal session", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
+    ({ error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue }));
+  }
   if (error) {
     console.error("[auth] session insert failed", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
     const sessionError = new Error("Не удалось создать сессию. Попробуйте войти заново.");
@@ -1485,7 +1490,7 @@ app.get("/api/health", async (_req, res) => {
     durationMs: 0
   };
   try {
-    const tables = ["orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
+    const tables = ["sessions", "orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
     const tableResults = await Promise.all(tables.map(async (table) => [table, await tableHealth(table)]));
     health.checks.tables = Object.fromEntries(tableResults);
     const state = supabase ? await loadSettingsState().catch(() => ({})) : {};
