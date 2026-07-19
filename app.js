@@ -2822,7 +2822,13 @@ function referralCodeFor(login = db.currentUser) {
 }
 
 function referralLinkFor(login = db.currentUser) {
-  return `${PRIMARY_API_ORIGIN}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
+  const currentHost = String(location.host || "").toLowerCase();
+  const base = location.protocol === "file:"
+    ? "https://cerber.to"
+    : currentHost.includes("onrender.com")
+      ? "https://cerber.to"
+      : location.origin;
+  return `${base}/?ref=${encodeURIComponent(referralCodeFor(login))}`;
 }
 
 function pendingReferralCode() {
@@ -2870,6 +2876,18 @@ function addReferralDeposit(referralLogin, amount) {
     date: new Date().toLocaleString()
   });
   saveDb();
+}
+
+function referralStatsForCurrentUser() {
+  const refs = db.referrals.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
+  const payments = db.referralPayments.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
+  return {
+    refs,
+    payments,
+    totalDeposits: payments.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+    totalEarned: payments.reduce((sum, item) => sum + Number(item.reward || 0), 0),
+    activeRefs: refs.filter((item) => Number(item.deposits || 0) > 0 || Number(item.earned || 0) > 0).length
+  };
 }
 
 function isoDate(date) {
@@ -3296,7 +3314,7 @@ async function handleAuth(event) {
       try {
         const payload = await apiFetch("/api/auth/register", {
           method: "POST",
-          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha })
+          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode() })
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
@@ -6276,15 +6294,18 @@ function renderReferrals(tab = activeReferralTab) {
   activeReferralTab = tab;
   const code = referralCodeFor();
   const link = referralLinkFor();
-  const refs = db.referrals.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
-  const payments = db.referralPayments.filter((item) => sameLogin(item.referrerLogin, db.currentUser));
-  const totalDeposits = payments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const totalEarned = payments.reduce((sum, item) => sum + Number(item.reward || 0), 0);
+  const linkHost = new URL(link).host;
+  const { refs, payments, totalDeposits, totalEarned, activeRefs } = referralStatsForCurrentUser();
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(link)}`;
-  const shortLink = link.length > 31 ? `${link.slice(0, 28)}...` : link;
   layout(`
     <section class="screen referral-screen">
       <h1>Реферальная программа</h1>
+      <section class="ref-summary-grid">
+        <article><span>Приглашено</span><strong>${refs.length}</strong></article>
+        <article><span>Активных</span><strong>${activeRefs}</strong></article>
+        <article><span>Оборот</span><strong>${totalDeposits.toFixed(2)} $</strong></article>
+        <article><span>Ваш доход</span><strong>${totalEarned.toFixed(2)} $</strong></article>
+      </section>
       <div class="pill-tabs referral-tabs">
         <button class="${tab === "referrals" ? "" : "muted"}" data-ref-tab="referrals">Рефералы</button>
         <button class="${tab === "analytics" ? "" : "muted"}" data-ref-tab="analytics">Аналитика</button>
@@ -6295,16 +6316,17 @@ function renderReferrals(tab = activeReferralTab) {
             <h2>${code ? "Ваша реферальная ссылка" : "Создать реферальную ссылку"}</h2>
             ${code ? `<span>Активна</span>` : ""}
           </div>
-          <p>Делитесь Вашей ссылкой и зарабатывайте 3% от пополнений приглашенных пользователей.</p>
+          <p>Приглашайте пользователей и получайте 3% с каждого подтверждённого пополнения их кошелька. Начисления приходят на ваш баланс автоматически.</p>
           ${code ? `
             <div class="ref-link-row">
-              <button data-copy-ref>${esc(shortLink)}</button>
+              <button data-copy-ref>${esc(link)}</button>
               <button data-copy-ref aria-label="Скопировать">⧉</button>
               <button class="qr-button" data-show-qr aria-label="QR">${navIcon("qr")}</button>
             </div>
+            <small class="ref-domain-note">Ссылка создана для домена: ${esc(linkHost)}</small>
           ` : `<button class="primary" data-create-ref>Создать ссылку</button>`}
         </article>
-        <article class="ref-terms"><strong>Все условия</strong><button data-ref-terms>Подробнее</button></article>
+        <article class="ref-terms"><strong>Правила начислений</strong><button data-ref-terms>Подробнее</button></article>
         <div class="ref-section-head">
           <h2>Рефералы</h2>
           <label class="search"><b>⌕</b><input data-ref-search placeholder="Поиск реферала по ID"></label>
@@ -6345,7 +6367,7 @@ function renderReferrals(tab = activeReferralTab) {
   });
   document.querySelector("[data-show-qr]")?.addEventListener("click", () => showReferralQr(qrUrl, code, link));
   document.querySelector("[data-ref-terms]")?.addEventListener("click", () => {
-    showModal(`<h2>Условия реферальной программы</h2><p>За каждого пользователя, зарегистрированного по вашей ссылке, вы будете видеть регистрацию в списке рефералов.</p><p>С каждого будущего пополнения реферала начисляется 3% на ваш личный баланс CERBER.</p><p>Начисленные средства можно использовать для покупок внутри площадки.</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+    showModal(`<h2>Условия реферальной программы</h2><p>Пользователь закрепляется за вами при регистрации по вашей ссылке.</p><p>С каждого подтверждённого пополнения кошелька реферала начисляется 3% на ваш баланс.</p><p>Одно пополнение начисляется только один раз, повторных дублей не будет.</p><button class="primary" data-close-modal>${tr("close")}</button>`);
   });
   document.querySelector("[data-ref-search]")?.addEventListener("input", (event) => {
     const q = event.target.value.toLowerCase();

@@ -25,6 +25,7 @@ const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber-project.onrender.com";
+const referralPublicBaseUrl = publicBaseUrl.includes("onrender.com") ? "https://cerber.to" : publicBaseUrl;
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
@@ -778,6 +779,15 @@ async function stateFor(user) {
       messages: messages?.length || 0
     });
     const settingsData = settings?.data || {};
+    if (user?.login) {
+      const beforeCode = settingsData.referralCodes?.[loginKey(user.login)] || "";
+      const ensuredCode = ensureReferralCodeForState(settingsData, user.login);
+      if (ensuredCode && ensuredCode !== beforeCode) {
+        saveSettingsState(settingsData).catch((error) => {
+          console.error("[stateFor] referral code save failed", { message: error.message });
+        });
+      }
+    }
     if (await normalizeServerOrders(settingsData)) {
       saveSettingsState(settingsData).catch((error) => {
         console.error("[stateFor] order normalization save failed", { message: error.message });
@@ -976,6 +986,74 @@ function publicGroupMessage(message) {
   };
 }
 
+function ensureReferralCodeForState(state = {}, login = "") {
+  const key = loginKey(login);
+  if (!key) return "";
+  state.referralCodes = state.referralCodes || {};
+  if (!state.referralCodes[key]) {
+    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    state.referralCodes[key] = `${seed.slice(0, 4)}${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  }
+  return state.referralCodes[key];
+}
+
+function applyReferralRegistration(state = {}, newLogin = "", refCode = "") {
+  const code = String(refCode || "").trim();
+  const newKey = loginKey(newLogin);
+  if (!code || !newKey) return null;
+  state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
+  state.referralCodes = state.referralCodes || {};
+  const ownerEntry = Object.entries(state.referralCodes).find(([, value]) => String(value || "").trim() === code);
+  if (!ownerEntry) return null;
+  const referrerLogin = ownerEntry[0];
+  if (sameLogin(referrerLogin, newLogin)) return null;
+  if (state.referrals.some((item) => sameLogin(item.login, newLogin))) return null;
+  const referral = {
+    id: `ref-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+    referrerLogin,
+    login: newLogin,
+    registeredAt: new Date().toLocaleString("ru-RU"),
+    createdAt: Date.now(),
+    deposits: 0,
+    earned: 0
+  };
+  state.referrals.push(referral);
+  return referral;
+}
+
+function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sourceId = "") {
+  const amount = Number(amountUsd || 0);
+  if (!referralLogin || amount <= 0) return null;
+  state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
+  state.referralPayments = Array.isArray(state.referralPayments) ? state.referralPayments : [];
+  state.balances = state.balances || {};
+  const referral = state.referrals.find((item) => sameLogin(item.login, referralLogin));
+  if (!referral) return null;
+  const sourceKey = String(sourceId || `manual-${Date.now()}`);
+  if (state.referralPayments.some((item) => String(item.sourceId || "") === sourceKey)) return null;
+  const reward = Math.round(amount * 0.03 * 100) / 100;
+  if (reward <= 0) return null;
+  referral.deposits = Number(referral.deposits || 0) + amount;
+  referral.earned = Number(referral.earned || 0) + reward;
+  referral.lastRewardAt = Date.now();
+  const referrerKey = loginKey(referral.referrerLogin);
+  state.balances[referrerKey] = Number(state.balances[referrerKey] || state.balances[referral.referrerLogin] || 0) + reward;
+  state.balances[referral.referrerLogin] = state.balances[referrerKey];
+  const payment = {
+    id: `refpay-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+    sourceId: sourceKey,
+    referrerLogin: referral.referrerLogin,
+    referralLogin,
+    amount,
+    reward,
+    date: new Date().toLocaleString("ru-RU"),
+    createdAt: Date.now(),
+    percent: 3
+  };
+  state.referralPayments.unshift(payment);
+  return payment;
+}
+
 async function telegramUserSummary(user) {
   await ensureSeed();
   const [{ data: settings }, { data: messageRows }] = await Promise.all([
@@ -986,12 +1064,9 @@ async function telegramUserSummary(user) {
   const login = user.login;
   const key = loginKey(login);
 
-  state.referralCodes = state.referralCodes || {};
-  if (!state.referralCodes[key]) {
-    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    state.referralCodes[key] = `${seed.slice(0, 4)}${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
-    await saveSettingsState(state);
-  }
+  const referralCode = ensureReferralCodeForState(state, login);
+  if (referralCode !== state.referralCodes?.[key]) state.referralCodes[key] = referralCode;
+  await saveSettingsState(state);
 
   const orders = (Array.isArray(state.orders) ? state.orders : []).filter((order) => sameLogin(order.login, login));
   const exchangeRequests = (Array.isArray(state.exchangeRequests) ? state.exchangeRequests : []).filter((request) => (
@@ -1054,8 +1129,8 @@ async function telegramUserSummary(user) {
       }))
     },
     referral: {
-      code: state.referralCodes[key],
-      link: `${publicBaseUrl}/?ref=${encodeURIComponent(state.referralCodes[key])}`
+      code: referralCode,
+      link: `${referralPublicBaseUrl}/?ref=${encodeURIComponent(referralCode)}`
     },
     messages: {
       count: inboundMessages.length,
@@ -1316,6 +1391,9 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (existing) return res.status(409).json({ error: "Такой логин уже есть" });
 
     const passwordHash = await bcrypt.hash(password, 12);
+    const state = await loadSettingsState();
+    ensureReferralCodeForState(state, login);
+    const referral = applyReferralRegistration(state, login, req.body.ref || req.body.referralCode);
     const { data: user, error } = await supabase.from("profiles").insert({
       login,
       login_key: key,
@@ -1324,9 +1402,10 @@ app.post("/api/auth/register", async (req, res, next) => {
       role: "user"
     }).select("*").single();
     if (error) throw error;
+    await saveSettingsState(state);
 
     const token = await createUserSession(req, key);
-    appendAdminLog("user_registered", login, { login, ...requestSource(req) }).catch((error) => {
+    appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
     res.json({ token, ...(await stateFor(user)) });
@@ -6235,6 +6314,15 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     title: "Баланс пополнен",
     body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено.`
   });
+  const referralPayment = applyReferralReward(state, deposit.login, paidUsd, `wallet-deposit:${deposit.id}`);
+  if (referralPayment) {
+    await notifySiteUser(state, referralPayment.referrerLogin, {
+      id: `notice-referral-reward-${referralPayment.id}-${loginKey(referralPayment.referrerLogin)}`,
+      eventType: "referral_reward",
+      title: "Реферальное начисление",
+      body: `Начислено ${Number(referralPayment.reward || 0).toFixed(2)} $ за пополнение пользователя ${deposit.login}.`
+    });
+  }
 
   await saveSettingsState(state);
 }
