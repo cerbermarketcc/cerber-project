@@ -28,6 +28,7 @@ let realtimePendingRender = false;
 let lastUserInteractionAt = 0;
 let shopPanelStateRefreshPromise = null;
 let shopPanelLastStateRefreshAt = 0;
+let activeShopPanelTab = "dashboard";
 let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
@@ -1668,16 +1669,22 @@ async function apiFetch(path, options = {}) {
 
 function applyRemoteState(payload) {
   if (!payload) return;
+  const previousCurrentUser = db?.currentUser || "";
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
   const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
   const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
   const rememberedOrders = Array.isArray(db?.orders) ? db.orders : [];
+  const rememberedUsers = Array.isArray(db?.users) ? db.users : [];
   const rememberedPasswords = new Map((Array.isArray(db?.users) ? db.users : [])
     .filter((user) => user?.login && typeof user.password === "string" && user.password)
     .map((user) => [loginKey(user.login), user.password]));
   db = merge(db, payload.state || {});
   if (payload.user) db.currentUser = payload.user.login;
+  else if (previousCurrentUser && payload.state && !payload.state.currentUser) db.currentUser = previousCurrentUser;
   normalizeDb(db);
+  rememberedUsers.forEach((savedUser) => {
+    if (savedUser?.login && !db.users.some((user) => sameLogin(user.login, savedUser.login))) db.users.push(savedUser);
+  });
   db.users = db.users.map((user) => {
     const password = rememberedPasswords.get(loginKey(user.login));
     return password && !user.password ? { ...user, password } : user;
@@ -1752,8 +1759,8 @@ async function loadRemoteSession() {
     const payload = await apiFetch("/api/session");
     applyRemoteState(payload);
     return Boolean(payload.user);
-  } catch {
-    localStorage.removeItem(API_TOKEN_KEY);
+  } catch (error) {
+    if (error.sessionExpired || error.status === 401 || error.status === 403) localStorage.removeItem(API_TOKEN_KEY);
     return false;
   }
 }
@@ -1771,6 +1778,10 @@ async function loadRemoteState() {
 
 async function refreshRemoteState() {
   if (!API_ENABLED) return;
+  if (localStorage.getItem(API_TOKEN_KEY)) {
+    await loadRemoteSession();
+    return;
+  }
   const payload = await apiFetch("/api/state", { timeoutMs: 15000 });
   applyRemoteState(payload);
 }
@@ -1855,14 +1866,36 @@ function prunePersonalStateForCurrentUser() {
   db.supportTickets = (db.supportTickets || []).filter((item) => recordBelongsToLogin(item, login));
 }
 
-function scheduleRealtimeRefresh() {
+function realtimeShouldRenderEvent(event = {}) {
+  const type = String(event.type || "");
+  if (route === "messages") return /private_message|dispute|support_ticket|state_updated/.test(type);
+  if (route === "group-chat") return /group_/.test(type);
+  if (route === "orders" || route === "exchange-order") return /order|dispute|exchange/.test(type);
+  if (route === "wallet") return /wallet|order_paid/.test(type);
+  if (route === "seller" || isShopPanelHash()) return /store|product|order|dispute|private_message|wallet|state_updated/.test(type);
+  if (route === "owner" || route === "admin") return /state_updated|store|product|order|dispute|wallet|broadcast|bot|exchanger/.test(type);
+  return false;
+}
+
+async function loadRealtimeState() {
+  if (localStorage.getItem(API_TOKEN_KEY)) return loadRemoteSession();
+  return loadRemoteState();
+}
+
+function scheduleRealtimeRefresh(event = {}) {
   clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = setTimeout(async () => {
-    const ok = await loadRemoteState();
+    const shouldRender = realtimeShouldRenderEvent(event);
+    const ok = await loadRealtimeState();
     if (!ok) return;
+    if (!shouldRender) {
+      realtimePendingRender = false;
+      renderFloatingOnly();
+      return;
+    }
     if (realtimeCanRenderNow()) {
       realtimePendingRender = false;
-      renderCurrent();
+      renderRealtimeTarget();
       return;
     }
     realtimePendingRender = true;
@@ -1879,7 +1912,7 @@ function scheduleRealtimeRender() {
       return;
     }
     realtimePendingRender = false;
-    renderCurrent();
+    renderRealtimeTarget();
   }, 1000);
 }
 
@@ -1887,7 +1920,40 @@ function flushRealtimeRender() {
   if (!realtimePendingRender || !realtimeCanRenderNow()) return;
   clearTimeout(realtimeRefreshTimer);
   realtimePendingRender = false;
-  renderCurrent();
+  renderRealtimeTarget();
+}
+
+function renderRealtimeTarget() {
+  if (!realtimeCanRenderNow()) {
+    realtimePendingRender = true;
+    scheduleRealtimeRender();
+    return;
+  }
+  if (route === "messages") return renderMessages();
+  if (route === "group-chat") return renderGroupChat();
+  if (route === "orders") return renderOrders(activeOrdersTab);
+  if (route === "exchange-order") return renderExchangeOrderDetail(activeExchangeOrderId);
+  if (route === "owner" || route === "admin") return renderOwnerPanel();
+  if (isShopPanelHash()) return renderShopPanel(activeShopPanelTab || "dashboard");
+  if (route === "seller") return renderSeller();
+  if (route === "wallet") return renderWallet();
+  renderFloatingOnly();
+}
+
+function renderFloatingOnly() {
+  const existing = document.querySelector("[data-group-widget]");
+  const nextHtml = renderGroupFloatingWidget();
+  if (!existing && nextHtml) {
+    root.insertAdjacentHTML("beforeend", nextHtml);
+    bindGroupFloatingWidget();
+    return;
+  }
+  if (existing && nextHtml) {
+    existing.outerHTML = nextHtml;
+    bindGroupFloatingWidget();
+    return;
+  }
+  if (existing && !nextHtml) existing.remove();
 }
 
 function connectRealtime() {
@@ -1900,7 +1966,7 @@ function connectRealtime() {
     realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/realtime`);
     realtimeSocket.onmessage = (event) => {
       const payload = JSON.parse(event.data || "{}");
-      if (payload.type !== "connected") scheduleRealtimeRefresh();
+      if (payload.type !== "connected") scheduleRealtimeRefresh(payload);
     };
     realtimeSocket.onclose = () => {
       realtimeReconnectTimer = setTimeout(connectRealtime, 5000);
@@ -4837,7 +4903,7 @@ function startPrivateMessagesRefresh() {
     if (!ok || route !== "messages") return;
     const after = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-60));
     if (before !== after) renderMessages();
-  }, 6000);
+  }, 3000);
 }
 
 function privateVisibleMessages(login = db.currentUser) {
@@ -9663,6 +9729,7 @@ function renderShopPanelLogin(message = "") {
 }
 
 function renderShopPanel(activeTab = "dashboard") {
+  activeShopPanelTab = activeTab || "dashboard";
   const storeId = shopPanelHashId() || shopPanelSession();
   const sessionId = shopPanelSession();
   const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
