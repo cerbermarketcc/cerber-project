@@ -1642,9 +1642,16 @@ function applyRemoteState(payload) {
   const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
   const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
   const rememberedOrders = Array.isArray(db?.orders) ? db.orders : [];
+  const rememberedPasswords = new Map((Array.isArray(db?.users) ? db.users : [])
+    .filter((user) => user?.login && typeof user.password === "string" && user.password)
+    .map((user) => [loginKey(user.login), user.password]));
   db = merge(db, payload.state || {});
   if (payload.user) db.currentUser = payload.user.login;
   normalizeDb(db);
+  db.users = db.users.map((user) => {
+    const password = rememberedPasswords.get(loginKey(user.login));
+    return password && !user.password ? { ...user, password } : user;
+  });
   db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
   db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
   db.orders = mergeOrderLists(db.orders, rememberedOrders);
@@ -2101,8 +2108,14 @@ function clearSession() {
 function clearApiSession() {
   try {
     localStorage.removeItem(API_TOKEN_KEY);
+    if (API_ENABLED) {
+      db.currentUser = "";
+      localStorage.removeItem(SESSION_KEY);
+      saveAuth();
+      localStorage.setItem(STORE_KEY, JSON.stringify(db));
+    }
   } catch {
-    // The visible account can stay open even when the server token is expired.
+    // Ignore storage errors; the next render will still ask for a fresh login.
   }
 }
 
@@ -2121,6 +2134,18 @@ function hasApiSession() {
 function currentLocalPassword() {
   const user = currentUser();
   return typeof user?.password === "string" ? user.password : "";
+}
+
+function rememberLocalPassword(login = "", password = "") {
+  const value = String(password || "");
+  if (!login || !value) return;
+  const existing = db.users.find((user) => sameLogin(user.login, login));
+  if (existing) existing.password = value;
+  else db.users.push({ login, password: value, name: login, role: "user", createdAt: isoDate(new Date()) });
+  saveAuth();
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(db));
+  } catch {}
 }
 
 async function ensureApiSession() {
@@ -3185,6 +3210,7 @@ async function handleAuth(event) {
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
+        rememberLocalPassword(payload.user?.login || login, password);
         registerReferral(payload.user?.login || login);
         saveDb();
         authMode = "login";
@@ -3211,6 +3237,7 @@ async function handleAuth(event) {
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);
+      rememberLocalPassword(payload.user?.login || login, password);
       return renderCurrent();
     } catch (error) {
       resetCaptcha();
