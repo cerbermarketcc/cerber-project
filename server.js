@@ -372,15 +372,19 @@ async function appendAdminLog(action, actor = "admin", details = {}) {
   try {
     const state = await withTimeout(loadSettingsState(), "admin log state load", 6000);
     state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
-    state.adminLogs.unshift({
+    const entry = {
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       action,
       actor,
       details,
       createdAt: Date.now()
-    });
+    };
+    state.adminLogs.unshift(entry);
     state.adminLogs = state.adminLogs.slice(0, 500);
     await withTimeout(saveSettingsState(state), "admin log save", 6000);
+    mirrorAuditLog(entry).catch((error) => {
+      console.warn("[audit-log] sql mirror skipped", { message: error.message });
+    });
     console.log(`[admin-log] ${action}`, { actor, ...details });
     notifyRealtime(action, details);
   } catch (error) {
@@ -1416,6 +1420,56 @@ app.get("/api/config", async (_req, res, next) => {
     res.json({ turnstileSiteKey: turnstileEnabled ? turnstileSiteKey : "", turnstileEnabled, cmsTexts: await readCmsTexts() });
   } catch (error) {
     next(error);
+  }
+});
+
+app.get("/api/health", async (_req, res) => {
+  const startedAt = Date.now();
+  const health = {
+    ok: true,
+    build: cerberBuildVersion,
+    time: new Date().toISOString(),
+    checks: {
+      supabase: { ok: Boolean(supabaseUrl && supabaseServiceKey) },
+      nowpayments: {
+        apiKey: Boolean(nowpaymentsApiKey),
+        ipnSecret: Boolean(nowpaymentsIpnSecret),
+        payoutsEnabled: nowpaymentsPayoutsEnabled,
+        payoutEmail: Boolean(nowpaymentsEmail),
+        payoutPassword: Boolean(nowpaymentsPassword),
+        payout2fa: Boolean(nowpaymentsPayout2faSecret),
+        readyForPayouts: Boolean(nowpaymentsApiKey && nowpaymentsPayoutsEnabled && nowpaymentsEmail && nowpaymentsPassword && nowpaymentsPayout2faSecret)
+      },
+      telegram: {
+        mainBot: Boolean(telegramBotToken),
+        webhookSecret: Boolean(telegramWebhookSecret),
+        siteNotifyBot: Boolean(siteNotifyBotToken)
+      },
+      tables: {},
+      bots: { mirrors: 0, active: 0, errors: 0 }
+    },
+    durationMs: 0
+  };
+  try {
+    const tables = ["orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
+    const tableResults = await Promise.all(tables.map(async (table) => [table, await tableHealth(table)]));
+    health.checks.tables = Object.fromEntries(tableResults);
+    const state = supabase ? await loadSettingsState().catch(() => ({})) : {};
+    const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    health.checks.bots = {
+      mirrors: mirrors.length,
+      active: mirrors.filter((bot) => bot.active !== false && !bot.blocked).length,
+      errors: mirrors.reduce((sum, bot) => sum + Number(bot.telegramErrorsCount || 0), 0),
+      lastErrorAt: mirrors.map((bot) => Number(bot.lastErrorAt || 0)).filter(Boolean).sort((a, b) => b - a)[0] || null
+    };
+    health.ok = Boolean(health.checks.supabase.ok);
+    health.durationMs = Date.now() - startedAt;
+    res.status(health.ok ? 200 : 503).json(health);
+  } catch (error) {
+    health.ok = false;
+    health.error = String(error.message || error);
+    health.durationMs = Date.now() - startedAt;
+    res.status(503).json(health);
   }
 });
 
@@ -4057,6 +4111,73 @@ async function mirrorPaymentIpnEvent(req, fingerprint = "", kind = "payment") {
   }
 }
 
+async function mirrorAuditLog(entry = {}) {
+  if (!entry?.id || !supabase || disabledMirrorTables.has("audit_logs")) return;
+  const { error } = await supabase.from("audit_logs").upsert({
+    id: String(entry.id),
+    action: String(entry.action || "unknown"),
+    actor: String(entry.actor || "system"),
+    details: entry.details && typeof entry.details === "object" ? entry.details : {},
+    ip: nullableText(entry.details?.ip),
+    user_agent: nullableText(entry.details?.userAgent || entry.details?.user_agent),
+    created_at: dbTimestamp(entry.createdAt) || new Date().toISOString()
+  }, { onConflict: "id" });
+  if (error) {
+    if (mirrorTableUnavailable(error)) disabledMirrorTables.add("audit_logs");
+    else console.warn("[audit-log] sql mirror skipped", { message: error.message, code: error.code || "" });
+  }
+}
+
+async function loadMirrorTableData(table = "", limit = 1000) {
+  if (!supabase || disabledMirrorTables.has(table)) return [];
+  const { data, error } = await supabase.from(table).select("data").limit(limit);
+  if (error) {
+    if (mirrorTableUnavailable(error)) {
+      disabledMirrorTables.add(table);
+      return [];
+    }
+    console.warn("[finance-mirror] read skipped", { table, message: error.message, code: error.code || "" });
+    return [];
+  }
+  return (Array.isArray(data) ? data : []).map((row) => row.data).filter(Boolean);
+}
+
+function mergeById(primary = [], secondary = []) {
+  const rows = Array.isArray(primary) ? [...primary] : [];
+  const seen = new Set(rows.map((item) => String(item?.id || "")).filter(Boolean));
+  (Array.isArray(secondary) ? secondary : []).forEach((item) => {
+    const id = String(item?.id || "");
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    rows.push(item);
+  });
+  return rows;
+}
+
+async function mergeFinanceMirrorIntoState(state = {}) {
+  const [orders, deposits, withdrawals, ledger] = await Promise.all([
+    loadMirrorTableData("orders", 1500),
+    loadMirrorTableData("wallet_deposits", 1000),
+    loadMirrorTableData("wallet_withdrawals", 1000),
+    loadMirrorTableData("ledger_entries", 2000)
+  ]);
+  state.orders = mergeById(state.orders, orders);
+  state.walletDeposits = mergeById(state.walletDeposits, deposits);
+  state.walletWithdrawals = mergeById(state.walletWithdrawals, withdrawals);
+  state.walletTransactions = mergeById(state.walletTransactions, ledger);
+  return state;
+}
+
+async function tableHealth(table = "") {
+  if (!supabase) return { ok: false, reason: "supabase_not_configured" };
+  const { error, count } = await supabase.from(table).select("*", { count: "exact", head: true });
+  if (error) {
+    if (mirrorTableUnavailable(error)) return { ok: false, reason: "missing" };
+    return { ok: false, reason: error.code || "error", message: error.message };
+  }
+  return { ok: true, count: Number(count || 0) };
+}
+
 async function clearDeletedStoreTombstone(storeId) {
   const id = String(storeId || "");
   if (!id) return;
@@ -4425,6 +4546,7 @@ async function loadSettingsState() {
   state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
+  await mergeFinanceMirrorIntoState(state);
   if (await normalizeServerOrders(state)) {
     await saveSettingsState(state);
   }

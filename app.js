@@ -5106,7 +5106,12 @@ function currentGroupRoom() {
 }
 
 function groupRoomLabel(room = currentGroupRoom()) {
-  return ({ ru: "Русский чат", md: "Moldova Chat", en: "English Chat" })[room] || "Чат";
+  const labels = {
+    ru: { ru: "Русский чат", md: "Молдавский чат", en: "Английский чат" },
+    md: { ru: "Chat rus", md: "Chat Moldova", en: "Chat englez" },
+    en: { ru: "Russian chat", md: "Moldova chat", en: "English chat" }
+  };
+  return labels[currentLang()]?.[room] || labels[currentLang()]?.[currentGroupRoom()] || "Chat";
 }
 
 function trFormat(key, values = {}) {

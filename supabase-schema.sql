@@ -136,3 +136,17 @@ create table if not exists payment_ipn_events (
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+create table if not exists audit_logs (
+  id text primary key,
+  action text not null,
+  actor text not null default 'system',
+  details jsonb not null default '{}'::jsonb,
+  ip text,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists audit_logs_action_idx on audit_logs(action);
+create index if not exists audit_logs_actor_idx on audit_logs(actor);
+create index if not exists audit_logs_created_at_idx on audit_logs(created_at);

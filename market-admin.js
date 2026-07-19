@@ -7,7 +7,7 @@ const IS_LOCAL_ADMIN_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const API_ORIGIN = IS_LOCAL_ADMIN_HOST ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
-const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Боты"];
+const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Health", "Боты"];
 nav.splice(2, 0, "Обменники");
 const supportTopics = [
   "Общие вопросы",
@@ -404,6 +404,7 @@ function renderSection() {
   if (section === "Настройки") return renderSettings();
   if (section === "Разное") return renderMisc();
   if (section === "Логи") return renderLogs();
+  if (section === "Health") return renderHealth();
   if (section === "Боты") return renderMirrorBots();
   return "";
 }
@@ -1135,6 +1136,63 @@ function renderLogs() {
     mirror_bot_delete: "Зеркало удалено"
   }[action] || action);
   return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
+}
+
+function healthStatus(value) {
+  return value ? `<span class="status">ok</span>` : `<span class="status off">fail</span>`;
+}
+
+function renderHealth() {
+  if (!data.health) {
+    api("/api/health").then((health) => {
+      data.health = health;
+      render();
+    }).catch((error) => {
+      data.health = { ok: false, error: error.message || "Health error", checks: {} };
+      render();
+    });
+  }
+  const health = data.health || { checks: {} };
+  const checks = health.checks || {};
+  const tables = checks.tables || {};
+  const tableRows = Object.entries(tables).map(([name, item]) => [
+    name,
+    item.ok ? "ok" : (item.reason || "error"),
+    item.count ?? "-"
+  ]);
+  return `
+    <section class="grid">
+      ${statCard("Health", health.ok ? "OK" : "FAIL", health.time || "")}
+      ${statCard("Supabase", checks.supabase?.ok ? "OK" : "FAIL", "database")}
+      ${statCard("NOWPayments", checks.nowpayments?.readyForPayouts ? "READY" : "CHECK", "payments")}
+      ${statCard("Telegram", checks.telegram?.mainBot ? "OK" : "CHECK", "bots")}
+    </section>
+    <section class="split">
+      <article class="table-card">
+        <h3>Services</h3>
+        <table><tbody>
+          <tr><td>Supabase</td><td>${healthStatus(checks.supabase?.ok)}</td></tr>
+          <tr><td>NOWPayments API</td><td>${healthStatus(checks.nowpayments?.apiKey)}</td></tr>
+          <tr><td>NOWPayments IPN secret</td><td>${healthStatus(checks.nowpayments?.ipnSecret)}</td></tr>
+          <tr><td>NOWPayments payouts</td><td>${healthStatus(checks.nowpayments?.readyForPayouts)}</td></tr>
+          <tr><td>Telegram main bot</td><td>${healthStatus(checks.telegram?.mainBot)}</td></tr>
+          <tr><td>Telegram webhook secret</td><td>${healthStatus(checks.telegram?.webhookSecret)}</td></tr>
+          <tr><td>Site notify bot</td><td>${healthStatus(checks.telegram?.siteNotifyBot)}</td></tr>
+        </tbody></table>
+      </article>
+      <article class="table-card">
+        <h3>Telegram mirrors</h3>
+        <table><tbody>
+          <tr><td>Mirrors</td><td>${esc(checks.bots?.mirrors ?? "-")}</td></tr>
+          <tr><td>Active</td><td>${esc(checks.bots?.active ?? "-")}</td></tr>
+          <tr><td>Errors</td><td>${esc(checks.bots?.errors ?? "-")}</td></tr>
+          <tr><td>Last error</td><td>${checks.bots?.lastErrorAt ? fmtDate(checks.bots.lastErrorAt) : "-"}</td></tr>
+        </tbody></table>
+      </article>
+    </section>
+    <article class="table-card"><h3>SQL tables</h3>${smallTable(["Table", "Status", "Rows"], tableRows)}</article>
+    ${health.error ? `<article class="notice danger">${esc(health.error)}</article>` : ""}
+  `;
 }
 
 function renderBots() {
