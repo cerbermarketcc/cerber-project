@@ -2118,6 +2118,32 @@ function hasApiSession() {
   }
 }
 
+function currentLocalPassword() {
+  const user = currentUser();
+  return typeof user?.password === "string" ? user.password : "";
+}
+
+async function ensureApiSession() {
+  if (!API_ENABLED) return true;
+  if (hasApiSession()) return true;
+  const user = currentUser();
+  const password = currentLocalPassword();
+  if (!user?.login || !password) return false;
+  try {
+    const payload = await apiFetch("/api/auth/restore-session", {
+      method: "POST",
+      timeoutMs: 15000,
+      body: JSON.stringify({ login: user.login, password })
+    });
+    localStorage.setItem(API_TOKEN_KEY, payload.token);
+    applyRemoteState(payload);
+    return true;
+  } catch {
+    clearApiSession();
+    return false;
+  }
+}
+
 function isAdmin() {
   try {
     return currentUser()?.role === "admin" || localStorage.getItem(ADMIN_ACCESS_KEY) === "ok";
@@ -6443,8 +6469,13 @@ function renderExchangerProfile(id) {
 
 async function handleExchangerMessage(event) {
   event.preventDefault();
-  if (!API_ENABLED || !hasApiSession()) {
+  if (!API_ENABLED || !currentUser()) {
     showToast("Войдите в аккаунт, чтобы написать обменнику");
+    return;
+  }
+  const sessionReady = await ensureApiSession();
+  if (!sessionReady) {
+    showToast("Сессия сайта истекла. Войдите заново один раз, чтобы написать обменнику.");
     return;
   }
   const form = event.currentTarget;

@@ -1325,6 +1325,32 @@ app.post("/api/auth/login", async (req, res, next) => {
   }
 });
 
+app.post("/api/auth/restore-session", async (req, res, next) => {
+  try {
+    requireDb();
+    assertClientRateLimit(req, "auth-restore-session", { limit: 6, windowMs: 10 * 60 * 1000, identity: req.body.login });
+    await ensureSeed();
+    const key = loginKey(req.body.login);
+    const password = String(req.body.password || "");
+    const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ error: "Нужно войти заново" });
+    }
+    const state = await loadSettingsState();
+    if (adminIsUserBlocked(state, user.login)) {
+      return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
+    }
+    const token = crypto.randomBytes(32).toString("hex");
+    await supabase.from("sessions").insert({ token, login_key: user.login_key, ...sessionSource(req) });
+    appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
+      console.error("[auth] restore session log failed", { login: user.login, message: error.message });
+    });
+    res.json({ token, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/telegram/login", async (req, res, next) => {
   try {
     requireDb();
