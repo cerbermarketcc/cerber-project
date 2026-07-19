@@ -89,7 +89,7 @@ const cspDirectives = [
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: blob: https:",
   "media-src 'self' data: blob: https:",
-  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://cerber.love https://cerber.vip wss://cerber-project.onrender.com wss://cerber.to wss://cerber.love wss://cerber.vip https://api.telegram.org",
+  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://cerber.love https://cerber.vip https://api.coingecko.com wss://cerber-project.onrender.com wss://cerber.to wss://cerber.love wss://cerber.vip https://api.telegram.org",
   "frame-src https://challenges.cloudflare.com",
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
