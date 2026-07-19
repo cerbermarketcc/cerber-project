@@ -1054,10 +1054,27 @@ function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sour
   return payment;
 }
 
+async function saveReferralRegistrationAsync(login = "", refCode = "") {
+  const code = String(refCode || "").trim();
+  if (!login || !code) return null;
+  const state = await loadSettingsState();
+  ensureReferralCodeForState(state, login);
+  const referral = applyReferralRegistration(state, login, code);
+  if (!referral) return null;
+  await saveSettingsState(state);
+  notifyRealtime("referral_registered", { login, referrerLogin: referral.referrerLogin });
+  return referral;
+}
+
 function authStateForUser(user, state = {}) {
   const publicProfile = publicUser(user);
   const login = user?.login || "";
   const key = loginKey(login);
+  const storesSource = Array.isArray(state.publicStoresCache) && state.publicStoresCache.length
+    ? state.publicStoresCache
+    : (Array.isArray(state.ownerStores) ? state.ownerStores.map(publicStoreForState) : []);
+  const visibleStores = storesSource.filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(state, store));
+  const visibleExchangeCards = (state.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
   return {
     user: publicProfile,
     state: {
@@ -1065,10 +1082,10 @@ function authStateForUser(user, state = {}) {
       theme: state.theme || "light",
       lang: state.lang || "ru",
       users: publicProfile ? [publicProfile] : [],
-      stores: [],
+      stores: visibleStores,
       messages: [],
       orders: [],
-      exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards : defaultExchangeCards,
+      exchangeCards: visibleExchangeCards,
       exchangers: publicExchangersForState(state.exchangers || []),
       exchangeRequests: [],
       groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
@@ -1093,6 +1110,24 @@ function authStateForUser(user, state = {}) {
       filters: state.filters || {}
     }
   };
+}
+
+async function authStateForUserWithStores(user, state = {}) {
+  if (Array.isArray(state.publicStoresCache) && state.publicStoresCache.length) return authStateForUser(user, state);
+  const storesResult = await withTimeout(
+    supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+    "auth stores query",
+    2500
+  ).catch((error) => {
+    console.error("[auth] quick stores query failed", { message: error.message });
+    return null;
+  });
+  const rows = Array.isArray(storesResult?.data) ? storesResult.data : [];
+  if (rows.length) {
+    state.publicStoresCache = rows.map((row) => publicStoreForState(row.data)).filter(Boolean);
+    state.publicStoresCacheAt = Date.now();
+  }
+  return authStateForUser(user, state);
 }
 
 async function telegramUserSummary(user) {
@@ -1428,13 +1463,14 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (!login || !password) return res.status(400).json({ error: "Введите логин и пароль" });
 
     const key = loginKey(login);
+    const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
     const { data: existing } = await supabase.from("profiles").select("login_key").eq("login_key", key).maybeSingle();
     if (existing) return res.status(409).json({ error: "Такой логин уже есть" });
 
     const passwordHash = await bcrypt.hash(password, 12);
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
-    const referral = applyReferralRegistration(state, login, req.body.ref || req.body.referralCode);
+    const referral = applyReferralRegistration(state, login, referralCode);
     const { data: user, error } = await supabase.from("profiles").insert({
       login,
       login_key: key,
@@ -1445,13 +1481,16 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (error) throw error;
     await withTimeout(saveSettingsState(state), "register referral save", 6000).catch((saveError) => {
       console.error("[auth] referral save delayed", { login, message: saveError.message });
+      saveReferralRegistrationAsync(login, referralCode).catch((retryError) => {
+        console.error("[auth] referral save retry failed", { login, message: retryError.message });
+      });
     });
 
     const token = await createUserSession(req, key);
     appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
-    res.json({ token, ...authStateForUser(user, state) });
+    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
   } catch (error) {
     next(error);
   }
@@ -1473,8 +1512,18 @@ app.post("/api/auth/login", async (req, res, next) => {
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
+    const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
+    const repairedReferral = referralCode ? applyReferralRegistration(state, user.login, referralCode) : null;
+    if (repairedReferral) {
+      await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
+        console.error("[auth] login referral repair delayed", { login: user.login, message: saveError.message });
+        saveReferralRegistrationAsync(user.login, referralCode).catch((retryError) => {
+          console.error("[auth] login referral repair retry failed", { login: user.login, message: retryError.message });
+        });
+      });
+    }
     const token = await createUserSession(req, user.login_key);
-    appendAdminLog("user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
+    appendAdminLog("user_login", user.login, { login: user.login, referrerLogin: repairedReferral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
     res.json({ token, ...(await stateFor(user)) });

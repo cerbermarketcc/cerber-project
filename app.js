@@ -3344,7 +3344,7 @@ async function handleAuth(event) {
     try {
       const payload = await apiFetch("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ login, password, captchaToken: captcha })
+        body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode() })
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);
