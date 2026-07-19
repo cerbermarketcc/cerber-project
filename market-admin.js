@@ -604,8 +604,12 @@ function renderExchangers() {
         </div>
         <label class="field">Описание<textarea name="description" placeholder="Условия, направление обмена, рабочее время"></textarea></label>
         <div class="row">
-          <label class="field">Фото файлом<input name="imageFile" type="file" accept="image/*"></label>
-          <label class="field">Фото URL<input name="image" placeholder="https://..."></label>
+          <label class="field">Фото каталога файлом<input name="imageFile" type="file" accept="image/*"></label>
+          <label class="field">Фото каталога URL<input name="image" placeholder="https://..."></label>
+        </div>
+        <div class="row">
+          <label class="field">Аватарка чата файлом<input name="avatarFile" type="file" accept="image/*"></label>
+          <label class="field">Аватарка чата URL<input name="avatar" placeholder="https://..."></label>
         </div>
         <div class="row">
           <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="0"></label>
@@ -616,8 +620,8 @@ function renderExchangers() {
     </article>
     <section class="split">
       <article class="table-card">
-        <table><thead><tr><th>Фото</th><th>Название</th><th>Логин</th><th>Статус</th><th>Позиция</th><th>Создан</th><th></th></tr></thead><tbody>
-          ${rows.map((item) => `<tr><td>${item.image ? `<img src="${esc(item.image)}" alt="" style="width:56px;height:40px;object-fit:cover;border-radius:8px">` : "-"}</td><td><strong>${esc(item.name || item.title || "")}</strong><br><span class="muted">${esc(String(item.description || "").slice(0, 90))}</span></td><td>${esc(item.login || "")}</td><td><span class="status ${item.active ? "" : "off"}">${esc(item.status || "active")}</span></td><td>${Number(item.position || 0)}</td><td>${fmtDate(item.createdAt)}</td><td><button class="ghost" data-exchanger-edit="${esc(item.id)}">Открыть</button></td></tr>`).join("") || `<tr><td colspan="7">Обменников пока нет.</td></tr>`}
+        <table><thead><tr><th>Фото</th><th>Аватар</th><th>Название</th><th>Логин</th><th>Статус</th><th>Позиция</th><th>Создан</th><th></th></tr></thead><tbody>
+          ${rows.map((item) => `<tr><td>${item.image ? `<img src="${esc(item.image)}" alt="" style="width:56px;height:40px;object-fit:cover;border-radius:8px">` : "-"}</td><td>${item.avatar ? `<img src="${esc(item.avatar)}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:50%">` : "-"}</td><td><strong>${esc(item.name || item.title || "")}</strong><br><span class="muted">${esc(String(item.description || "").slice(0, 90))}</span></td><td>${esc(item.login || "")}</td><td><span class="status ${item.active ? "" : "off"}">${esc(item.status || "active")}</span></td><td>${Number(item.position || 0)}</td><td>${fmtDate(item.createdAt)}</td><td><button class="ghost" data-exchanger-edit="${esc(item.id)}">Открыть</button></td></tr>`).join("") || `<tr><td colspan="8">Обменников пока нет.</td></tr>`}
         </tbody></table>
       </article>
       <article class="split-card" data-exchanger-detail>
@@ -637,8 +641,10 @@ function exchangerDetail(id) {
       <label class="field">Логин пользователя<input name="login" list="exchanger-users" value="${esc(item.login || "")}" required></label>
       <label class="field">Название<input name="name" value="${esc(item.name || item.title || "")}" required></label>
       <label class="field">Описание<textarea name="description">${esc(item.description || "")}</textarea></label>
-      <label class="field">Новое фото файлом<input name="imageFile" type="file" accept="image/*"></label>
-      <label class="field">Фото URL<input name="image" value="${esc(item.image || "")}"></label>
+      <label class="field">Новое фото каталога файлом<input name="imageFile" type="file" accept="image/*"></label>
+      <label class="field">Фото каталога URL<input name="image" value="${esc(item.image || "")}"></label>
+      <label class="field">Новая аватарка чата файлом<input name="avatarFile" type="file" accept="image/*"></label>
+      <label class="field">Аватарка чата URL<input name="avatar" value="${esc(item.avatar || "")}"></label>
       <div class="row">
         <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(item.position || 0)}"></label>
         <label class="field">Статус<select name="status"><option value="active" ${item.active ? "selected" : ""}>Активен</option><option value="disabled" ${!item.active ? "selected" : ""}>Скрыт</option></select></label>
@@ -1257,6 +1263,7 @@ function bindActions() {
     const fd = new FormData(event.currentTarget);
     try {
       const image = await formImageValue(fd, "imageFile", "image");
+      const avatar = await formImageValue(fd, "avatarFile", "avatar");
       data = await api("/api/admin/exchangers", {
         method: "POST",
         body: JSON.stringify({
@@ -1264,6 +1271,7 @@ function bindActions() {
           name: fd.get("name"),
           description: fd.get("description"),
           image,
+          avatar,
           position: Number(fd.get("position") || 0),
           status: fd.get("status")
         })
@@ -1288,6 +1296,7 @@ function bindActions() {
       const fd = new FormData(form);
       try {
         const image = await formImageValue(fd, "imageFile", "image");
+        const avatar = await formImageValue(fd, "avatarFile", "avatar");
         data = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
           method: "PATCH",
           body: JSON.stringify({
@@ -1295,6 +1304,7 @@ function bindActions() {
             name: fd.get("name"),
             description: fd.get("description"),
             image,
+            avatar,
             position: Number(fd.get("position") || 0),
             status: fd.get("status")
           })

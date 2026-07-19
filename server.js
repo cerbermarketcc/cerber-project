@@ -5605,6 +5605,7 @@ function cleanExchangerPayload(body = {}, existing = {}) {
   const title = String(body.title ?? body.name ?? existing.title ?? existing.name ?? "").trim().slice(0, 120);
   const description = String(body.description ?? existing.description ?? "").trim().slice(0, 1200);
   const image = String(body.image ?? existing.image ?? "").trim();
+  const avatar = String(body.avatar ?? existing.avatar ?? "").trim();
   const status = String(body.status ?? existing.status ?? "active").trim().toLowerCase() === "disabled" ? "disabled" : "active";
   const position = Number.isFinite(Number(body.position ?? existing.position)) ? Number(body.position ?? existing.position) : 0;
   return {
@@ -5615,6 +5616,7 @@ function cleanExchangerPayload(body = {}, existing = {}) {
     name: title,
     description,
     image,
+    avatar,
     reviews: Array.isArray(existing.reviews) ? existing.reviews : [],
     status,
     active: status === "active",
@@ -5706,6 +5708,7 @@ function publicExchangersForState(exchangers = []) {
       name: String(item.name || item.title || item.login || ""),
       description: String(item.description || ""),
       image: String(item.image || ""),
+      avatar: String(item.avatar || ""),
       position: Number(item.position || 0),
       createdAt: item.createdAt || null,
       updatedAt: item.updatedAt || null,
@@ -5729,6 +5732,7 @@ function adminExchangersForState(exchangers = [], profiles = []) {
         name: String(item.name || item.title || login || ""),
         description: String(item.description || ""),
         image: String(item.image || ""),
+        avatar: String(item.avatar || ""),
         ...exchangerReviewSummary(item),
         status: item.status || (item.active === false ? "disabled" : "active"),
         active: item.active !== false && item.status !== "disabled",

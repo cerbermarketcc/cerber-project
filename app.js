@@ -4684,7 +4684,7 @@ function renderMessages() {
         ${activePrivateLogin ? `
           <article class="panel private-chat">
             <header class="private-chat-head">
-              <button class="group-avatar">${esc(activePrivateLogin.slice(0, 1).toUpperCase())}</button>
+              ${privateAvatarHtml(activePrivateLogin, exchangerForLogin(activePrivateLogin))}
               <div>
                 <h3>${esc(activePrivateLogin)}</h3>
                 <p>Личный диалог</p>
@@ -4840,6 +4840,28 @@ function privateConversationMessages(peer, messages = privateVisibleMessages(), 
   return messages.filter((msg) => sameLogin(privatePeer(msg, login), peer)).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
+function exchangerForLogin(login = "") {
+  const key = loginKey(login);
+  if (!key) return null;
+  return (db.exchangers || []).find((item) => item && item.active !== false && item.status !== "disabled" && loginKey(item.login || item.ownerLogin) === key) || null;
+}
+
+function exchangerForMessage(msg = {}) {
+  const fromExchanger = exchangerForLogin(msg.fromLogin);
+  const exchangerId = String(msg.exchangerId || "").trim();
+  if (exchangerId && fromExchanger) {
+    const byId = (db.exchangers || []).find((item) => String(item.id || "") === exchangerId);
+    return byId || fromExchanger;
+  }
+  return fromExchanger || null;
+}
+
+function privateAvatarHtml(login = "", exchanger = null) {
+  const image = exchanger?.avatar || "";
+  const label = String(login || exchanger?.login || "?").slice(0, 1).toUpperCase();
+  return `<button class="group-avatar private-avatar">${image ? `<img src="${esc(image)}" alt="${esc(login || exchanger?.name || "")}">` : esc(label)}</button>`;
+}
+
 function activePrivateDisputeOrder(peer = activePrivateLogin) {
   const user = currentUser();
   if (!user || !peer) return null;
@@ -4936,9 +4958,10 @@ function privateMessageView(msg) {
   const own = sameLogin(msg.fromLogin, db.currentUser);
   const likes = Array.isArray(msg.likes) ? msg.likes : [];
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const exchanger = exchangerForMessage(msg);
   return `
     <article class="group-message private-message ${own ? "own" : ""} ${msg.stickerUrl ? "sticker-message" : ""}" data-private-message="${esc(msg.id)}">
-      <button class="group-avatar">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
+      ${privateAvatarHtml(msg.fromLogin, exchanger)}
       <div>
         <div class="group-meta">
           <span>${esc(msg.fromLogin)}</span>
