@@ -1602,7 +1602,17 @@ async function apiFetchOnce(path, options = {}) {
   try {
     const response = await fetch(apiUrl(path), { ...options, headers, signal: controller.signal });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || "API error");
+    if (!response.ok) {
+      const message = payload.error || "API error";
+      const error = new Error(message);
+      error.status = response.status;
+      if (response.status === 401 && /Сессия не найдена|session/i.test(String(message))) {
+        clearSession();
+        error.sessionExpired = true;
+        error.message = "Сессия истекла. Войдите снова.";
+      }
+      throw error;
+    }
     return payload;
   } catch (error) {
    if (error.name === "AbortError") throw new Error("Сервер долго не отвечает. Проверьте backend/API и попробуйте ещё раз.");
@@ -6446,6 +6456,11 @@ async function handleExchangerMessage(event) {
     showToast(tr("sent"));
     renderMessages();
   } catch (error) {
+    if (error.sessionExpired || /Сессия не найдена|Сессия истекла|session/i.test(String(error.message || ""))) {
+      authMode = "login";
+      renderAuth("Сессия истекла. Войдите снова, чтобы написать обменнику.");
+      return;
+    }
     showToast(error.message || "Не удалось отправить сообщение");
   }
 }
