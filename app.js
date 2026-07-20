@@ -44,6 +44,34 @@ let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
 const syncedReferralCodes = new Set();
+const PUBLIC_CATALOG_STATE_KEYS = ["stores", "exchangeCards", "exchangers"];
+const PARTIAL_STATE_ARRAY_KEYS = [
+  ...PUBLIC_CATALOG_STATE_KEYS,
+  "exchangeRequests",
+  "messages",
+  "groupMessages",
+  "orders",
+  "walletTransactions",
+  "walletDeposits",
+  "walletWithdrawals",
+  "siteNotifications",
+  "broadcasts",
+  "userFilters",
+  "storeApplications",
+  "supportTickets",
+  "referrals",
+  "referralPayments"
+];
+const PARTIAL_STATE_OBJECT_KEYS = [
+  "balances",
+  "ltcBalances",
+  "referralCodes",
+  "groupSettings",
+  "ownerSettings",
+  "paymentSettings",
+  "filters",
+  "blockedUsers"
+];
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -1758,6 +1786,90 @@ async function apiFetch(path, options = {}) {
   throw lastError || new Error("API error");
 }
 
+function plainObjectHasKeys(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+}
+
+function stateArrayKey(item, index) {
+  return String(
+    item?.id ||
+    item?.orderId ||
+    item?.exchangeRequestId ||
+    item?.storeId ||
+    item?.login ||
+    item?.code ||
+    item?.token ||
+    item?.createdAt ||
+    index
+  );
+}
+
+function mergeStateArrayPreservingExisting(existingItems = [], incomingItems = []) {
+  const result = [];
+  const seen = new Set();
+  (Array.isArray(incomingItems) ? incomingItems : []).forEach((item, index) => {
+    const key = stateArrayKey(item, index);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    result.push(item);
+  });
+  (Array.isArray(existingItems) ? existingItems : []).forEach((item, index) => {
+    const key = stateArrayKey(item, index);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    result.push(item);
+  });
+  return result;
+}
+
+function protectIncomingState(incomingState = {}, payload = {}) {
+  const incoming = { ...incomingState };
+  const partial = Boolean(
+    payload.statePartial ||
+    payload.partialState ||
+    payload.catalogsPartial ||
+    incoming.statePartial ||
+    incoming.partialState ||
+    incoming.catalogsPartial
+  );
+  const catalogsAuthoritative = Boolean(payload.catalogsAuthoritative || incoming.catalogsAuthoritative);
+  const protectedArrayKeys = partial ? PARTIAL_STATE_ARRAY_KEYS : PUBLIC_CATALOG_STATE_KEYS;
+  protectedArrayKeys.forEach((key) => {
+    const existing = Array.isArray(db?.[key]) ? db[key] : [];
+    if (!existing.length) return;
+    const hasIncoming = Object.prototype.hasOwnProperty.call(incoming, key);
+    const value = incoming[key];
+    const incomingEmpty = Array.isArray(value) && value.length === 0;
+    const shouldKeepExisting = !hasIncoming || incomingEmpty;
+    if (shouldKeepExisting && (partial || PUBLIC_CATALOG_STATE_KEYS.includes(key) || !catalogsAuthoritative)) {
+      incoming[key] = existing;
+      return;
+    }
+    if (partial && Array.isArray(value)) incoming[key] = mergeStateArrayPreservingExisting(existing, value);
+  });
+
+  if (partial) {
+    PARTIAL_STATE_OBJECT_KEYS.forEach((key) => {
+      const existing = db?.[key];
+      if (!plainObjectHasKeys(existing)) return;
+      const hasIncoming = Object.prototype.hasOwnProperty.call(incoming, key);
+      const value = incoming[key];
+      if (!hasIncoming || !plainObjectHasKeys(value)) {
+        incoming[key] = existing;
+        return;
+      }
+      incoming[key] = { ...existing, ...value };
+    });
+  }
+
+  delete incoming.statePartial;
+  delete incoming.partialState;
+  delete incoming.catalogsPartial;
+  delete incoming.catalogsAuthoritative;
+  delete incoming.stateSnapshotComplete;
+  return incoming;
+}
+
 function applyRemoteState(payload) {
   if (!payload) return;
   const previousCurrentUser = db?.currentUser || "";
@@ -1770,7 +1882,7 @@ function applyRemoteState(payload) {
   const rememberedPasswords = new Map((Array.isArray(db?.users) ? db.users : [])
     .filter((user) => user?.login && typeof user.password === "string" && user.password)
     .map((user) => [loginKey(user.login), user.password]));
-  db = merge(db, payload.state || {});
+  db = merge(db, protectIncomingState(payload.state || {}, payload));
   if (payload.user) db.currentUser = payload.user.login;
   else if (previousCurrentUser && payload.state && !payload.state.currentUser) db.currentUser = previousCurrentUser;
   normalizeDb(db);

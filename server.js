@@ -788,14 +788,36 @@ async function stateFor(user) {
       });
       if (settingsResult.error) throw settingsResult.error;
       const settingsData = settingsResult.data?.data || {};
+      let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
+      if (!publicStores.length) {
+        const storesResult = await withTimeout(
+          supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+          "public stores fallback query",
+          2500
+        ).catch((error) => {
+          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
+          return null;
+        });
+        const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
+        if (storeRows.length) {
+          publicStores = storeRows
+            .map((row) => publicStoreForState(row.data))
+            .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
+          savePublicStoresCache(publicStores).catch((error) => {
+            console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
+          });
+        }
+      }
       return {
         user: null,
         state: {
+          stateSnapshotComplete: true,
+          catalogsAuthoritative: true,
           currentUser: "",
           theme: settingsData.theme || "light",
           lang: settingsData.lang || "ru",
           users: [],
-          stores: Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [],
+          stores: publicStores,
           messages: [],
           orders: [],
           exchangeCards: (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))),
@@ -983,6 +1005,8 @@ async function stateFor(user) {
     return {
       user: publicUser(user),
       state: {
+        stateSnapshotComplete: true,
+        catalogsAuthoritative: true,
         currentUser: user?.login || "",
         theme: settingsData.theme || "light",
         lang: settingsData.lang || "ru",
@@ -1312,6 +1336,8 @@ function authStateForUser(user, state = {}) {
   return {
     user: publicProfile,
     state: {
+      statePartial: true,
+      catalogsPartial: true,
       currentUser: login,
       theme: state.theme || "light",
       lang: state.lang || "ru",
@@ -1636,6 +1662,8 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const payload = {
     user: null,
     state: {
+      statePartial: true,
+      catalogsPartial: true,
       currentUser: "",
       stores: store ? [publicStoreForState(store, { includeStaff: true })] : [],
       orders: [],
@@ -2998,29 +3026,8 @@ app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
 app.delete("/api/admin/marketplace-data", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    requireDb();
-    const { error: storesError } = await supabase.from("stores").delete().neq("id", "__never__");
-    if (storesError) throw storesError;
-    const state = await loadSettingsState();
-    Object.assign(state, {
-      stores: [],
-      ownerStores: [],
-      publicStoresCache: [],
-      publicStoresCacheAt: Date.now(),
-      deletedStoreIds: [],
-      exchangeCards: [],
-      exchangeRequests: [],
-      storeApplications: []
-    });
-    await saveSettingsState(state);
-    await appendAdminLog("marketplace_data_cleared", admin.login, {
-      stores: "deleted",
-      exchangeCards: "cleared",
-      exchangers: "preserved",
-      exchangeRequests: "cleared",
-      storeApplications: "cleared"
-    });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    await appendAdminLog("marketplace_bulk_clear_blocked", admin.login, {});
+    res.status(403).json({ error: "РњР°СЃСЃРѕРІР°СЏ РѕС‡РёСЃС‚РєР° РјР°СЂРєРµС‚РїР»РµР№СЃР° РѕС‚РєР»СЋС‡РµРЅР°" });
   } catch (error) {
     next(error);
   }
@@ -4466,6 +4473,64 @@ function rememberNowpaymentsIpn(state = {}, fingerprint = "", kind = "payment") 
   return true;
 }
 
+function hasPlainObjectKeys(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+}
+
+const PRESERVED_STATE_ARRAY_KEYS = [
+  "ownerStores",
+  "publicStoresCache",
+  "exchangers",
+  "exchangeCards",
+  "exchangeRequests",
+  "orders",
+  "groupMessages",
+  "storeApplications",
+  "walletTransactions",
+  "walletDeposits",
+  "walletWithdrawals",
+  "referrals",
+  "referralPayments",
+  "siteNotifications",
+  "broadcasts",
+  "userFilters",
+  "supportTickets",
+  "mirrorBots"
+];
+
+const PRESERVED_STATE_OBJECT_KEYS = [
+  "balances",
+  "ltcBalances",
+  "referralCodes",
+  "telegramBot",
+  "blockedUsers",
+  "ownerSettings",
+  "paymentSettings",
+  "filters",
+  "referralPeriod"
+];
+
+function preserveExistingStateCollections(next, currentData = {}, incomingState = {}, options = {}) {
+  const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
+  if (options.allowEmptyExchangers) allowEmptyKeys.add("exchangers");
+  PRESERVED_STATE_ARRAY_KEYS.forEach((key) => {
+    if (allowEmptyKeys.has(key)) return;
+    const incoming = incomingState?.[key];
+    const current = currentData?.[key];
+    if (Array.isArray(incoming) && incoming.length === 0 && Array.isArray(current) && current.length > 0) {
+      next[key] = current;
+    }
+  });
+  PRESERVED_STATE_OBJECT_KEYS.forEach((key) => {
+    if (allowEmptyKeys.has(key)) return;
+    const incoming = incomingState?.[key];
+    const current = currentData?.[key];
+    if (incoming && typeof incoming === "object" && !Array.isArray(incoming) && !hasPlainObjectKeys(incoming) && hasPlainObjectKeys(current)) {
+      next[key] = current;
+    }
+  });
+}
+
 async function saveSettingsState(state, options = {}) {
   const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
   const currentData = currentSettings?.data || {};
@@ -4486,6 +4551,7 @@ async function saveSettingsState(state, options = {}) {
       ? currentExchangers
       : (incomingExchangers || currentExchangers)
   };
+  preserveExistingStateCollections(next, currentData, state || {}, options);
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
   notifyRealtime("state_updated");
   if (state && (state.orders || state.walletDeposits || state.walletWithdrawals || state.walletTransactions)) {
