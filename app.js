@@ -29,6 +29,7 @@ let turnstileWidgetId = null;
 let turnstileToken = "";
 let turnstileRetryTimer = null;
 let turnstileRenderTimer = null;
+let turnstileRenderStartedAt = 0;
 let turnstileWaitStartedAt = 0;
 let authSubmitting = false;
 let realtimeSocket = null;
@@ -3423,9 +3424,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
 
 function cleanupTurnstile() {
   clearTimeout(turnstileRetryTimer);
-  clearTimeout(turnstileRenderTimer);
   turnstileRetryTimer = null;
-  turnstileRenderTimer = null;
   turnstileWaitStartedAt = 0;
   if (!window.turnstile || turnstileWidgetId === null) return;
   try {
@@ -3453,12 +3452,27 @@ function updateAuthSubmitCaptchaState() {
   button.disabled = !captchaToken();
 }
 
+function scheduleTurnstileWatch() {
+  clearTimeout(turnstileRenderTimer);
+  turnstileRenderTimer = setTimeout(() => {
+    if (!document.getElementById("turnstile-widget")) return;
+    if (captchaToken()) return;
+    if (turnstileRenderStartedAt && Date.now() - turnstileRenderStartedAt >= 15000) {
+      setCaptchaStatus("Капча не выдала токен. Обновите капчу или добавьте этот домен в Cloudflare Turnstile hostnames.", true);
+      updateAuthSubmitCaptchaState();
+      return;
+    }
+    scheduleTurnstileWatch();
+  }, 3000);
+}
+
 function mountTurnstile(force = false) {
   if (!API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
   if (force && window.turnstile && turnstileWidgetId !== null) {
     cleanupTurnstile();
     turnstileWidgetId = null;
     turnstileToken = "";
+    turnstileRenderStartedAt = Date.now();
   }
   if (!window.turnstile) {
     if (!turnstileWaitStartedAt || force) turnstileWaitStartedAt = Date.now();
@@ -3475,6 +3489,7 @@ function mountTurnstile(force = false) {
   }
   if (turnstileWidgetId !== null) return;
   turnstileWaitStartedAt = 0;
+  if (!turnstileRenderStartedAt) turnstileRenderStartedAt = Date.now();
   setCaptchaStatus("Загрузка капчи...", false);
   updateAuthSubmitCaptchaState();
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
@@ -3487,6 +3502,7 @@ function mountTurnstile(force = false) {
       turnstileToken = String(token || "");
       clearTimeout(turnstileRenderTimer);
       turnstileRenderTimer = null;
+      turnstileRenderStartedAt = 0;
       setCaptchaStatus("", false);
       updateAuthSubmitCaptchaState();
     },
@@ -3503,12 +3519,7 @@ function mountTurnstile(force = false) {
     }
   });
   clearTimeout(turnstileRenderTimer);
-  turnstileRenderTimer = setTimeout(() => {
-    if (!captchaToken()) {
-      setCaptchaStatus("Капча не выдала токен. Обновите капчу или добавьте этот домен в Cloudflare Turnstile hostnames.", true);
-      updateAuthSubmitCaptchaState();
-    }
-  }, 15000);
+  scheduleTurnstileWatch();
 }
 
 function captchaToken() {
@@ -3519,8 +3530,10 @@ function captchaToken() {
 
 function resetCaptcha() {
   turnstileToken = "";
+  turnstileRenderStartedAt = Date.now();
   if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
   updateAuthSubmitCaptchaState();
+  scheduleTurnstileWatch();
 }
 
 async function handleAuth(event) {
