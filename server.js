@@ -10,7 +10,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "telegram-menu-reply-keyboard-2026-07-17";
+const cerberBuildVersion = "public-catalog-safety-2026-07-20-v111";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -67,6 +67,17 @@ const publicStateSettingsSelect = [
   "groupSettings:data->groupSettings",
   "referralPeriod:data->referralPeriod",
   "filters:data->filters"
+].join(",");
+const publicCatalogSettingsSelect = [
+  "theme:data->theme",
+  "lang:data->lang",
+  "stores:data->stores",
+  "exchangeCards:data->exchangeCards",
+  "exchangers:data->exchangers",
+  "groupSettings:data->groupSettings",
+  "referralPeriod:data->referralPeriod",
+  "filters:data->filters",
+  "updatedAt:data->updatedAt"
 ].join(",");
 const publicStoresSelect = [
   "id",
@@ -662,6 +673,26 @@ function withTimeout(promise, label, timeoutMs = 8000) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+async function timedDbCheck(label, run, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  try {
+    const value = await withTimeout(Promise.resolve().then(run), label, timeoutMs);
+    return {
+      ok: true,
+      ms: Date.now() - startedAt,
+      ...((value && typeof value === "object") ? value : {})
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      ms: Date.now() - startedAt,
+      error: String(error.message || error),
+      status: error.status || 500,
+      code: error.code || ""
+    };
+  }
+}
+
 async function verifyCaptcha(token, req) {
   if (!turnstileEnabled) {
     console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
@@ -819,6 +850,70 @@ function compactSettingsData(row = {}) {
   };
 }
 
+function compactPublicCatalogData(row = {}) {
+  if (row?.data && typeof row.data === "object") return row.data;
+  return {
+    theme: row?.theme,
+    lang: row?.lang,
+    stores: row?.stores,
+    exchangeCards: row?.exchangeCards,
+    exchangers: row?.exchangers,
+    groupSettings: row?.groupSettings,
+    referralPeriod: row?.referralPeriod,
+    filters: row?.filters,
+    updatedAt: row?.updatedAt
+  };
+}
+
+function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
+  const sourceStores = Array.isArray(storesSource)
+    ? storesSource
+    : (Array.isArray(state.publicStoresCache) && state.publicStoresCache.length
+      ? state.publicStoresCache
+      : (Array.isArray(state.ownerStores) ? state.ownerStores : []));
+  const stores = sourceStores
+    .map((store) => publicStoreForState(store))
+    .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(state, store));
+  return {
+    theme: state.theme || "light",
+    lang: state.lang || "ru",
+    stores,
+    exchangeCards: (state.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))),
+    exchangers: publicExchangersForState(state.exchangers || []),
+    groupSettings: normalizeGroupSettings(state.groupSettings || {}),
+    referralPeriod: state.referralPeriod || {},
+    filters: state.filters || {},
+    updatedAt: Date.now()
+  };
+}
+
+async function loadPublicCatalogSnapshot() {
+  if (!supabase) return null;
+  const result = await withTimeout(
+    supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", "public_catalog").maybeSingle(),
+    "public catalog query",
+    3000
+  ).catch((error) => {
+    console.error("[public-catalog] load failed", { message: error.message, status: error.status || 500 });
+    return null;
+  });
+  const data = compactPublicCatalogData(result?.data || {});
+  if (!Array.isArray(data.stores) && !Array.isArray(data.exchangers) && !Array.isArray(data.exchangeCards)) return null;
+  return data;
+}
+
+async function savePublicCatalogSnapshot(state = {}, storesSource = null) {
+  if (!supabase) return null;
+  const snapshot = buildPublicCatalogSnapshot(state, storesSource);
+  if (!snapshot.stores.length && !snapshot.exchangers.length && !snapshot.exchangeCards.length) return null;
+  await withTimeout(
+    supabase.from("app_settings").upsert({ id: "public_catalog", data: snapshot }, { onConflict: "id" }),
+    "public catalog save",
+    8000
+  );
+  return snapshot;
+}
+
 function compactStoreData(row = {}) {
   if (row?.data && typeof row.data === "object") return row.data;
   return {
@@ -897,6 +992,51 @@ async function stateFor(user) {
     }
     const seedMs = Date.now() - seedStartedAt;
     if (!user) {
+      const publicCatalog = await loadPublicCatalogSnapshot();
+      if (publicCatalog) {
+        const catalogStores = Array.isArray(publicCatalog.stores) ? publicCatalog.stores : [];
+        if (catalogStores.length) rememberPublicStoresCache(catalogStores);
+        return {
+          user: null,
+          state: {
+            stateSnapshotComplete: true,
+            catalogsAuthoritative: true,
+            currentUser: "",
+            theme: publicCatalog.theme || "light",
+            lang: publicCatalog.lang || "ru",
+            users: [],
+            stores: catalogStores,
+            messages: [],
+            orders: [],
+            exchangeCards: Array.isArray(publicCatalog.exchangeCards) ? publicCatalog.exchangeCards : [],
+            exchangers: Array.isArray(publicCatalog.exchangers) ? publicCatalog.exchangers : [],
+            exchangeRequests: [],
+            groupMessages: [],
+            groupSettings: normalizeGroupSettings(publicCatalog.groupSettings || {}),
+            referrals: [],
+            referralPayments: [],
+            referralCodes: {},
+            balances: {},
+            ltcBalances: {},
+            walletTransactions: [],
+            walletDeposits: [],
+            walletWithdrawals: [],
+            mirrorBots: [],
+            bots: { total: 0, active: 0, blocked: 0, items: [] },
+            siteNotifications: [],
+            broadcasts: [],
+            supportSettings: { recipients: [] },
+            supportTickets: [],
+            userFilters: [],
+            blockedUsers: {},
+            storeApplications: [],
+            ownerSettings: {},
+            paymentSettings: {},
+            referralPeriod: publicCatalog.referralPeriod || {},
+            filters: publicCatalog.filters || {}
+          }
+        };
+      }
       const [settingsResult, storesResult] = await Promise.all([
         withTimeout(
           supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
@@ -943,11 +1083,21 @@ async function stateFor(user) {
       if (!publicStores.length) {
         refreshPublicStoresCacheInBackground(settingsData);
       }
+      const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+      const visibleExchangers = publicExchangersForState(settingsData.exchangers || []);
+      const publicCatalogComplete = Boolean(publicStores.length || visibleExchangeCards.length || visibleExchangers.length);
+      if (publicCatalogComplete) {
+        savePublicCatalogSnapshot(settingsData, publicStores).catch((error) => {
+          console.error("[public-catalog] fallback save failed", { message: error.message });
+        });
+      }
       return {
         user: null,
         state: {
-          stateSnapshotComplete: true,
-          catalogsAuthoritative: true,
+          statePartial: !publicCatalogComplete,
+          catalogsPartial: !publicCatalogComplete,
+          stateSnapshotComplete: publicCatalogComplete,
+          catalogsAuthoritative: publicCatalogComplete,
           currentUser: "",
           theme: settingsData.theme || "light",
           lang: settingsData.lang || "ru",
@@ -955,8 +1105,8 @@ async function stateFor(user) {
           stores: publicStores,
           messages: [],
           orders: [],
-          exchangeCards: (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))),
-          exchangers: publicExchangersForState(settingsData.exchangers || []),
+          exchangeCards: visibleExchangeCards,
+          exchangers: visibleExchangers,
           exchangeRequests: [],
           groupMessages: [],
           groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
@@ -3019,6 +3169,120 @@ app.get("/api/admin/overview", async (req, res, next) => {
   }
 });
 
+app.get("/api/admin/db-diagnostics", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const countArray = (value) => Array.isArray(value) ? value.length : null;
+    const checks = {};
+    checks.publicCatalog = await timedDbCheck("diag public catalog", async () => {
+      const { data, error } = await supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", "public_catalog").maybeSingle();
+      if (error) throw error;
+      const catalog = compactPublicCatalogData(data || {});
+      return {
+        hasRow: Boolean(data),
+        stores: countArray(catalog.stores),
+        exchangers: countArray(catalog.exchangers),
+        exchangeCards: countArray(catalog.exchangeCards),
+        updatedAt: catalog.updatedAt || null
+      };
+    }, 5000);
+    checks.mainSettingsId = await timedDbCheck("diag main settings id", async () => {
+      const { data, error } = await supabase.from("app_settings").select("id").eq("id", "main").maybeSingle();
+      if (error) throw error;
+      return { hasRow: Boolean(data) };
+    }, 5000);
+    checks.mainSettingsCompact = await timedDbCheck("diag main settings compact", async () => {
+      const { data, error } = await supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle();
+      if (error) throw error;
+      const state = compactSettingsData(data || {});
+      return {
+        hasRow: Boolean(data),
+        publicStoresCache: countArray(state.publicStoresCache),
+        ownerStores: countArray(state.ownerStores),
+        exchangers: countArray(state.exchangers),
+        exchangeCards: countArray(state.exchangeCards)
+      };
+    }, 8000);
+    checks.storesCount = await timedDbCheck("diag stores count", async () => {
+      const { count, error } = await supabase.from("stores").select("id", { count: "exact", head: true });
+      if (error) throw error;
+      return { count: Number(count || 0) };
+    }, 8000);
+    checks.storesLimitOne = await timedDbCheck("diag stores limit one", async () => {
+      const { data, error } = await supabase.from("stores").select("id,created_at,updated_at").limit(1);
+      if (error) throw error;
+      return { rows: Array.isArray(data) ? data.length : 0 };
+    }, 8000);
+    checks.messagesCount = await timedDbCheck("diag messages count", async () => {
+      const { count, error } = await supabase.from("messages").select("id", { count: "exact", head: true });
+      if (error) throw error;
+      return { count: Number(count || 0) };
+    }, 8000);
+    checks.profilesCount = await timedDbCheck("diag profiles count", async () => {
+      const { count, error } = await supabase.from("profiles").select("login_key", { count: "exact", head: true });
+      if (error) throw error;
+      return { count: Number(count || 0) };
+    }, 8000);
+    res.json({
+      ok: Object.values(checks).every((item) => item.ok),
+      admin: { login: admin.login, role: admin.role },
+      build: cerberBuildVersion,
+      time: new Date().toISOString(),
+      checks
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/public-catalog/rebuild", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const { data, error } = await withTimeout(
+      supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
+      "public catalog rebuild settings query",
+      20000
+    );
+    if (error) throw error;
+    const state = compactSettingsData(data || {});
+    let storesSource = Array.isArray(state.publicStoresCache) && state.publicStoresCache.length
+      ? state.publicStoresCache
+      : (Array.isArray(state.ownerStores) ? state.ownerStores : []);
+    if (!storesSource.length) {
+      const storesResult = await withTimeout(
+        supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(500),
+        "public catalog rebuild stores query",
+        60000
+      ).catch((storeError) => {
+        console.error("[public-catalog] rebuild stores fallback failed", { message: storeError.message });
+        return { data: [] };
+      });
+      storesSource = (storesResult?.data || []).map((row) => ({
+        ...row.data,
+        createdAt: row.data?.createdAt || row.created_at,
+        updatedAt: row.data?.updatedAt || row.updated_at
+      }));
+      if (storesSource.length) {
+        state.publicStoresCache = storesSource.map((store) => publicStoreForState(store));
+        state.publicStoresCacheAt = Date.now();
+        state.ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
+        await saveSettingsState(state);
+      }
+    }
+    const catalog = await savePublicCatalogSnapshot(state, storesSource);
+    await appendAdminLog("public_catalog_rebuilt", admin.login, {
+      stores: catalog?.stores?.length || 0,
+      exchangers: catalog?.exchangers?.length || 0,
+      exchangeCards: catalog?.exchangeCards?.length || 0
+    });
+    res.json({ ok: Boolean(catalog), catalog });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/admin/payments/payout-config", async (req, res, next) => {
   try {
     requireAdmin(req);
@@ -3173,22 +3437,8 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
 app.delete("/api/admin/public-stores-cache", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    requireDb();
-    const { data: settings, error: settingsError } = await supabase
-      .from("app_settings")
-      .select("data")
-      .eq("id", "main")
-      .maybeSingle();
-    if (settingsError) throw settingsError;
-    const state = settings?.data || {};
-    delete state.publicStoresCache;
-    delete state.publicStoresCacheAt;
-    const { error: saveError } = await supabase
-      .from("app_settings")
-      .upsert({ id: "main", data: state }, { onConflict: "id" });
-    if (saveError) throw saveError;
-    await appendAdminLog("public_stores_cache_cleared", admin.login, {});
-    res.json({ ok: true });
+    await appendAdminLog("public_stores_cache_clear_blocked", admin.login, {});
+    res.status(403).json({ error: "Public store cache clearing is disabled. Delete or edit stores from the store section only." });
   } catch (error) {
     next(error);
   }
@@ -3658,6 +3908,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
+    await saveOwnerStoreFallback(protectedStore);
     await clearDeletedStoreTombstone(protectedStore.id);
     const panel = adminStorePanelLinks(protectedStore, panelPassword);
     await appendAdminLog("store_created", admin.login, { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
@@ -3679,6 +3930,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
+    await saveOwnerStoreFallback(protectedStore);
     await clearDeletedStoreTombstone(protectedStore.id);
     await appendAdminLog("store_updated", admin.login, { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
     console.log("[admin-store] updated", { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
@@ -4690,6 +4942,24 @@ async function saveSettingsState(state, options = {}) {
   };
   preserveExistingStateCollections(next, currentData, state || {}, options);
   await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
+  if (
+    state
+    && (
+      Array.isArray(state.ownerStores) ||
+      Array.isArray(state.publicStoresCache) ||
+      Array.isArray(state.exchangeCards) ||
+      Array.isArray(state.exchangers) ||
+      state.groupSettings ||
+      state.referralPeriod ||
+      state.filters ||
+      state.theme ||
+      state.lang
+    )
+  ) {
+    await savePublicCatalogSnapshot(next).catch((error) => {
+      console.error("[public-catalog] sync after settings save failed", { message: error.message });
+    });
+  }
   notifyRealtime("state_updated");
   if (state && (state.orders || state.walletDeposits || state.walletWithdrawals || state.walletTransactions)) {
     scheduleFinanceMirror(next);
@@ -4705,6 +4975,9 @@ async function savePublicStoresCache(stores = []) {
   state.publicStoresCache = nextCache;
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await savePublicCatalogSnapshot(state, nextCache).catch((error) => {
+    console.error("[public-catalog] sync after stores cache save failed", { message: error.message });
+  });
 }
 
 function dbTimestamp(value) {
@@ -4945,6 +5218,9 @@ async function saveOwnerStoreFallback(store = {}) {
   state.publicStoresCache = [publicStoreForState(store), ...publicStoresCache.filter((item) => String(item?.id || "") !== String(store.id))];
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await savePublicCatalogSnapshot(state, state.publicStoresCache).catch((error) => {
+    console.error("[public-catalog] sync after owner store fallback failed", { message: error.message });
+  });
   console.log("[owner-store] fallback saved", { storeId: store.id, ownerStores: state.ownerStores.length });
 }
 
@@ -4973,6 +5249,9 @@ async function removeOwnerStoreFallback(storeId) {
   state.publicStoresCache = publicStoresCache.filter((item) => String(item?.id || "") !== id);
   state.publicStoresCacheAt = Date.now();
   await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await savePublicCatalogSnapshot(state, state.publicStoresCache).catch((error) => {
+    console.error("[public-catalog] sync after owner store fallback removal failed", { message: error.message });
+  });
 }
 
 function stableDisputeNumber(value = "") {
@@ -5438,26 +5717,52 @@ async function adminLoadMarketplace() {
   await withTimeout(ensureSeed(), "admin marketplace seed", 5000).catch((error) => {
     console.error("[admin] seed skipped", { message: error.message });
   });
-  const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
-    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 30000),
-    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 30000),
-    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000).catch((error) => {
-      console.error("[admin] settings fallback", { message: error.message });
-      return { data: { data: {} } };
+  const [storesResult, messagesResult, settingsResult, profilesResult, sessionsResult, publicCatalog] = await Promise.all([
+    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 12000).catch((error) => {
+      console.error("[admin] stores fallback", { message: error.message });
+      return { data: null, failed: true };
     }),
-    withTimeout(supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }), "admin profiles query", 10000),
-    withTimeout(supabase.from("sessions").select("login_key,created_at"), "admin sessions query", 10000)
+    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 12000).catch((error) => {
+      console.error("[admin] messages fallback", { message: error.message });
+      return { data: [] };
+    }),
+    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 12000).catch((error) => {
+      console.error("[admin] settings fallback", { message: error.message });
+      return { data: { data: {} }, failed: true };
+    }),
+    withTimeout(supabase.from("profiles").select("login_key,login,name,role,created_at").order("created_at", { ascending: true }), "admin profiles query", 12000).catch((error) => {
+      console.error("[admin] profiles fallback", { message: error.message });
+      return { data: [] };
+    }),
+    withTimeout(supabase.from("sessions").select("login_key,created_at"), "admin sessions query", 8000).catch((error) => {
+      console.error("[admin] sessions fallback", { message: error.message });
+      return { data: [] };
+    }),
+    loadPublicCatalogSnapshot()
   ]);
-  const state = settings?.data || {};
-  const mergedStores = mergeStoreSources((stores || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), state.ownerStores || []);
-  const messageItems = (messages || []).map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 }));
+  const state = settingsResult?.data?.data || {};
+  if (publicCatalog) {
+    state.publicStoresCache = Array.isArray(state.publicStoresCache) && state.publicStoresCache.length ? state.publicStoresCache : (publicCatalog.stores || []);
+    state.exchangeCards = Array.isArray(state.exchangeCards) && state.exchangeCards.length ? state.exchangeCards : (publicCatalog.exchangeCards || []);
+    state.exchangers = Array.isArray(state.exchangers) && state.exchangers.length ? state.exchangers : (publicCatalog.exchangers || []);
+    state.groupSettings = state.groupSettings || publicCatalog.groupSettings || {};
+    state.referralPeriod = state.referralPeriod || publicCatalog.referralPeriod || {};
+    state.filters = state.filters || publicCatalog.filters || {};
+  }
+  const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
+  const fallbackStores = Array.isArray(state.ownerStores) && state.ownerStores.length
+    ? state.ownerStores
+    : (Array.isArray(state.publicStoresCache) ? state.publicStoresCache : []);
+  const mergedStores = mergeStoreSources(storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), fallbackStores);
+  const messages = Array.isArray(messagesResult?.data) ? messagesResult.data : [];
+  const messageItems = messages.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 }));
   recoverMissingProductOrdersFromDisputeMessages(state, mergedStores, messageItems);
   return {
     state,
     stores: mergedStores,
     messages: messageItems,
-    profiles: profiles || [],
-    sessions: sessions || []
+    profiles: profilesResult?.data || [],
+    sessions: sessionsResult?.data || []
   };
 }
 
