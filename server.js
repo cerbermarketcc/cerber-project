@@ -878,7 +878,7 @@ async function stateFor(user) {
           return { data: { data: {} }, error: null };
         }),
         withTimeout(
-          supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(100),
+          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
           "public stores fallback query",
           24000
         ).catch((error) => {
