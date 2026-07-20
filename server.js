@@ -640,14 +640,27 @@ async function verifyCaptcha(token, req) {
   }
   const result = await response.json().catch(() => ({}));
   if (!result.success) {
+    const errorCodes = (result["error-codes"] || []).map(String);
     console.warn("[captcha] Turnstile verification failed", {
-      errors: result["error-codes"] || [],
+      errors: errorCodes,
       hostname: result.hostname || "",
       action: result.action || "",
       cdata: result.cdata || ""
     });
-    const error = new Error("Капча не пройдена, попробуйте ещё раз");
-    error.status = 400;
+    let message = "Капча не пройдена, попробуйте ещё раз";
+    let status = 400;
+    if (errorCodes.includes("invalid-input-secret")) {
+      message = "Капча настроена неверно: обновите TURNSTILE_SECRET_KEY в Render";
+      status = 500;
+    } else if (errorCodes.includes("invalid-input-response") || errorCodes.includes("missing-input-response")) {
+      message = "Капча не выдала корректный токен. Обновите страницу и пройдите проверку ещё раз.";
+    } else if (errorCodes.includes("timeout-or-duplicate")) {
+      message = "Капча устарела или уже использована. Пройдите проверку ещё раз.";
+    } else if (errorCodes.includes("bad-request")) {
+      message = "Капча отклонена Cloudflare. Проверьте домен в Turnstile hostnames.";
+    }
+    const error = new Error(message);
+    error.status = status;
     throw error;
   }
 }
