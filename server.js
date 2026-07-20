@@ -904,6 +904,7 @@ function arrayHasItems(value) {
 }
 
 function catalogHasContent(catalog = {}) {
+  if (!catalog || typeof catalog !== "object") return false;
   return Boolean(
     arrayHasItems(catalog.stores) ||
     arrayHasItems(catalog.exchangers) ||
