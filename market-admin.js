@@ -1149,13 +1149,30 @@ function healthStatus(value) {
 }
 
 function renderHealth() {
-  if (!data.health) {
+  if (!data.health && !data.healthLoading) {
+    data.healthLoading = true;
     api("/api/health").then((health) => {
       data.health = health;
       render();
     }).catch((error) => {
       data.health = { ok: false, error: error.message || "Health error", checks: {} };
       render();
+    }).finally(() => {
+      data.healthLoading = false;
+    });
+  }
+  if (data.health && !data.healthDeep && !data.healthDeepLoading) {
+    data.healthDeepLoading = true;
+    api("/api/health/deep").then((health) => {
+      data.health = health;
+      data.healthDeep = true;
+      render();
+    }).catch((error) => {
+      data.healthDeepError = error.message || "Deep health error";
+      data.healthDeep = true;
+      render();
+    }).finally(() => {
+      data.healthDeepLoading = false;
     });
   }
   const health = data.health || { checks: {} };
@@ -1184,6 +1201,9 @@ function renderHealth() {
           <tr><td>Telegram main bot</td><td>${healthStatus(checks.telegram?.mainBot)}</td></tr>
           <tr><td>Telegram webhook secret</td><td>${healthStatus(checks.telegram?.webhookSecret)}</td></tr>
           <tr><td>Site notify bot</td><td>${healthStatus(checks.telegram?.siteNotifyBot)}</td></tr>
+          <tr><td>Default CMS admin password</td><td>${healthStatus(!checks.security?.insecureDefaultCmsPassword)}</td></tr>
+          <tr><td>Default owner password</td><td>${healthStatus(!checks.security?.insecureDefaultOwnerPassword)}</td></tr>
+          <tr><td>Default market admin password</td><td>${healthStatus(!checks.security?.insecureDefaultMarketAdminPassword)}</td></tr>
         </tbody></table>
       </article>
       <article class="table-card">
@@ -1196,8 +1216,9 @@ function renderHealth() {
         </tbody></table>
       </article>
     </section>
-    <article class="table-card"><h3>SQL tables</h3>${smallTable(["Table", "Status", "Rows"], tableRows)}</article>
+    <article class="table-card"><h3>SQL tables</h3>${data.healthDeepLoading ? `<p class="muted">Deep diagnostics loading...</p>` : smallTable(["Table", "Status", "Rows"], tableRows)}</article>
     ${health.error ? `<article class="notice danger">${esc(health.error)}</article>` : ""}
+    ${data.healthDeepError ? `<article class="notice danger">${esc(data.healthDeepError)}</article>` : ""}
   `;
 }
 

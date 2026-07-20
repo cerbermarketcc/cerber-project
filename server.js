@@ -11,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "public-catalog-safety-2026-07-20-v113";
+const cerberBuildVersion = "marketplace-stability-2026-07-21-v114";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -96,6 +96,10 @@ const publicCatalogSettingsSelect = [
   "filters:data->filters",
   "updatedAt:data->updatedAt"
 ].join(",");
+const mainSettingsRowId = "main";
+const mainSettingsBackupRowId = "main_backup_latest";
+const publicCatalogRowId = "public_catalog";
+const publicCatalogBackupRowId = "public_catalog_backup";
 const publicStoresSelect = [
   "id",
   "created_at",
@@ -128,6 +132,7 @@ let seedPromise = null;
 let financeMirrorPromise = null;
 let publicStoresMemoryCache = [];
 let publicStoresMemoryCacheAt = 0;
+let publicCatalogMemorySnapshot = null;
 let publicStoresRefreshPromise = null;
 const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
@@ -446,7 +451,7 @@ async function ensureAdminSecurity() {
   const fallbackLogin = process.env.MARKET_ADMIN_LOGIN || "admin";
   const fallbackPassword = process.env.MARKET_ADMIN_PASSWORD || "admin1212";
   const { data: settings } = await withTimeout(
-    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+    supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
     "admin security settings query",
     3000
   ).catch((error) => {
@@ -468,11 +473,14 @@ async function ensureAdminSecurity() {
         }
       };
       delete nextState.adminSecurity.plainPassword;
-      return withTimeout(
-        supabase.from("app_settings").upsert({ id: "main", data: nextState }, { onConflict: "id" }),
-        "admin security save",
-        8000
-      );
+      return Promise.all([
+        withTimeout(
+          supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: nextState }, { onConflict: "id" }),
+          "admin security save",
+          8000
+        ),
+        saveSettingsBackupState(nextState)
+      ]);
     }).catch((error) => console.error("[admin-login] security save skipped", { message: error.message }));
     delete state.adminSecurity.passwordHash;
   }
@@ -774,7 +782,7 @@ async function ensureSeed() {
   seedPromise = (async () => {
     const startedAt = Date.now();
     const [{ data: existingSettings, error: settingsError }, { data: existingAdmin, error: adminError }] = await Promise.all([
-      supabase.from("app_settings").select("id").eq("id", "main").maybeSingle(),
+      supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle(),
       supabase.from("profiles").select("login_key").eq("login_key", "admin").maybeSingle()
     ]);
     if (settingsError) throw settingsError;
@@ -791,7 +799,7 @@ async function ensureSeed() {
 
     if (!existingSettings) {
       const { error } = await supabase.from("app_settings").upsert({
-        id: "main",
+        id: mainSettingsRowId,
         data: {
       theme: "light",
       lang: "ru",
@@ -882,6 +890,50 @@ function compactPublicCatalogData(row = {}) {
   };
 }
 
+function cloneJson(value) {
+  if (!value || typeof value !== "object") return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value));
+  }
+}
+
+function arrayHasItems(value) {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function catalogHasContent(catalog = {}) {
+  return Boolean(
+    arrayHasItems(catalog.stores) ||
+    arrayHasItems(catalog.exchangers) ||
+    arrayHasItems(catalog.exchangeCards)
+  );
+}
+
+function stateHasDurableContent(state = {}) {
+  return Boolean(
+    catalogHasContent({
+      stores: state.publicStoresCache || state.ownerStores,
+      exchangers: state.exchangers,
+      exchangeCards: state.exchangeCards
+    }) ||
+    arrayHasItems(state.orders) ||
+    arrayHasItems(state.exchangeRequests) ||
+    arrayHasItems(state.groupMessages) ||
+    arrayHasItems(state.walletTransactions) ||
+    arrayHasItems(state.walletDeposits) ||
+    arrayHasItems(state.walletWithdrawals) ||
+    arrayHasItems(state.referrals) ||
+    arrayHasItems(state.referralPayments) ||
+    arrayHasItems(state.supportTickets) ||
+    arrayHasItems(state.mirrorBots) ||
+    Boolean(state.balances && typeof state.balances === "object" && Object.keys(state.balances).length) ||
+    Boolean(state.ltcBalances && typeof state.ltcBalances === "object" && Object.keys(state.ltcBalances).length) ||
+    Boolean(state.referralCodes && typeof state.referralCodes === "object" && Object.keys(state.referralCodes).length)
+  );
+}
+
 function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
   const sourceStores = Array.isArray(storesSource)
     ? storesSource
@@ -906,25 +958,49 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
 
 async function loadPublicCatalogSnapshot() {
   if (!supabase) return null;
-  const result = await withTimeout(
-    supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", "public_catalog").maybeSingle(),
-    "public catalog query",
-    3000
-  ).catch((error) => {
-    console.error("[public-catalog] load failed", { message: error.message, status: error.status || 500 });
-    return null;
-  });
-  const data = compactPublicCatalogData(result?.data || {});
-  if (!Array.isArray(data.stores) && !Array.isArray(data.exchangers) && !Array.isArray(data.exchangeCards)) return null;
-  return data;
+  const loadRow = async (id, label) => {
+    const result = await withTimeout(
+      supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", id).maybeSingle(),
+      label,
+      3000
+    ).catch((error) => {
+      console.error("[public-catalog] load failed", { id, message: error.message, status: error.status || 500 });
+      return null;
+    });
+    if (!result?.data) return null;
+    return compactPublicCatalogData(result.data || {});
+  };
+  const primary = await loadRow(publicCatalogRowId, "public catalog query");
+  if (catalogHasContent(primary)) {
+    publicCatalogMemorySnapshot = cloneJson(primary);
+    return primary;
+  }
+  const backup = await loadRow(publicCatalogBackupRowId, "public catalog backup query");
+  if (catalogHasContent(backup)) {
+    publicCatalogMemorySnapshot = cloneJson(backup);
+    console.warn("[public-catalog] using backup snapshot", {
+      stores: backup.stores?.length || 0,
+      exchangers: backup.exchangers?.length || 0,
+      exchangeCards: backup.exchangeCards?.length || 0
+    });
+    return { ...backup, restoredFromBackup: true };
+  }
+  if (catalogHasContent(publicCatalogMemorySnapshot)) {
+    return { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true };
+  }
+  return null;
 }
 
 async function savePublicCatalogSnapshot(state = {}, storesSource = null) {
   if (!supabase) return null;
   const snapshot = buildPublicCatalogSnapshot(state, storesSource);
-  if (!snapshot.stores.length && !snapshot.exchangers.length && !snapshot.exchangeCards.length) return null;
+  if (!catalogHasContent(snapshot)) return null;
+  publicCatalogMemorySnapshot = cloneJson(snapshot);
   await withTimeout(
-    supabase.from("app_settings").upsert({ id: "public_catalog", data: snapshot }, { onConflict: "id" }),
+    supabase.from("app_settings").upsert([
+      { id: publicCatalogRowId, data: snapshot },
+      { id: publicCatalogBackupRowId, data: { ...snapshot, backupOf: publicCatalogRowId, backupAt: Date.now() } }
+    ], { onConflict: "id" }),
     "public catalog save",
     8000
   );
@@ -1056,7 +1132,7 @@ async function stateFor(user) {
       }
       const [settingsResult, storesResult] = await Promise.all([
         withTimeout(
-          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
+          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
           "public app_settings query",
           4000
         ).catch((error) => {
@@ -1076,7 +1152,18 @@ async function stateFor(user) {
         })
       ]);
       if (settingsResult.error) throw settingsResult.error;
-      const settingsData = compactSettingsData(settingsResult.data || {});
+      let settingsData = compactSettingsData(settingsResult.data || {});
+      if (!stateHasDurableContent(settingsData)) {
+        const backupState = await loadSettingsBackupState();
+        if (stateHasDurableContent(backupState)) {
+          settingsData = { ...settingsData, ...backupState };
+          console.warn("[stateFor] public state restored from backup", {
+            publicStoresCache: settingsData.publicStoresCache?.length || 0,
+            exchangers: settingsData.exchangers?.length || 0,
+            exchangeCards: settingsData.exchangeCards?.length || 0
+          });
+        }
+      }
       let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
       if (!publicStores.length && Array.isArray(settingsData.ownerStores) && settingsData.ownerStores.length) {
         publicStores = settingsData.ownerStores
@@ -1158,7 +1245,7 @@ async function stateFor(user) {
       8000
     );
     const settingsQuery = withTimeout(
-      supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+      supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
       "app_settings query",
       8000
     ).catch((error) => {
@@ -1199,7 +1286,19 @@ async function stateFor(user) {
       stores: stores?.length || 0,
       messages: messages?.length || 0
     });
-    const settingsData = settings?.data || {};
+    let settingsData = settings?.data || {};
+    if (!stateHasDurableContent(settingsData)) {
+      const backupState = await loadSettingsBackupState();
+      if (stateHasDurableContent(backupState)) {
+        settingsData = { ...settingsData, ...backupState };
+        console.warn("[stateFor] user state restored from backup", {
+          login: user?.login || "",
+          publicStoresCache: settingsData.publicStoresCache?.length || 0,
+          exchangers: settingsData.exchangers?.length || 0,
+          orders: settingsData.orders?.length || 0
+        });
+      }
+    }
     if (user?.login) {
       const beforeCode = settingsData.referralCodes?.[loginKey(user.login)] || "";
       const ensuredCode = ensureReferralCodeForState(settingsData, user.login);
@@ -1696,11 +1795,10 @@ async function authStateForUserWithStores(user, state = {}) {
 
 async function telegramUserSummary(user) {
   await ensureSeed();
-  const [{ data: settings }, { data: messageRows }] = await Promise.all([
-    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+  const [state, { data: messageRows }] = await Promise.all([
+    loadSettingsState(),
     supabase.from("messages").select("data").order("created_at", { ascending: false })
   ]);
-  const state = settings?.data || {};
   const login = user.login;
   const key = loginKey(login);
 
@@ -1787,8 +1885,7 @@ async function telegramUserSummary(user) {
 
 async function telegramGroupChat() {
   await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const settingsData = state.groupSettings || {};
   const now = Date.now();
   const presence = state.telegramChatPresence || {};
@@ -1808,8 +1905,7 @@ async function telegramGroupChat() {
 
 async function updateTelegramChatPresence(user) {
   await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const now = Date.now();
   const presence = state.telegramChatPresence || {};
   presence[loginKey(user.login)] = {
@@ -1828,8 +1924,7 @@ async function updateTelegramChatPresence(user) {
 
 async function addTelegramGroupMessage(user, payload = {}) {
   await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const body = String(payload.body || "").trim();
   const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 3).map((file) => ({
     name: String(file.name || "file").slice(0, 120),
@@ -1881,15 +1976,25 @@ function sellerForbidden(res) {
 
 async function stateForStoreAdmin(storeId, token = {}) {
   const id = String(storeId || "");
-  const { data: settings } = await withTimeout(
-    supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-    "store-admin app_settings query",
-    4000
-  ).catch((error) => {
+  let state = await withTimeout(loadSettingsState(), "store-admin app_settings query", 6000).catch(async (error) => {
     console.error("[store-admin] app_settings fallback", { message: error.message });
-    return { data: { data: {} } };
+    return loadSettingsBackupState();
   });
-  const state = settings?.data || {};
+  if (!stateHasDurableContent(state)) {
+    const publicCatalog = await loadPublicCatalogSnapshot().catch((error) => {
+      console.error("[store-admin] public catalog fallback failed", { message: error.message });
+      return null;
+    });
+    state = {
+      ...state,
+      ...(publicCatalog ? {
+        publicStoresCache: publicCatalog.stores || [],
+        exchangeCards: publicCatalog.exchangeCards || [],
+        exchangers: publicCatalog.exchangers || [],
+        groupSettings: publicCatalog.groupSettings || state.groupSettings || {}
+      } : {})
+    };
+  }
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const messages = (await withTimeout(
     supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
@@ -1915,7 +2020,8 @@ async function stateForStoreAdmin(storeId, token = {}) {
     console.error("[store-admin] store fallback", { storeId: id, message: error.message });
     return { data: null };
   });
-  const store = storeRow?.data || (Array.isArray(state.ownerStores) ? state.ownerStores.find((item) => String(item?.id || "") === id) : null);
+  const stateStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
+  const store = storeRow?.data || stateStores.find((item) => String(item?.id || "") === id) || null;
   const embeddedOrders = Array.isArray(store?.productOrders)
     ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
     : [];
@@ -2224,9 +2330,8 @@ app.get("/api/config", async (_req, res, next) => {
   }
 });
 
-app.get("/api/health", async (_req, res) => {
-  const startedAt = Date.now();
-  const health = {
+function baseHealthPayload(startedAt = Date.now()) {
+  return {
     ok: true,
     build: cerberBuildVersion,
     time: new Date().toISOString(),
@@ -2246,14 +2351,50 @@ app.get("/api/health", async (_req, res) => {
         webhookSecret: Boolean(telegramWebhookSecret),
         siteNotifyBot: Boolean(siteNotifyBotToken)
       },
+      security: {
+        cmsAdminPasswordEnv: Boolean(process.env.ADMIN_PASSWORD),
+        ownerPasswordEnv: Boolean(process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD),
+        marketAdminPasswordEnv: Boolean(process.env.MARKET_ADMIN_PASSWORD),
+        adminJwtSecretEnv: Boolean(process.env.ADMIN_JWT_SECRET || supabaseServiceKey),
+        insecureDefaultCmsPassword: !process.env.ADMIN_PASSWORD,
+        insecureDefaultOwnerPassword: !process.env.OWNER_PANEL_PASSWORD && !process.env.ADMIN_PASSWORD,
+        insecureDefaultMarketAdminPassword: !process.env.MARKET_ADMIN_PASSWORD
+      },
       tables: {},
       bots: { mirrors: 0, active: 0, errors: 0 }
     },
     durationMs: 0
   };
+}
+
+app.get("/api/health", async (_req, res) => {
+  const startedAt = Date.now();
+  const health = baseHealthPayload(startedAt);
+  try {
+    const supabasePing = await timedDbCheck("health supabase ping", async () => {
+      if (!supabase) return { configured: false };
+      const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
+      if (error) throw error;
+      return { configured: true, mainSettings: Boolean(data) };
+    }, 2500);
+    health.checks.supabase = { ...health.checks.supabase, ...supabasePing };
+    health.ok = Boolean(supabasePing.ok);
+    health.durationMs = Date.now() - startedAt;
+    res.status(health.ok ? 200 : 503).json(health);
+  } catch (error) {
+    health.ok = false;
+    health.error = String(error.message || error);
+    health.durationMs = Date.now() - startedAt;
+    res.status(503).json(health);
+  }
+});
+
+app.get("/api/health/deep", async (_req, res) => {
+  const startedAt = Date.now();
+  const health = baseHealthPayload(startedAt);
   try {
     const tables = ["sessions", "orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
-    const tableResults = await Promise.all(tables.map(async (table) => [table, await tableHealth(table)]));
+    const tableResults = await Promise.all(tables.map(async (table) => [table, await timedDbCheck(`health table ${table}`, () => tableHealth(table), 4000)]));
     health.checks.tables = Object.fromEntries(tableResults);
     const state = supabase ? await loadSettingsState().catch(() => ({})) : {};
     const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
@@ -2359,25 +2500,46 @@ function sellerStoreInputForToken(existing = {}, input = {}, token = {}) {
 async function loadStoreWithFallback(storeId) {
   const id = String(storeId || "").trim();
   if (!id) return null;
-  const { data: row } = await withTimeout(
-    supabase.from("stores").select("data").eq("id", id).maybeSingle(),
-    "store-admin load store",
-    5000
-  );
+  let row = null;
+  try {
+    const result = await withTimeout(
+      supabase.from("stores").select("data").eq("id", id).maybeSingle(),
+      "store-admin load store",
+      5000
+    );
+    row = result?.data || null;
+  } catch (error) {
+    console.error("[store-admin] direct store load failed; using fallback", { storeId: id, message: error.message });
+  }
   if (row?.data) return row.data;
-  const state = await withTimeout(loadSettingsState(), "store-admin fallback state", 5000);
-  return (state.ownerStores || []).find((item) => String(item?.id || "") === id) || null;
+  const state = await withTimeout(loadSettingsState(), "store-admin fallback state", 6000).catch(async (error) => {
+    console.error("[store-admin] settings fallback failed; using backup", { storeId: id, message: error.message });
+    return loadSettingsBackupState();
+  });
+  const fallbackStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
+  return fallbackStores.find((item) => String(item?.id || "") === id) || null;
 }
 
 async function findSellerAdminStore(storeId, login) {
   if (storeId) return loadStoreWithFallback(storeId);
   const key = loginKey(login);
   if (!key) return null;
-  const [{ data: rows }, state] = await Promise.all([
-    supabase.from("stores").select("data").limit(500),
-    loadSettingsState()
+  const [storesResult, state] = await Promise.all([
+    withTimeout(
+      supabase.from("stores").select("data").limit(500),
+      "store-admin stores lookup",
+      6000
+    ).catch((error) => {
+      console.error("[store-admin] stores lookup fallback", { login, message: error.message });
+      return { data: [] };
+    }),
+    withTimeout(loadSettingsState(), "store-admin login settings", 6000).catch(async (error) => {
+      console.error("[store-admin] login settings fallback", { login, message: error.message });
+      return loadSettingsBackupState();
+    })
   ]);
-  return mergeStoreSources((rows || []).map((row) => row.data), state.ownerStores || []).find((item) => (
+  const fallbackStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
+  return mergeStoreSources((storesResult?.data || []).map((row) => row.data), fallbackStores).find((item) => (
     item && (loginKey(item.ownerLogin) === key || loginKey(item.id) === key)
   )) || null;
 }
@@ -2791,8 +2953,7 @@ app.put("/api/state", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const state = req.body.state || {};
-    const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const currentSettingsData = currentSettings?.data || {};
+    const currentSettingsData = await loadSettingsState();
     const currentGroupSettings = normalizeGroupSettings(currentSettingsData.groupSettings || {});
     const incomingGroupSettings = normalizeGroupSettings(state.groupSettings || {});
     const mergedGroupMessages = [
@@ -2823,39 +2984,37 @@ app.put("/api/state", async (req, res, next) => {
         ...(incomingGroupSettings.presence || {})
       }
     };
-    await supabase.from("app_settings").upsert({
-      id: "main",
-      data: {
-        ...currentSettingsData,
-        theme: state.theme || "light",
-        lang: state.lang || "ru",
-        orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
-        exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
-        exchangers: Array.isArray(currentSettingsData.exchangers) ? currentSettingsData.exchangers : [],
-        exchangeRequests: currentSettingsData.exchangeRequests || [],
-        groupMessages: mergedGroupMessages,
-        groupSettings: mergedGroupSettings,
-        referrals: Array.isArray(state.referrals) ? state.referrals : [],
-        referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
-        referralCodes: state.referralCodes || {},
-        balances: currentSettingsData.balances || {},
-        ltcBalances: currentSettingsData.ltcBalances || {},
-        walletTransactions: Array.isArray(currentSettingsData.walletTransactions) ? currentSettingsData.walletTransactions : [],
-        walletDeposits: Array.isArray(currentSettingsData.walletDeposits) ? currentSettingsData.walletDeposits : [],
-        walletWithdrawals: Array.isArray(currentSettingsData.walletWithdrawals) ? currentSettingsData.walletWithdrawals : [],
-        telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
-        mirrorBots: currentSettingsData.mirrorBots || [],
-        siteNotifications: currentSettingsData.siteNotifications || [],
-        broadcasts: currentSettingsData.broadcasts || [],
-        userFilters: currentSettingsData.userFilters || [],
-        blockedUsers: currentSettingsData.blockedUsers || {},
-        storeApplications: Array.isArray(currentSettingsData.storeApplications) ? currentSettingsData.storeApplications : [],
-        ownerSettings: currentSettingsData.ownerSettings || {},
-        paymentSettings: currentSettingsData.paymentSettings || {},
-        referralPeriod: state.referralPeriod || {},
-        filters: state.filters || {}
-      }
-    }, { onConflict: "id" });
+    const nextSettingsData = {
+      ...currentSettingsData,
+      theme: state.theme || "light",
+      lang: state.lang || "ru",
+      orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
+      exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
+      exchangers: Array.isArray(currentSettingsData.exchangers) ? currentSettingsData.exchangers : [],
+      exchangeRequests: currentSettingsData.exchangeRequests || [],
+      groupMessages: mergedGroupMessages,
+      groupSettings: mergedGroupSettings,
+      referrals: Array.isArray(state.referrals) ? state.referrals : [],
+      referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
+      referralCodes: state.referralCodes || {},
+      balances: currentSettingsData.balances || {},
+      ltcBalances: currentSettingsData.ltcBalances || {},
+      walletTransactions: Array.isArray(currentSettingsData.walletTransactions) ? currentSettingsData.walletTransactions : [],
+      walletDeposits: Array.isArray(currentSettingsData.walletDeposits) ? currentSettingsData.walletDeposits : [],
+      walletWithdrawals: Array.isArray(currentSettingsData.walletWithdrawals) ? currentSettingsData.walletWithdrawals : [],
+      telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
+      mirrorBots: currentSettingsData.mirrorBots || [],
+      siteNotifications: currentSettingsData.siteNotifications || [],
+      broadcasts: currentSettingsData.broadcasts || [],
+      userFilters: currentSettingsData.userFilters || [],
+      blockedUsers: currentSettingsData.blockedUsers || {},
+      storeApplications: Array.isArray(currentSettingsData.storeApplications) ? currentSettingsData.storeApplications : [],
+      ownerSettings: currentSettingsData.ownerSettings || {},
+      paymentSettings: currentSettingsData.paymentSettings || {},
+      referralPeriod: state.referralPeriod || {},
+      filters: state.filters || {}
+    };
+    await saveSettingsState(nextSettingsData);
 
     if (Array.isArray(state.exchangeCards)) {
       for (const card of state.exchangeCards) {
@@ -3208,7 +3367,7 @@ app.get("/api/admin/db-diagnostics", async (req, res, next) => {
       };
     }, 7000);
     checks.publicCatalog = await timedDbCheck("diag public catalog", async () => {
-      const { data, error } = await supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", "public_catalog").maybeSingle();
+      const { data, error } = await supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", publicCatalogRowId).maybeSingle();
       if (error) throw error;
       const catalog = compactPublicCatalogData(data || {});
       return {
@@ -3219,13 +3378,26 @@ app.get("/api/admin/db-diagnostics", async (req, res, next) => {
         updatedAt: catalog.updatedAt || null
       };
     }, 5000);
+    checks.publicCatalogBackup = await timedDbCheck("diag public catalog backup", async () => {
+      const { data, error } = await supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", publicCatalogBackupRowId).maybeSingle();
+      if (error) throw error;
+      const catalog = compactPublicCatalogData(data || {});
+      return {
+        hasRow: Boolean(data),
+        stores: countArray(catalog.stores),
+        exchangers: countArray(catalog.exchangers),
+        exchangeCards: countArray(catalog.exchangeCards),
+        updatedAt: catalog.updatedAt || null,
+        backupAt: catalog.backupAt || null
+      };
+    }, 5000);
     checks.mainSettingsId = await timedDbCheck("diag main settings id", async () => {
-      const { data, error } = await supabase.from("app_settings").select("id").eq("id", "main").maybeSingle();
+      const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
       if (error) throw error;
       return { hasRow: Boolean(data) };
     }, 5000);
     checks.mainSettingsCompact = await timedDbCheck("diag main settings compact", async () => {
-      const { data, error } = await supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle();
+      const { data, error } = await supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle();
       if (error) throw error;
       const state = compactSettingsData(data || {});
       return {
@@ -3273,7 +3445,7 @@ app.post("/api/admin/public-catalog/rebuild", async (req, res, next) => {
     const admin = requireAdmin(req);
     requireDb();
     const { data, error } = await withTimeout(
-      supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
+      supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
       "public catalog rebuild settings query",
       20000
     );
@@ -4952,9 +5124,39 @@ function preserveExistingStateCollections(next, currentData = {}, incomingState 
   });
 }
 
+async function loadSettingsBackupState() {
+  if (!supabase) return {};
+  const result = await withTimeout(
+    supabase.from("app_settings").select("data").eq("id", mainSettingsBackupRowId).maybeSingle(),
+    "main settings backup query",
+    3000
+  ).catch((error) => {
+    console.error("[settings-backup] load failed", { message: error.message, status: error.status || 500 });
+    return null;
+  });
+  const state = result?.data?.data || {};
+  return stateHasDurableContent(state) ? state : {};
+}
+
+async function saveSettingsBackupState(state = {}) {
+  if (!supabase || !stateHasDurableContent(state)) return;
+  const backup = {
+    ...cloneJson(state),
+    backupOf: mainSettingsRowId,
+    backupAt: Date.now()
+  };
+  await withTimeout(
+    supabase.from("app_settings").upsert({ id: mainSettingsBackupRowId, data: backup }, { onConflict: "id" }),
+    "main settings backup save",
+    8000
+  ).catch((error) => {
+    console.error("[settings-backup] save failed", { message: error.message, status: error.status || 500 });
+  });
+}
+
 async function saveSettingsState(state, options = {}) {
-  const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const currentData = currentSettings?.data || {};
+  const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
+  const currentData = currentSettings?.data || await loadSettingsBackupState();
   const incomingExchangers = Array.isArray(state?.exchangers) ? state.exchangers : null;
   const currentExchangers = Array.isArray(currentData.exchangers) ? currentData.exchangers : [];
   const preserveExistingExchangers = !options.allowEmptyExchangers
@@ -4973,7 +5175,8 @@ async function saveSettingsState(state, options = {}) {
       : (incomingExchangers || currentExchangers)
   };
   preserveExistingStateCollections(next, currentData, state || {}, options);
-  await supabase.from("app_settings").upsert({ id: "main", data: next }, { onConflict: "id" });
+  await supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" });
+  await saveSettingsBackupState(next);
   if (
     state
     && (
@@ -5000,13 +5203,12 @@ async function saveSettingsState(state, options = {}) {
 
 async function savePublicStoresCache(stores = []) {
   if (!Array.isArray(stores) || !stores.length) return;
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const nextCache = stores.map(publicStoreForState);
   if (JSON.stringify(state.publicStoresCache || []) === JSON.stringify(nextCache)) return;
   state.publicStoresCache = nextCache;
   state.publicStoresCacheAt = Date.now();
-  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await saveSettingsState(state);
   await savePublicCatalogSnapshot(state, nextCache).catch((error) => {
     console.error("[public-catalog] sync after stores cache save failed", { message: error.message });
   });
@@ -5231,25 +5433,23 @@ async function tableHealth(table = "") {
 async function clearDeletedStoreTombstone(storeId) {
   const id = String(storeId || "");
   if (!id) return;
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const deletedIds = Array.isArray(state.deletedStoreIds) ? state.deletedStoreIds.map(String) : [];
   if (!deletedIds.includes(id)) return;
   state.deletedStoreIds = deletedIds.filter((item) => item !== id);
-  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await saveSettingsState(state);
   console.log("[store] tombstone cleared", { storeId: id });
 }
 
 async function saveOwnerStoreFallback(store = {}) {
   if (!store.id) return;
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
   state.ownerStores = [store, ...ownerStores.filter((item) => String(item?.id || "") !== String(store.id))];
   const publicStoresCache = Array.isArray(state.publicStoresCache) ? state.publicStoresCache : [];
   state.publicStoresCache = [publicStoreForState(store), ...publicStoresCache.filter((item) => String(item?.id || "") !== String(store.id))];
   state.publicStoresCacheAt = Date.now();
-  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await saveSettingsState(state);
   await savePublicCatalogSnapshot(state, state.publicStoresCache).catch((error) => {
     console.error("[public-catalog] sync after owner store fallback failed", { message: error.message });
   });
@@ -5273,14 +5473,13 @@ async function persistStoreSecretMigration(store = {}) {
 async function removeOwnerStoreFallback(storeId) {
   const id = String(storeId || "");
   if (!id) return;
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const state = await loadSettingsState();
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
   state.ownerStores = ownerStores.filter((item) => String(item?.id || "") !== id);
   const publicStoresCache = Array.isArray(state.publicStoresCache) ? state.publicStoresCache : [];
   state.publicStoresCache = publicStoresCache.filter((item) => String(item?.id || "") !== id);
   state.publicStoresCacheAt = Date.now();
-  await supabase.from("app_settings").upsert({ id: "main", data: state }, { onConflict: "id" });
+  await saveSettingsState(state);
   await savePublicCatalogSnapshot(state, state.publicStoresCache).catch((error) => {
     console.error("[public-catalog] sync after owner store fallback removal failed", { message: error.message });
   });
@@ -5494,11 +5693,18 @@ async function ensureProductOrderSettlement(state = {}, order = {}, store = null
   const storeTxId = `tx-store-sale-${order.id}`;
   const ownerTxId = `tx-owner-commission-${order.id}`;
   const referralSourceId = `product-order:${order.id}`;
-  const alreadyHasStoreTx = state.walletTransactions.some((tx) => tx.id === storeTxId);
+  const existingStoreTx = state.walletTransactions.find((tx) => tx.id === storeTxId);
+  const alreadyHasStoreTx = Boolean(existingStoreTx);
   const alreadyHasOwnerTx = state.walletTransactions.some((tx) => tx.id === ownerTxId);
   const alreadyHasReferralTx = Array.isArray(state.referralPayments) && state.referralPayments.some((tx) => String(tx.sourceId || "") === referralSourceId);
   const hasReferral = Array.isArray(state.referrals) && state.referrals.some((item) => sameLogin(item.login, order.login));
-  if (order.ledgerRecordedAt && (alreadyHasStoreTx || !order.storeId) && (alreadyHasOwnerTx || Number(order.platformCommissionUsd || 0) <= 0) && (alreadyHasReferralTx || !hasReferral)) {
+  const storeReleaseNeeded = Boolean(
+    order.storeId &&
+    alreadyHasStoreTx &&
+    !storeOrderHeldForPayout(order) &&
+    (existingStoreTx.held || String(existingStoreTx.status || "").toLowerCase() === "held" || !order.storeBalanceReleasedAt)
+  );
+  if (order.ledgerRecordedAt && !storeReleaseNeeded && (alreadyHasStoreTx || !order.storeId) && (alreadyHasOwnerTx || Number(order.platformCommissionUsd || 0) <= 0) && (alreadyHasReferralTx || !hasReferral)) {
     return false;
   }
   const beforeTxCount = state.walletTransactions.length;
@@ -5597,8 +5803,20 @@ async function normalizeServerOrders(state = {}) {
 
 async function loadSettingsState() {
   await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-  const state = settings?.data || {};
+  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
+  let state = settings?.data || {};
+  if (!stateHasDurableContent(state)) {
+    const backupState = await loadSettingsBackupState();
+    if (stateHasDurableContent(backupState)) {
+      state = { ...state, ...backupState, restoredFromBackup: true };
+      console.warn("[settings] using main backup state", {
+        ownerStores: state.ownerStores?.length || 0,
+        publicStoresCache: state.publicStoresCache?.length || 0,
+        exchangers: state.exchangers?.length || 0,
+        orders: state.orders?.length || 0
+      });
+    }
+  }
   state.telegramBot = state.telegramBot || { users: {}, sentMessages: {} };
   state.telegramBot.users = state.telegramBot.users || {};
   state.telegramBot.sentMessages = state.telegramBot.sentMessages || {};
@@ -5758,7 +5976,7 @@ async function adminLoadMarketplace() {
       console.error("[admin] messages fallback", { message: error.message });
       return { data: [] };
     }),
-    withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 12000).catch((error) => {
+    withTimeout(supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(), "admin settings query", 12000).catch((error) => {
       console.error("[admin] settings fallback", { message: error.message });
       return { data: { data: {} }, failed: true };
     }),
@@ -5772,7 +5990,19 @@ async function adminLoadMarketplace() {
     }),
     loadPublicCatalogSnapshot()
   ]);
-  const state = settingsResult?.data?.data || {};
+  let state = settingsResult?.data?.data || {};
+  if (!stateHasDurableContent(state)) {
+    const backupState = await loadSettingsBackupState();
+    if (stateHasDurableContent(backupState)) {
+      state = { ...state, ...backupState };
+      console.warn("[admin] marketplace state restored from backup", {
+        ownerStores: state.ownerStores?.length || 0,
+        publicStoresCache: state.publicStoresCache?.length || 0,
+        exchangers: state.exchangers?.length || 0,
+        orders: state.orders?.length || 0
+      });
+    }
+  }
   if (publicCatalog) {
     state.publicStoresCache = Array.isArray(state.publicStoresCache) && state.publicStoresCache.length ? state.publicStoresCache : (publicCatalog.stores || []);
     state.exchangeCards = Array.isArray(state.exchangeCards) && state.exchangeCards.length ? state.exchangeCards : (publicCatalog.exchangeCards || []);
@@ -6195,8 +6425,18 @@ function recordProductOrderLedger(order, state = {}, store = null) {
   const storeId = String(order.storeId || "");
   const storeTxId = `tx-store-sale-${order.id}`;
   const ownerTxId = `tx-owner-commission-${order.id}`;
+  const storeHeld = storeOrderHeldForPayout(order);
+  const storeTxStatus = storeHeld ? "held" : "completed";
 
-  if (storeId && !state.walletTransactions.some((tx) => tx.id === storeTxId)) {
+  const existingStoreTx = storeId ? state.walletTransactions.find((tx) => tx.id === storeTxId) : null;
+  if (existingStoreTx) {
+    existingStoreTx.status = storeTxStatus;
+    existingStoreTx.held = storeHeld;
+    existingStoreTx.amountUsd = sellerUsd;
+    existingStoreTx.grossUsd = amountUsd;
+    existingStoreTx.commissionUsd = commissionUsd;
+    existingStoreTx.amountLtc = sellerUsd / 54.2;
+  } else if (storeId) {
     state.walletTransactions.unshift({
       id: storeTxId,
       scope: "store",
@@ -6214,9 +6454,13 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       payCurrency: "ltc",
       createdAt,
       date: new Date(createdAt).toLocaleString("ru-RU"),
-      status: "completed"
+      status: storeTxStatus,
+      held: storeHeld
     });
+  }
+  if (storeId && !storeHeld && !order.storeBalanceReleasedAt) {
     state.storeBalancesUsd[storeId] = Number(state.storeBalancesUsd[storeId] || 0) + sellerUsd;
+    order.storeBalanceReleasedAt = Date.now();
   }
 
   if (commissionUsd > 0 && !state.walletTransactions.some((tx) => tx.id === ownerTxId)) {
@@ -7535,8 +7779,7 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     const orderId = String(req.body.orderId || "");
-    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const state = settings?.data || {};
+    const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const order = orders.find((item) => item.id === orderId && item.type === "product");
     if (!order) return res.status(404).json({ error: "Заказ не найден" });
@@ -7595,8 +7838,7 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
     const amountLtcExpected = Math.max(0, Number(req.body.amountLtcEstimate || 0));
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму пополнения" });
 
-    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const state = settings?.data || {};
+    const state = await loadSettingsState();
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
     const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const deposit = {
@@ -7755,8 +7997,7 @@ app.get("/api/telegram/wallet/deposits/:id", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const state = settings?.data || {};
+    const state = await loadSettingsState();
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
     const deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
     if (!deposit) return res.status(404).json({ error: "Пополнение не найдено" });
@@ -7771,8 +8012,7 @@ app.post("/api/telegram/wallet/deposits/:id/extend", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const state = settings?.data || {};
+    const state = await loadSettingsState();
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
     const deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
     if (!deposit) return res.status(404).json({ error: "Пополнение не найдено" });
@@ -7800,8 +8040,7 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const cancelled = ["failed", "expired", "refunded", "cancelled", "canceled"].includes(status);
     if (!orderId) return res.status(400).json({ error: "Unsupported payment callback" });
 
-    const { data: settings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const state = settings?.data || {};
+    const state = await loadSettingsState();
     if (!rememberNowpaymentsIpn(state, fingerprint, "payment")) return res.json({ ok: true, duplicate: true });
     mirrorPaymentIpnEvent(req, fingerprint, "payment").catch((error) => {
       console.warn("[finance-mirror] payment ipn event skipped", { message: error.message });
@@ -9975,10 +10214,10 @@ function proverkaInitStats(state) {
 async function proverkaLoadState() {
   if (proverkaStateCache) return { proverkaBot: proverkaStateCache };
   if (!proverkaStateLoadPromise) {
-    proverkaStateLoadPromise = supabase.from("app_settings").select("data").eq("id", "main").maybeSingle()
-      .then(({ data }) => {
-        proverkaStateCache = data?.data?.proverkaBot && typeof data.data.proverkaBot === "object"
-          ? data.data.proverkaBot
+    proverkaStateLoadPromise = loadSettingsState()
+      .then((state) => {
+        proverkaStateCache = state?.proverkaBot && typeof state.proverkaBot === "object"
+          ? state.proverkaBot
           : {};
         return { proverkaBot: proverkaStateCache };
       })
@@ -9994,12 +10233,8 @@ async function proverkaFlushState() {
   proverkaStateSaveInFlight = true;
   proverkaStateDirty = false;
   try {
-    const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", "main").maybeSingle();
-    const currentData = currentSettings?.data || {};
-    await supabase.from("app_settings").upsert({
-      id: "main",
-      data: { ...currentData, proverkaBot: proverkaStateCache }
-    }, { onConflict: "id" });
+    const currentData = await loadSettingsState();
+    await saveSettingsState({ ...currentData, proverkaBot: proverkaStateCache });
   } catch (error) {
     proverkaStateDirty = true;
     console.error("Proverka stats save error", error);

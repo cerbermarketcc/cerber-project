@@ -13,12 +13,24 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: ADMIN_JWT_SECRET
+        sync: false
       - key: ADMIN_PASSWORD
+        sync: false
+      - key: OWNER_PANEL_PASSWORD
+        sync: false
+      - key: MARKET_ADMIN_LOGIN
+        sync: false
+      - key: MARKET_ADMIN_PASSWORD
         sync: false
       - key: TURNSTILE_SITE_KEY
         sync: false
       - key: TURNSTILE_SECRET_KEY
         sync: false
+      - key: ALLOWED_ORIGINS
+        value: "https://cerber-project.onrender.com,https://cerber.to,https://www.cerber.to,https://cerber.love,https://www.cerber.love,https://cerber.vip,https://www.cerber.vip"
+      - key: USER_SESSION_TTL_HOURS
+        value: "72"
       - key: NOWPAYMENTS_API_KEY
         sync: false
       - key: NOWPAYMENTS_IPN_SECRET
@@ -34,6 +46,10 @@ services:
       - key: NOWPAYMENTS_PASSWORD
         sync: false
       - key: NOWPAYMENTS_PAYOUT_2FA_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
       - key: PROVERKA_BOT_TOKEN
         sync: false

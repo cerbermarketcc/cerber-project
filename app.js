@@ -31,6 +31,7 @@ let turnstileRetryTimer = null;
 let turnstileRenderTimer = null;
 let turnstileRenderStartedAt = 0;
 let turnstileWaitStartedAt = 0;
+let turnstileScriptPromise = null;
 let authSubmitting = false;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
@@ -1263,18 +1264,19 @@ function sameLogin(a, b) {
 
 function loadDb() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || localStorage.getItem(LEGACY_STORE_KEY));
+    const savedRaw = storageGet(STORE_KEY) || storageGet(LEGACY_STORE_KEY);
+    const saved = savedRaw ? JSON.parse(savedRaw) : null;
     const next = saved ? merge(defaults, saved) : structuredClone(defaults);
     restoreAuth(next);
-    const rememberedLogin = localStorage.getItem(SESSION_KEY);
+    const rememberedLogin = storageGet(SESSION_KEY);
     const rememberedUser = rememberedLogin ? next.users.find((user) => sameLogin(user.login, rememberedLogin)) : null;
     if (rememberedUser) {
       next.currentUser = rememberedUser.login;
     }
     normalizeDb(next);
-    if (localStorage.getItem(STATS_RESET_KEY) !== "done") {
+    if (storageGet(STATS_RESET_KEY) !== "done") {
       resetStoreStats(next);
-      localStorage.setItem(STATS_RESET_KEY, "done");
+      storageSet(STATS_RESET_KEY, "done");
     }
     const current = next.currentUser ? next.users.find((user) => sameLogin(user.login, next.currentUser)) : null;
     if (current) {
@@ -1634,7 +1636,8 @@ function calculateExchangeQuote(card, type, amount, currency) {
 
 function restoreAuth(next) {
   try {
-    const auth = JSON.parse(localStorage.getItem(AUTH_KEY));
+    const authRaw = storageGet(AUTH_KEY);
+    const auth = authRaw ? JSON.parse(authRaw) : null;
     if (!auth) return;
     if (Array.isArray(auth.users)) {
       auth.users.forEach((savedUser) => {
@@ -1658,8 +1661,9 @@ function saveAuth() {
       currentUser: db.currentUser,
       users: db.users
     };
-    localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
-    if (db.currentUser) localStorage.setItem(SESSION_KEY, db.currentUser);
+    storageSet(AUTH_KEY, JSON.stringify(auth));
+    if (db.currentUser) storageSet(SESSION_KEY, db.currentUser);
+    else storageRemove(SESSION_KEY);
   } catch {
     // Keep the visible app working even if storage is temporarily unavailable.
   }
@@ -1774,12 +1778,14 @@ async function apiFetchOnce(path, options = {}) {
 
 async function apiFetch(path, options = {}) {
   let lastError = null;
-  for (const origin of API_ORIGINS) {
+  for (let index = 0; index < API_ORIGINS.length; index += 1) {
+    const origin = API_ORIGINS[index];
     try {
       return await apiFetchOnce(apiUrl(path, origin), options);
     } catch (error) {
       lastError = error;
-      const canRetry = origin !== PRIMARY_API_ORIGIN && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
+      const hasNextOrigin = index < API_ORIGINS.length - 1;
+      const canRetry = hasNextOrigin && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
       if (!canRetry) throw error;
     }
   }
@@ -1970,7 +1976,10 @@ async function loadRemoteSession() {
     applyRemoteState(payload);
     return Boolean(payload.user);
   } catch (error) {
-    if (error.sessionExpired || error.status === 401 || error.status === 403) clearApiSession();
+    if (error.sessionExpired || error.status === 401 || error.status === 403) {
+      clearApiSession();
+      return ensureApiSession();
+    }
     return false;
   }
 }
@@ -2405,21 +2414,19 @@ async function persistSellerAdminStore() {
 function saveDb(options = {}) {
   normalizeOrders(db);
   saveAuth();
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
-  } catch {
-    if (!options.silentLocalStorageError) showToast("LocalStorage недоступен");
-  }
+  const serialized = JSON.stringify(db);
+  const saved = storageSet(STORE_KEY, serialized);
+  if (!saved && !API_ENABLED && !options.silentLocalStorageError) showToast("LocalStorage недоступен");
   persistRemoteState();
 }
 
 function clearSession() {
   db.currentUser = "";
   try {
-    localStorage.removeItem(SESSION_KEY);
+    storageRemove(SESSION_KEY);
     clearApiSession();
     saveAuth();
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(db));
   } catch {
     saveDb();
   }
@@ -2437,9 +2444,17 @@ function hasApiSession() {
   return Boolean(apiSessionToken());
 }
 
-function currentLocalPassword() {
-  const user = currentUser();
-  return typeof user?.password === "string" ? user.password : "";
+function currentLocalPassword(login = db.currentUser) {
+  const key = loginKey(login || db.currentUser || storageGet(SESSION_KEY));
+  const user = key ? db.users.find((item) => sameLogin(item.login, key)) : currentUser();
+  if (typeof user?.password === "string" && user.password) return user.password;
+  try {
+    const authRaw = storageGet(AUTH_KEY);
+    const auth = authRaw ? JSON.parse(authRaw) : null;
+    const savedUser = Array.isArray(auth?.users) ? auth.users.find((item) => sameLogin(item.login, key || auth.currentUser)) : null;
+    if (typeof savedUser?.password === "string" && savedUser.password) return savedUser.password;
+  } catch {}
+  return "";
 }
 
 function rememberLocalPassword(login = "", password = "") {
@@ -2449,25 +2464,26 @@ function rememberLocalPassword(login = "", password = "") {
   if (existing) existing.password = value;
   else db.users.push({ login, password: value, name: login, role: "user", createdAt: isoDate(new Date()) });
   saveAuth();
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
-  } catch {}
+  storageSet(STORE_KEY, JSON.stringify(db));
 }
 
 async function ensureApiSession() {
   if (!API_ENABLED) return true;
   if (hasApiSession()) return true;
   const user = currentUser();
-  const password = currentLocalPassword();
-  if (!user?.login || !password) return false;
+  const login = user?.login || db.currentUser || storageGet(SESSION_KEY);
+  const password = currentLocalPassword(login);
+  if (!login || !password) return false;
+  if (!db.currentUser) db.currentUser = login;
   try {
     const payload = await apiFetch("/api/auth/restore-session", {
       method: "POST",
       timeoutMs: 15000,
-      body: JSON.stringify({ login: user.login, password })
+      body: JSON.stringify({ login, password })
     });
     rememberApiToken(payload.token);
     applyRemoteState(payload);
+    rememberLocalPassword(payload.user?.login || login, password);
     return true;
   } catch {
     clearApiSession();
@@ -3586,6 +3602,36 @@ function scheduleTurnstileWatch() {
   }, 3000);
 }
 
+function ensureTurnstileScript() {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileScriptPromise) return turnstileScriptPromise;
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]');
+    if (existing) {
+      existing.addEventListener("load", () => resolve(window.turnstile), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Turnstile script failed")), { once: true });
+      setTimeout(() => {
+        if (window.turnstile) resolve(window.turnstile);
+      }, 0);
+      setTimeout(() => {
+        if (!window.turnstile) reject(new Error("Turnstile script unavailable"));
+      }, 5000);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve(window.turnstile);
+    script.onerror = () => reject(new Error("Turnstile script failed"));
+    document.head.appendChild(script);
+  }).catch((error) => {
+    turnstileScriptPromise = null;
+    throw error;
+  });
+  return turnstileScriptPromise;
+}
+
 function mountTurnstile(force = false) {
   if (!API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
   if (force && window.turnstile && turnstileWidgetId !== null) {
@@ -3596,6 +3642,10 @@ function mountTurnstile(force = false) {
   }
   if (!window.turnstile) {
     if (!turnstileWaitStartedAt || force) turnstileWaitStartedAt = Date.now();
+    ensureTurnstileScript().then(() => mountTurnstile(force)).catch(() => {
+      setCaptchaStatus("Капча не загрузилась. Нажмите «Обновить капчу» или проверьте домен в Cloudflare Turnstile.", true);
+      updateAuthSubmitCaptchaState();
+    });
     clearTimeout(turnstileRetryTimer);
     turnstileRetryTimer = setTimeout(() => {
       if (!window.turnstile && Date.now() - turnstileWaitStartedAt > 12000) {
@@ -3612,32 +3662,40 @@ function mountTurnstile(force = false) {
   if (!turnstileRenderStartedAt) turnstileRenderStartedAt = Date.now();
   setCaptchaStatus("Загрузка капчи...", false);
   updateAuthSubmitCaptchaState();
-  turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
-    sitekey: TURNSTILE_SITE_KEY,
-    theme: db.theme === "dark" ? "dark" : "light",
-    appearance: "always",
-    retry: "auto",
-    "retry-interval": 8000,
-    callback: (token) => {
-      turnstileToken = String(token || "");
-      clearTimeout(turnstileRenderTimer);
-      turnstileRenderTimer = null;
-      turnstileRenderStartedAt = 0;
-      setCaptchaStatus("", false);
-      updateAuthSubmitCaptchaState();
-    },
-    "expired-callback": () => {
-      turnstileToken = "";
-      setCaptchaStatus("Капча устарела. Обновите проверку.", true);
-      updateAuthSubmitCaptchaState();
-    },
-    "error-callback": () => {
-      turnstileToken = "";
-      setCaptchaStatus("Капча не открылась для этого домена. Добавьте домен в Cloudflare Turnstile и обновите страницу.", true);
-      updateAuthSubmitCaptchaState();
-      return true;
-    }
-  });
+  try {
+    turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
+      sitekey: TURNSTILE_SITE_KEY,
+      theme: db.theme === "dark" ? "dark" : "light",
+      appearance: "always",
+      retry: "auto",
+      "retry-interval": 8000,
+      callback: (token) => {
+        turnstileToken = String(token || "");
+        clearTimeout(turnstileRenderTimer);
+        turnstileRenderTimer = null;
+        turnstileRenderStartedAt = 0;
+        setCaptchaStatus("", false);
+        updateAuthSubmitCaptchaState();
+      },
+      "expired-callback": () => {
+        turnstileToken = "";
+        setCaptchaStatus("Капча устарела. Обновите проверку.", true);
+        updateAuthSubmitCaptchaState();
+      },
+      "error-callback": () => {
+        turnstileToken = "";
+        setCaptchaStatus("Капча не открылась для этого домена. Добавьте домен в Cloudflare Turnstile и обновите страницу.", true);
+        updateAuthSubmitCaptchaState();
+        return true;
+      }
+    });
+  } catch (error) {
+    turnstileWidgetId = null;
+    turnstileToken = "";
+    setCaptchaStatus("Капча не открылась. Нажмите «Обновить капчу» или проверьте домен в Cloudflare Turnstile.", true);
+    updateAuthSubmitCaptchaState();
+    return;
+  }
   clearTimeout(turnstileRenderTimer);
   scheduleTurnstileWatch();
 }
@@ -5524,7 +5582,8 @@ async function handlePrivateMessageSend(event) {
     url: await fileToDataUrl(file)
   }] : (privateVoiceDraft ? [privateVoiceDraft] : []);
   const disputeOrder = activePrivateDisputeOrder(activePrivateLogin);
-  if (disputeOrder && API_ENABLED && hasApiSession()) {
+  const sessionReady = API_ENABLED ? await ensureApiSession() : false;
+  if (disputeOrder && sessionReady) {
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(disputeOrder.id)}/dispute/reply`, {
         method: "POST",
@@ -5541,7 +5600,7 @@ async function handlePrivateMessageSend(event) {
       return;
     }
   }
-  if (API_ENABLED && hasApiSession()) {
+  if (sessionReady) {
     try {
       const payload = await apiFetch("/api/private-messages", {
         method: "POST",
@@ -7061,12 +7120,12 @@ function renderExchangerProfile(id) {
 
 async function handleExchangerMessage(event) {
   event.preventDefault();
-  if (!API_ENABLED || !currentUser()) {
+  if (!API_ENABLED) {
     showToast("Войдите в аккаунт, чтобы написать обменнику");
     return;
   }
   const sessionReady = await ensureApiSession();
-  if (!sessionReady) {
+  if (!sessionReady || !currentUser()) {
     showToast("Сессия сайта истекла. Войдите заново один раз, чтобы написать обменнику.");
     return;
   }
@@ -7113,12 +7172,12 @@ async function handleExchangerMessage(event) {
 
 async function handleExchangerReview(event) {
   event.preventDefault();
-  if (!API_ENABLED || !currentUser()) {
+  if (!API_ENABLED) {
     showToast(tr("Войдите в аккаунт, чтобы оставить отзыв"));
     return;
   }
   const sessionReady = await ensureApiSession();
-  if (!sessionReady) {
+  if (!sessionReady || !currentUser()) {
     showToast(tr("Сессия сайта истекла. Войдите заново один раз, чтобы оставить отзыв."));
     return;
   }
