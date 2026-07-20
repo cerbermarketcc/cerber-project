@@ -98,6 +98,9 @@ let publicRealtimeServer = null;
 let seedReady = false;
 let seedPromise = null;
 let financeMirrorPromise = null;
+let publicStoresMemoryCache = [];
+let publicStoresMemoryCacheAt = 0;
+let publicStoresRefreshPromise = null;
 const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
 const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
@@ -849,6 +852,42 @@ function compactStoreData(row = {}) {
   };
 }
 
+function publicStoresFromRows(rows = [], settingsData = {}) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => publicStoreForState(compactStoreData({ ...row, data: row.data ? { ...row.data, createdAt: row.data.createdAt || row.created_at, updatedAt: row.data.updatedAt || row.updated_at } : row.data })))
+    .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
+}
+
+function rememberPublicStoresCache(stores = []) {
+  if (!Array.isArray(stores) || !stores.length) return;
+  publicStoresMemoryCache = stores.map((store) => ({ ...store }));
+  publicStoresMemoryCacheAt = Date.now();
+}
+
+function refreshPublicStoresCacheInBackground(settingsData = {}) {
+  if (publicStoresRefreshPromise) return publicStoresRefreshPromise;
+  publicStoresRefreshPromise = withTimeout(
+    supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
+    "background public stores refresh",
+    120000
+  ).then((result) => {
+    const stores = publicStoresFromRows(result?.data || [], settingsData);
+    if (stores.length) {
+      rememberPublicStoresCache(stores);
+      savePublicStoresCache(stores).catch((error) => {
+        console.error("[stateFor] background public stores cache save failed", { message: error.message });
+      });
+    }
+    return stores;
+  }).catch((error) => {
+    console.error("[stateFor] background public stores refresh failed", { message: error.message });
+    return [];
+  }).finally(() => {
+    publicStoresRefreshPromise = null;
+  });
+  return publicStoresRefreshPromise;
+}
+
 async function stateFor(user) {
   const totalStartedAt = Date.now();
   try {
@@ -873,7 +912,7 @@ async function stateFor(user) {
         withTimeout(
           supabase.from("stores").select("id,created_at,updated_at").limit(100),
           "public stores fallback query",
-          24000
+          3000
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
@@ -887,16 +926,22 @@ async function stateFor(user) {
           .map((store) => publicStoreForState(store))
           .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
       }
+      if (publicStores.length) rememberPublicStoresCache(publicStores);
       if (!publicStores.length) {
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
-          publicStores = storeRows
-            .map((row) => publicStoreForState(compactStoreData(row)))
-            .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
+          publicStores = publicStoresFromRows(storeRows, settingsData);
+          rememberPublicStoresCache(publicStores);
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
           });
         }
+      }
+      if (!publicStores.length && publicStoresMemoryCache.length) {
+        publicStores = publicStoresMemoryCache.map((store) => ({ ...store }));
+      }
+      if (!publicStores.length) {
+        refreshPublicStoresCacheInBackground(settingsData);
       }
       return {
         user: null,
