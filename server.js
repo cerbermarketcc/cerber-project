@@ -878,7 +878,7 @@ async function stateFor(user) {
           return { data: { data: {} }, error: null };
         }),
         withTimeout(
-          supabase.from("stores").select(publicStoresSelect).order("created_at", { ascending: true }).limit(500),
+          supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
           24000
         ).catch((error) => {
@@ -898,7 +898,7 @@ async function stateFor(user) {
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
           publicStores = storeRows
-            .map((row) => publicStoreForState(compactStoreData(row)))
+            .map((row) => publicStoreForState(compactStoreData({ ...row, data: row.data ? { ...row.data, createdAt: row.data.createdAt || row.created_at, updatedAt: row.data.updatedAt || row.updated_at } : row.data })))
             .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
@@ -5402,7 +5402,7 @@ async function adminLoadMarketplace() {
   });
   const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
     withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 30000),
-    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 10000),
+    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 30000),
     withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000).catch((error) => {
       console.error("[admin] settings fallback", { message: error.message });
       return { data: { data: {} } };
