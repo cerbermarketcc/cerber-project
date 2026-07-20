@@ -741,6 +741,59 @@ async function stateFor(user) {
     const seedStartedAt = Date.now();
     await withTimeout(ensureSeed(), "ensureSeed", 8000);
     const seedMs = Date.now() - seedStartedAt;
+    if (!user) {
+      const settingsResult = await withTimeout(
+        supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+        "public app_settings query",
+        5000
+      ).catch((error) => {
+        console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
+          message: error.message,
+          status: error.status || 500
+        });
+        return { data: { data: {} }, error: null };
+      });
+      if (settingsResult.error) throw settingsResult.error;
+      const settingsData = settingsResult.data?.data || {};
+      return {
+        user: null,
+        state: {
+          currentUser: "",
+          theme: settingsData.theme || "light",
+          lang: settingsData.lang || "ru",
+          users: [],
+          stores: Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [],
+          messages: [],
+          orders: [],
+          exchangeCards: (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))),
+          exchangers: publicExchangersForState(settingsData.exchangers || []),
+          exchangeRequests: [],
+          groupMessages: [],
+          groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
+          referrals: [],
+          referralPayments: [],
+          referralCodes: {},
+          balances: {},
+          ltcBalances: {},
+          walletTransactions: [],
+          walletDeposits: [],
+          walletWithdrawals: [],
+          mirrorBots: [],
+          bots: { total: 0, active: 0, blocked: 0, items: [] },
+          siteNotifications: [],
+          broadcasts: [],
+          supportSettings: { recipients: [] },
+          supportTickets: [],
+          userFilters: [],
+          blockedUsers: {},
+          storeApplications: [],
+          ownerSettings: {},
+          paymentSettings: {},
+          referralPeriod: settingsData.referralPeriod || {},
+          filters: settingsData.filters || {}
+        }
+      };
+    }
     const queriesStartedAt = Date.now();
     const messagesQuery = withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
