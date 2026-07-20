@@ -17,7 +17,7 @@ const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const API_ENABLED = location.protocol !== "file:";
 const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
-const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
+const API_ORIGINS = Array.from(new Set([PRIMARY_API_ORIGIN, API_ORIGIN].filter(Boolean)));
 const runtimeStorage = new Map();
 let runtimeApiToken = "";
 let runtimeSellerAdminApiToken = "";
@@ -1884,6 +1884,14 @@ async function refreshRemoteState() {
   applyRemoteState(payload);
 }
 
+function refreshRemoteStateAfterAuth() {
+  refreshRemoteState().then(() => {
+    if (db.currentUser && route !== "auth") renderCurrent();
+  }).catch((error) => {
+    console.error("[auth] background state refresh failed", error);
+  });
+}
+
 async function refreshShopPanelState(force = false) {
   if (!API_ENABLED) return false;
   const token = sellerAdminApiSessionToken();
@@ -3564,9 +3572,7 @@ async function handleAuth(event) {
         registerReferral(payload.user?.login || login);
         saveDb();
         authMode = "login";
-        loadRemoteSession().then(() => {
-          if (db.currentUser && route !== "auth") renderCurrent();
-        }).catch(() => {});
+        refreshRemoteStateAfterAuth();
         return renderCurrent();
       } catch (error) {
         resetCaptcha();
@@ -3592,6 +3598,7 @@ async function handleAuth(event) {
       rememberApiToken(payload.token);
       applyRemoteState(payload);
       rememberLocalPassword(payload.user?.login || login, password);
+      refreshRemoteStateAfterAuth();
       return renderCurrent();
     } catch (error) {
       resetCaptcha();

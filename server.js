@@ -1726,7 +1726,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
-    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
+    res.json({ token, ...authStateForUser(user, state) });
   } catch (error) {
     next(error);
   }
@@ -1764,7 +1764,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     appendAdminLog("user_login", user.login, { login: user.login, referrerLogin: repairedReferral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
-    res.json({ token, ...(await stateFor(user)) });
+    res.json({ token, ...authStateForUser(user, state) });
   } catch (error) {
     next(error);
   }
@@ -1789,7 +1789,7 @@ app.post("/api/auth/restore-session", async (req, res, next) => {
     appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] restore session log failed", { login: user.login, message: error.message });
     });
-    res.json({ token, ...(await stateFor(user)) });
+    res.json({ token, ...authStateForUser(user, state) });
   } catch (error) {
     next(error);
   }
