@@ -10800,6 +10800,7 @@ async function initApp() {
   connectRealtime();
   try {
     await loadRemoteConfig();
+    safeRenderCurrent();
     await loadCmsTextOverrides();
     await loadRemoteState();
     await loadRemoteSession();
