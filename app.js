@@ -1656,7 +1656,7 @@ async function apiFetchOnce(path, options = {}) {
       const message = payload.error || "API error";
       const error = new Error(message);
       error.status = response.status;
-      if (response.status === 401 && /Сессия не найдена|session/i.test(String(message))) {
+      if (response.status === 401 && /Сессия не найдена|Сессия истекла|session/i.test(String(message))) {
         clearApiSession();
         error.sessionExpired = true;
         error.message = "Сессия истекла. Войдите снова.";
@@ -1665,7 +1665,7 @@ async function apiFetchOnce(path, options = {}) {
     }
     return payload;
   } catch (error) {
-   if (error.name === "AbortError") throw new Error("Сервер долго не отвечает. Проверьте backend/API и попробуйте ещё раз.");
+   if (error.name === "AbortError") throw new Error("Сервер отвечает слишком долго. Проверьте интернет и попробуйте ещё раз.");
     throw error;
   } finally {
     clearTimeout(timer);
@@ -2204,13 +2204,13 @@ async function persistSellerAdminStore() {
   }
 }
 
-function saveDb() {
+function saveDb(options = {}) {
   normalizeOrders(db);
   saveAuth();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
   } catch {
-    showToast("LocalStorage недоступен");
+    if (!options.silentLocalStorageError) showToast("LocalStorage недоступен");
   }
   persistRemoteState();
 }
@@ -3258,7 +3258,7 @@ function renderAuth(message = "") {
               </div>
             ` : ""}
           ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
-          <button class="primary" type="submit">${authMode === "login" ? tr("enter") : tr("create")}</button>
+          <button class="primary" type="submit" data-auth-submit ${API_ENABLED && TURNSTILE_SITE_KEY ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
         <p><button class="link-button" data-auth-switch>${authMode === "login" ? tr("register") : tr("login")}</button></p>
       </section>
@@ -3336,6 +3336,12 @@ function cleanupTurnstile() {
   } catch {}
 }
 
+function updateAuthSubmitCaptchaState() {
+  const button = document.querySelector("[data-auth-submit]");
+  if (!button || !API_ENABLED || !TURNSTILE_SITE_KEY) return;
+  button.disabled = !captchaToken();
+}
+
 function mountTurnstile() {
   if (!API_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
   if (!window.turnstile) {
@@ -3343,17 +3349,21 @@ function mountTurnstile() {
     return;
   }
   if (turnstileWidgetId !== null) return;
+  updateAuthSubmitCaptchaState();
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
     sitekey: TURNSTILE_SITE_KEY,
     theme: db.theme === "dark" ? "dark" : "light",
     callback: (token) => {
       turnstileToken = String(token || "");
+      updateAuthSubmitCaptchaState();
     },
     "expired-callback": () => {
       turnstileToken = "";
+      updateAuthSubmitCaptchaState();
     },
     "error-callback": () => {
       turnstileToken = "";
+      updateAuthSubmitCaptchaState();
       return true;
     }
   });
@@ -3368,6 +3378,7 @@ function captchaToken() {
 function resetCaptcha() {
   turnstileToken = "";
   if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
+  updateAuthSubmitCaptchaState();
 }
 
 async function handleAuth(event) {
@@ -3383,7 +3394,8 @@ async function handleAuth(event) {
       try {
         const payload = await apiFetch("/api/auth/register", {
           method: "POST",
-          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() })
+          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
+          timeoutMs: 60000
         });
         localStorage.setItem(API_TOKEN_KEY, payload.token);
         applyRemoteState(payload);
@@ -3413,7 +3425,8 @@ async function handleAuth(event) {
     try {
       const payload = await apiFetch("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() })
+        body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
+        timeoutMs: 60000
       });
       localStorage.setItem(API_TOKEN_KEY, payload.token);
       applyRemoteState(payload);
@@ -9885,7 +9898,7 @@ async function shopPersistAndRender(tab = "dashboard") {
     products: store?.products?.length,
     token: Boolean(localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY))
   });
-  saveDb();
+  saveDb({ silentLocalStorageError: true });
 
   let savedRemote = false;
 
