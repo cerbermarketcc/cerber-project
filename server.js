@@ -774,9 +774,9 @@ async function stateFor(user) {
     const seedStartedAt = Date.now();
     if (user) {
       await withTimeout(ensureSeed(), "ensureSeed", 8000);
-    } else {
-      await withTimeout(ensureSeed(), "public ensureSeed", 1500).catch((error) => {
-        console.error("[stateFor] public seed skipped", { message: error.message });
+    } else if (!seedReady) {
+      ensureSeed().catch((error) => {
+        console.error("[stateFor] public background seed failed", { message: error.message });
       });
     }
     const seedMs = Date.now() - seedStartedAt;
@@ -799,7 +799,7 @@ async function stateFor(user) {
         const storesResult = await withTimeout(
           supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
-          1500
+          6000
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
