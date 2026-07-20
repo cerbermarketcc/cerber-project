@@ -784,7 +784,7 @@ async function stateFor(user) {
       const settingsResult = await withTimeout(
         supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
         "public app_settings query",
-        2500
+        6500
       ).catch((error) => {
         console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
           message: error.message,
@@ -795,11 +795,16 @@ async function stateFor(user) {
       if (settingsResult.error) throw settingsResult.error;
       const settingsData = settingsResult.data?.data || {};
       let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
+      if (!publicStores.length && Array.isArray(settingsData.ownerStores) && settingsData.ownerStores.length) {
+        publicStores = settingsData.ownerStores
+          .map((store) => publicStoreForState(store))
+          .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
+      }
       if (!publicStores.length) {
         const storesResult = await withTimeout(
           supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
-          6000
+          2000
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
@@ -928,7 +933,9 @@ async function stateFor(user) {
       ? storesResult.data.map((row) => row.data)
       : null;
     const fallbackStores = Array.isArray(settingsData.publicStoresCache)
-      ? settingsData.publicStoresCache
+      ? mergeStoreSources(settingsData.publicStoresCache, settingsData.ownerStores || [])
+      : Array.isArray(settingsData.ownerStores)
+        ? settingsData.ownerStores
       : [];
     const allStores = storesFromDb
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
