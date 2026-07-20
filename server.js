@@ -807,7 +807,7 @@ async function stateFor(user) {
         withTimeout(
           supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
           "public app_settings query",
-          8500
+          20000
         ).catch((error) => {
           console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
             message: error.message,
@@ -818,7 +818,7 @@ async function stateFor(user) {
         withTimeout(
           supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
-          8500
+          20000
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
