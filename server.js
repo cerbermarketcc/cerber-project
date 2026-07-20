@@ -67,14 +67,22 @@ let seedPromise = null;
 let financeMirrorPromise = null;
 const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
+const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 const allowedCorsOrigins = new Set([
   "https://cerber-project.onrender.com",
   "https://cerber.to",
+  "https://www.cerber.to",
   "https://cerber.love",
+  "https://www.cerber.love",
   "https://cerber.vip",
+  "https://www.cerber.vip",
   "http://u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
   "http://ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
-  "http://ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+  "http://ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion",
+  ...configuredAllowedOrigins
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const clientRateLimits = new Map();
@@ -89,7 +97,7 @@ const cspDirectives = [
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: blob: https:",
   "media-src 'self' data: blob: https:",
-  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://cerber.love https://cerber.vip https://api.coingecko.com wss://cerber-project.onrender.com wss://cerber.to wss://cerber.love wss://cerber.vip https://api.telegram.org",
+  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://api.coingecko.com https://challenges.cloudflare.com wss://cerber-project.onrender.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip https://api.telegram.org",
   "frame-src https://challenges.cloudflare.com",
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
@@ -612,6 +620,10 @@ async function verifyCaptcha(token, req) {
   const form = new URLSearchParams();
   form.set("secret", turnstileSecretKey);
   form.set("response", token);
+  const remoteIp = String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "")
+    .split(",")[0]
+    .trim();
+  if (remoteIp) form.set("remoteip", remoteIp);
 
   let response;
   try {
@@ -639,7 +651,6 @@ async function verifyCaptcha(token, req) {
     throw error;
   }
 }
-
 async function ensureSeed() {
   if (!supabase || seedReady) return;
   if (seedPromise) return seedPromise;
