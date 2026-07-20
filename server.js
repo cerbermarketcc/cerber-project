@@ -102,8 +102,18 @@ const cspDirectives = [
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
 
+function isAllowedMirrorOrigin(origin = "") {
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname.toLowerCase();
+    return hostname.includes("cerber") || hostname.endsWith(".onion");
+  } catch {
+    return false;
+  }
+}
+
 function isAllowedCorsOrigin(origin = "") {
-  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin);
+  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin) || isAllowedMirrorOrigin(origin);
 }
 
 function maskSecret(value = "") {
@@ -192,6 +202,16 @@ app.use((req, res, next) => {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
   }
   if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+app.use((req, res, next) => {
+  const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+  const freshAsset = pathname === "/" || /\.(?:html|js|css)$/i.test(pathname);
+  if (req.method === "GET" && freshAsset) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
   next();
 });
 app.use(express.json({ limit: "40mb" }));

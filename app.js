@@ -15,15 +15,20 @@ const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messa
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
-const API_ORIGIN = IS_LOCAL_APP_HOST ? location.origin : PRIMARY_API_ORIGIN;
-const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const API_ENABLED = location.protocol !== "file:";
+const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
+const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const runtimeStorage = new Map();
 let runtimeApiToken = "";
 let runtimeSellerAdminApiToken = "";
 let TURNSTILE_SITE_KEY = "";
+let TURNSTILE_ENABLED = false;
+let remoteConfigLoaded = !API_ENABLED;
+let remoteConfigError = "";
 let turnstileWidgetId = null;
 let turnstileToken = "";
+let turnstileRetryTimer = null;
+let turnstileWaitStartedAt = 0;
 let authSubmitting = false;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
@@ -2072,9 +2077,15 @@ async function loadRemoteConfig() {
   try {
     const config = await apiFetch("/api/config");
     TURNSTILE_SITE_KEY = config.turnstileSiteKey || "";
+    TURNSTILE_ENABLED = Boolean(config.turnstileEnabled && TURNSTILE_SITE_KEY);
+    remoteConfigLoaded = true;
+    remoteConfigError = "";
     applyCmsTextOverrides(config.cmsTexts || {});
-  } catch {
+  } catch (error) {
     TURNSTILE_SITE_KEY = "";
+    TURNSTILE_ENABLED = false;
+    remoteConfigLoaded = true;
+    remoteConfigError = error.message || "Не удалось загрузить настройки капчи";
   }
 }
 
@@ -3294,6 +3305,10 @@ function renderAuth(message = "") {
   turnstileWidgetId = null;
   turnstileToken = "";
   authSubmitting = false;
+  const captchaRequired = API_ENABLED && TURNSTILE_ENABLED && TURNSTILE_SITE_KEY;
+  const captchaPending = API_ENABLED && !remoteConfigLoaded;
+  const captchaBlocked = API_ENABLED && Boolean(remoteConfigError);
+  const authSubmitDisabled = captchaPending || captchaBlocked || captchaRequired;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -3306,13 +3321,24 @@ function renderAuth(message = "") {
           <label class="field">${tr("username")}<input name="login" required autocomplete="username"></label>
           <label class="field">${tr("password")}<input name="password" type="password" required autocomplete="current-password"></label>
           ${API_ENABLED ? `
-            ${TURNSTILE_SITE_KEY ? `
+            ${captchaPending ? `
+              <div class="captcha-box">
+                <p class="captcha-status">Загрузка настроек капчи...</p>
+              </div>
+            ` : captchaBlocked ? `
+              <div class="captcha-box">
+                <p class="captcha-status">Не удалось загрузить настройки капчи: ${esc(remoteConfigError)}</p>
+                <button class="link-button captcha-retry" type="button" data-config-retry>Повторить загрузку</button>
+              </div>
+            ` : captchaRequired ? `
               <div class="captcha-box">
                 <div id="turnstile-widget"></div>
+                <p class="captcha-status" data-captcha-status>Загрузка капчи...</p>
+                <button class="link-button captcha-retry" type="button" data-captcha-retry hidden>Обновить капчу</button>
               </div>
             ` : ""}
           ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
-          <button class="primary" type="submit" data-auth-submit ${API_ENABLED && TURNSTILE_SITE_KEY ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
+          <button class="primary" type="submit" data-auth-submit ${authSubmitDisabled ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
         <p><button class="link-button" data-auth-switch>${authMode === "login" ? tr("register") : tr("login")}</button></p>
       </section>
@@ -3325,6 +3351,17 @@ function renderAuth(message = "") {
     renderAuth();
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
+  document.querySelector("[data-captcha-retry]")?.addEventListener("click", () => {
+    resetCaptcha();
+    mountTurnstile(true);
+  });
+  document.querySelector("[data-config-retry]")?.addEventListener("click", async () => {
+    remoteConfigLoaded = false;
+    remoteConfigError = "";
+    renderAuth();
+    await loadRemoteConfig();
+    renderAuth();
+  });
   mountTurnstile();
   applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
@@ -3384,15 +3421,28 @@ function renderSellerAdminLogin(storeId = "", message = "") {
 }
 
 function cleanupTurnstile() {
+  clearTimeout(turnstileRetryTimer);
+  turnstileRetryTimer = null;
+  turnstileWaitStartedAt = 0;
   if (!window.turnstile || turnstileWidgetId === null) return;
   try {
     window.turnstile.remove(turnstileWidgetId);
   } catch {}
 }
 
+function setCaptchaStatus(message = "", retryVisible = false) {
+  const status = document.querySelector("[data-captcha-status]");
+  const retry = document.querySelector("[data-captcha-retry]");
+  if (status) {
+    status.textContent = message;
+    status.hidden = !message;
+  }
+  if (retry) retry.hidden = !retryVisible;
+}
+
 function updateAuthSubmitCaptchaState() {
   const button = document.querySelector("[data-auth-submit]");
-  if (!button || !API_ENABLED || !TURNSTILE_SITE_KEY) return;
+  if (!button || !API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY) return;
   if (authSubmitting) {
     button.disabled = true;
     return;
@@ -3400,27 +3450,46 @@ function updateAuthSubmitCaptchaState() {
   button.disabled = !captchaToken();
 }
 
-function mountTurnstile() {
-  if (!API_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
+function mountTurnstile(force = false) {
+  if (!API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
+  if (force && window.turnstile && turnstileWidgetId !== null) {
+    cleanupTurnstile();
+    turnstileWidgetId = null;
+    turnstileToken = "";
+  }
   if (!window.turnstile) {
-    setTimeout(mountTurnstile, 250);
+    if (!turnstileWaitStartedAt || force) turnstileWaitStartedAt = Date.now();
+    clearTimeout(turnstileRetryTimer);
+    turnstileRetryTimer = setTimeout(() => {
+      if (!window.turnstile && Date.now() - turnstileWaitStartedAt > 12000) {
+        setCaptchaStatus("Капча не загрузилась. Обновите капчу или проверьте домен в Cloudflare Turnstile.", true);
+        updateAuthSubmitCaptchaState();
+        return;
+      }
+      mountTurnstile();
+    }, 1000);
     return;
   }
   if (turnstileWidgetId !== null) return;
+  turnstileWaitStartedAt = 0;
+  setCaptchaStatus("Загрузка капчи...", false);
   updateAuthSubmitCaptchaState();
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
     sitekey: TURNSTILE_SITE_KEY,
     theme: db.theme === "dark" ? "dark" : "light",
     callback: (token) => {
       turnstileToken = String(token || "");
+      setCaptchaStatus("", false);
       updateAuthSubmitCaptchaState();
     },
     "expired-callback": () => {
       turnstileToken = "";
+      setCaptchaStatus("Капча устарела. Обновите проверку.", true);
       updateAuthSubmitCaptchaState();
     },
     "error-callback": () => {
       turnstileToken = "";
+      setCaptchaStatus("Капча не открылась для этого домена. Добавьте домен в Cloudflare Turnstile и обновите страницу.", true);
       updateAuthSubmitCaptchaState();
       return true;
     }
@@ -3428,7 +3497,7 @@ function mountTurnstile() {
 }
 
 function captchaToken() {
-  if (!API_ENABLED || !TURNSTILE_SITE_KEY) return "";
+  if (!API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY) return "";
   if (!window.turnstile || turnstileWidgetId === null) return "";
   return turnstileToken || window.turnstile.getResponse(turnstileWidgetId) || "";
 }
@@ -3448,7 +3517,7 @@ async function handleAuth(event) {
   const login = data.get("login").trim();
   const password = data.get("password");
   const captcha = API_ENABLED ? captchaToken() : data.get("captcha");
-  if ((API_ENABLED && TURNSTILE_SITE_KEY && !captcha) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
+  if ((API_ENABLED && TURNSTILE_ENABLED && TURNSTILE_SITE_KEY && !captcha) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
   authSubmitting = true;
   if (submitButton) setButtonLoading(submitButton, true, authMode === "login" ? tr("enter") : tr("create"));
   updateAuthSubmitCaptchaState();
