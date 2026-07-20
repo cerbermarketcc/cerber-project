@@ -77,11 +77,6 @@ const publicStoresSelect = [
   "name:data->name",
   "short:data->short",
   "description:data->description",
-  "image:data->image",
-  "avatar:data->avatar",
-  "cover:data->cover",
-  "banner:data->banner",
-  "gallery:data->gallery",
   "countries:data->countries",
   "cities:data->cities",
   "districts:data->districts",
@@ -93,9 +88,7 @@ const publicStoresSelect = [
   "visibleInCatalog:data->visibleInCatalog",
   "orders:data->orders",
   "reviews:data->reviews",
-  "rating:data->rating",
-  "products:data->products",
-  "reviewsList:data->reviewsList"
+  "rating:data->rating"
 ].join(",");
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
@@ -878,7 +871,7 @@ async function stateFor(user) {
           return { data: { data: {} }, error: null };
         }),
         withTimeout(
-          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
+          supabase.from("stores").select(publicStoresSelect).limit(100),
           "public stores fallback query",
           24000
         ).catch((error) => {
@@ -898,7 +891,7 @@ async function stateFor(user) {
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
           publicStores = storeRows
-            .map((row) => publicStoreForState(compactStoreData({ ...row, data: row.data ? { ...row.data, createdAt: row.data.createdAt || row.created_at, updatedAt: row.data.updatedAt || row.updated_at } : row.data })))
+            .map((row) => publicStoreForState(compactStoreData(row)))
             .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
