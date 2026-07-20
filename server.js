@@ -68,6 +68,35 @@ const publicStateSettingsSelect = [
   "referralPeriod:data->referralPeriod",
   "filters:data->filters"
 ].join(",");
+const publicStoresSelect = [
+  "id",
+  "created_at",
+  "updated_at",
+  "tag:data->tag",
+  "ownerLogin:data->ownerLogin",
+  "name:data->name",
+  "short:data->short",
+  "description:data->description",
+  "image:data->image",
+  "avatar:data->avatar",
+  "cover:data->cover",
+  "banner:data->banner",
+  "gallery:data->gallery",
+  "countries:data->countries",
+  "cities:data->cities",
+  "districts:data->districts",
+  "status:data->status",
+  "salesBlocked:data->salesBlocked",
+  "isTop:data->isTop",
+  "isFeatured:data->isFeatured",
+  "isNew:data->isNew",
+  "visibleInCatalog:data->visibleInCatalog",
+  "orders:data->orders",
+  "reviews:data->reviews",
+  "rating:data->rating",
+  "products:data->products",
+  "reviewsList:data->reviewsList"
+].join(",");
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
@@ -794,6 +823,39 @@ function compactSettingsData(row = {}) {
   };
 }
 
+function compactStoreData(row = {}) {
+  if (row?.data && typeof row.data === "object") return row.data;
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    tag: row.tag,
+    ownerLogin: row.ownerLogin,
+    name: row.name,
+    short: row.short,
+    description: row.description,
+    image: row.image,
+    avatar: row.avatar,
+    cover: row.cover,
+    banner: row.banner,
+    gallery: row.gallery,
+    countries: row.countries,
+    cities: row.cities,
+    districts: row.districts,
+    status: row.status,
+    salesBlocked: row.salesBlocked,
+    isTop: row.isTop,
+    isFeatured: row.isFeatured,
+    isNew: row.isNew,
+    visibleInCatalog: row.visibleInCatalog,
+    orders: row.orders,
+    reviews: row.reviews,
+    rating: row.rating,
+    products: row.products,
+    reviewsList: row.reviewsList
+  };
+}
+
 async function stateFor(user) {
   const totalStartedAt = Date.now();
   try {
@@ -816,7 +878,7 @@ async function stateFor(user) {
           return { data: { data: {} }, error: null };
         }),
         withTimeout(
-          supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+          supabase.from("stores").select(publicStoresSelect).order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
           20000
         ).catch((error) => {
@@ -836,7 +898,7 @@ async function stateFor(user) {
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
           publicStores = storeRows
-            .map((row) => publicStoreForState(row.data))
+            .map((row) => publicStoreForState(compactStoreData(row)))
             .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
