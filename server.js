@@ -772,13 +772,19 @@ async function stateFor(user) {
   const totalStartedAt = Date.now();
   try {
     const seedStartedAt = Date.now();
-    await withTimeout(ensureSeed(), "ensureSeed", 8000);
+    if (user) {
+      await withTimeout(ensureSeed(), "ensureSeed", 8000);
+    } else {
+      await withTimeout(ensureSeed(), "public ensureSeed", 1500).catch((error) => {
+        console.error("[stateFor] public seed skipped", { message: error.message });
+      });
+    }
     const seedMs = Date.now() - seedStartedAt;
     if (!user) {
       const settingsResult = await withTimeout(
         supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
         "public app_settings query",
-        5000
+        2500
       ).catch((error) => {
         console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
           message: error.message,
@@ -793,7 +799,7 @@ async function stateFor(user) {
         const storesResult = await withTimeout(
           supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
-          2500
+          1500
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
