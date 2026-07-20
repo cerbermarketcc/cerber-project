@@ -3237,6 +3237,7 @@ function layout(content) {
 }
 
 function renderAuth(message = "") {
+  cleanupTurnstile();
   turnstileWidgetId = null;
   turnstileToken = "";
   document.body.dataset.theme = db.theme;
@@ -3328,12 +3329,20 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   };
 }
 
+function cleanupTurnstile() {
+  if (!window.turnstile || turnstileWidgetId === null) return;
+  try {
+    window.turnstile.remove(turnstileWidgetId);
+  } catch {}
+}
+
 function mountTurnstile() {
   if (!API_ENABLED || !TURNSTILE_SITE_KEY || !document.getElementById("turnstile-widget")) return;
   if (!window.turnstile) {
     setTimeout(mountTurnstile, 250);
     return;
   }
+  if (turnstileWidgetId !== null) return;
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
     sitekey: TURNSTILE_SITE_KEY,
     theme: db.theme === "dark" ? "dark" : "light",
