@@ -869,7 +869,7 @@ async function stateFor(user) {
         withTimeout(
           supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
           "public app_settings query",
-          20000
+          24000
         ).catch((error) => {
           console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
             message: error.message,
@@ -880,7 +880,7 @@ async function stateFor(user) {
         withTimeout(
           supabase.from("stores").select(publicStoresSelect).order("created_at", { ascending: true }).limit(500),
           "public stores fallback query",
-          20000
+          24000
         ).catch((error) => {
           console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
           return null;
@@ -5401,7 +5401,7 @@ async function adminLoadMarketplace() {
     console.error("[admin] seed skipped", { message: error.message });
   });
   const [{ data: stores }, { data: messages }, { data: settings }, { data: profiles }, { data: sessions }] = await Promise.all([
-    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 10000),
+    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 30000),
     withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 10000),
     withTimeout(supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(), "admin settings query", 10000).catch((error) => {
       console.error("[admin] settings fallback", { message: error.message });
