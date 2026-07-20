@@ -28,6 +28,7 @@ let remoteConfigError = "";
 let turnstileWidgetId = null;
 let turnstileToken = "";
 let turnstileRetryTimer = null;
+let turnstileRenderTimer = null;
 let turnstileWaitStartedAt = 0;
 let authSubmitting = false;
 let realtimeSocket = null;
@@ -3422,7 +3423,9 @@ function renderSellerAdminLogin(storeId = "", message = "") {
 
 function cleanupTurnstile() {
   clearTimeout(turnstileRetryTimer);
+  clearTimeout(turnstileRenderTimer);
   turnstileRetryTimer = null;
+  turnstileRenderTimer = null;
   turnstileWaitStartedAt = 0;
   if (!window.turnstile || turnstileWidgetId === null) return;
   try {
@@ -3477,8 +3480,13 @@ function mountTurnstile(force = false) {
   turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
     sitekey: TURNSTILE_SITE_KEY,
     theme: db.theme === "dark" ? "dark" : "light",
+    appearance: "always",
+    retry: "auto",
+    "retry-interval": 8000,
     callback: (token) => {
       turnstileToken = String(token || "");
+      clearTimeout(turnstileRenderTimer);
+      turnstileRenderTimer = null;
       setCaptchaStatus("", false);
       updateAuthSubmitCaptchaState();
     },
@@ -3494,6 +3502,13 @@ function mountTurnstile(force = false) {
       return true;
     }
   });
+  clearTimeout(turnstileRenderTimer);
+  turnstileRenderTimer = setTimeout(() => {
+    if (!captchaToken()) {
+      setCaptchaStatus("Капча не выдала токен. Обновите капчу или добавьте этот домен в Cloudflare Turnstile hostnames.", true);
+      updateAuthSubmitCaptchaState();
+    }
+  }, 15000);
 }
 
 function captchaToken() {
