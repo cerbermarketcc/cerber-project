@@ -11,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "public-catalog-safety-2026-07-20-v112";
+const cerberBuildVersion = "public-catalog-safety-2026-07-20-v113";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3192,6 +3192,21 @@ app.get("/api/admin/db-diagnostics", async (req, res, next) => {
     requireDb();
     const countArray = (value) => Array.isArray(value) ? value.length : null;
     const checks = {};
+    checks.supabaseRest = await timedDbCheck("diag supabase rest", async () => {
+      const restUrl = new URL("/rest/v1/", supabaseUrl).toString();
+      const response = await fetch(restUrl, {
+        headers: {
+          apikey: supabaseServiceKey,
+          Authorization: `Bearer ${supabaseServiceKey}`
+        },
+        signal: AbortSignal.timeout(5000)
+      });
+      return {
+        configured: Boolean(supabaseUrl && supabaseServiceKey),
+        statusCode: response.status,
+        reachable: response.status > 0 && response.status < 500
+      };
+    }, 7000);
     checks.publicCatalog = await timedDbCheck("diag public catalog", async () => {
       const { data, error } = await supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", "public_catalog").maybeSingle();
       if (error) throw error;

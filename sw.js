@@ -1,4 +1,4 @@
-const CACHE_NAME = "cerber-mobile-v72";
+const CACHE_NAME = "cerber-mobile-v73";
 const STATIC_ASSETS = [
   "./manifest.webmanifest",
   "./assets/cerber-head-logo.png",
