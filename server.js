@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import dns from "node:dns";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "public-catalog-safety-2026-07-20-v111";
+const cerberBuildVersion = "public-catalog-safety-2026-07-20-v112";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -49,9 +50,25 @@ if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
 }
 
+try {
+  dns.setDefaultResultOrder?.("ipv4first");
+} catch (error) {
+  console.warn("[dns] ipv4first unavailable", { message: error.message });
+}
+
+function supabaseFetchWithTimeout(input, init = {}) {
+  const timeoutMs = Math.max(5000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 20000));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signals = [controller.signal, init.signal].filter(Boolean);
+  const signal = signals.length > 1 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : controller.signal;
+  return fetch(input, { ...init, signal }).finally(() => clearTimeout(timer));
+}
+
 const supabase = supabaseUrl && supabaseServiceKey
   ? createClient(supabaseUrl, supabaseServiceKey, {
       auth: { persistSession: false },
+      global: { fetch: supabaseFetchWithTimeout },
       realtime: { transport: WebSocket }
     })
   : null;
