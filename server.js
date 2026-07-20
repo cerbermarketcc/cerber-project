@@ -774,24 +774,30 @@ async function stateFor(user) {
     const seedStartedAt = Date.now();
     if (user) {
       await withTimeout(ensureSeed(), "ensureSeed", 8000);
-    } else if (!seedReady) {
-      ensureSeed().catch((error) => {
-        console.error("[stateFor] public background seed failed", { message: error.message });
-      });
     }
     const seedMs = Date.now() - seedStartedAt;
     if (!user) {
-      const settingsResult = await withTimeout(
-        supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
-        "public app_settings query",
-        6500
-      ).catch((error) => {
-        console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
-          message: error.message,
-          status: error.status || 500
-        });
-        return { data: { data: {} }, error: null };
-      });
+      const [settingsResult, storesResult] = await Promise.all([
+        withTimeout(
+          supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+          "public app_settings query",
+          8500
+        ).catch((error) => {
+          console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
+            message: error.message,
+            status: error.status || 500
+          });
+          return { data: { data: {} }, error: null };
+        }),
+        withTimeout(
+          supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+          "public stores fallback query",
+          8500
+        ).catch((error) => {
+          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
+          return null;
+        })
+      ]);
       if (settingsResult.error) throw settingsResult.error;
       const settingsData = settingsResult.data?.data || {};
       let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
@@ -801,14 +807,6 @@ async function stateFor(user) {
           .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
       }
       if (!publicStores.length) {
-        const storesResult = await withTimeout(
-          supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
-          "public stores fallback query",
-          2000
-        ).catch((error) => {
-          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
-          return null;
-        });
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
           publicStores = storeRows
