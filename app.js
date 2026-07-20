@@ -18,9 +18,13 @@ const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const API_ORIGIN = IS_LOCAL_APP_HOST ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const API_ENABLED = location.protocol !== "file:";
+const runtimeStorage = new Map();
+let runtimeApiToken = "";
+let runtimeSellerAdminApiToken = "";
 let TURNSTILE_SITE_KEY = "";
 let turnstileWidgetId = null;
 let turnstileToken = "";
+let authSubmitting = false;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
 let realtimeRefreshTimer = null;
@@ -1639,12 +1643,73 @@ function apiUrl(path, origin = API_ORIGIN) {
   return `${origin}${path}`;
 }
 
+function storageGet(key) {
+  try {
+    const value = localStorage.getItem(key);
+    if (value !== null && value !== "") return value;
+  } catch {}
+  try {
+    const value = sessionStorage.getItem(key);
+    if (value !== null && value !== "") return value;
+  } catch {}
+  return runtimeStorage.get(key) || "";
+}
+
+function storageSet(key, value) {
+  const text = String(value ?? "");
+  runtimeStorage.set(key, text);
+  let saved = false;
+  try {
+    localStorage.setItem(key, text);
+    saved = true;
+  } catch {}
+  try {
+    sessionStorage.setItem(key, text);
+    saved = true;
+  } catch {}
+  return saved;
+}
+
+function storageRemove(key) {
+  runtimeStorage.delete(key);
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+  try {
+    sessionStorage.removeItem(key);
+  } catch {}
+}
+
+function apiSessionToken() {
+  return runtimeApiToken || storageGet(API_TOKEN_KEY);
+}
+
+function rememberApiToken(token = "") {
+  runtimeApiToken = String(token || "");
+  if (runtimeApiToken) storageSet(API_TOKEN_KEY, runtimeApiToken);
+  else storageRemove(API_TOKEN_KEY);
+}
+
+function sellerAdminApiSessionToken() {
+  return runtimeSellerAdminApiToken || storageGet(SELLER_ADMIN_API_TOKEN_KEY);
+}
+
+function rememberSellerAdminApiToken(token = "") {
+  runtimeSellerAdminApiToken = String(token || "");
+  if (runtimeSellerAdminApiToken) storageSet(SELLER_ADMIN_API_TOKEN_KEY, runtimeSellerAdminApiToken);
+  else storageRemove(SELLER_ADMIN_API_TOKEN_KEY);
+}
+
+function clearSellerAdminApiSession() {
+  rememberSellerAdminApiToken("");
+}
+
 async function apiFetchOnce(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
     ...(options.headers || {})
   };
-  const token = localStorage.getItem(API_TOKEN_KEY);
+  const token = apiSessionToken();
   const hasAuthorization = Object.keys(headers).some((key) => key.toLowerCase() === "authorization");
   if (token && !hasAuthorization) headers.Authorization = `Bearer ${token}`;
   const controller = new AbortController();
@@ -1779,14 +1844,14 @@ function mergeOrderLists(remoteOrders = [], localOrders = []) {
 
 async function loadRemoteSession() {
   if (!API_ENABLED) return false;
-  const token = localStorage.getItem(API_TOKEN_KEY);
+  const token = apiSessionToken();
   if (!token) return false;
   try {
     const payload = await apiFetch("/api/session");
     applyRemoteState(payload);
     return Boolean(payload.user);
   } catch (error) {
-    if (error.sessionExpired || error.status === 401 || error.status === 403) localStorage.removeItem(API_TOKEN_KEY);
+    if (error.sessionExpired || error.status === 401 || error.status === 403) clearApiSession();
     return false;
   }
 }
@@ -1804,7 +1869,7 @@ async function loadRemoteState() {
 
 async function refreshRemoteState() {
   if (!API_ENABLED) return;
-  if (localStorage.getItem(API_TOKEN_KEY)) {
+  if (apiSessionToken()) {
     await loadRemoteSession();
     return;
   }
@@ -1814,7 +1879,7 @@ async function refreshRemoteState() {
 
 async function refreshShopPanelState(force = false) {
   if (!API_ENABLED) return false;
-  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const token = sellerAdminApiSessionToken();
   if (!token) return false;
   const now = Date.now();
   if (!force && now - shopPanelLastStateRefreshAt < 6000) return false;
@@ -1873,7 +1938,7 @@ function recordBelongsToLogin(record = {}, login = "") {
 function prunePersonalStateForCurrentUser() {
   const login = db.currentUser || "";
   if (!login) {
-    if (localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY) && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
+    if (sellerAdminApiSessionToken() && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
     db.messages = [];
     db.orders = [];
     db.walletTransactions = [];
@@ -1904,7 +1969,7 @@ function realtimeShouldRenderEvent(event = {}) {
 }
 
 async function loadRealtimeState() {
-  if (localStorage.getItem(API_TOKEN_KEY)) return loadRemoteSession();
+  if (apiSessionToken()) return loadRemoteSession();
   return loadRemoteState();
 }
 
@@ -2116,8 +2181,8 @@ async function loadCmsTextOverrides() {
 }
 
 async function persistRemoteState() {
-  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
-  if (localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY) && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
+  if (!API_ENABLED || !apiSessionToken()) return;
+  if (sellerAdminApiSessionToken() && (isShopPanelHash() || sellerAdminHashId() || sellerAdminSessionId())) return;
   try {
     await apiFetch("/api/state", {
       method: "PUT",
@@ -2157,7 +2222,7 @@ async function persistRemoteState() {
 async function persistSellerAdminStore() {
   if (!API_ENABLED) return false;
 
-  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const token = sellerAdminApiSessionToken();
   const store = shopPanelStore() || sellerAdminStore();
   const localStore = rememberShopPanelStore(store);
 
@@ -2219,7 +2284,7 @@ function clearSession() {
   db.currentUser = "";
   try {
     localStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(API_TOKEN_KEY);
+    clearApiSession();
     saveAuth();
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
   } catch {
@@ -2228,11 +2293,7 @@ function clearSession() {
 }
 
 function clearApiSession() {
-  try {
-    localStorage.removeItem(API_TOKEN_KEY);
-  } catch {
-    // Ignore storage errors; the current screen will decide whether to ask for login.
-  }
+  rememberApiToken("");
 }
 
 function currentUser() {
@@ -2240,11 +2301,7 @@ function currentUser() {
 }
 
 function hasApiSession() {
-  try {
-    return Boolean(localStorage.getItem(API_TOKEN_KEY));
-  } catch {
-    return false;
-  }
+  return Boolean(apiSessionToken());
 }
 
 function currentLocalPassword() {
@@ -2276,7 +2333,7 @@ async function ensureApiSession() {
       timeoutMs: 15000,
       body: JSON.stringify({ login: user.login, password })
     });
-    localStorage.setItem(API_TOKEN_KEY, payload.token);
+    rememberApiToken(payload.token);
     applyRemoteState(payload);
     return true;
   } catch {
@@ -2327,11 +2384,7 @@ function shopPanelHashId() {
 }
 
 function sellerAdminSessionId() {
-  try {
-    return localStorage.getItem(SELLER_ADMIN_KEY) || "";
-  } catch {
-    return "";
-  }
+  return storageGet(SELLER_ADMIN_KEY) || "";
 }
 
 function sellerAdminStore() {
@@ -2862,20 +2915,20 @@ function referralLinkFor(login = db.currentUser) {
 function pendingReferralCode() {
   const fromUrl = new URLSearchParams(location.search).get("ref");
   if (fromUrl) {
-    localStorage.setItem("cerber_pending_ref_v1", fromUrl);
+    storageSet("cerber_pending_ref_v1", fromUrl);
     return fromUrl;
   }
-  return localStorage.getItem("cerber_pending_ref_v1") || "";
+  return storageGet("cerber_pending_ref_v1") || "";
 }
 
 function pendingReferralOwner() {
   const params = new URLSearchParams(location.search);
   const fromUrl = params.get("r") || params.get("referrer") || params.get("u");
   if (fromUrl) {
-    localStorage.setItem("cerber_pending_ref_owner_v1", fromUrl);
+    storageSet("cerber_pending_ref_owner_v1", fromUrl);
     return fromUrl;
   }
-  return localStorage.getItem("cerber_pending_ref_owner_v1") || "";
+  return storageGet("cerber_pending_ref_owner_v1") || "";
 }
 
 function registerReferral(newLogin) {
@@ -2894,8 +2947,8 @@ function registerReferral(newLogin) {
     deposits: 0,
     earned: 0
   });
-  localStorage.removeItem("cerber_pending_ref_v1");
-  localStorage.removeItem("cerber_pending_ref_owner_v1");
+  storageRemove("cerber_pending_ref_v1");
+  storageRemove("cerber_pending_ref_owner_v1");
 }
 
 function addReferralDeposit(referralLogin, amount) {
@@ -2918,7 +2971,7 @@ function addReferralDeposit(referralLogin, amount) {
 }
 
 async function syncReferralCodeRemote(code = referralCodeFor()) {
-  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY) || !code) return false;
+  if (!API_ENABLED || !apiSessionToken() || !code) return false;
   if (syncedReferralCodes.has(code)) return false;
   syncedReferralCodes.add(code);
   try {
@@ -3240,6 +3293,7 @@ function renderAuth(message = "") {
   cleanupTurnstile();
   turnstileWidgetId = null;
   turnstileToken = "";
+  authSubmitting = false;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -3308,7 +3362,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
           timeoutMs: 12000,
           body: JSON.stringify({ storeId: store.id, password })
         });
-        localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
+        rememberSellerAdminApiToken(payload.token);
         applyRemoteState(payload);
       } catch (error) {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
@@ -3320,7 +3374,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
       return;
     }
     try {
-      localStorage.setItem(SELLER_ADMIN_KEY, store.id);
+      storageSet(SELLER_ADMIN_KEY, store.id);
     } catch {}
     sellerAdminStoreId = store.id;
     route = "seller";
@@ -3339,6 +3393,10 @@ function cleanupTurnstile() {
 function updateAuthSubmitCaptchaState() {
   const button = document.querySelector("[data-auth-submit]");
   if (!button || !API_ENABLED || !TURNSTILE_SITE_KEY) return;
+  if (authSubmitting) {
+    button.disabled = true;
+    return;
+  }
   button.disabled = !captchaToken();
 }
 
@@ -3383,11 +3441,17 @@ function resetCaptcha() {
 
 async function handleAuth(event) {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  if (authSubmitting) return;
+  const form = event.currentTarget;
+  const submitButton = form.querySelector("[data-auth-submit]");
+  const data = new FormData(form);
   const login = data.get("login").trim();
   const password = data.get("password");
   const captcha = API_ENABLED ? captchaToken() : data.get("captcha");
   if ((API_ENABLED && TURNSTILE_SITE_KEY && !captcha) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
+  authSubmitting = true;
+  if (submitButton) setButtonLoading(submitButton, true, authMode === "login" ? tr("enter") : tr("create"));
+  updateAuthSubmitCaptchaState();
 
   if (authMode === "register") {
     if (API_ENABLED) {
@@ -3397,7 +3461,7 @@ async function handleAuth(event) {
           body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
           timeoutMs: 60000
         });
-        localStorage.setItem(API_TOKEN_KEY, payload.token);
+        rememberApiToken(payload.token);
         applyRemoteState(payload);
         rememberLocalPassword(payload.user?.login || login, password);
         registerReferral(payload.user?.login || login);
@@ -3428,7 +3492,7 @@ async function handleAuth(event) {
         body: JSON.stringify({ login, password, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
         timeoutMs: 60000
       });
-      localStorage.setItem(API_TOKEN_KEY, payload.token);
+      rememberApiToken(payload.token);
       applyRemoteState(payload);
       rememberLocalPassword(payload.user?.login || login, password);
       return renderCurrent();
@@ -5500,7 +5564,7 @@ function markGroupPresence(login = db.currentUser) {
 }
 
 async function saveGroupPresenceRemote(room = currentGroupRoom()) {
-  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return false;
+  if (!API_ENABLED || !apiSessionToken()) return false;
   try {
     const payload = await apiFetch("/api/group/presence", {
       method: "POST",
@@ -5543,7 +5607,7 @@ async function joinGroupChat() {
   ensureGroupSettings();
   rememberGroupMember(user.login);
   markGroupPresence(user.login);
-  if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+  if (API_ENABLED && apiSessionToken()) {
     try {
       const payload = await apiFetch("/api/group/join", {
         method: "POST",
@@ -5571,7 +5635,7 @@ function visibleGroupMessages() {
 }
 
 async function sendGroupMessageRemote(message) {
-  if (!API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return false;
+  if (!API_ENABLED || !apiSessionToken()) return false;
   try {
     const payload = await apiFetch("/api/group/messages", {
       method: "POST",
@@ -5753,7 +5817,7 @@ function renderGroupChat() {
   const onlineCount = groupOnlineCount();
   const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted && groupMessageRoom(msg) === currentGroupRoom());
   const messages = visibleGroupMessages();
-  if (!messages.length && API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+  if (!messages.length && API_ENABLED && apiSessionToken()) {
     loadRemoteSession().then((ok) => {
       if (ok && route === "group-chat" && visibleGroupMessages().length) renderGroupChat();
     }).catch(() => {});
@@ -6242,7 +6306,7 @@ function renderSupportLegacy() {
     const subject = String(data.get("subject") || "");
     const body = String(data.get("body") || "");
     const recipient = recipients.find((item) => item.id === recipientId) || recipients[0];
-    if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+    if (API_ENABLED && apiSessionToken()) {
       try {
         const payload = await apiFetch("/api/support/tickets", {
           method: "POST",
@@ -6322,7 +6386,7 @@ function renderSupport() {
     const body = String(data.get("body") || "").trim();
     const attachments = await supportAttachmentsFromInput(fileInput);
     if (!body && !attachments.length) return showToast("Введите сообщение или прикрепите фото");
-    if (API_ENABLED && localStorage.getItem(API_TOKEN_KEY)) {
+    if (API_ENABLED && apiSessionToken()) {
       try {
         const payload = await apiFetch("/api/support/tickets", {
           method: "POST",
@@ -9155,7 +9219,7 @@ const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "
 
 function shopStaffSession() {
   try {
-    const raw = localStorage.getItem(SHOP_PANEL_STAFF_SESSION_KEY);
+    const raw = storageGet(SHOP_PANEL_STAFF_SESSION_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -9630,7 +9694,7 @@ function showShopDisputeChatModal(orderId) {
 }
 
 async function submitShopDisputeReply(form) {
-  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const token = sellerAdminApiSessionToken();
   if (!token) return showToast("Войдите в Shop Admin заново");
   const fd = new FormData(form);
   const body = String(fd.get("body") || "").trim();
@@ -9761,11 +9825,7 @@ function shopSettingsTab(store) {
 }
 
 function shopPanelSession() {
-  try {
-    return localStorage.getItem(SHOP_PANEL_SESSION_KEY) || "";
-  } catch {
-    return "";
-  }
+  return storageGet(SHOP_PANEL_SESSION_KEY) || "";
 }
 
 function shopPanelStore() {
@@ -9819,13 +9879,13 @@ function renderShopPanelLogin(message = "") {
         body: JSON.stringify({ storeId: loginStoreId, login, password })
       });
       const nextStoreId = payload.store?.id || loginStoreId;
-      localStorage.setItem(SELLER_ADMIN_API_TOKEN_KEY, payload.token);
-      localStorage.setItem(SHOP_PANEL_SESSION_KEY, nextStoreId);
-      localStorage.setItem(SELLER_ADMIN_KEY, nextStoreId);
+      rememberSellerAdminApiToken(payload.token);
+      storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
+      storageSet(SELLER_ADMIN_KEY, nextStoreId);
       if (payload.staff?.role === "staff") {
-        localStorage.setItem(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
+        storageSet(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
       } else {
-        localStorage.removeItem(SHOP_PANEL_STAFF_SESSION_KEY);
+        storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
       }
       sellerAdminStoreId = nextStoreId;
       applyRemoteState(payload);
@@ -9842,7 +9902,7 @@ function renderShopPanel(activeTab = "dashboard") {
   activeShopPanelTab = activeTab || "dashboard";
   const storeId = shopPanelHashId() || shopPanelSession();
   const sessionId = shopPanelSession();
-  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const token = sellerAdminApiSessionToken();
   const store = shopPanelStore();
   if (!store || !token || sessionId !== storeId) return renderShopPanelLogin();
   refreshShopPanelState().then((updated) => {
@@ -9877,9 +9937,9 @@ function renderShopPanel(activeTab = "dashboard") {
   });
   document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", () => {
     try {
-      localStorage.removeItem(SHOP_PANEL_SESSION_KEY);
-      localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
-      localStorage.removeItem(SHOP_PANEL_STAFF_SESSION_KEY);
+      storageRemove(SHOP_PANEL_SESSION_KEY);
+      clearSellerAdminApiSession();
+      storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
     } catch {}
     renderShopPanelLogin();
   });
@@ -9896,7 +9956,7 @@ async function shopPersistAndRender(tab = "dashboard") {
   console.log("[shop-admin] before persist", {
     storeId: store?.id,
     products: store?.products?.length,
-    token: Boolean(localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY))
+    token: Boolean(sellerAdminApiSessionToken())
   });
   saveDb({ silentLocalStorageError: true });
 
@@ -10132,7 +10192,7 @@ function bindShopPanelActions(store, activeTab) {
 
   document.querySelectorAll("[data-shop-dispute-close]").forEach((button) => {
     button.onclick = async () => {
-      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+      const token = sellerAdminApiSessionToken();
       if (!token) return showToast("Войдите в Shop Admin заново");
       try {
         const payload = await apiFetch(`/api/orders/${encodeURIComponent(button.dataset.shopDisputeClose)}/dispute/close`, {
@@ -10153,7 +10213,7 @@ function bindShopPanelActions(store, activeTab) {
   });
   document.querySelectorAll("[data-shop-dispute-join]").forEach((button) => {
     button.onclick = async () => {
-      const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+      const token = sellerAdminApiSessionToken();
       if (!token) return showToast("Войдите в Shop Admin заново");
       try {
         const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(button.dataset.shopDisputeJoin)}/join`, {
@@ -10192,7 +10252,7 @@ function shopPayoutAvailableUsd(store) {
 
 function openShopPayoutModal(event) {
   const store = shopPanelStore() || sellerAdminStore();
-  if (!store || !localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY)) return showToast("Войдите в Shop Admin заново");
+  if (!store || !sellerAdminApiSessionToken()) return showToast("Войдите в Shop Admin заново");
   const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
   if (!wallet) return showToast("Вы не сохранили ваш LTC кошелек в настройках магазина");
   const availableUsd = shopPayoutAvailableUsd(store);
@@ -10218,7 +10278,7 @@ function openShopPayoutModal(event) {
 async function requestShopPayout(event) {
   event.preventDefault();
   const store = shopPanelStore() || sellerAdminStore();
-  const token = localStorage.getItem(SELLER_ADMIN_API_TOKEN_KEY);
+  const token = sellerAdminApiSessionToken();
   if (!store || !token) return showToast("Войдите в Shop Admin заново");
   const data = new FormData(event.currentTarget);
   const amountUsd = Number(data.get("amountUsd") || 0);
@@ -10311,8 +10371,8 @@ function renderSeller() {
   `);
   document.querySelector("[data-seller-admin-logout]")?.addEventListener("click", () => {
     try {
-      localStorage.removeItem(SELLER_ADMIN_KEY);
-      localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
+      storageRemove(SELLER_ADMIN_KEY);
+      clearSellerAdminApiSession();
     } catch {}
     const storeId = store.id;
     sellerAdminStoreId = storeId;
@@ -10514,13 +10574,13 @@ function showModal(html, className = "") {
 }
 
 async function trackSiteBroadcast(notification, action) {
-  if (!notification?.id || !API_ENABLED || !localStorage.getItem(API_TOKEN_KEY)) return;
+  if (!notification?.id || !API_ENABLED || !apiSessionToken()) return;
   try {
     await fetch(apiUrl(`/api/broadcasts/${encodeURIComponent(notification.id)}/track`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem(API_TOKEN_KEY)}`
+        Authorization: `Bearer ${apiSessionToken()}`
       },
       body: JSON.stringify({ action })
     });
