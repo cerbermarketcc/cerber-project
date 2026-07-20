@@ -57,6 +57,17 @@ const supabase = supabaseUrl && supabaseServiceKey
   : null;
 
 const defaultExchangeCards = [];
+const publicStateSettingsSelect = [
+  "theme:data->theme",
+  "lang:data->lang",
+  "publicStoresCache:data->publicStoresCache",
+  "ownerStores:data->ownerStores",
+  "exchangeCards:data->exchangeCards",
+  "exchangers:data->exchangers",
+  "groupSettings:data->groupSettings",
+  "referralPeriod:data->referralPeriod",
+  "filters:data->filters"
+].join(",");
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 12 * 60 * 60 * 1000;
@@ -768,6 +779,21 @@ async function ensureSeed() {
   }
 }
 
+function compactSettingsData(row = {}) {
+  if (row?.data && typeof row.data === "object") return row.data;
+  return {
+    theme: row?.theme,
+    lang: row?.lang,
+    publicStoresCache: row?.publicStoresCache,
+    ownerStores: row?.ownerStores,
+    exchangeCards: row?.exchangeCards,
+    exchangers: row?.exchangers,
+    groupSettings: row?.groupSettings,
+    referralPeriod: row?.referralPeriod,
+    filters: row?.filters
+  };
+}
+
 async function stateFor(user) {
   const totalStartedAt = Date.now();
   try {
@@ -779,7 +805,7 @@ async function stateFor(user) {
     if (!user) {
       const [settingsResult, storesResult] = await Promise.all([
         withTimeout(
-          supabase.from("app_settings").select("data").eq("id", "main").maybeSingle(),
+          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", "main").maybeSingle(),
           "public app_settings query",
           8500
         ).catch((error) => {
@@ -799,7 +825,7 @@ async function stateFor(user) {
         })
       ]);
       if (settingsResult.error) throw settingsResult.error;
-      const settingsData = settingsResult.data?.data || {};
+      const settingsData = compactSettingsData(settingsResult.data || {});
       let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
       if (!publicStores.length && Array.isArray(settingsData.ownerStores) && settingsData.ownerStores.length) {
         publicStores = settingsData.ownerStores
