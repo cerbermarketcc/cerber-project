@@ -11,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-07-21-v114";
+const cerberBuildVersion = "marketplace-stability-2026-07-21-v115";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -959,6 +959,17 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
 
 async function loadPublicCatalogSnapshot() {
   if (!supabase) return null;
+  if (catalogHasContent(publicCatalogMemorySnapshot)) {
+    return { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true };
+  }
+  if (Array.isArray(publicStoresMemoryCache) && publicStoresMemoryCache.length) {
+    return {
+      stores: publicStoresMemoryCache.map((store) => ({ ...store })),
+      exchangeCards: [],
+      exchangers: [],
+      restoredFromStoreMemory: true
+    };
+  }
   const loadRow = async (id, label) => {
     const result = await withTimeout(
       supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", id).maybeSingle(),
