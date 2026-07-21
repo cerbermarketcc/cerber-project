@@ -41,7 +41,8 @@ button:active {
   transform: scale(0.96);
 }
 
-button.tap-loading:not(:disabled)::after {
+button.tap-loading:not(:disabled)::after,
+button.is-loading::after {
   content: "";
   position: absolute;
   right: 8px;
@@ -55,6 +56,10 @@ button.tap-loading:not(:disabled)::after {
   opacity: 0.72;
   pointer-events: none;
   animation: admin-button-spin 720ms linear infinite;
+}
+
+form.is-submitting {
+  opacity: 0.82;
 }
 
 @keyframes admin-button-spin {
@@ -682,5 +687,113 @@ tr:hover td {
 
   .admin-modal-panel {
     max-height: 92vh;
+  }
+}
+
+@media (max-width: 560px) {
+  body {
+    min-width: 0;
+  }
+
+  input,
+  select,
+  textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .login-page {
+    align-items: start;
+    padding: 12px;
+  }
+
+  .login-card,
+  .split-card {
+    padding: 14px;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 12px;
+  }
+
+  .brand {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .nav {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .nav button {
+    flex: 0 0 auto;
+    min-width: 132px;
+  }
+
+  .content {
+    padding: 12px 10px 28px;
+    overflow-x: hidden;
+  }
+
+  .topline {
+    display: grid;
+    align-items: stretch;
+  }
+
+  .topline input {
+    max-width: none;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .checks {
+    grid-template-columns: 1fr;
+  }
+
+  .checks label {
+    min-height: 44px;
+  }
+
+  .table-card {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table {
+    min-width: 700px;
+  }
+
+  .primary,
+  .ghost {
+    min-height: 46px;
+  }
+
+  .admin-form-actions,
+  .admin-table-actions {
+    justify-content: stretch;
+    padding: 10px;
+  }
+
+  .admin-form-actions button,
+  .admin-table-actions button,
+  form > .primary,
+  form p > .primary {
+    width: 100%;
+  }
+
+  .admin-toast {
+    right: 10px;
+    left: 10px;
+    bottom: 12px;
+    max-width: none;
   }
 }

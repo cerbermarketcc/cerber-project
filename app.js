@@ -2396,7 +2396,7 @@ async function persistSellerAdminStore() {
   try {
     const payload = await apiFetch("/api/store-admin/store", {
       method: "PUT",
-      timeoutMs: 15000,
+      timeoutMs: 90000,
       headers: {
         Authorization: `Bearer ${token}`
       },
@@ -10805,7 +10805,7 @@ function renderSeller() {
       store.image = image;
       store.cover = image;
     }
-    saveDb();
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     const saved = await persistSellerAdminStore();
     if (!saved) return;
     await refreshRemoteState();
@@ -10861,7 +10861,7 @@ function renderSeller() {
       }],
       reviewsList: []
     });
-    saveDb();
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     const saved = await persistSellerAdminStore();
     if (!saved) return;
     await refreshRemoteState();
@@ -10945,6 +10945,10 @@ function readFileDataUrl(file) {
   });
 }
 
+function dataUrlBytes(dataUrl = "") {
+  return Math.ceil(String(dataUrl || "").length * 0.75);
+}
+
 function imageElementFromDataUrl(dataUrl) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -10957,19 +10961,30 @@ function imageElementFromDataUrl(dataUrl) {
 async function fileToDataUrl(file) {
   if (!file || !file.size) return "";
   const original = String(await readFileDataUrl(file) || "");
-  if (!String(file.type || "").startsWith("image/") || original.length < 1200000) return original;
+  const targetBytes = 950000;
+  const hardLimitBytes = 1800000;
+  if (!String(file.type || "").startsWith("image/")) return dataUrlBytes(original) <= hardLimitBytes ? original : "";
   try {
     const image = await imageElementFromDataUrl(original);
-    const maxSide = 1400;
-    const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
-    canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
-    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-    const compressed = canvas.toDataURL("image/jpeg", 0.82);
-    return compressed && compressed.length < original.length ? compressed : original;
+    const variants = [
+      [1200, 0.78],
+      [960, 0.72],
+      [760, 0.66]
+    ];
+    let best = original;
+    for (const [maxSide, quality] of variants) {
+      const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
+      canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
+      canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+      const compressed = canvas.toDataURL("image/jpeg", quality);
+      if (compressed && compressed.length < best.length) best = compressed;
+      if (dataUrlBytes(best) <= targetBytes) return best;
+    }
+    return dataUrlBytes(best) <= hardLimitBytes ? best : "";
   } catch {
-    return original;
+    return dataUrlBytes(original) <= hardLimitBytes ? original : "";
   }
 }
 

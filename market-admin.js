@@ -6,6 +6,10 @@ const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const IS_LOCAL_ADMIN_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const API_ORIGIN = IS_LOCAL_ADMIN_HOST ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
+const ADMIN_FORM_LOCK_MS = 5 * 60 * 1000;
+const ADMIN_UPLOAD_TIMEOUT_MS = 90000;
+const ADMIN_IMAGE_TARGET_BYTES = 950000;
+const ADMIN_IMAGE_HARD_LIMIT_BYTES = 1800000;
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Health", "Боты"];
 nav.splice(2, 0, "Обменники");
@@ -33,6 +37,8 @@ let realtimeSocket = null;
 let refreshTimer = null;
 let adminLastInteractionAt = 0;
 let adminDetailRestoreNonce = 0;
+let adminFormLockUntil = 0;
+let adminBusyForms = 0;
 
 function readAdminUiState() {
   try {
@@ -54,9 +60,18 @@ function persistAdminUiState() {
   } catch {}
 }
 
+function markAdminFormActivity(ms = ADMIN_FORM_LOCK_MS) {
+  adminLastInteractionAt = Date.now();
+  adminFormLockUntil = Math.max(adminFormLockUntil, Date.now() + ms);
+}
+
 function adminIsEditing() {
   const element = document.activeElement;
   return Boolean(element && element.closest("form") && /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+}
+
+function adminHasDirtyForm() {
+  return Boolean(root.querySelector("form[data-admin-form-dirty='1'], form.is-submitting"));
 }
 
 function adminHasOpenDetail() {
@@ -68,6 +83,9 @@ function adminHasOpenDetail() {
 }
 
 function adminCanSilentRender() {
+  if (adminBusyForms > 0) return false;
+  if (Date.now() < adminFormLockUntil) return false;
+  if (adminHasDirtyForm()) return false;
   if (adminIsEditing()) return false;
   if (adminHasOpenDetail()) return false;
   if (window.scrollY > 80) return false;
@@ -144,6 +162,10 @@ function readFileDataUrl(file) {
   });
 }
 
+function dataUrlBytes(dataUrl = "") {
+  return Math.ceil(String(dataUrl || "").length * 0.75);
+}
+
 function imageElementFromDataUrl(dataUrl) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -155,19 +177,29 @@ function imageElementFromDataUrl(dataUrl) {
 
 async function fileToDataUrl(file) {
   const original = String(await readFileDataUrl(file) || "");
-  if (!file || !file.size || !String(file.type || "").startsWith("image/") || original.length < 1200000) return original;
+  if (!file || !file.size) return "";
+  if (!String(file.type || "").startsWith("image/")) return dataUrlBytes(original) <= ADMIN_IMAGE_HARD_LIMIT_BYTES ? original : "";
   try {
     const image = await imageElementFromDataUrl(original);
-    const maxSide = 1400;
-    const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
-    canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
-    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-    const compressed = canvas.toDataURL("image/jpeg", 0.82);
-    return compressed && compressed.length < original.length ? compressed : original;
+    const variants = [
+      [1200, 0.78],
+      [960, 0.72],
+      [760, 0.66]
+    ];
+    let best = original;
+    for (const [maxSide, quality] of variants) {
+      const scale = Math.min(1, maxSide / Math.max(image.width || maxSide, image.height || maxSide));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round((image.width || maxSide) * scale));
+      canvas.height = Math.max(1, Math.round((image.height || maxSide) * scale));
+      canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+      const compressed = canvas.toDataURL("image/jpeg", quality);
+      if (compressed && compressed.length < best.length) best = compressed;
+      if (dataUrlBytes(best) <= ADMIN_IMAGE_TARGET_BYTES) return best;
+    }
+    return dataUrlBytes(best) <= ADMIN_IMAGE_HARD_LIMIT_BYTES ? best : "";
   } catch {
-    return original;
+    return dataUrlBytes(original) <= ADMIN_IMAGE_HARD_LIMIT_BYTES ? original : "";
   }
 }
 
@@ -182,38 +214,48 @@ async function filesToSupportAttachments(input) {
 
 async function formImageValue(formData, fileName, fallbackName = "") {
   const file = formData.get(fileName);
-  if (file && file.size) return fileToDataUrl(file);
+  if (file && file.size) {
+    const value = await fileToDataUrl(file);
+    if (!value && file.size > ADMIN_IMAGE_HARD_LIMIT_BYTES) {
+      toast("Фото слишком большое. Объект будет создан без этого фото.", true);
+    }
+    return value;
+  }
   return String(formData.get(fallbackName || fileName) || "").trim();
 }
 
 async function api(path, options = {}) {
-  if (/^https?:\/\//i.test(String(path || ""))) {
-    const response = await fetch(path, {
-      ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.headers || {})
-      }
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || "API error");
-    return payload;
-  }
-  let lastError = null;
-  for (const origin of API_ORIGINS) {
+  const fetchJson = async (url) => {
+    const { timeoutMs = 45000, headers: optionHeaders = {}, ...fetchOptions } = options;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${origin}${path}`, {
-        ...options,
+      const response = await fetch(url, {
+        ...fetchOptions,
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...(options.headers || {})
-        }
+          ...optionHeaders
+        },
+        signal: fetchOptions.signal || controller.signal
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || "API error");
       return payload;
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("Сервер долго отвечает. Проверьте интернет и попробуйте ещё раз.");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  if (/^https?:\/\//i.test(String(path || ""))) {
+    return fetchJson(path);
+  }
+  let lastError = null;
+  for (const origin of API_ORIGINS) {
+    try {
+      return await fetchJson(`${origin}${path}`);
     } catch (error) {
       lastError = error;
       if (origin === PRIMARY_API_ORIGIN) break;
@@ -391,6 +433,32 @@ function bindAdminButtonFeedback(scope = root) {
   });
 }
 
+function beginAdminFormSubmit(form, loadingText = "Сохраняю...") {
+  if (!form || form.dataset.submitting === "1") return null;
+  markAdminFormActivity(ADMIN_UPLOAD_TIMEOUT_MS + 15000);
+  form.dataset.submitting = "1";
+  form.classList.add("is-submitting");
+  adminBusyForms += 1;
+  const button = form.querySelector('button[type="submit"], button.primary:not([type])');
+  const previousText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.textContent = loadingText;
+  }
+  return () => {
+    form.dataset.submitting = "";
+    form.dataset.adminFormDirty = "";
+    form.classList.remove("is-submitting");
+    adminBusyForms = Math.max(0, adminBusyForms - 1);
+    if (button) {
+      button.disabled = false;
+      button.classList.remove("is-loading");
+      button.textContent = previousText;
+    }
+  };
+}
+
 function renderSection() {
   if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
@@ -497,7 +565,7 @@ function renderStores() {
           <label><input name="region_transnistria" type="checkbox"> Приднестровье</label>
         </div>
         <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${coin === "ltc" ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
-        <button class="primary">Создать магазин</button>
+        <button class="primary" type="submit">Создать магазин</button>
       </form>
       <div data-created-store></div>
     </article>
@@ -560,7 +628,7 @@ function storeDetail(id) {
         <label><input name="region_transnistria" type="checkbox" ${countries.includes("transnistria") ? "checked" : ""}> Приднестровье</label>
       </div>
       <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
-      <p><button class="primary">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
+      <p><button class="primary" type="submit">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
     </form>
   `;
   return `
@@ -576,7 +644,7 @@ function storeDetail(id) {
       </div>
       <label class="field">Пароль панели магазина<input name="adminPassword" placeholder="новый пароль магазина"></label>
       <div class="checks">${coins.map((coin) => `<label><input name="coin_${coin}" type="checkbox" ${store.coins?.[coin] !== false ? "checked" : ""}> ${coin.toUpperCase()}</label>`).join("")}</div>
-      <p><button class="primary">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
+      <p><button class="primary" type="submit">Сохранить магазин</button> <button class="ghost danger" type="button" data-delete-store="${esc(store.id)}">DELETE магазин</button></p>
     </form>
   `;
 }
@@ -612,7 +680,7 @@ function renderExchangers() {
           <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="0"></label>
           <label class="field">Статус<select name="status"><option value="active">Активен</option><option value="disabled">Скрыт</option></select></label>
         </div>
-        <button class="primary">Создать обменник</button>
+        <button class="primary" type="submit">Создать обменник</button>
       </form>
     </article>
     <section class="split">
@@ -644,7 +712,7 @@ function exchangerDetail(id) {
         <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(item.position || 0)}"></label>
         <label class="field">Статус<select name="status"><option value="active" ${item.active ? "selected" : ""}>Активен</option><option value="disabled" ${!item.active ? "selected" : ""}>Скрыт</option></select></label>
       </div>
-      <p><button class="primary">Сохранить</button> <button class="ghost danger" type="button" data-exchanger-delete="${esc(item.id)}">Удалить</button></p>
+      <p><button class="primary" type="submit">Сохранить</button> <button class="ghost danger" type="button" data-exchanger-delete="${esc(item.id)}">Удалить</button></p>
     </form>
   `;
 }
@@ -1281,12 +1349,17 @@ function renderMirrorBots() {
 function bindActions() {
   root.querySelector("[data-exchanger-create-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const fd = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    if (form.dataset.submitting === "1") return;
+    const fd = new FormData(form);
+    const endSubmit = beginAdminFormSubmit(form, "Создаю...");
+    if (!endSubmit) return;
     try {
       const image = await formImageValue(fd, "imageFile");
       const avatar = await formImageValue(fd, "avatarFile");
       data = await api("/api/admin/exchangers", {
         method: "POST",
+        timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
         body: JSON.stringify({
           login: fd.get("login"),
           name: fd.get("name"),
@@ -1298,8 +1371,10 @@ function bindActions() {
         })
       });
       toast("Обменник создан");
+      endSubmit();
       renderShell();
     } catch (error) {
+      endSubmit();
       toast(error.message, true);
     }
   });
@@ -1314,12 +1389,16 @@ function bindActions() {
   root.querySelectorAll("[data-exchanger-update-form]").forEach((form) => {
     form.onsubmit = async (event) => {
       event.preventDefault();
+      if (form.dataset.submitting === "1") return;
       const fd = new FormData(form);
+      const endSubmit = beginAdminFormSubmit(form, "Сохраняю...");
+      if (!endSubmit) return;
       try {
         const image = await formImageValue(fd, "imageFile");
         const avatar = await formImageValue(fd, "avatarFile");
         data = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
           method: "PATCH",
+          timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
           body: JSON.stringify({
             login: fd.get("login"),
             name: fd.get("name"),
@@ -1331,8 +1410,10 @@ function bindActions() {
           })
         });
         toast("Обменник сохранен");
+        endSubmit();
         renderShell();
       } catch (error) {
+        endSubmit();
         toast(error.message, true);
       }
     };
@@ -1351,7 +1432,9 @@ function bindActions() {
   });
   root.querySelector("[data-create-store-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const fd = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    if (form.dataset.submitting === "1") return;
+    const fd = new FormData(form);
     const countries = [];
     if (fd.get("region_moldova")) countries.push("moldova");
     if (fd.get("region_transnistria")) countries.push("transnistria");
@@ -1361,10 +1444,13 @@ function bindActions() {
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (fd.get("placement_stores")) placements.push("stores");
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
+    const endSubmit = beginAdminFormSubmit(form, "Создаю...");
+    if (!endSubmit) return;
     try {
       const image = await formImageValue(fd, "imageFile");
       const result = await api("/api/admin/stores", {
         method: "POST",
+        timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
@@ -1381,12 +1467,14 @@ function bindActions() {
       });
       data = result.overview;
       toast("Магазин создан");
+      endSubmit();
       renderShell();
       setTimeout(() => {
         const box = root.querySelector("[data-created-store]");
         if (box) box.innerHTML = `<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`;
       });
     } catch (error) {
+      endSubmit();
       toast(error.message, true);
     }
   });
@@ -1400,6 +1488,7 @@ function bindActions() {
   });
   root.querySelectorAll("[data-store-form]").forEach((form) => form.onsubmit = async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "1") return;
     const fd = new FormData(form);
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
     const countries = [];
@@ -1410,11 +1499,14 @@ function bindActions() {
     if (fd.get("placement_TOP")) placements.push("TOP");
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (fd.get("placement_stores")) placements.push("stores");
+    const endSubmit = beginAdminFormSubmit(form, "Сохраняю...");
+    if (!endSubmit) return;
     try {
       const image = await formImageValue(fd, "imageFile");
       const cover = await formImageValue(fd, "coverFile");
       data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
+        timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
@@ -1434,8 +1526,10 @@ function bindActions() {
         })
       });
       toast("Магазин сохранен");
+      endSubmit();
       renderShell();
     } catch (error) {
+      endSubmit();
       toast(error.message, true);
     }
   });
@@ -1763,6 +1857,15 @@ document.addEventListener("pointerdown", (event) => {
     adminLastInteractionAt = Date.now();
   }
 }, { passive: true });
+
+["input", "change", "focusin"].forEach((eventName) => {
+  document.addEventListener(eventName, (event) => {
+    const form = event.target.closest?.("form");
+    if (!form || !root.contains(form)) return;
+    form.dataset.adminFormDirty = "1";
+    markAdminFormActivity();
+  }, true);
+});
 
 if (token) load().catch(() => renderLogin("Сессия истекла"));
 else renderLogin();

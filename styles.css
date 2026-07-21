@@ -5298,6 +5298,16 @@ details[data-shop-storage-item] .form {
     grid-template-columns: 1fr;
   }
 
+  .shop-panel-page input,
+  .shop-panel-page select,
+  .shop-panel-page textarea,
+  .seller-admin-screen input,
+  .seller-admin-screen select,
+  .seller-admin-screen textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
   .seller-wide-card {
     grid-column: auto;
   }
@@ -5310,6 +5320,41 @@ details[data-shop-storage-item] .form {
 
   .shop-panel-page {
     padding: 8px;
+  }
+
+  .seller-dashboard-main {
+    padding: 10px;
+  }
+
+  .seller-dashboard-card,
+  .seller-dash-stat {
+    border-radius: 14px;
+    padding: 12px;
+  }
+
+  .seller-dashboard-balance,
+  .seller-dashboard-user {
+    width: 100%;
+    border-radius: 14px;
+  }
+
+  details[data-shop-storage-item] summary,
+  details[data-shop-sale-item] summary,
+  .seller-card-head,
+  .seller-source,
+  .seller-tree-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .seller-stock-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .seller-dashboard-table > div {
+    min-width: 0;
+    grid-template-columns: 1fr;
   }
 }
 
