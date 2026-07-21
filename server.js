@@ -938,6 +938,11 @@ function stateHasDurableContent(state = {}) {
   );
 }
 
+function publicExchangeCardsForState(exchangeCards = null) {
+  const source = Array.isArray(exchangeCards) && exchangeCards.length ? exchangeCards : defaultExchangeCards;
+  return source.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+}
+
 function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
   const sourceStores = Array.isArray(storesSource)
     ? storesSource
@@ -951,7 +956,7 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
     theme: state.theme || "light",
     lang: state.lang || "ru",
     stores,
-    exchangeCards: (state.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))),
+    exchangeCards: publicExchangeCardsForState(state.exchangeCards),
     exchangers: publicExchangersForState(state.exchangers || []),
     groupSettings: normalizeGroupSettings(state.groupSettings || {}),
     referralPeriod: state.referralPeriod || {},
@@ -974,6 +979,7 @@ function mergePublicCatalogSnapshots(primary = {}, backup = {}) {
     const backupItems = Array.isArray(backup?.[key]) ? backup[key] : [];
     next[key] = primaryItems.length ? primaryItems : backupItems;
   });
+  if (!arrayHasItems(next.exchangeCards)) next.exchangeCards = publicExchangeCardsForState();
   next.groupSettings = normalizeGroupSettings(objectHasKeys(primary?.groupSettings) ? primary.groupSettings : (backup?.groupSettings || {}));
   next.referralPeriod = objectHasKeys(primary?.referralPeriod) ? primary.referralPeriod : (backup?.referralPeriod || {});
   next.filters = objectHasKeys(primary?.filters) ? primary.filters : (backup?.filters || {});
@@ -1233,7 +1239,7 @@ async function stateFor(user) {
       if (!publicStores.length) {
         refreshPublicStoresCacheInBackground(settingsData);
       }
-      const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+      const visibleExchangeCards = publicExchangeCardsForState(settingsData.exchangeCards);
       const visibleExchangers = publicExchangersForState(settingsData.exchangers || []);
       const publicCatalogComplete = Boolean(publicStores.length || visibleExchangeCards.length || visibleExchangers.length);
       if (publicCatalogComplete) {
@@ -1401,7 +1407,7 @@ async function stateFor(user) {
         console.error("[stateFor] public stores cache save failed", { message: error.message });
       });
     }
-    const visibleExchangeCards = (settingsData.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+    const visibleExchangeCards = publicExchangeCardsForState(settingsData.exchangeCards);
     const userLogin = user?.login || "";
     const userKey = loginKey(userLogin);
     const sameUser = (value) => userKey && loginKey(value) === userKey;
@@ -1781,7 +1787,7 @@ function authStateForUser(user, state = {}) {
     ? state.publicStoresCache
     : (Array.isArray(state.ownerStores) ? state.ownerStores.map(publicStoreForState) : []);
   const visibleStores = storesSource.filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(state, store));
-  const visibleExchangeCards = (state.exchangeCards || defaultExchangeCards).filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+  const visibleExchangeCards = publicExchangeCardsForState(state.exchangeCards);
   return {
     user: publicProfile,
     state: {
@@ -3035,7 +3041,7 @@ app.put("/api/state", async (req, res, next) => {
       theme: state.theme || "light",
       lang: state.lang || "ru",
       orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
-      exchangeCards: currentSettingsData.exchangeCards || defaultExchangeCards,
+      exchangeCards: publicExchangeCardsForState(currentSettingsData.exchangeCards),
       exchangers: Array.isArray(currentSettingsData.exchangers) ? currentSettingsData.exchangers : [],
       exchangeRequests: currentSettingsData.exchangeRequests || [],
       groupMessages: mergedGroupMessages,
