@@ -311,7 +311,8 @@ const defaults = {
     city: "chisinau",
     district: "",
     category: "Все товары",
-    sort: "relevance"
+    sort: "relevance",
+    query: ""
   }
 };
 
@@ -1879,6 +1880,7 @@ function protectIncomingState(incomingState = {}, payload = {}) {
 function applyRemoteState(payload) {
   if (!payload) return;
   const previousCurrentUser = db?.currentUser || "";
+  const rememberedFilters = { ...(db?.filters || defaults.filters) };
   const rememberedReferralCodes = { ...(db?.referralCodes || {}) };
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
   const rememberedPrivateMessages = Array.isArray(db?.messages) ? db.messages : [];
@@ -1908,6 +1910,7 @@ function applyRemoteState(payload) {
   db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
   db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
   db.orders = mergeOrderLists(db.orders, rememberedOrders);
+  db.filters = { ...structuredClone(defaults.filters), ...rememberedFilters };
   prunePersonalStateForCurrentUser();
   db.groupSettings.members = mergeGroupMembers(db.groupSettings.members, rememberedGroupMembers);
   writeStoredGroupMembers(db.groupSettings.members);
@@ -2351,8 +2354,7 @@ async function persistRemoteState() {
           storeApplications: db.storeApplications,
           ownerSettings: db.ownerSettings,
           paymentSettings: db.paymentSettings,
-          referralPeriod: db.referralPeriod,
-          filters: db.filters
+          referralPeriod: db.referralPeriod
         }
       })
     });
@@ -2417,7 +2419,7 @@ function saveDb(options = {}) {
   const serialized = JSON.stringify(db);
   const saved = storageSet(STORE_KEY, serialized);
   if (!saved && !API_ENABLED && !options.silentLocalStorageError) showToast("LocalStorage недоступен");
-  persistRemoteState();
+  if (!options.localOnly) persistRemoteState();
 }
 
 function clearSession() {
@@ -2595,21 +2597,155 @@ function exchangeCardById(id = activeExchangeId) {
   return db.exchangeCards.find((card) => card.id === id) || db.exchangeCards[0];
 }
 
-function filteredStores() {
-  const filters = db.filters || {};
-  return (db.stores || []).filter((store) => {
+function searchText(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
+function catalogFilters() {
+  return { ...structuredClone(defaults.filters), ...(db.filters || {}) };
+}
+
+function categoryIsAll(value = "") {
+  return !value || value === "Все товары";
+}
+
+function locationFilterActive(filters = catalogFilters()) {
+  return Boolean(filters.country || filters.city || filters.district);
+}
+
+function categoryMatches(product = {}, filters = catalogFilters()) {
+  if (categoryIsAll(filters.category)) return true;
+  return searchText(localizedValue(product, "category") || product.category).includes(searchText(filters.category));
+}
+
+function positionMatchesFilters(position = {}, filters = catalogFilters()) {
+  if (filters.country && position.country && position.country !== filters.country) return false;
+  if (filters.city && position.city && position.city !== filters.city) return false;
+  if (filters.district && position.district && position.district !== filters.district) return false;
+  return true;
+}
+
+function productFilteredPositions(product = {}, filters = catalogFilters()) {
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const matched = !positions.length || !locationFilterActive(filters)
+    ? positions.slice()
+    : positions.filter((position) => positionMatchesFilters(position, filters));
+  if (filters.sort === "priceAsc") return matched.sort((a, b) => Number(a.priceUsd || 0) - Number(b.priceUsd || 0));
+  if (filters.sort === "priceDesc") return matched.sort((a, b) => Number(b.priceUsd || 0) - Number(a.priceUsd || 0));
+  return matched;
+}
+
+function productSearchBlob(product = {}, store = {}) {
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  return [
+    localizedValue(product, "title"),
+    localizedValue(product, "category"),
+    localizedValue(product, "description"),
+    product.title,
+    product.category,
+    product.description,
+    localizedValue(store, "name"),
+    store.name,
+    store.tag,
+    ...positions.flatMap((position) => [
+      localizedValue(position, "title"),
+      localizedValue(position, "description"),
+      position.title,
+      position.description,
+      position.country,
+      position.city,
+      position.district,
+      position.deliveryType,
+      position.weight
+    ])
+  ].join(" ").toLowerCase();
+}
+
+function productMatchesFilters(product = {}, store = {}, filters = catalogFilters()) {
+  if (!categoryMatches(product, filters)) return false;
+  const query = searchText(filters.query);
+  if (query && !productSearchBlob(product, store).includes(query)) return false;
+  const positions = Array.isArray(product.positions) ? product.positions : [];
+  if (locationFilterActive(filters) && positions.some((position) => position.country || position.city || position.district)) {
+    return productFilteredPositions(product, filters).length > 0;
+  }
+  return true;
+}
+
+function storeSearchBlob(store = {}) {
+  const products = Array.isArray(store.products) ? store.products : [];
+  return [
+    localizedValue(store, "name"),
+    localizedValue(store, "short"),
+    localizedValue(store, "description"),
+    store.name,
+    store.short,
+    store.description,
+    store.tag,
+    store.ownerLogin,
+    ...(store.countries || []),
+    ...(store.cities || []),
+    ...(store.districts || []),
+    ...products.map((product) => productSearchBlob(product, store))
+  ].join(" ").toLowerCase();
+}
+
+function storeLocationMatches(store = {}, filters = catalogFilters()) {
+  const products = Array.isArray(store.products) ? store.products : [];
+  const positions = products.flatMap((product) => Array.isArray(product.positions) ? product.positions : []);
+  const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
+  const hasCityScope = (store.cities || []).length || positions.some((position) => position.city);
+  const hasDistrictScope = (store.districts || []).length || positions.some((position) => position.district);
+  const countryMatch = !filters.country || !hasCountryScope || (store.countries || []).includes(filters.country) || positions.some((position) => position.country === filters.country);
+  const cityMatch = !filters.city || !hasCityScope || (store.cities || []).includes(filters.city) || positions.some((position) => position.city === filters.city);
+  const districtMatch = !filters.district || !hasDistrictScope || (store.districts || []).includes(filters.district) || positions.some((position) => position.district === filters.district);
+  return countryMatch && cityMatch && districtMatch;
+}
+
+function storeMinPrice(store = {}, filters = catalogFilters()) {
+  const products = (Array.isArray(store.products) ? store.products : []).filter((product) => productMatchesFilters(product, store, filters));
+  const prices = products.flatMap((product) => {
+    const positions = productFilteredPositions(product, filters);
+    const positionPrices = positions.map((position) => Number(position.priceUsd || 0)).filter((price) => price > 0);
+    return positionPrices.length ? positionPrices : [Number(product.priceUsd || 0)].filter((price) => price > 0);
+  });
+  return prices.length ? Math.min(...prices) : Number.MAX_SAFE_INTEGER;
+}
+
+function productMinPrice(product = {}, filters = catalogFilters()) {
+  const positions = productFilteredPositions(product, filters);
+  const prices = positions.map((position) => Number(position.priceUsd || 0)).filter((price) => price > 0);
+  return prices.length ? Math.min(...prices) : Number(product.priceUsd || Number.MAX_SAFE_INTEGER);
+}
+
+function sortProductsForFilters(products = [], filters = catalogFilters()) {
+  const ordered = products.slice();
+  if (filters.sort === "priceAsc") return ordered.sort((a, b) => productMinPrice(a, filters) - productMinPrice(b, filters));
+  if (filters.sort === "priceDesc") return ordered.sort((a, b) => productMinPrice(b, filters) - productMinPrice(a, filters));
+  return ordered.sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+}
+
+function sortStoresForFilters(stores = [], filters = catalogFilters()) {
+  const ordered = stores.slice();
+  if (filters.sort === "priceAsc") {
+    return ordered.sort((a, b) => storeMinPrice(a, filters) - storeMinPrice(b, filters) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+  }
+  if (filters.sort === "priceDesc") {
+    return ordered.sort((a, b) => storeMinPrice(b, filters) - storeMinPrice(a, filters) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+  }
+  return ordered.sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+}
+
+function filteredStores(filters = catalogFilters()) {
+  const query = searchText(filters.query);
+  return sortStoresForFilters((db.stores || []).filter((store) => {
     if (!storeIsVisible(store) && !isAdmin()) return false;
-    const products = store.products || [];
-    const positions = products.flatMap((product) => product.positions || []);
-    const hasCountryScope = (store.countries || []).length || positions.some((position) => position.country);
-    const hasCityScope = (store.cities || []).length || positions.some((position) => position.city);
-    const hasDistrictScope = (store.districts || []).length || positions.some((position) => position.district);
-    const countryMatch = !filters.country || !hasCountryScope || (store.countries || []).includes(filters.country) || positions.some((position) => position.country === filters.country);
-    const cityMatch = !filters.city || !hasCityScope || (store.cities || []).includes(filters.city) || positions.some((position) => position.city === filters.city);
-    const districtMatch = !filters.district || !hasDistrictScope || (store.districts || []).includes(filters.district) || positions.some((position) => position.district === filters.district);
-    const categoryMatch = !filters.category || filters.category === "Все товары" || !products.length || products.some((product) => String(product.category || "").includes(filters.category));
-    return countryMatch && cityMatch && districtMatch && categoryMatch;
-  }).sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0));
+    const products = Array.isArray(store.products) ? store.products : [];
+    if (!storeLocationMatches(store, filters)) return false;
+    if (query && !storeSearchBlob(store).includes(query)) return false;
+    if (!categoryIsAll(filters.category) && !products.some((product) => productMatchesFilters(product, store, filters))) return false;
+    return true;
+  }), filters);
 }
 
 function storePlacementValues(store = {}) {
@@ -2642,18 +2778,20 @@ function sortStoresByPosition(stores) {
   return stores.slice().sort((a, b) => Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
 }
 
-function visibleStores(topOnly = false) {
-  return sortStoresByPosition(publicStores().filter((store) => {
+function visibleStores(topOnly = false, filters = catalogFilters()) {
+  const allowedIds = new Set(filteredStores(filters).map((store) => store.id));
+  return sortStoresForFilters(publicStores().filter((store) => {
+    if (!allowedIds.has(store.id)) return false;
     if (topOnly) return storeInPlacement(store, "TOP 10");
     return storeInPlacement(store, "stores");
-  }));
+  }), filters);
 }
 
-function homeStores(tab = "all") {
-  const stores = publicStores();
-  if (tab === "top") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "TOP 10")));
-  if (tab === "new") return sortStoresByPosition(stores.filter((store) => storeInPlacement(store, "NEW")));
-  return visibleStores(false);
+function homeStores(tab = "all", filters = catalogFilters()) {
+  const stores = filteredStores(filters);
+  if (tab === "top") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "TOP 10")), filters);
+  if (tab === "new") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "NEW")), filters);
+  return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "stores")), filters);
 }
 
 function userBalance(login = db.currentUser) {
@@ -3781,6 +3919,7 @@ async function handleAuth(event) {
 
 function renderHome() {
   route = "home";
+  const filters = catalogFilters();
   const stores = homeStores(activeHomeTab);
   const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
@@ -3789,7 +3928,8 @@ function renderHome() {
     </section>
     <section class="hero">
       <h1>${topTitleView()}</h1>
-      <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
+      <label class="search"><b>⌕</b><input data-search value="${esc(filters.query || "")}" placeholder="${tr("search")}"></label>
+      <button class="filter-inline-button" data-filters>Фильтры</button>
       <div class="tabs">
         <button class="tab ${activeHomeTab === "all" ? "active" : ""}" data-home-tab="all">${tr("all")}</button>
         <button class="tab ${activeHomeTab === "top" ? "active" : ""}" data-home-tab="top">${tr("top")}</button>
@@ -3808,9 +3948,9 @@ function renderHome() {
     };
   });
   document.querySelector("[data-search]").oninput = (event) => {
-    const q = event.target.value.toLowerCase();
+    db.filters = { ...catalogFilters(), query: event.target.value };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-feed]").innerHTML = homeStores(activeHomeTab)
-      .filter((store) => `${store.name} ${store.short} ${store.description} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -3849,18 +3989,20 @@ function officialMirrorsView() {
 
 function renderCatalog() {
   route = "catalog";
+  const filters = catalogFilters();
   const cards = visibleStores(false).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
   layout(`
     <section class="hero">
       <h1>Магазины</h1>
-      <label class="search"><b>⌕</b><input data-search placeholder="${tr("search")}"></label>
+      <label class="search"><b>⌕</b><input data-search value="${esc(filters.query || "")}" placeholder="${tr("search")}"></label>
+      <button class="filter-inline-button" data-filters>Фильтры</button>
     </section>
     <section class="feed" data-feed>${cards}</section>
   `);
   document.querySelector("[data-search]").oninput = (event) => {
-    const q = event.target.value.toLowerCase();
+    db.filters = { ...catalogFilters(), query: event.target.value };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-feed]").innerHTML = visibleStores(false)
-      .filter((store) => `${store.name} ${store.short} ${store.description} ${store.tag} ${store.ownerLogin}`.toLowerCase().includes(q))
       .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
     bindStoreCards();
   };
@@ -4269,9 +4411,10 @@ async function handleProductReview(event) {
 }
 
 function renderFilters() {
-  const filters = db.filters || structuredClone(defaults.filters);
+  const filters = catalogFilters();
   const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
   const city = country.cities[filters.city] || Object.values(country.cities)[0];
+  const resultCount = homeStores(activeHomeTab, filters).length;
   showModal(`
     <div class="filter-head">
       <button data-clear-filters>Очистить</button>
@@ -4279,6 +4422,9 @@ function renderFilters() {
       <button data-close-modal>${navIcon("close")}</button>
     </div>
     <form class="filter-form" data-filter-form>
+      <label class="field">Поиск
+        <input name="query" value="${esc(filters.query || "")}" placeholder="Магазин, товар, район или описание">
+      </label>
       <label class="field">Страна
         <select name="country">
           ${Object.entries(filterOptions.countries).map(([key, item]) => `<option value="${key}" ${filters.country === key ? "selected" : ""}>${item.label}</option>`).join("")}
@@ -4305,22 +4451,27 @@ function renderFilters() {
         <label><input type="radio" name="sort" value="priceAsc" ${filters.sort === "priceAsc" ? "checked" : ""}> Возрастанию цены</label>
         <label><input type="radio" name="sort" value="priceDesc" ${filters.sort === "priceDesc" ? "checked" : ""}> Убыванию цены</label>
       </div>
+      <p class="filter-result-count">Найдено: ${resultCount}</p>
       <button class="primary">Применить</button>
     </form>
   `, "filter-panel");
   document.querySelector("[name='country']").onchange = (event) => {
-    db.filters = { ...filters, country: event.target.value, city: Object.keys(filterOptions.countries[event.target.value].cities)[0], district: "" };
+    const draft = new FormData(document.querySelector("[data-filter-form]"));
+    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, country: event.target.value, city: Object.keys(filterOptions.countries[event.target.value].cities)[0], district: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
   };
   document.querySelector("[name='city']").onchange = (event) => {
-    db.filters = { ...filters, city: event.target.value, district: "" };
+    const draft = new FormData(document.querySelector("[data-filter-form]"));
+    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, city: event.target.value, district: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
   };
   document.querySelector("[data-clear-filters]").onclick = () => {
     db.filters = structuredClone(defaults.filters);
-    saveDb();
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderCurrent();
   };
@@ -4332,9 +4483,10 @@ function renderFilters() {
       city: data.get("city"),
       district: data.get("district"),
       category: data.get("category"),
-      sort: data.get("sort")
+      sort: data.get("sort"),
+      query: String(data.get("query") || "").trim()
     };
-    saveDb();
+    saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderCurrent();
   };
@@ -4378,10 +4530,10 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const coverImage = store.cover || store.banner || store.image || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
-  const publicProducts = sortedStoreProducts(store);
+  const publicProducts = sortProductsForFilters(sortedStoreProducts(store).filter((product) => productMatchesFilters(product, store)));
   const content = activeStoreTab === "reviews"
     ? (reviewsList.length ? reviewsList.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`)
-    : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("noPositions")}</p></article>`);
+    : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("noFilteredProducts")}</p><button class="primary" data-filters>${tr("openFilters")}</button></article>`);
   layout(`
     <section class="screen">
       <article class="panel">
@@ -4468,15 +4620,7 @@ function productCardView(product, store) {
 }
 
 function productPositions(product) {
-  const filters = db.filters || {};
-  const positions = Array.isArray(product.positions) ? product.positions : [];
-  const filtered = positions.filter((position) => {
-    if (filters.country && position.country && filters.country !== position.country) return false;
-    if (filters.city && position.city && filters.city !== position.city) return false;
-    if (filters.district && position.district && filters.district !== position.district) return false;
-    return true;
-  });
-  return filtered.length ? filtered : positions;
+  return productFilteredPositions(product, catalogFilters());
 }
 
 function positionWeightLabel(position = {}) {

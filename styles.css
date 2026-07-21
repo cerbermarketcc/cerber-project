@@ -307,6 +307,17 @@ body[data-theme="dark"] .logo {
   color: #b9b9bf;
 }
 
+.filter-inline-button {
+  width: fit-content;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 800;
+}
+
 .tabs {
   display: flex;
   gap: 14px;
@@ -3798,6 +3809,12 @@ body[data-theme="dark"] .mirror-row {
 .filter-form {
   display: grid;
   gap: 18px;
+}
+
+.filter-result-count {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-weight: 800;
 }
 
 .sort-pills {
