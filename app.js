@@ -3446,7 +3446,7 @@ function renderAuth(message = "") {
   const captchaRequired = API_ENABLED && TURNSTILE_ENABLED && TURNSTILE_SITE_KEY;
   const captchaPending = API_ENABLED && !remoteConfigLoaded;
   const captchaBlocked = API_ENABLED && Boolean(remoteConfigError);
-  const authSubmitDisabled = captchaPending || captchaBlocked || captchaRequired;
+  const authSubmitDisabled = captchaPending || captchaBlocked;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -3580,12 +3580,8 @@ function setCaptchaStatus(message = "", retryVisible = false) {
 
 function updateAuthSubmitCaptchaState() {
   const button = document.querySelector("[data-auth-submit]");
-  if (!button || !API_ENABLED || !TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY) return;
-  if (authSubmitting) {
-    button.disabled = true;
-    return;
-  }
-  button.disabled = !captchaToken();
+  if (!button) return;
+  button.disabled = Boolean(authSubmitting || (API_ENABLED && (!remoteConfigLoaded || remoteConfigError)));
 }
 
 function scheduleTurnstileWatch() {

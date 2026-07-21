@@ -11,7 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-07-21-v115";
+const cerberBuildVersion = "marketplace-stability-2026-07-21-v116";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -134,6 +134,9 @@ let publicStoresMemoryCache = [];
 let publicStoresMemoryCacheAt = 0;
 let publicCatalogMemorySnapshot = null;
 let publicStoresRefreshPromise = null;
+let settingsBackupMemorySnapshot = null;
+let settingsBackupMemoryAt = 0;
+const settingsBackupCacheMs = 15 * 1000;
 const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
 const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
@@ -957,19 +960,31 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
   };
 }
 
+function objectHasKeys(value = {}) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+}
+
+function mergePublicCatalogSnapshots(primary = {}, backup = {}) {
+  const next = {
+    ...(backup || {}),
+    ...(primary || {})
+  };
+  ["stores", "exchangers", "exchangeCards"].forEach((key) => {
+    const primaryItems = Array.isArray(primary?.[key]) ? primary[key] : [];
+    const backupItems = Array.isArray(backup?.[key]) ? backup[key] : [];
+    next[key] = primaryItems.length ? primaryItems : backupItems;
+  });
+  next.groupSettings = normalizeGroupSettings(objectHasKeys(primary?.groupSettings) ? primary.groupSettings : (backup?.groupSettings || {}));
+  next.referralPeriod = objectHasKeys(primary?.referralPeriod) ? primary.referralPeriod : (backup?.referralPeriod || {});
+  next.filters = objectHasKeys(primary?.filters) ? primary.filters : (backup?.filters || {});
+  return next;
+}
+
 async function loadPublicCatalogSnapshot() {
   if (!supabase) return null;
-  if (catalogHasContent(publicCatalogMemorySnapshot)) {
-    return { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true };
-  }
-  if (Array.isArray(publicStoresMemoryCache) && publicStoresMemoryCache.length) {
-    return {
-      stores: publicStoresMemoryCache.map((store) => ({ ...store })),
-      exchangeCards: [],
-      exchangers: [],
-      restoredFromStoreMemory: true
-    };
-  }
+  const memorySnapshot = catalogHasContent(publicCatalogMemorySnapshot)
+    ? { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true }
+    : null;
   const loadRow = async (id, label) => {
     const result = await withTimeout(
       supabase.from("app_settings").select(publicCatalogSettingsSelect).eq("id", id).maybeSingle(),
@@ -982,23 +997,41 @@ async function loadPublicCatalogSnapshot() {
     if (!result?.data) return null;
     return compactPublicCatalogData(result.data || {});
   };
-  const primary = await loadRow(publicCatalogRowId, "public catalog query");
-  if (catalogHasContent(primary)) {
-    publicCatalogMemorySnapshot = cloneJson(primary);
-    return primary;
+  const [primary, backup] = await Promise.all([
+    loadRow(publicCatalogRowId, "public catalog query"),
+    loadRow(publicCatalogBackupRowId, "public catalog backup query")
+  ]);
+  const fallbackCatalog = mergePublicCatalogSnapshots(backup || {}, memorySnapshot || {});
+  const merged = mergePublicCatalogSnapshots(primary || {}, fallbackCatalog);
+  if (catalogHasContent(merged)) {
+    const restoredFromBackup = Boolean(
+      backup && (
+        ((!Array.isArray(primary?.stores) || !primary.stores.length) && arrayHasItems(backup.stores)) ||
+        ((!Array.isArray(primary?.exchangers) || !primary.exchangers.length) && arrayHasItems(backup.exchangers)) ||
+        ((!Array.isArray(primary?.exchangeCards) || !primary.exchangeCards.length) && arrayHasItems(backup.exchangeCards))
+      )
+    );
+    publicCatalogMemorySnapshot = cloneJson(merged);
+    if (restoredFromBackup) {
+      console.warn("[public-catalog] repaired snapshot from backup", {
+        stores: merged.stores?.length || 0,
+        exchangers: merged.exchangers?.length || 0,
+        exchangeCards: merged.exchangeCards?.length || 0
+      });
+      savePublicCatalogSnapshot(merged, merged.stores).catch((error) => {
+        console.error("[public-catalog] backup repair save failed", { message: error.message });
+      });
+    }
+    return restoredFromBackup ? { ...merged, restoredFromBackup: true } : merged;
   }
-  const backup = await loadRow(publicCatalogBackupRowId, "public catalog backup query");
-  if (catalogHasContent(backup)) {
-    publicCatalogMemorySnapshot = cloneJson(backup);
-    console.warn("[public-catalog] using backup snapshot", {
-      stores: backup.stores?.length || 0,
-      exchangers: backup.exchangers?.length || 0,
-      exchangeCards: backup.exchangeCards?.length || 0
-    });
-    return { ...backup, restoredFromBackup: true };
-  }
-  if (catalogHasContent(publicCatalogMemorySnapshot)) {
-    return { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true };
+  if (memorySnapshot) return memorySnapshot;
+  if (Array.isArray(publicStoresMemoryCache) && publicStoresMemoryCache.length) {
+    return {
+      stores: publicStoresMemoryCache.map((store) => ({ ...store })),
+      exchangeCards: [],
+      exchangers: [],
+      restoredFromStoreMemory: true
+    };
   }
   return null;
 }
@@ -2177,7 +2210,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
-    res.json({ token, ...authStateForUser(user, state) });
+    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
   } catch (error) {
     next(error);
   }
@@ -2215,7 +2248,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     appendAdminLog("user_login", user.login, { login: user.login, referrerLogin: repairedReferral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
-    res.json({ token, ...authStateForUser(user, state) });
+    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
   } catch (error) {
     next(error);
   }
@@ -2240,7 +2273,7 @@ app.post("/api/auth/restore-session", async (req, res, next) => {
     appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
       console.error("[auth] restore session log failed", { login: user.login, message: error.message });
     });
-    res.json({ token, ...authStateForUser(user, state) });
+    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
   } catch (error) {
     next(error);
   }
@@ -5116,6 +5149,33 @@ const PRESERVED_STATE_OBJECT_KEYS = [
   "referralPeriod"
 ];
 
+function restoreMissingStateCollections(state = {}, backup = {}, options = {}) {
+  if (!stateHasDurableContent(backup)) return state;
+  const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
+  if (options.allowEmptyExchangers) allowEmptyKeys.add("exchangers");
+  let changed = false;
+  const next = { ...(state || {}) };
+  PRESERVED_STATE_ARRAY_KEYS.forEach((key) => {
+    if (allowEmptyKeys.has(key)) return;
+    const current = Array.isArray(next[key]) ? next[key] : [];
+    const backupItems = Array.isArray(backup[key]) ? backup[key] : [];
+    if (!current.length && backupItems.length) {
+      next[key] = backupItems;
+      changed = true;
+    }
+  });
+  PRESERVED_STATE_OBJECT_KEYS.forEach((key) => {
+    if (allowEmptyKeys.has(key)) return;
+    const current = next[key];
+    const backupValue = backup[key];
+    if (!hasPlainObjectKeys(current) && hasPlainObjectKeys(backupValue)) {
+      next[key] = backupValue;
+      changed = true;
+    }
+  });
+  return changed ? next : state;
+}
+
 function preserveExistingStateCollections(next, currentData = {}, incomingState = {}, options = {}) {
   const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
   if (options.allowEmptyExchangers) allowEmptyKeys.add("exchangers");
@@ -5139,6 +5199,9 @@ function preserveExistingStateCollections(next, currentData = {}, incomingState 
 
 async function loadSettingsBackupState() {
   if (!supabase) return {};
+  if (settingsBackupMemorySnapshot && Date.now() - settingsBackupMemoryAt < settingsBackupCacheMs) {
+    return cloneJson(settingsBackupMemorySnapshot);
+  }
   const result = await withTimeout(
     supabase.from("app_settings").select("data").eq("id", mainSettingsBackupRowId).maybeSingle(),
     "main settings backup query",
@@ -5148,6 +5211,10 @@ async function loadSettingsBackupState() {
     return null;
   });
   const state = result?.data?.data || {};
+  if (stateHasDurableContent(state)) {
+    settingsBackupMemorySnapshot = cloneJson(state);
+    settingsBackupMemoryAt = Date.now();
+  }
   return stateHasDurableContent(state) ? state : {};
 }
 
@@ -5158,6 +5225,8 @@ async function saveSettingsBackupState(state = {}) {
     backupOf: mainSettingsRowId,
     backupAt: Date.now()
   };
+  settingsBackupMemorySnapshot = cloneJson(backup);
+  settingsBackupMemoryAt = Date.now();
   await withTimeout(
     supabase.from("app_settings").upsert({ id: mainSettingsBackupRowId, data: backup }, { onConflict: "id" }),
     "main settings backup save",
@@ -5169,7 +5238,13 @@ async function saveSettingsBackupState(state = {}) {
 
 async function saveSettingsState(state, options = {}) {
   const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
-  const currentData = currentSettings?.data || await loadSettingsBackupState();
+  let currentData = currentSettings?.data || {};
+  const backupData = await loadSettingsBackupState();
+  if (!stateHasDurableContent(currentData)) {
+    if (stateHasDurableContent(backupData)) currentData = { ...currentData, ...backupData };
+  } else if (stateHasDurableContent(backupData)) {
+    currentData = restoreMissingStateCollections(currentData, backupData, options);
+  }
   const incomingExchangers = Array.isArray(state?.exchangers) ? state.exchangers : null;
   const currentExchangers = Array.isArray(currentData.exchangers) ? currentData.exchangers : [];
   const preserveExistingExchangers = !options.allowEmptyExchangers
@@ -5818,17 +5893,19 @@ async function loadSettingsState() {
   await ensureSeed();
   const { data: settings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
   let state = settings?.data || {};
+  const backupState = await loadSettingsBackupState();
   if (!stateHasDurableContent(state)) {
-    const backupState = await loadSettingsBackupState();
-    if (stateHasDurableContent(backupState)) {
-      state = { ...state, ...backupState, restoredFromBackup: true };
-      console.warn("[settings] using main backup state", {
-        ownerStores: state.ownerStores?.length || 0,
-        publicStoresCache: state.publicStoresCache?.length || 0,
-        exchangers: state.exchangers?.length || 0,
-        orders: state.orders?.length || 0
-      });
-    }
+    if (stateHasDurableContent(backupState)) state = { ...state, ...backupState, restoredFromBackup: true };
+  } else {
+    state = restoreMissingStateCollections(state, backupState);
+  }
+  if (state.restoredFromBackup) {
+    console.warn("[settings] using main backup state", {
+      ownerStores: state.ownerStores?.length || 0,
+      publicStoresCache: state.publicStoresCache?.length || 0,
+      exchangers: state.exchangers?.length || 0,
+      orders: state.orders?.length || 0
+    });
   }
   state.telegramBot = state.telegramBot || { users: {}, sentMessages: {} };
   state.telegramBot.users = state.telegramBot.users || {};
