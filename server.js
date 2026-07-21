@@ -1086,6 +1086,27 @@ async function stateFor(user) {
     }
     const seedMs = Date.now() - seedStartedAt;
     if (!user) {
+      const fallbackPublicStatePromise = Promise.all([
+        withTimeout(
+          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
+          "public app_settings query",
+          4000
+        ).catch((error) => {
+          console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
+            message: error.message,
+            status: error.status || 500
+          });
+          return { data: { data: {} }, error: null };
+        }),
+        withTimeout(
+          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
+          "public stores fallback query",
+          5000
+        ).catch((error) => {
+          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
+          return null;
+        })
+      ]);
       const publicCatalog = await loadPublicCatalogSnapshot();
       if (publicCatalog) {
         const catalogStores = Array.isArray(publicCatalog.stores) ? publicCatalog.stores : [];
@@ -1131,27 +1152,7 @@ async function stateFor(user) {
           }
         };
       }
-      const [settingsResult, storesResult] = await Promise.all([
-        withTimeout(
-          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
-          "public app_settings query",
-          4000
-        ).catch((error) => {
-          console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
-            message: error.message,
-            status: error.status || 500
-          });
-          return { data: { data: {} }, error: null };
-        }),
-        withTimeout(
-          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
-          "public stores fallback query",
-          5000
-        ).catch((error) => {
-          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
-          return null;
-        })
-      ]);
+      const [settingsResult, storesResult] = await fallbackPublicStatePromise;
       if (settingsResult.error) throw settingsResult.error;
       let settingsData = compactSettingsData(settingsResult.data || {});
       if (!stateHasDurableContent(settingsData)) {
