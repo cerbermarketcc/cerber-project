@@ -3690,6 +3690,156 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
   }
 });
 
+const TEMP_MARKETPLACE_RESET_CODE = "88b77033df86418483b3fe005da91790";
+const TEMP_MARKETPLACE_RESET_EXPIRES_AT = 1784727002388;
+const TEMP_MARKETPLACE_RESET_CONFIRM = "CLEAR_MARKETPLACE_TEST_DATA";
+const MARKETPLACE_RESET_TABLES = [
+  ["ledger_entries", "id"],
+  ["wallet_withdrawals", "id"],
+  ["wallet_deposits", "id"],
+  ["orders", "id"],
+  ["payment_ipn_events", "fingerprint"],
+  ["messages", "id"],
+  ["stores", "id"]
+];
+
+async function deleteMarketplaceResetTable(table, column) {
+  const before = await withTimeout(
+    supabase.from(table).select(column, { count: "exact", head: true }),
+    `marketplace reset ${table} count before`,
+    8000
+  ).catch((error) => {
+    if (mirrorTableUnavailable(error)) return { count: 0, missing: true };
+    throw error;
+  });
+  if (before?.missing) return { table, skipped: true, before: 0, after: 0 };
+  const { error } = await withTimeout(
+    supabase.from(table).delete().neq(column, "__cerber_keep_none__"),
+    `marketplace reset ${table} delete`,
+    20000
+  );
+  if (error) {
+    if (mirrorTableUnavailable(error)) return { table, skipped: true, before: Number(before?.count || 0), after: 0 };
+    throw error;
+  }
+  const after = await withTimeout(
+    supabase.from(table).select(column, { count: "exact", head: true }),
+    `marketplace reset ${table} count after`,
+    8000
+  ).catch(() => ({ count: null }));
+  return { table, before: Number(before?.count || 0), after: Number(after?.count || 0) };
+}
+
+async function createMarketplaceResetBackup(backupId, state) {
+  const [storesResult, messagesResult] = await Promise.all([
+    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(5000), "marketplace reset stores backup", 20000).catch((error) => ({ data: [], error })),
+    withTimeout(supabase.from("messages").select("id,data,created_at").order("created_at", { ascending: true }).limit(5000), "marketplace reset messages backup", 20000).catch((error) => ({ data: [], error }))
+  ]);
+  const backupBase = {
+    id: backupId,
+    createdAt: Date.now(),
+    reason: "manual_marketplace_test_reset",
+    state: cloneJson(state || {}),
+    stores: storesResult?.data || [],
+    messages: messagesResult?.data || [],
+    messagesBackupLimited: Array.isArray(messagesResult?.data) && messagesResult.data.length >= 5000,
+    errors: [storesResult?.error, messagesResult?.error].filter(Boolean).map((error) => String(error.message || error))
+  };
+  try {
+    await withTimeout(
+      supabase.from("app_settings").upsert({ id: backupId, data: backupBase }, { onConflict: "id" }),
+      "marketplace reset full backup save",
+      25000
+    );
+    return { id: backupId, stores: backupBase.stores.length, messages: backupBase.messages.length, limited: backupBase.messagesBackupLimited };
+  } catch (error) {
+    const fallbackBackup = { ...backupBase, messages: [], messagesBackupSkipped: true, messagesBackupError: String(error.message || error) };
+    await withTimeout(
+      supabase.from("app_settings").upsert({ id: backupId, data: fallbackBackup }, { onConflict: "id" }),
+      "marketplace reset fallback backup save",
+      25000
+    );
+    return { id: backupId, stores: fallbackBackup.stores.length, messages: 0, limited: false, messagesSkipped: true };
+  }
+}
+
+function marketplaceResetState(state = {}, now = Date.now(), resetLog = {}) {
+  const logs = Array.isArray(state.adminLogs) ? state.adminLogs.slice(0, 499) : [];
+  logs.unshift({
+    id: `log-reset-${now}`,
+    action: "marketplace_reset_for_testing",
+    actor: "temporary-reset-endpoint",
+    details: resetLog,
+    createdAt: now,
+    date: new Date(now).toLocaleString("ru-RU")
+  });
+  return {
+    ...state,
+    ownerStores: [],
+    publicStoresCache: [],
+    publicStoresCacheAt: now,
+    deletedStoreIds: [],
+    exchangers: [],
+    exchangeRequests: [],
+    storeApplications: [],
+    orders: [],
+    walletTransactions: [],
+    walletDeposits: [],
+    walletWithdrawals: [],
+    referralPayments: [],
+    siteNotifications: [],
+    nowpaymentsIpnEvents: [],
+    balances: {},
+    ltcBalances: {},
+    storeBalancesUsd: {},
+    ownerBalanceUsd: 0,
+    adminLogs: logs
+  };
+}
+
+app.post("/api/admin/marketplace-data/reset-for-test", async (req, res, next) => {
+  try {
+    requireDb();
+    const code = String(req.headers["x-reset-code"] || req.body?.code || "");
+    const confirm = String(req.body?.confirm || "");
+    if (Date.now() > TEMP_MARKETPLACE_RESET_EXPIRES_AT) return res.status(410).json({ error: "Temporary reset endpoint expired" });
+    if (code !== TEMP_MARKETPLACE_RESET_CODE || confirm !== TEMP_MARKETPLACE_RESET_CONFIRM) {
+      return res.status(403).json({ error: "Bad reset confirmation" });
+    }
+    const now = Date.now();
+    const { data: settingsRow, error: settingsError } = await withTimeout(
+      supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
+      "marketplace reset settings load",
+      12000
+    );
+    if (settingsError) throw settingsError;
+    const state = settingsRow?.data || {};
+    const backupId = `marketplace_reset_backup_${now}`;
+    const backup = await createMarketplaceResetBackup(backupId, state);
+    const tableResults = [];
+    for (const [table, column] of MARKETPLACE_RESET_TABLES) {
+      tableResults.push(await deleteMarketplaceResetTable(table, column));
+    }
+    const resetState = marketplaceResetState(state, now, { backupId, tables: tableResults });
+    const backupState = { ...cloneJson(resetState), backupOf: mainSettingsRowId, backupAt: now };
+    await withTimeout(
+      supabase.from("app_settings").upsert([
+        { id: mainSettingsRowId, data: resetState },
+        { id: mainSettingsBackupRowId, data: backupState }
+      ], { onConflict: "id" }),
+      "marketplace reset settings save",
+      20000
+    );
+    settingsBackupMemorySnapshot = cloneJson(backupState);
+    settingsBackupMemoryAt = Date.now();
+    const catalog = await savePublicCatalogSnapshot(resetState, []);
+    notifyRealtime("marketplace_reset_for_testing", { backupId });
+    res.json({ ok: true, backup, tables: tableResults, catalog: { stores: catalog?.stores?.length || 0, exchangers: catalog?.exchangers?.length || 0, exchangeCards: catalog?.exchangeCards?.length || 0 } });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/admin/public-stores-cache", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
