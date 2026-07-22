@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import dns from "node:dns";
 import fs from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -61,6 +63,80 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function requestHeadersToObject(headers = {}) {
+  if (!headers) return {};
+  if (typeof headers.forEach === "function") {
+    const output = {};
+    headers.forEach((value, key) => {
+      output[key] = value;
+    });
+    return output;
+  }
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return { ...headers };
+}
+
+function responseHeadersToObject(headers = {}) {
+  const output = {};
+  Object.entries(headers || {}).forEach(([key, value]) => {
+    output[key] = Array.isArray(value) ? value.join(", ") : String(value ?? "");
+  });
+  return output;
+}
+
+function bodyToBuffer(body) {
+  if (body === null || body === undefined) return null;
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === "string") return Buffer.from(body);
+  if (body instanceof URLSearchParams) return Buffer.from(body.toString());
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  return Buffer.from(String(body));
+}
+
+function supabaseHttpRequest(input, init = {}, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(typeof input === "string" ? input : (input?.url || String(input)));
+    const method = String(init.method || input?.method || "GET").toUpperCase();
+    const body = bodyToBuffer(init.body);
+    const headers = {
+      ...requestHeadersToObject(input?.headers),
+      ...requestHeadersToObject(init.headers)
+    };
+    if (body && !headers["content-length"] && !headers["Content-Length"]) headers["content-length"] = String(body.length);
+    const client = url.protocol === "http:" ? http : https;
+    const req = client.request(url, {
+      method,
+      headers,
+      family: 4,
+      timeout: timeoutMs
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve(new Response(Buffer.concat(chunks), {
+          status: res.statusCode || 0,
+          statusText: res.statusMessage || "",
+          headers: responseHeadersToObject(res.headers)
+        }));
+      });
+    });
+    const abort = () => {
+      const error = new Error("Supabase request aborted");
+      error.name = "AbortError";
+      req.destroy(error);
+    };
+    if (init.signal) {
+      if (init.signal.aborted) return abort();
+      init.signal.addEventListener("abort", abort, { once: true });
+      req.on("close", () => init.signal.removeEventListener("abort", abort));
+    }
+    req.on("timeout", abort);
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 async function supabaseFetchWithTimeout(input, init = {}) {
   const timeoutMs = Math.max(5000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 20000));
   const method = String(init.method || "GET").toUpperCase();
@@ -73,7 +149,7 @@ async function supabaseFetchWithTimeout(input, init = {}) {
     const signals = [controller.signal, init.signal].filter(Boolean);
     const signal = signals.length > 1 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : controller.signal;
     try {
-      const response = await fetch(input, { ...init, signal });
+      const response = await supabaseHttpRequest(input, { ...init, signal }, timeoutMs);
       if (!canRetry || response.status < 500 || attempt >= maxAttempts) return response;
       lastError = new Error(`Supabase fetch ${response.status}`);
     } catch (error) {
