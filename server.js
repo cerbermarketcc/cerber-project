@@ -36,6 +36,7 @@ const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
+const dbQueryTimeoutMs = Math.max(12000, Number(process.env.DB_QUERY_TIMEOUT_MS || 25000));
 const exchangerReviewCooldownMs = 6 * 60 * 60 * 1000;
 const visualMarketplaceResetAt = 1784727156485;
 const groupChatHiddenSiteEmojiIds = new Set(["024", "025", "026", "027", "028", "029", "030", "031", "032", "033", "034", "035", "036", "037", "038"]);
@@ -138,7 +139,7 @@ function supabaseHttpRequest(input, init = {}, timeoutMs = 20000) {
 }
 
 async function supabaseFetchWithTimeout(input, init = {}) {
-  const timeoutMs = Math.max(5000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 20000));
+  const timeoutMs = Math.max(10000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 45000));
   const method = String(init.method || "GET").toUpperCase();
   const canRetry = ["GET", "HEAD"].includes(method);
   const maxAttempts = canRetry ? Math.max(1, Number(process.env.SUPABASE_FETCH_RETRIES || 3)) : 1;
@@ -862,13 +863,16 @@ function requireDb() {
 }
 
 function withTimeout(promise, label, timeoutMs = 8000) {
+  const effectiveTimeoutMs = /supabase|query|settings|stores|messages|profiles|sessions|catalog|table|seed|backup/i.test(String(label || ""))
+    ? Math.max(timeoutMs, dbQueryTimeoutMs)
+    : timeoutMs;
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      const error = new Error(`${label} timeout after ${timeoutMs}ms`);
+      const error = new Error(`${label} timeout after ${effectiveTimeoutMs}ms`);
       error.status = 504;
       reject(error);
-    }, timeoutMs);
+    }, effectiveTimeoutMs);
   });
 
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
