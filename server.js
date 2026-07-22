@@ -57,13 +57,34 @@ try {
   console.warn("[dns] ipv4first unavailable", { message: error.message });
 }
 
-function supabaseFetchWithTimeout(input, init = {}) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function supabaseFetchWithTimeout(input, init = {}) {
   const timeoutMs = Math.max(5000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 20000));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const signals = [controller.signal, init.signal].filter(Boolean);
-  const signal = signals.length > 1 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : controller.signal;
-  return fetch(input, { ...init, signal }).finally(() => clearTimeout(timer));
+  const method = String(init.method || "GET").toUpperCase();
+  const canRetry = ["GET", "HEAD"].includes(method);
+  const maxAttempts = canRetry ? Math.max(1, Number(process.env.SUPABASE_FETCH_RETRIES || 3)) : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signals = [controller.signal, init.signal].filter(Boolean);
+    const signal = signals.length > 1 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : controller.signal;
+    try {
+      const response = await fetch(input, { ...init, signal });
+      if (!canRetry || response.status < 500 || attempt >= maxAttempts) return response;
+      lastError = new Error(`Supabase fetch ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (!canRetry || attempt >= maxAttempts || error?.name === "AbortError") throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    await delay(250 * attempt);
+  }
+  throw lastError || new Error("Supabase fetch failed");
 }
 
 const supabase = supabaseUrl && supabaseServiceKey
@@ -2533,7 +2554,10 @@ app.get("/api/health/deep", async (_req, res) => {
       return { configured: true, mainSettings: Boolean(data) };
     }, 10000);
     const tables = ["sessions", "orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
-    const tableResults = await Promise.all(tables.map(async (table) => [table, await timedDbCheck(`health table ${table}`, () => tableHealth(table), 4000)]));
+    const tableResults = [];
+    for (const table of tables) {
+      tableResults.push([table, await timedDbCheck(`health table ${table}`, () => tableHealth(table), 10000)]);
+    }
     health.checks.tables = Object.fromEntries(tableResults);
     const state = supabase ? await loadSettingsState().catch(() => ({})) : {};
     const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
