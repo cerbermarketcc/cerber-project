@@ -48,6 +48,7 @@ let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
 const syncedReferralCodes = new Set();
 const SHOP_PANEL_FORM_LOCK_MS = 5 * 60 * 1000;
+const VISUAL_MARKETPLACE_RESET_AT = 1784727156485;
 const PUBLIC_CATALOG_STATE_KEYS = ["stores", "exchangeCards", "exchangers"];
 const PARTIAL_STATE_ARRAY_KEYS = [
   ...PUBLIC_CATALOG_STATE_KEYS,
@@ -1300,6 +1301,47 @@ function merge(base, saved) {
   return { ...structuredClone(base), ...saved };
 }
 
+function visualResetTimestamp(item = {}) {
+  const candidates = [
+    item.createdAt,
+    item.created_at,
+    item.paidAt,
+    item.completedAt,
+    item.closedAt,
+    item.updatedAt,
+    item.updated_at,
+    item.date
+  ];
+  for (const value of candidates) {
+    if (value === null || value === undefined || value === "") continue;
+    const ts = typeof value === "number" ? value : Date.parse(value);
+    if (Number.isFinite(ts) && ts > 0) return ts;
+  }
+  return 0;
+}
+
+function isAfterVisualMarketplaceReset(item = {}) {
+  if (!VISUAL_MARKETPLACE_RESET_AT) return true;
+  const ts = visualResetTimestamp(item);
+  return ts ? ts >= VISUAL_MARKETPLACE_RESET_AT : true;
+}
+
+function isMarketplaceRecordAfterVisualReset(item = {}) {
+  if (!VISUAL_MARKETPLACE_RESET_AT) return true;
+  const ts = visualResetTimestamp(item);
+  return Boolean(ts && ts >= VISUAL_MARKETPLACE_RESET_AT);
+}
+
+function applyVisualMarketplaceReset(next = {}) {
+  if (!VISUAL_MARKETPLACE_RESET_AT) return next;
+  ["stores", "exchangers", "exchangeRequests", "storeApplications", "orders", "walletTransactions", "walletDeposits", "walletWithdrawals", "referralPayments", "siteNotifications"].forEach((key) => {
+    if (Array.isArray(next[key])) next[key] = next[key].filter(isMarketplaceRecordAfterVisualReset);
+  });
+  next.balances = {};
+  next.ltcBalances = {};
+  return next;
+}
+
 function normalizeDb(next) {
   if (!Array.isArray(next.orders)) next.orders = [];
   if (!Array.isArray(next.groupMessages)) next.groupMessages = [];
@@ -1416,6 +1458,7 @@ function normalizeDb(next) {
   }));
   next.stores = (next.stores || []).filter((store) => !["marketolog", "test"].includes(String(store.id || "")));
   next.exchangeCards = next.exchangeCards.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || ""))).map(normalizeExchangeCard);
+  applyVisualMarketplaceReset(next);
 }
 
 function normalizeProduct(product, store = {}) {

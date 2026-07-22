@@ -35,6 +35,7 @@ const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const exchangerReviewCooldownMs = 6 * 60 * 60 * 1000;
+const visualMarketplaceResetAt = 1784727156485;
 const groupChatHiddenSiteEmojiIds = new Set(["024", "025", "026", "027", "028", "029", "030", "031", "032", "033", "034", "035", "036", "037", "038"]);
 const walletCoins = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC" },
@@ -600,6 +601,81 @@ function mergeStoreSources(primaryStores = [], fallbackStores = []) {
   return Array.from(map.values());
 }
 
+function visualResetTimestamp(item = {}) {
+  const candidates = [
+    item.createdAt,
+    item.created_at,
+    item.paidAt,
+    item.completedAt,
+    item.closedAt,
+    item.updatedAt,
+    item.updated_at,
+    item.date
+  ];
+  for (const value of candidates) {
+    if (value === null || value === undefined || value === "") continue;
+    const ts = typeof value === "number" ? value : Date.parse(value);
+    if (Number.isFinite(ts) && ts > 0) return ts;
+  }
+  return 0;
+}
+
+function isAfterVisualMarketplaceReset(item = {}) {
+  if (!visualMarketplaceResetAt) return true;
+  const ts = visualResetTimestamp(item);
+  return ts ? ts >= visualMarketplaceResetAt : true;
+}
+
+function isMarketplaceRecordAfterVisualReset(item = {}) {
+  if (!visualMarketplaceResetAt) return true;
+  const ts = visualResetTimestamp(item);
+  return Boolean(ts && ts >= visualMarketplaceResetAt);
+}
+
+function marketplaceMessageAfterVisualReset(message = {}) {
+  if (!visualMarketplaceResetAt) return true;
+  const ts = visualResetTimestamp(message);
+  if (!ts || ts >= visualMarketplaceResetAt) return true;
+  const system = String(message.system || "").toLowerCase();
+  return !(
+    message.orderId ||
+    message.disputeThreadId ||
+    message.storeId ||
+    message.exchangeRequestId ||
+    ["store-sale-ledger", "dispute", "order", "exchange", "withdraw", "deposit", "payment"].some((token) => system.includes(token))
+  );
+}
+
+function sanitizeStoresForVisualReset(stores = []) {
+  return (Array.isArray(stores) ? stores : []).filter(isMarketplaceRecordAfterVisualReset);
+}
+
+function sanitizeMessagesForVisualReset(messages = []) {
+  return (Array.isArray(messages) ? messages : []).filter(marketplaceMessageAfterVisualReset);
+}
+
+function sanitizeStateForVisualReset(state = {}) {
+  if (!visualMarketplaceResetAt || !state || typeof state !== "object") return state || {};
+  const next = { ...state };
+  next.ownerStores = sanitizeStoresForVisualReset(next.ownerStores);
+  next.publicStoresCache = sanitizeStoresForVisualReset(next.publicStoresCache);
+  next.stores = sanitizeStoresForVisualReset(next.stores);
+  next.exchangers = (Array.isArray(next.exchangers) ? next.exchangers : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.exchangeRequests = (Array.isArray(next.exchangeRequests) ? next.exchangeRequests : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.storeApplications = (Array.isArray(next.storeApplications) ? next.storeApplications : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.orders = (Array.isArray(next.orders) ? next.orders : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.walletTransactions = (Array.isArray(next.walletTransactions) ? next.walletTransactions : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.walletDeposits = (Array.isArray(next.walletDeposits) ? next.walletDeposits : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.walletWithdrawals = (Array.isArray(next.walletWithdrawals) ? next.walletWithdrawals : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.referralPayments = (Array.isArray(next.referralPayments) ? next.referralPayments : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.siteNotifications = (Array.isArray(next.siteNotifications) ? next.siteNotifications : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.nowpaymentsIpnEvents = (Array.isArray(next.nowpaymentsIpnEvents) ? next.nowpaymentsIpnEvents : []).filter(isMarketplaceRecordAfterVisualReset);
+  next.deletedStoreIds = [];
+  next.balances = {};
+  next.ltcBalances = {};
+  return next;
+}
+
 function publicProductForState(product = {}, store = {}) {
   const item = { ...product };
   const images = Array.isArray(item.images) ? item.images : [];
@@ -949,18 +1025,19 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
     : (Array.isArray(state.publicStoresCache) && state.publicStoresCache.length
       ? state.publicStoresCache
       : (Array.isArray(state.ownerStores) ? state.ownerStores : []));
-  const stores = sourceStores
+  const cleanState = sanitizeStateForVisualReset(state);
+  const stores = sanitizeStoresForVisualReset(sourceStores)
     .map((store) => publicStoreForState(store))
-    .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(state, store));
+    .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(cleanState, store));
   return {
-    theme: state.theme || "light",
-    lang: state.lang || "ru",
+    theme: cleanState.theme || "light",
+    lang: cleanState.lang || "ru",
     stores,
-    exchangeCards: publicExchangeCardsForState(state.exchangeCards),
-    exchangers: publicExchangersForState(state.exchangers || []),
-    groupSettings: normalizeGroupSettings(state.groupSettings || {}),
-    referralPeriod: state.referralPeriod || {},
-    filters: state.filters || {},
+    exchangeCards: publicExchangeCardsForState(cleanState.exchangeCards),
+    exchangers: publicExchangersForState(cleanState.exchangers || []),
+    groupSettings: normalizeGroupSettings(cleanState.groupSettings || {}),
+    referralPeriod: cleanState.referralPeriod || {},
+    filters: cleanState.filters || {},
     updatedAt: Date.now()
   };
 }
@@ -1159,7 +1236,7 @@ async function stateFor(user) {
       ]);
       const publicCatalog = await loadPublicCatalogSnapshot();
       if (publicCatalog) {
-        const catalogStores = Array.isArray(publicCatalog.stores) ? publicCatalog.stores : [];
+        const catalogStores = sanitizeStoresForVisualReset(publicCatalog.stores);
         if (catalogStores.length) rememberPublicStoresCache(catalogStores);
         return {
           user: null,
@@ -1174,7 +1251,7 @@ async function stateFor(user) {
             messages: [],
             orders: [],
             exchangeCards: Array.isArray(publicCatalog.exchangeCards) ? publicCatalog.exchangeCards : [],
-            exchangers: Array.isArray(publicCatalog.exchangers) ? publicCatalog.exchangers : [],
+            exchangers: publicExchangersForState(publicCatalog.exchangers || []),
             exchangeRequests: [],
             groupMessages: [],
             groupSettings: normalizeGroupSettings(publicCatalog.groupSettings || {}),
@@ -1216,6 +1293,7 @@ async function stateFor(user) {
           });
         }
       }
+      settingsData = sanitizeStateForVisualReset(settingsData);
       let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
       if (!publicStores.length && Array.isArray(settingsData.ownerStores) && settingsData.ownerStores.length) {
         publicStores = settingsData.ownerStores
@@ -1226,7 +1304,7 @@ async function stateFor(user) {
       if (!publicStores.length) {
         const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
         if (storeRows.length) {
-          publicStores = publicStoresFromRows(storeRows, settingsData);
+          publicStores = publicStoresFromRows(storeRows.filter((row) => isMarketplaceRecordAfterVisualReset({ ...row.data, createdAt: row.data?.createdAt || row.created_at })), settingsData);
           rememberPublicStoresCache(publicStores);
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
@@ -1234,7 +1312,7 @@ async function stateFor(user) {
         }
       }
       if (!publicStores.length && publicStoresMemoryCache.length) {
-        publicStores = publicStoresMemoryCache.map((store) => ({ ...store }));
+        publicStores = sanitizeStoresForVisualReset(publicStoresMemoryCache).map((store) => ({ ...store }));
       }
       if (!publicStores.length) {
         refreshPublicStoresCacheInBackground(settingsData);
@@ -1351,6 +1429,7 @@ async function stateFor(user) {
         });
       }
     }
+    settingsData = sanitizeStateForVisualReset(settingsData);
     if (user?.login) {
       const beforeCode = settingsData.referralCodes?.[loginKey(user.login)] || "";
       const ensuredCode = ensureReferralCodeForState(settingsData, user.login);
@@ -1366,22 +1445,22 @@ async function stateFor(user) {
         console.error("[stateFor] order normalization save failed", { message: error.message });
       });
     }
-    const allMessages = (messages || []).map((row) => row.data);
+    const allMessages = sanitizeMessagesForVisualReset((messages || []).map((row) => row.data));
     let orders = hydrateOrdersDisputeHistory(
       (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
       allMessages
     );
     const storesFromDb = Array.isArray(storesResult.data)
-      ? storesResult.data.map((row) => row.data)
+      ? sanitizeStoresForVisualReset(storesResult.data.map((row) => row.data))
       : null;
     const fallbackStores = Array.isArray(settingsData.publicStoresCache)
       ? mergeStoreSources(settingsData.publicStoresCache, settingsData.ownerStores || [])
       : Array.isArray(settingsData.ownerStores)
         ? settingsData.ownerStores
       : [];
-    const allStores = storesFromDb
+    const allStores = sanitizeStoresForVisualReset(storesFromDb
       ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
-      : fallbackStores;
+      : fallbackStores);
     const embeddedStoreOrders = allStores.flatMap((store) => (
       Array.isArray(store?.productOrders)
         ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id }))
@@ -2047,6 +2126,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
       } : {})
     };
   }
+  state = sanitizeStateForVisualReset(state);
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const messages = (await withTimeout(
     supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
@@ -2072,8 +2152,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
     console.error("[store-admin] store fallback", { storeId: id, message: error.message });
     return { data: null };
   });
-  const stateStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
-  const store = storeRow?.data || stateStores.find((item) => String(item?.id || "") === id) || null;
+  const stateStores = sanitizeStoresForVisualReset(mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []));
+  let store = storeRow?.data || stateStores.find((item) => String(item?.id || "") === id) || null;
+  if (store && !isMarketplaceRecordAfterVisualReset(store)) store = null;
   const embeddedOrders = Array.isArray(store?.productOrders)
     ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
     : [];
@@ -2094,9 +2175,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
     seenMessageIds.add(messageId);
     messageRows.push(row);
   });
-  const storeMessages = messageRows
+  const storeMessages = sanitizeMessagesForVisualReset(messageRows
     .map((row) => row.data)
-    .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id);
+    .filter((message) => String(message.storeId || "") === id || String(message.storeTag || "") === id));
   storeMessages.map((message) => storeSaleLedgerOrderFromMessage(message, store)).filter(Boolean).forEach((order) => {
     const orderId = String(order?.id || "");
     if (orderId && !seenOrderIds.has(orderId)) {
@@ -5923,6 +6004,7 @@ async function loadSettingsState() {
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
   await mergeFinanceMirrorIntoState(state);
+  state = sanitizeStateForVisualReset(state);
   if (await normalizeServerOrders(state)) {
     await saveSettingsState(state);
   }
@@ -6107,13 +6189,14 @@ async function adminLoadMarketplace() {
     state.referralPeriod = state.referralPeriod || publicCatalog.referralPeriod || {};
     state.filters = state.filters || publicCatalog.filters || {};
   }
+  state = sanitizeStateForVisualReset(state);
   const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
   const fallbackStores = Array.isArray(state.ownerStores) && state.ownerStores.length
     ? state.ownerStores
     : (Array.isArray(state.publicStoresCache) ? state.publicStoresCache : []);
-  const mergedStores = mergeStoreSources(storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), fallbackStores);
+  const mergedStores = sanitizeStoresForVisualReset(mergeStoreSources(storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), fallbackStores));
   const messages = Array.isArray(messagesResult?.data) ? messagesResult.data : [];
-  const messageItems = messages.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 }));
+  const messageItems = sanitizeMessagesForVisualReset(messages.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })));
   recoverMissingProductOrdersFromDisputeMessages(state, mergedStores, messageItems);
   return {
     state,
@@ -7122,7 +7205,7 @@ function addExchangerReview(exchanger, user, review) {
 
 function publicExchangersForState(exchangers = []) {
   return (Array.isArray(exchangers) ? exchangers : [])
-    .filter((item) => item && item.status !== "disabled" && item.active !== false && item.login)
+    .filter((item) => item && isMarketplaceRecordAfterVisualReset(item) && item.status !== "disabled" && item.active !== false && item.login)
     .map((item) => ({
       id: String(item.id || ""),
       login: String(item.login || item.ownerLogin || ""),
@@ -7142,6 +7225,7 @@ function publicExchangersForState(exchangers = []) {
 function adminExchangersForState(exchangers = [], profiles = []) {
   const profileByKey = new Map((Array.isArray(profiles) ? profiles : []).map((user) => [loginKey(user.login || user.login_key), user]));
   return (Array.isArray(exchangers) ? exchangers : [])
+    .filter(isAfterVisualMarketplaceReset)
     .map((item) => {
       const login = String(item.login || item.ownerLogin || "");
       const profile = profileByKey.get(loginKey(login));
