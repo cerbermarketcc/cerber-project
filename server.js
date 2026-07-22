@@ -3691,7 +3691,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
 });
 
 const TEMP_MARKETPLACE_RESET_CODE = "88b77033df86418483b3fe005da91790";
-const TEMP_MARKETPLACE_RESET_EXPIRES_AT = 1784727002388;
+const TEMP_MARKETPLACE_RESET_EXPIRES_AT = 1784727246883;
 const TEMP_MARKETPLACE_RESET_CONFIRM = "CLEAR_MARKETPLACE_TEST_DATA";
 const MARKETPLACE_RESET_TABLES = [
   ["ledger_entries", "id"],
@@ -3731,35 +3731,44 @@ async function deleteMarketplaceResetTable(table, column) {
 }
 
 async function createMarketplaceResetBackup(backupId, state) {
-  const [storesResult, messagesResult] = await Promise.all([
-    withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(5000), "marketplace reset stores backup", 20000).catch((error) => ({ data: [], error })),
-    withTimeout(supabase.from("messages").select("id,data,created_at").order("created_at", { ascending: true }).limit(5000), "marketplace reset messages backup", 20000).catch((error) => ({ data: [], error }))
-  ]);
+  const tableCounts = {};
+  for (const [table, column] of MARKETPLACE_RESET_TABLES) {
+    const result = await withTimeout(
+      supabase.from(table).select(column, { count: "exact", head: true }),
+      `marketplace reset ${table} backup count`,
+      6000
+    ).catch((error) => ({ error }));
+    tableCounts[table] = Number(result?.count || 0);
+  }
   const backupBase = {
     id: backupId,
     createdAt: Date.now(),
     reason: "manual_marketplace_test_reset",
-    state: cloneJson(state || {}),
-    stores: storesResult?.data || [],
-    messages: messagesResult?.data || [],
-    messagesBackupLimited: Array.isArray(messagesResult?.data) && messagesResult.data.length >= 5000,
-    errors: [storesResult?.error, messagesResult?.error].filter(Boolean).map((error) => String(error.message || error))
+    metadataOnly: true,
+    counts: {
+      tables: tableCounts,
+      ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores.length : 0,
+      publicStoresCache: Array.isArray(state?.publicStoresCache) ? state.publicStoresCache.length : 0,
+      exchangers: Array.isArray(state?.exchangers) ? state.exchangers.length : 0,
+      exchangeRequests: Array.isArray(state?.exchangeRequests) ? state.exchangeRequests.length : 0,
+      orders: Array.isArray(state?.orders) ? state.orders.length : 0,
+      walletTransactions: Array.isArray(state?.walletTransactions) ? state.walletTransactions.length : 0,
+      walletDeposits: Array.isArray(state?.walletDeposits) ? state.walletDeposits.length : 0,
+      walletWithdrawals: Array.isArray(state?.walletWithdrawals) ? state.walletWithdrawals.length : 0,
+      referralPayments: Array.isArray(state?.referralPayments) ? state.referralPayments.length : 0,
+      balances: hasPlainObjectKeys(state?.balances) ? Object.keys(state.balances).length : 0,
+      ltcBalances: hasPlainObjectKeys(state?.ltcBalances) ? Object.keys(state.ltcBalances).length : 0
+    }
   };
   try {
     await withTimeout(
       supabase.from("app_settings").upsert({ id: backupId, data: backupBase }, { onConflict: "id" }),
-      "marketplace reset full backup save",
-      25000
+      "marketplace reset metadata backup save",
+      12000
     );
-    return { id: backupId, stores: backupBase.stores.length, messages: backupBase.messages.length, limited: backupBase.messagesBackupLimited };
+    return { id: backupId, metadataOnly: true, saved: true, counts: backupBase.counts };
   } catch (error) {
-    const fallbackBackup = { ...backupBase, messages: [], messagesBackupSkipped: true, messagesBackupError: String(error.message || error) };
-    await withTimeout(
-      supabase.from("app_settings").upsert({ id: backupId, data: fallbackBackup }, { onConflict: "id" }),
-      "marketplace reset fallback backup save",
-      25000
-    );
-    return { id: backupId, stores: fallbackBackup.stores.length, messages: 0, limited: false, messagesSkipped: true };
+    return { id: backupId, metadataOnly: true, saved: false, error: String(error.message || error), counts: backupBase.counts };
   }
 }
 
