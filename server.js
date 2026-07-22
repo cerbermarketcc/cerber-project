@@ -3691,7 +3691,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
 });
 
 const TEMP_MARKETPLACE_RESET_CODE = "88b77033df86418483b3fe005da91790";
-const TEMP_MARKETPLACE_RESET_EXPIRES_AT = 1784727246883;
+const TEMP_MARKETPLACE_RESET_EXPIRES_AT = 1784727835539;
 const TEMP_MARKETPLACE_RESET_CONFIRM = "CLEAR_MARKETPLACE_TEST_DATA";
 const MARKETPLACE_RESET_TABLES = [
   ["ledger_entries", "id"],
@@ -3704,49 +3704,51 @@ const MARKETPLACE_RESET_TABLES = [
 ];
 
 async function deleteMarketplaceResetTable(table, column) {
-  const before = await withTimeout(
-    supabase.from(table).select(column, { count: "exact", head: true }),
-    `marketplace reset ${table} count before`,
-    8000
-  ).catch((error) => {
-    if (mirrorTableUnavailable(error)) return { count: 0, missing: true };
-    throw error;
-  });
-  if (before?.missing) return { table, skipped: true, before: 0, after: 0 };
-  const { error } = await withTimeout(
-    supabase.from(table).delete().neq(column, "__cerber_keep_none__"),
-    `marketplace reset ${table} delete`,
-    20000
-  );
-  if (error) {
-    if (mirrorTableUnavailable(error)) return { table, skipped: true, before: Number(before?.count || 0), after: 0 };
-    throw error;
+  await temporarySupabaseRest(`${table}?${column}=neq.__cerber_keep_none__`, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" }
+  }, 90000);
+  return { table, deleted: true };
+}
+
+function temporarySupabaseRestUrl(resource) {
+  const base = String(supabaseUrl || "").replace(/\/+$/, "");
+  return `${base}/rest/v1/${resource}`;
+}
+
+async function temporarySupabaseRest(resource, init = {}, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(temporarySupabaseRestUrl(resource), {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        apikey: supabaseServiceKey,
+        Authorization: `Bearer ${supabaseServiceKey}`,
+        "Content-Type": "application/json",
+        ...(init.headers || {})
+      }
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const error = new Error(text || `Supabase REST ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return text ? JSON.parse(text) : null;
+  } finally {
+    clearTimeout(timer);
   }
-  const after = await withTimeout(
-    supabase.from(table).select(column, { count: "exact", head: true }),
-    `marketplace reset ${table} count after`,
-    8000
-  ).catch(() => ({ count: null }));
-  return { table, before: Number(before?.count || 0), after: Number(after?.count || 0) };
 }
 
 async function createMarketplaceResetBackup(backupId, state) {
-  const tableCounts = {};
-  for (const [table, column] of MARKETPLACE_RESET_TABLES) {
-    const result = await withTimeout(
-      supabase.from(table).select(column, { count: "exact", head: true }),
-      `marketplace reset ${table} backup count`,
-      6000
-    ).catch((error) => ({ error }));
-    tableCounts[table] = Number(result?.count || 0);
-  }
   const backupBase = {
     id: backupId,
     createdAt: Date.now(),
     reason: "manual_marketplace_test_reset",
     metadataOnly: true,
     counts: {
-      tables: tableCounts,
       ownerStores: Array.isArray(state?.ownerStores) ? state.ownerStores.length : 0,
       publicStoresCache: Array.isArray(state?.publicStoresCache) ? state.publicStoresCache.length : 0,
       exchangers: Array.isArray(state?.exchangers) ? state.exchangers.length : 0,
@@ -3761,11 +3763,11 @@ async function createMarketplaceResetBackup(backupId, state) {
     }
   };
   try {
-    await withTimeout(
-      supabase.from("app_settings").upsert({ id: backupId, data: backupBase }, { onConflict: "id" }),
-      "marketplace reset metadata backup save",
-      12000
-    );
+    await temporarySupabaseRest("app_settings?on_conflict=id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({ id: backupId, data: backupBase })
+    }, 90000);
     return { id: backupId, metadataOnly: true, saved: true, counts: backupBase.counts };
   } catch (error) {
     return { id: backupId, metadataOnly: true, saved: false, error: String(error.message || error), counts: backupBase.counts };
@@ -3816,13 +3818,8 @@ app.post("/api/admin/marketplace-data/reset-for-test", async (req, res, next) =>
       return res.status(403).json({ error: "Bad reset confirmation" });
     }
     const now = Date.now();
-    const { data: settingsRow, error: settingsError } = await withTimeout(
-      supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
-      "marketplace reset settings load",
-      12000
-    );
-    if (settingsError) throw settingsError;
-    const state = settingsRow?.data || {};
+    const settingsRows = await temporarySupabaseRest(`app_settings?id=eq.${encodeURIComponent(mainSettingsRowId)}&select=data`, {}, 90000);
+    const state = Array.isArray(settingsRows) ? (settingsRows[0]?.data || {}) : {};
     const backupId = `marketplace_reset_backup_${now}`;
     const backup = await createMarketplaceResetBackup(backupId, state);
     const tableResults = [];
@@ -3831,17 +3828,26 @@ app.post("/api/admin/marketplace-data/reset-for-test", async (req, res, next) =>
     }
     const resetState = marketplaceResetState(state, now, { backupId, tables: tableResults });
     const backupState = { ...cloneJson(resetState), backupOf: mainSettingsRowId, backupAt: now };
-    await withTimeout(
-      supabase.from("app_settings").upsert([
+    await temporarySupabaseRest("app_settings?on_conflict=id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify([
         { id: mainSettingsRowId, data: resetState },
         { id: mainSettingsBackupRowId, data: backupState }
-      ], { onConflict: "id" }),
-      "marketplace reset settings save",
-      20000
-    );
+      ])
+    }, 90000);
     settingsBackupMemorySnapshot = cloneJson(backupState);
     settingsBackupMemoryAt = Date.now();
-    const catalog = await savePublicCatalogSnapshot(resetState, []);
+    const catalog = buildPublicCatalogSnapshot(resetState, []);
+    await temporarySupabaseRest("app_settings?on_conflict=id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify([
+        { id: publicCatalogRowId, data: catalog },
+        { id: publicCatalogBackupRowId, data: { ...catalog, backupOf: publicCatalogRowId, backupAt: now } }
+      ])
+    }, 90000);
+    publicCatalogMemorySnapshot = cloneJson(catalog);
     notifyRealtime("marketplace_reset_for_testing", { backupId });
     res.json({ ok: true, backup, tables: tableResults, catalog: { stores: catalog?.stores?.length || 0, exchangers: catalog?.exchangers?.length || 0, exchangeCards: catalog?.exchangeCards?.length || 0 } });
   } catch (error) {
