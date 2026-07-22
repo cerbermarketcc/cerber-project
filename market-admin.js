@@ -370,7 +370,7 @@ function renderShell() {
     <section class="admin-shell">
       <aside class="sidebar">
         <div class="brand"><strong>CERBER Admin</strong><button class="ghost" data-logout>Выйти</button></div>
-        <nav class="nav">
+        <nav class="nav" aria-label="Admin sections">
           ${nav.map((item) => `<button class="${section === item ? "active" : ""}" data-section="${esc(item)}">${esc(item)}<span>›</span></button>`).join("")}
         </nav>
       </aside>
@@ -407,6 +407,7 @@ function renderShell() {
   bindActions();
   bindAdminButtonFeedback(root);
   enhanceAdminMobileTables(root);
+  root.querySelector(".nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
   drawCharts();
 }
 

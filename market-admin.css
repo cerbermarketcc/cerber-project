@@ -694,12 +694,32 @@ tr:hover td {
   }
 
   .sidebar {
-    position: static;
+    position: sticky;
+    top: 0;
+    z-index: 20;
     height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.28);
   }
 
   .nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .nav::-webkit-scrollbar {
+    height: 0;
+  }
+
+  .nav button {
+    flex: 0 0 auto;
+    min-width: 138px;
+    scroll-snap-align: center;
   }
 
   .grid,
@@ -721,6 +741,7 @@ tr:hover td {
 @media (max-width: 560px) {
   body {
     min-width: 0;
+    background: #0d0f0c;
   }
 
   input,
@@ -741,59 +762,175 @@ tr:hover td {
   }
 
   .sidebar {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    padding: 12px;
+    padding: 10px 10px 8px;
+    background: rgba(18, 20, 16, 0.98);
+    backdrop-filter: blur(14px);
   }
 
   .brand {
-    align-items: flex-start;
-    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+
+  .brand strong {
+    font-size: 16px;
+    line-height: 1.1;
+  }
+
+  .brand .ghost {
+    min-height: 36px;
+    padding-inline: 12px;
+    border-radius: 999px;
   }
 
   .nav {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 4px;
-    -webkit-overflow-scrolling: touch;
+    margin-inline: -2px;
+    padding: 0 2px 4px;
   }
 
   .nav button {
     flex: 0 0 auto;
-    min-width: 132px;
+    min-width: auto;
+    min-height: 38px;
+    border-radius: 999px;
+    padding: 0 13px;
+    gap: 8px;
+    white-space: nowrap;
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .nav button span {
+    display: none;
+  }
+
+  .nav button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #14120e;
+    box-shadow: 0 8px 20px rgba(243, 165, 54, 0.22);
   }
 
   .content {
-    padding: 12px 10px 28px;
+    padding: 14px 10px 32px;
     overflow-x: hidden;
   }
 
   .topline {
     display: grid;
     align-items: stretch;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .topline h1 {
+    margin-bottom: 0;
+    font-size: 30px;
+    line-height: 1.05;
+  }
+
+  .topline .eyebrow {
+    margin-bottom: 5px;
   }
 
   .topline input {
     max-width: none;
+    border-radius: 999px;
+    background: #151713;
   }
 
   .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .card {
+    min-height: 104px;
+    padding: 13px;
+    border-radius: 12px;
+  }
+
+  .card span {
+    min-height: 30px;
+    line-height: 1.25;
+  }
+
+  .card strong {
+    margin-top: 6px;
+    font-size: 22px;
+    line-height: 1.05;
+    word-break: break-word;
+  }
+
+  .charts {
+    gap: 10px;
+  }
+
+  .chart-box {
+    min-height: 0;
+  }
+
+  canvas {
+    height: 140px;
+  }
+
+  .split,
+  .row,
+  .support-topic-row {
     grid-template-columns: 1fr;
+  }
+
+  .split {
+    gap: 10px;
+  }
+
+  .split-card,
+  .table-card,
+  .card {
+    border-radius: 12px;
+  }
+
+  .split-card {
+    margin-top: 10px;
+  }
+
+  .split-card h2,
+  .table-card h3 {
+    line-height: 1.15;
   }
 
   .checks {
     grid-template-columns: 1fr;
+    gap: 7px;
   }
 
   .checks label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     min-height: 44px;
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .field {
+    margin: 10px 0;
+    font-size: 13px;
+  }
+
+  input[type="file"] {
+    padding: 9px;
   }
 
   .table-card {
     max-width: 100%;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    border: 0;
+    background: transparent;
+    margin-top: 10px;
+  }
+
+  .table-card > h3 {
+    padding: 0 2px;
   }
 
   table {
@@ -823,12 +960,13 @@ tr:hover td {
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--panel);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
   }
 
   td {
     display: grid;
-    grid-template-columns: minmax(92px, 38%) minmax(0, 1fr);
+    grid-template-columns: minmax(94px, 35%) minmax(0, 1fr);
     gap: 10px;
     align-items: center;
     border-bottom: 1px solid var(--line);
@@ -862,24 +1000,98 @@ tr:hover td {
   td .primary,
   td .ghost {
     width: 100%;
+    justify-content: center;
   }
 
   .primary,
   .ghost {
     min-height: 46px;
+    border-radius: 10px;
   }
 
   .admin-form-actions,
   .admin-table-actions {
     justify-content: stretch;
     padding: 10px;
+    gap: 8px;
   }
 
   .admin-form-actions button,
   .admin-table-actions button,
   form > .primary,
-  form p > .primary {
+  form p > .primary,
+  form p > .ghost {
     width: 100%;
+  }
+
+  form p {
+    display: grid;
+    gap: 8px;
+  }
+
+  .status {
+    min-height: 28px;
+    justify-content: center;
+  }
+
+  .admin-dispute-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-dispute-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .admin-dispute-chat {
+    max-height: 55vh;
+    padding: 10px;
+  }
+
+  .admin-dispute-message,
+  .admin-dispute-message.own {
+    max-width: 100%;
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .admin-dispute-message.own {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .admin-dispute-avatar {
+    width: 32px;
+    height: 32px;
+  }
+
+  .admin-modal {
+    align-items: end;
+    padding: 0;
+  }
+
+  .admin-modal-panel {
+    width: 100%;
+    max-height: 94vh;
+    border-radius: 18px 18px 0 0;
+    padding: 14px;
+  }
+
+  .admin-modal-head {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .dispute-chat-modal .admin-dispute-chat {
+    min-height: 42vh;
+  }
+
+  .ticket-head,
+  .support-user-ticket summary {
+    display: grid;
+  }
+
+  .support-attachments img {
+    width: 74px;
+    height: 74px;
   }
 
   .admin-toast {
@@ -887,5 +1099,21 @@ tr:hover td {
     left: 10px;
     bottom: 12px;
     max-width: none;
+    border-radius: 14px;
+  }
+}
+
+@media (max-width: 380px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  td {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  td::before {
+    font-size: 10px;
   }
 }
