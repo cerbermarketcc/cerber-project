@@ -1319,7 +1319,7 @@ async function stateFor(user) {
       }
       const visibleExchangeCards = publicExchangeCardsForState(settingsData.exchangeCards);
       const visibleExchangers = publicExchangersForState(settingsData.exchangers || []);
-      const publicCatalogComplete = Boolean(publicStores.length || visibleExchangeCards.length || visibleExchangers.length);
+      const publicCatalogComplete = true;
       if (publicCatalogComplete) {
         savePublicCatalogSnapshot(settingsData, publicStores).catch((error) => {
           console.error("[public-catalog] fallback save failed", { message: error.message });
@@ -2509,7 +2509,7 @@ app.get("/api/health", async (_req, res) => {
       const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
       if (error) throw error;
       return { configured: true, mainSettings: Boolean(data) };
-    }, 5000);
+    }, 10000);
     health.checks.supabase = { ...health.checks.supabase, ...supabasePing };
     health.ok = Boolean(supabasePing.ok);
     health.durationMs = Date.now() - startedAt;
