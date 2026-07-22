@@ -2526,6 +2526,12 @@ app.get("/api/health/deep", async (_req, res) => {
   const startedAt = Date.now();
   const health = baseHealthPayload(startedAt);
   try {
+    health.checks.supabase = await timedDbCheck("deep health supabase ping", async () => {
+      if (!supabase) return { configured: false };
+      const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
+      if (error) throw error;
+      return { configured: true, mainSettings: Boolean(data) };
+    }, 10000);
     const tables = ["sessions", "orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
     const tableResults = await Promise.all(tables.map(async (table) => [table, await timedDbCheck(`health table ${table}`, () => tableHealth(table), 4000)]));
     health.checks.tables = Object.fromEntries(tableResults);
@@ -2537,7 +2543,7 @@ app.get("/api/health/deep", async (_req, res) => {
       errors: mirrors.reduce((sum, bot) => sum + Number(bot.telegramErrorsCount || 0), 0),
       lastErrorAt: mirrors.map((bot) => Number(bot.lastErrorAt || 0)).filter(Boolean).sort((a, b) => b - a)[0] || null
     };
-    health.ok = Boolean(health.checks.supabase.ok);
+    health.ok = Boolean(health.checks.supabase.ok) && Object.values(health.checks.tables).every((item) => item.ok);
     health.durationMs = Date.now() - startedAt;
     res.status(health.ok ? 200 : 503).json(health);
   } catch (error) {
