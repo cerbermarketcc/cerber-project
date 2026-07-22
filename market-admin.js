@@ -10,6 +10,7 @@ const ADMIN_FORM_LOCK_MS = 5 * 60 * 1000;
 const ADMIN_UPLOAD_TIMEOUT_MS = 90000;
 const ADMIN_IMAGE_TARGET_BYTES = 950000;
 const ADMIN_IMAGE_HARD_LIMIT_BYTES = 1800000;
+const adminRuntimeStorage = new Map();
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Health", "Боты"];
 nav.splice(2, 0, "Обменники");
@@ -25,7 +26,44 @@ const supportTopics = [
   "Открытие магазина"
 ];
 
-let token = localStorage.getItem(TOKEN_KEY) || "";
+function adminStorageGet(key) {
+  try {
+    const value = localStorage.getItem(key);
+    if (value !== null && value !== "") return value;
+  } catch {}
+  try {
+    const value = sessionStorage.getItem(key);
+    if (value !== null && value !== "") return value;
+  } catch {}
+  return adminRuntimeStorage.get(key) || "";
+}
+
+function adminStorageSet(key, value) {
+  const text = String(value ?? "");
+  adminRuntimeStorage.set(key, text);
+  let saved = false;
+  try {
+    localStorage.setItem(key, text);
+    saved = true;
+  } catch {}
+  try {
+    sessionStorage.setItem(key, text);
+    saved = true;
+  } catch {}
+  return saved;
+}
+
+function adminStorageRemove(key) {
+  adminRuntimeStorage.delete(key);
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+  try {
+    sessionStorage.removeItem(key);
+  } catch {}
+}
+
+let token = adminStorageGet(TOKEN_KEY) || "";
 let data = null;
 let adminUiState = readAdminUiState();
 let section = adminUiState.section || "Dashboard";
@@ -42,7 +80,7 @@ let adminBusyForms = 0;
 
 function readAdminUiState() {
   try {
-    return JSON.parse(localStorage.getItem(UI_STATE_KEY) || "{}") || {};
+    return JSON.parse(adminStorageGet(UI_STATE_KEY) || "{}") || {};
   } catch {
     return {};
   }
@@ -50,7 +88,7 @@ function readAdminUiState() {
 
 function persistAdminUiState() {
   try {
-    localStorage.setItem(UI_STATE_KEY, JSON.stringify({
+    adminStorageSet(UI_STATE_KEY, JSON.stringify({
       section,
       query,
       selectedStoreId,
@@ -312,7 +350,7 @@ function renderLogin(message = "") {
         body: JSON.stringify({ login: form.get("login"), password: form.get("password") })
       });
       token = payload.token;
-      localStorage.setItem(TOKEN_KEY, token);
+      adminStorageSet(TOKEN_KEY, token);
       await refreshData();
       connectRealtime();
     } catch (error) {
@@ -354,7 +392,7 @@ function renderShell() {
     renderShell();
   });
   root.querySelector("[data-logout]").onclick = () => {
-    localStorage.removeItem(TOKEN_KEY);
+    adminStorageRemove(TOKEN_KEY);
     token = "";
     realtimeSocket?.close();
     clearInterval(refreshTimer);
@@ -368,6 +406,7 @@ function renderShell() {
   restoreAdminDetailPanels();
   bindActions();
   bindAdminButtonFeedback(root);
+  enhanceAdminMobileTables(root);
   drawCharts();
 }
 
@@ -380,6 +419,7 @@ function renderCurrentView({ preserveScroll = false } = {}) {
   restoreAdminDetailPanels();
   bindActions();
   bindAdminButtonFeedback(root);
+  enhanceAdminMobileTables(root);
   drawCharts();
   if (preserveScroll) requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
 }
@@ -389,6 +429,7 @@ function restoreAdminDetailPanels() {
   const storeDetailBox = root.querySelector("[data-store-detail]");
   if (storeDetailBox && selectedStoreId && data.stores?.some((store) => store.id === selectedStoreId)) {
     storeDetailBox.innerHTML = storeDetail(selectedStoreId);
+    enhanceAdminMobileTables(storeDetailBox);
   }
   const userDetailBox = root.querySelector("[data-user-detail]");
   if (userDetailBox && selectedUserLogin && userDetailBox.dataset.restoredLogin !== selectedUserLogin) {
@@ -400,6 +441,7 @@ function restoreAdminDetailPanels() {
         userDetailBox.innerHTML = userDetail(payload);
         bindActions();
         bindAdminButtonFeedback(root);
+        enhanceAdminMobileTables(userDetailBox);
       })
       .catch(() => {});
   }
@@ -413,9 +455,22 @@ function restoreAdminDetailPanels() {
         disputeDetailBox.innerHTML = disputeDetail(payload);
         bindActions();
         bindAdminButtonFeedback(root);
+        enhanceAdminMobileTables(disputeDetailBox);
       })
       .catch(() => {});
   }
+}
+
+function enhanceAdminMobileTables(scope = root) {
+  scope.querySelectorAll("table").forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("thead th")).map((header) => header.textContent.trim());
+    if (!headers.length) return;
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      Array.from(row.children).forEach((cell, index) => {
+        if (headers[index] && !cell.dataset.label) cell.dataset.label = headers[index];
+      });
+    });
+  });
 }
 
 function bindAdminButtonFeedback(scope = root) {
@@ -1384,6 +1439,7 @@ function bindActions() {
       if (box) box.innerHTML = exchangerDetail(button.dataset.exchangerEdit);
       bindActions();
       bindAdminButtonFeedback(root);
+      if (box) enhanceAdminMobileTables(box);
     };
   });
   root.querySelectorAll("[data-exchanger-update-form]").forEach((form) => {
@@ -1483,8 +1539,13 @@ function bindActions() {
     selectedUserLogin = "";
     selectedDisputeId = "";
     persistAdminUiState();
-    root.querySelector("[data-store-detail]").innerHTML = storeDetail(row.dataset.store);
+    const box = root.querySelector("[data-store-detail]");
+    if (box) {
+      box.innerHTML = storeDetail(row.dataset.store);
+      enhanceAdminMobileTables(box);
+    }
     bindActions();
+    bindAdminButtonFeedback(root);
   });
   root.querySelectorAll("[data-store-form]").forEach((form) => form.onsubmit = async (event) => {
     event.preventDefault();

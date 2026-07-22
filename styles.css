@@ -52,9 +52,32 @@ select {
 
 button {
   position: relative;
+  overflow: hidden;
+  isolation: isolate;
   cursor: pointer;
   touch-action: manipulation;
   transition: transform 140ms ease, opacity 140ms ease, background 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+}
+
+button:not(.link-button)::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 0;
+  width: 160%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0) 62%);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.22);
+  transition: opacity 180ms ease, transform 220ms ease;
+  pointer-events: none;
+}
+
+button:not(.link-button):active::before {
+  opacity: 0.24;
+  transform: translate(-50%, -50%) scale(1);
 }
 
 button:active {
@@ -84,6 +107,10 @@ button.tap-loading:not(:disabled):not(.is-loading)::after {
 button:disabled {
   cursor: default;
   opacity: 0.58;
+}
+
+button:disabled::before {
+  display: none;
 }
 
 button:disabled:active {
@@ -5283,14 +5310,35 @@ details[data-shop-storage-item] .form {
 
   .seller-dashboard-nav {
     min-height: 0;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
     position: sticky;
     top: 0;
     z-index: 4;
+    padding: 10px;
+    -webkit-overflow-scrolling: touch;
   }
 
   .seller-dashboard-brand {
-    grid-column: 1 / -1;
+    flex: 0 0 auto;
+    min-width: 138px;
+    margin: 0;
+  }
+
+  .seller-dashboard-brand img {
+    width: 110px;
+  }
+
+  .seller-dashboard-nav a,
+  .seller-dashboard-nav button {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 118px;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 0 14px;
+    white-space: nowrap;
   }
 
   .seller-dashboard-stats,
@@ -5323,6 +5371,7 @@ details[data-shop-storage-item] .form {
   }
 
   .seller-dashboard-main {
+    gap: 12px;
     padding: 10px;
   }
 
@@ -5336,6 +5385,27 @@ details[data-shop-storage-item] .form {
   .seller-dashboard-user {
     width: 100%;
     border-radius: 14px;
+  }
+
+  .shop-panel-page .row,
+  .seller-admin-screen .row,
+  .shop-panel-page .form .row,
+  .seller-admin-screen .form .row {
+    grid-template-columns: 1fr;
+  }
+
+  .shop-panel-page .field,
+  .seller-admin-screen .field {
+    gap: 8px;
+  }
+
+  .shop-panel-page .primary,
+  .shop-panel-page .ghost-button,
+  .seller-admin-screen .primary,
+  .seller-admin-screen .ghost-button {
+    width: 100%;
+    min-height: 48px;
+    justify-content: center;
   }
 
   details[data-shop-storage-item] summary,
@@ -5355,6 +5425,11 @@ details[data-shop-storage-item] .form {
   .seller-dashboard-table > div {
     min-width: 0;
     grid-template-columns: 1fr;
+    gap: 4px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px;
+    margin-bottom: 10px;
   }
 }
 

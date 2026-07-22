@@ -32,13 +32,41 @@ textarea {
 
 button {
   position: relative;
+  overflow: hidden;
+  isolation: isolate;
   cursor: pointer;
   touch-action: manipulation;
   transition: transform 140ms ease, opacity 140ms ease, filter 140ms ease, box-shadow 140ms ease;
 }
 
+button:not(.link-button)::before {
+  content: "";
+  position: absolute;
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  z-index: 0;
+  width: 160%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0) 62%);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.25);
+  transition: opacity 180ms ease, transform 220ms ease;
+  pointer-events: none;
+}
+
+button:not(.link-button):active::before {
+  opacity: 0.22;
+  transform: translate(-50%, -50%) scale(1);
+}
+
 button:active {
   transform: scale(0.96);
+}
+
+button:disabled::before {
+  display: none;
 }
 
 button.tap-loading:not(:disabled)::after,
@@ -764,12 +792,76 @@ tr:hover td {
 
   .table-card {
     max-width: 100%;
-    overflow-x: auto;
+    overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
   }
 
   table {
-    min-width: 700px;
+    min-width: 0;
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0 10px;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tbody,
+  tr,
+  td {
+    display: block;
+    width: 100%;
+  }
+
+  tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  tr {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  td {
+    display: grid;
+    grid-template-columns: minmax(92px, 38%) minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px;
+    word-break: break-word;
+  }
+
+  td:last-child {
+    border-bottom: 0;
+  }
+
+  td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  td[colspan] {
+    grid-template-columns: 1fr;
+  }
+
+  td[colspan]::before {
+    content: "";
+    display: none;
+  }
+
+  td button,
+  td .primary,
+  td .ghost {
+    width: 100%;
   }
 
   .primary,

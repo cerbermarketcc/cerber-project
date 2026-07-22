@@ -40,11 +40,14 @@ let realtimePendingRender = false;
 let lastUserInteractionAt = 0;
 let shopPanelStateRefreshPromise = null;
 let shopPanelLastStateRefreshAt = 0;
+let shopPanelFormLockUntil = 0;
+let shopPanelBusyForms = 0;
 let activeShopPanelTab = "dashboard";
 let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
 const syncedReferralCodes = new Set();
+const SHOP_PANEL_FORM_LOCK_MS = 5 * 60 * 1000;
 const PUBLIC_CATALOG_STATE_KEYS = ["stores", "exchangeCards", "exchangers"];
 const PARTIAL_STATE_ARRAY_KEYS = [
   ...PUBLIC_CATALOG_STATE_KEYS,
@@ -1195,7 +1198,7 @@ function mountCmsVisualEditor() {
 
   const status = toolbar.querySelector("[data-cms-status]");
   const password = toolbar.querySelector("[data-cms-password]");
-  password.value = sessionStorage.getItem("cerber_text_admin_password") || "";
+  password.value = storageGet("cerber_text_admin_password") || "";
   const setStatus = (message) => status.textContent = message;
 
   document.addEventListener("click", (event) => {
@@ -1215,7 +1218,7 @@ function mountCmsVisualEditor() {
 
   toolbar.querySelector("[data-cms-save]").onclick = async () => {
     const adminPassword = password.value.trim();
-    sessionStorage.setItem("cerber_text_admin_password", adminPassword);
+    storageSet("cerber_text_admin_password", adminPassword);
     document.querySelectorAll("[data-cms-original-text]").forEach((element) => {
       const next = cmsNormalizeText(element.textContent);
       const original = element.dataset.cmsOriginalText;
@@ -1916,7 +1919,7 @@ function applyRemoteState(payload) {
   writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(db));
   } catch {}
 }
 
@@ -2056,7 +2059,7 @@ function restoreShopPanelStore(store) {
   }
   normalizeDb(db);
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(db));
   } catch {}
 }
 
@@ -2495,7 +2498,7 @@ async function ensureApiSession() {
 
 function isAdmin() {
   try {
-    return currentUser()?.role === "admin" || localStorage.getItem(ADMIN_ACCESS_KEY) === "ok";
+    return currentUser()?.role === "admin" || storageGet(ADMIN_ACCESS_KEY) === "ok";
   } catch {
     return currentUser()?.role === "admin";
   }
@@ -5558,7 +5561,7 @@ function activePrivateDisputeOrder(peer = activePrivateLogin) {
 
 function readSyncedPrivateDisputeMessageIds() {
   try {
-    const values = JSON.parse(localStorage.getItem(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY) || "[]");
+    const values = JSON.parse(storageGet(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY) || "[]");
     return new Set(Array.isArray(values) ? values.map(String) : []);
   } catch {
     return new Set();
@@ -5567,7 +5570,7 @@ function readSyncedPrivateDisputeMessageIds() {
 
 function writeSyncedPrivateDisputeMessageIds(ids) {
   try {
-    localStorage.setItem(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY, JSON.stringify([...ids].slice(-500)));
+    storageSet(DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY, JSON.stringify([...ids].slice(-500)));
   } catch {}
 }
 
@@ -5927,7 +5930,7 @@ function mergeGroupMembers(...lists) {
 
 function readStoredGroupMembers() {
   try {
-    const saved = JSON.parse(localStorage.getItem(GROUP_MEMBERS_KEY) || "[]");
+    const saved = JSON.parse(storageGet(GROUP_MEMBERS_KEY) || "[]");
     return Array.isArray(saved) ? saved.filter(Boolean) : [];
   } catch {
     return [];
@@ -5936,7 +5939,7 @@ function readStoredGroupMembers() {
 
 function writeStoredGroupMembers(members) {
   try {
-    localStorage.setItem(GROUP_MEMBERS_KEY, JSON.stringify(mergeGroupMembers(members)));
+    storageSet(GROUP_MEMBERS_KEY, JSON.stringify(mergeGroupMembers(members)));
   } catch {
     // Chat membership still remains in the in-memory database for this session.
   }
@@ -8423,8 +8426,8 @@ function renderOwnerAccess() {
     const password = new FormData(event.currentTarget).get("password");
     if (password !== ADMIN_PANEL_PASSWORD) return showToast("Неверный пароль");
     try {
-      localStorage.setItem(ADMIN_ACCESS_KEY, "ok");
-      localStorage.setItem(OWNER_ACCESS_PASSWORD_KEY, password);
+      storageSet(ADMIN_ACCESS_KEY, "ok");
+      storageSet(OWNER_ACCESS_PASSWORD_KEY, password);
     } catch {}
     renderOwnerPanel();
   };
@@ -8879,7 +8882,7 @@ async function handleOwnerCreateStore(event) {
     try {
       const payload = await apiFetch("/api/owner/stores", {
         method: "POST",
-        headers: { "x-owner-password": localStorage.getItem(OWNER_ACCESS_PASSWORD_KEY) || ADMIN_PANEL_PASSWORD },
+        headers: { "x-owner-password": storageGet(OWNER_ACCESS_PASSWORD_KEY) || ADMIN_PANEL_PASSWORD },
         body: JSON.stringify(store)
       });
       const savedStore = payload.store || store;
@@ -9101,7 +9104,7 @@ function renderAdmin() {
         return;
       }
       try {
-        localStorage.setItem(ADMIN_ACCESS_KEY, "ok");
+        storageSet(ADMIN_ACCESS_KEY, "ok");
       } catch {}
       renderAdmin();
     };
@@ -10313,6 +10316,77 @@ function renderShopPanelLogin(message = "") {
   };
 }
 
+function markShopPanelFormActivity(ms = SHOP_PANEL_FORM_LOCK_MS) {
+  lastUserInteractionAt = Date.now();
+  shopPanelFormLockUntil = Math.max(shopPanelFormLockUntil, Date.now() + ms);
+}
+
+function shopPanelIsEditing() {
+  const element = document.activeElement;
+  return Boolean(
+    element &&
+    element.closest(".shop-panel-page form, .seller-admin-screen form") &&
+    /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName)
+  );
+}
+
+function shopPanelHasDirtyForm() {
+  return Boolean(document.querySelector(
+    ".shop-panel-page form[data-shop-form-dirty='1'], " +
+    ".seller-admin-screen form[data-shop-form-dirty='1'], " +
+    ".shop-panel-page form.is-submitting, " +
+    ".seller-admin-screen form.is-submitting"
+  ));
+}
+
+function shopPanelCanRefresh() {
+  if (shopPanelBusyForms > 0) return false;
+  if (Date.now() < shopPanelFormLockUntil) return false;
+  if (shopPanelHasDirtyForm()) return false;
+  if (shopPanelIsEditing()) return false;
+  return true;
+}
+
+function beginShopFormSubmit(form, loadingText = "Сохраняю...") {
+  if (!form || form.dataset.submitting === "1") return null;
+  markShopPanelFormActivity(90000);
+  form.dataset.submitting = "1";
+  form.classList.add("is-submitting");
+  shopPanelBusyForms += 1;
+  const button = form.querySelector('button[type="submit"], button.primary:not([type])');
+  const previousText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.textContent = loadingText;
+  }
+  return () => {
+    form.dataset.submitting = "";
+    form.dataset.shopFormDirty = "";
+    form.classList.remove("is-submitting");
+    shopPanelBusyForms = Math.max(0, shopPanelBusyForms - 1);
+    shopPanelFormLockUntil = Math.min(shopPanelFormLockUntil, Date.now() + 5000);
+    if (button) {
+      button.disabled = false;
+      button.classList.remove("is-loading");
+      button.textContent = previousText;
+    }
+  };
+}
+
+async function runShopFormSubmit(form, loadingText, action) {
+  const endSubmit = beginShopFormSubmit(form, loadingText);
+  if (!endSubmit) return;
+  try {
+    await action();
+  } catch (error) {
+    console.error("[shop-admin] submit failed", error);
+    showToast(error.message || "Не удалось сохранить. Попробуйте еще раз.");
+  } finally {
+    endSubmit();
+  }
+}
+
 function renderShopPanel(activeTab = "dashboard") {
   activeShopPanelTab = activeTab || "dashboard";
   const storeId = shopPanelHashId() || shopPanelSession();
@@ -10320,13 +10394,15 @@ function renderShopPanel(activeTab = "dashboard") {
   const token = sellerAdminApiSessionToken();
   const store = shopPanelStore();
   if (!store || !token || sessionId !== storeId) return renderShopPanelLogin();
-  refreshShopPanelState().then((updated) => {
-    if (!updated) return;
-    const currentStoreId = shopPanelHashId() || shopPanelSession();
-    if (currentStoreId === storeId) renderShopPanel(activeTab);
-  }).catch((error) => {
-    console.error("[shop-admin] state refresh failed", error);
-  });
+  if (shopPanelCanRefresh() && Date.now() - shopPanelLastStateRefreshAt > 20000) {
+    refreshShopPanelState().then((updated) => {
+      if (!updated || !shopPanelCanRefresh()) return;
+      const currentStoreId = shopPanelHashId() || shopPanelSession();
+      if (currentStoreId === storeId) renderShopPanel(activeTab);
+    }).catch((error) => {
+      console.error("[shop-admin] state refresh failed", error);
+    });
+  }
   if (!canAccessShopTab(activeTab)) {
     const fallbackTab = firstAllowedShopTab();
     if (fallbackTab === activeTab) return renderShopPanelLogin("Для этого сотрудника не выбраны разделы доступа");
@@ -10407,47 +10483,53 @@ function bindShopPanelActions(store, activeTab) {
   bindShopLocationSelects(store);
   document.querySelector("[data-shop-profile-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    store.name = String(data.get("name") || "").trim();
-    store.tag = String(data.get("tag") || "").trim();
-    store.short = String(data.get("short") || "").trim();
-    store.description = String(data.get("description") || "").trim();
-    const image = data.get("image");
-    const cover = data.get("cover");
-    if (image && image.size) store.image = await fileToDataUrl(image);
-    if (cover && cover.size) store.cover = await fileToDataUrl(cover);
-    if (!store.cover) store.cover = store.image || fallbackImage;
-    await shopPersistAndRender("profile");
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Сохраняю...", async () => {
+      const data = new FormData(form);
+      store.name = String(data.get("name") || "").trim();
+      store.tag = String(data.get("tag") || "").trim();
+      store.short = String(data.get("short") || "").trim();
+      store.description = String(data.get("description") || "").trim();
+      const image = data.get("image");
+      const cover = data.get("cover");
+      if (image && image.size) store.image = await fileToDataUrl(image);
+      if (cover && cover.size) store.cover = await fileToDataUrl(cover);
+      if (!store.cover) store.cover = store.image || fallbackImage;
+      await shopPersistAndRender("profile");
+    });
   });
 
   document.querySelector("[data-shop-card-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     console.log("[shop-admin] card submit");
-    const data = new FormData(event.currentTarget);
-    const title = String(data.get("title") || "").trim();
-    if (!title) return;
-    const mainFile = data.get("mainImage");
-    const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
-    const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
-    const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image || fallbackImage);
-    const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
-    store.products = Array.isArray(store.products) ? store.products : [];
-    store.products.push(normalizeProduct({
-      id: `card-${Date.now()}`,
-      title,
-      category: title,
-      description: String(data.get("description") || "").trim(),
-      priceUsd: Number(data.get("priceUsd") || 0),
-      price: `от ${Number(data.get("priceUsd") || 0)}$`,
-      image: images[0],
-      images,
-      position: Number(data.get("position") || store.products.length + 1),
-      status: String(data.get("status") || "active"),
-      sellerManaged: true,
-      positions: [],
-      reviewsList: []
-    }, store));
-    await shopPersistAndRender("cards");
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Создаю...", async () => {
+      const data = new FormData(form);
+      const title = String(data.get("title") || "").trim();
+      if (!title) return;
+      const mainFile = data.get("mainImage");
+      const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
+      const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+      const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image || fallbackImage);
+      const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
+      store.products = Array.isArray(store.products) ? store.products : [];
+      store.products.push(normalizeProduct({
+        id: `card-${Date.now()}`,
+        title,
+        category: title,
+        description: String(data.get("description") || "").trim(),
+        priceUsd: Number(data.get("priceUsd") || 0),
+        price: `от ${Number(data.get("priceUsd") || 0)}$`,
+        image: images[0],
+        images,
+        position: Number(data.get("position") || store.products.length + 1),
+        status: String(data.get("status") || "active"),
+        sellerManaged: true,
+        positions: [],
+        reviewsList: []
+      }, store));
+      await shopPersistAndRender("cards");
+    });
   });
 
   document.querySelectorAll("[data-shop-card-move]").forEach((button) => button.onclick = async () => {
@@ -10472,31 +10554,34 @@ function bindShopPanelActions(store, activeTab) {
   document.querySelector("[data-shop-product-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     console.log("[shop-admin] product submit");
-    const data = new FormData(event.currentTarget);
-    const product = (store.products || []).find((item) => item.id === data.get("cardId"));
-    if (!product) return;
-    const rawDeliveryItems = shopLines(data.get("deliveryItems"));
-    const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
-    const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
-    product.positions = Array.isArray(product.positions) ? product.positions : [];
-    const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
-    product.positions.unshift({
-      id: `position-${Date.now()}`,
-      title: String(data.get("title") || product.title || "").trim(),
-      description: String(data.get("description") || "").trim(),
-      priceUsd,
-      weight: String(data.get("weight") || "").trim(),
-      deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
-      country: String(data.get("country") || shopDefaultCountry(store)),
-      city: String(data.get("city") || shopDefaultCity(store)),
-      district: String(data.get("district") || "").trim(),
-      deliveryItems,
-      stock: Math.max(1, deliveryItems.length),
-      status: "ready"
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Добавляю...", async () => {
+      const data = new FormData(form);
+      const product = (store.products || []).find((item) => item.id === data.get("cardId"));
+      if (!product) return;
+      const rawDeliveryItems = shopLines(data.get("deliveryItems"));
+      const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
+      const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
+      product.positions = Array.isArray(product.positions) ? product.positions : [];
+      const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
+      product.positions.unshift({
+        id: `position-${Date.now()}`,
+        title: String(data.get("title") || product.title || "").trim(),
+        description: String(data.get("description") || "").trim(),
+        priceUsd,
+        weight: String(data.get("weight") || "").trim(),
+        deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
+        country: String(data.get("country") || shopDefaultCountry(store)),
+        city: String(data.get("city") || shopDefaultCity(store)),
+        district: String(data.get("district") || "").trim(),
+        deliveryItems,
+        stock: Math.max(1, deliveryItems.length),
+        status: "ready"
+      });
+      if (!product.priceUsd) product.priceUsd = priceUsd;
+      if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
+      await shopPersistAndRender("products");
     });
-    if (!product.priceUsd) product.priceUsd = priceUsd;
-    if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
-    await shopPersistAndRender("products");
   });
   document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
     const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
@@ -10508,59 +10593,64 @@ function bindShopPanelActions(store, activeTab) {
   document.querySelectorAll("[data-shop-position-edit]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      await runShopFormSubmit(form, "Сохраняю...", async () => {
 
-      const product = (store.products || []).find((item) => item.id === form.dataset.cardId);
-      const position = (product?.positions || []).find((item) => item.id === form.dataset.positionId);
+        const product = (store.products || []).find((item) => item.id === form.dataset.cardId);
+        const position = (product?.positions || []).find((item) => item.id === form.dataset.positionId);
 
-      if (!product || !position) return;
+        if (!product || !position) return;
 
-      const data = new FormData(form);
-      const deliveryItems = shopLines(data.get("deliveryItems"));
-      const stockValue = Number(data.get("stock"));
+        const data = new FormData(form);
+        const deliveryItems = shopLines(data.get("deliveryItems"));
+        const stockValue = Number(data.get("stock"));
 
-      position.title = String(data.get("title") || product.title || "").trim();
-      position.description = String(data.get("description") || "").trim();
-      position.priceUsd = Number(data.get("priceUsd") || 0);
-      position.weight = String(data.get("weight") || "").trim();
-      position.deliveryType = String(data.get("deliveryType") || "").trim() || "Товар";
-      position.country = String(data.get("country") || shopDefaultCountry(store));
-      position.city = String(data.get("city") || shopDefaultCity(store));
-      position.district = String(data.get("district") || "").trim();
-      position.deliveryItems = deliveryItems;
-      position.stock = Math.max(deliveryItems.length, Number.isFinite(stockValue) ? stockValue : deliveryItems.length);
-      position.status = String(data.get("status") || position.status || "ready");
+        position.title = String(data.get("title") || product.title || "").trim();
+        position.description = String(data.get("description") || "").trim();
+        position.priceUsd = Number(data.get("priceUsd") || 0);
+        position.weight = String(data.get("weight") || "").trim();
+        position.deliveryType = String(data.get("deliveryType") || "").trim() || "Товар";
+        position.country = String(data.get("country") || shopDefaultCountry(store));
+        position.city = String(data.get("city") || shopDefaultCity(store));
+        position.district = String(data.get("district") || "").trim();
+        position.deliveryItems = deliveryItems;
+        position.stock = Math.max(deliveryItems.length, Number.isFinite(stockValue) ? stockValue : deliveryItems.length);
+        position.status = String(data.get("status") || position.status || "ready");
 
-      await shopPersistAndRender("storage");
+        await shopPersistAndRender("storage");
+      });
     });
   });
 
   document.querySelector("[data-shop-staff-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Сохраняю...", async () => {
 
-    const data = new FormData(event.currentTarget);
-    const login = String(data.get("login") || "").trim();
-    const password = String(data.get("password") || "").trim();
-    const permissions = data.getAll("permissions").map(String).filter((id) => SHOP_STAFF_ACCESS_TABS.some(([tab]) => tab === id));
+      const data = new FormData(form);
+      const login = String(data.get("login") || "").trim();
+      const password = String(data.get("password") || "").trim();
+      const permissions = data.getAll("permissions").map(String).filter((id) => SHOP_STAFF_ACCESS_TABS.some(([tab]) => tab === id));
 
-    if (!login || !password) return showToast("Укажите логин и пароль сотрудника");
-    if (!permissions.length) return showToast("Выберите хотя бы один раздел для сотрудника");
+      if (!login || !password) return showToast("Укажите логин и пароль сотрудника");
+      if (!permissions.length) return showToast("Выберите хотя бы один раздел для сотрудника");
 
-    store.staff = Array.isArray(store.staff) ? store.staff : [];
-    const member = {
-      login,
-      password,
-      name: String(data.get("name") || "").trim(),
-      permissions,
-      updatedAt: Date.now()
-    };
-    const index = store.staff.findIndex((item) => sameLogin(item.login, login));
-    if (index >= 0) {
-      store.staff[index] = { ...store.staff[index], ...member };
-    } else {
-      store.staff.unshift({ ...member, createdAt: Date.now() });
-    }
+      store.staff = Array.isArray(store.staff) ? store.staff : [];
+      const member = {
+        login,
+        password,
+        name: String(data.get("name") || "").trim(),
+        permissions,
+        updatedAt: Date.now()
+      };
+      const index = store.staff.findIndex((item) => sameLogin(item.login, login));
+      if (index >= 0) {
+        store.staff[index] = { ...store.staff[index], ...member };
+      } else {
+        store.staff.unshift({ ...member, createdAt: Date.now() });
+      }
 
-    await shopPersistAndRender("staff");
+      await shopPersistAndRender("staff");
+    });
   });
 
   document.querySelectorAll("[data-shop-staff-delete]").forEach((button) => {
@@ -10573,17 +10663,20 @@ function bindShopPanelActions(store, activeTab) {
 
   document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    store.wallets = storeWallets(store);
-    storeEnabledCoins(store).forEach((coin) => {
-      const value = String(data.get(`wallet_${coin.id}`) || "").trim();
-      store.wallets[coin.id] = value;
-      if (coin.id === "ltc") store.ltcWallet = value;
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Сохраняю...", async () => {
+      const data = new FormData(form);
+      store.wallets = storeWallets(store);
+      storeEnabledCoins(store).forEach((coin) => {
+        const value = String(data.get(`wallet_${coin.id}`) || "").trim();
+        store.wallets[coin.id] = value;
+        if (coin.id === "ltc") store.ltcWallet = value;
+      });
+      store.autoReleaseHours = Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24)));
+      const nextPassword = String(data.get("adminPassword") || "").trim();
+      if (nextPassword) store.adminPassword = nextPassword;
+      await shopPersistAndRender("settings");
     });
-    store.autoReleaseHours = Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24)));
-    const nextPassword = String(data.get("adminPassword") || "").trim();
-    if (nextPassword) store.adminPassword = nextPassword;
-    await shopPersistAndRender("settings");
   });
 
   document.querySelector("[data-shop-dispute-search]")?.addEventListener("input", (event) => {
@@ -10795,22 +10888,25 @@ function renderSeller() {
   });
   document.querySelector("[data-seller-profile-form]").onsubmit = async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const file = data.get("image");
-    store.name = data.get("name").trim();
-    store.short = data.get("short").trim();
-    store.description = data.get("description").trim();
-    if (file && file.size) {
-      const image = await fileToDataUrl(file);
-      store.image = image;
-      store.cover = image;
-    }
-    saveDb({ localOnly: true, silentLocalStorageError: true });
-    const saved = await persistSellerAdminStore();
-    if (!saved) return;
-    await refreshRemoteState();
-    showToast("Страница магазина сохранена");
-    renderSeller();
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Сохраняю...", async () => {
+      const data = new FormData(form);
+      const file = data.get("image");
+      store.name = data.get("name").trim();
+      store.short = data.get("short").trim();
+      store.description = data.get("description").trim();
+      if (file && file.size) {
+        const image = await fileToDataUrl(file);
+        store.image = image;
+        store.cover = image;
+      }
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+      const saved = await persistSellerAdminStore();
+      if (!saved) throw new Error("Сервер не принял изменения магазина");
+      await refreshRemoteState();
+      showToast("Страница магазина сохранена");
+      renderSeller();
+    });
   };
   document.querySelectorAll("[data-seller-dispute-chat]").forEach((button) => {
     button.onclick = () => {
@@ -10821,52 +10917,55 @@ function renderSeller() {
   bindLocationSelects();
   document.querySelector("[data-product-form]").onsubmit = async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const mainFile = data.get("mainImage");
-    const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
-    const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
-    const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image);
-    const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
-    const priceUsd = Number(data.get("priceUsd") || 0);
-    const productId = `product-${Date.now()}`;
-    const rawDeliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    const fallbackDeliveryText = String(data.get("description") || data.get("title") || "Товар").trim();
-    const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
-    store.products.unshift({
-      id: productId,
-      title: data.get("title").trim(),
-      category: data.get("category").trim(),
-      description: data.get("description").trim(),
-      price: `от ${priceUsd}$`,
-      priceUsd,
-      image: images[0],
-      images,
-      sellerManaged: true,
-      deliveryItems,
-      rating: 5,
-      reviews: 0,
-      purchases: 0,
-      positions: [{
-        id: `${productId}-position`,
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Добавляю...", async () => {
+      const data = new FormData(form);
+      const mainFile = data.get("mainImage");
+      const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
+      const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
+      const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image);
+      const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
+      const priceUsd = Number(data.get("priceUsd") || 0);
+      const productId = `product-${Date.now()}`;
+      const rawDeliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      const fallbackDeliveryText = String(data.get("description") || data.get("title") || "Товар").trim();
+      const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
+      store.products.unshift({
+        id: productId,
         title: data.get("title").trim(),
+        category: data.get("category").trim(),
         description: data.get("description").trim(),
+        price: `от ${priceUsd}$`,
         priceUsd,
-        country: data.get("country"),
-        city: String(data.get("city") || "chisinau").trim(),
-        district: String(data.get("district") || "").trim(),
-        deliveryType: data.get("deliveryType").trim() || "Курьер",
+        image: images[0],
+        images,
+        sellerManaged: true,
         deliveryItems,
-        stock: Math.max(1, deliveryItems.length),
-        status: "ready"
-      }],
-      reviewsList: []
+        rating: 5,
+        reviews: 0,
+        purchases: 0,
+        positions: [{
+          id: `${productId}-position`,
+          title: data.get("title").trim(),
+          description: data.get("description").trim(),
+          priceUsd,
+          country: data.get("country"),
+          city: String(data.get("city") || "chisinau").trim(),
+          district: String(data.get("district") || "").trim(),
+          deliveryType: data.get("deliveryType").trim() || "Курьер",
+          deliveryItems,
+          stock: Math.max(1, deliveryItems.length),
+          status: "ready"
+        }],
+        reviewsList: []
+      });
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+      const saved = await persistSellerAdminStore();
+      if (!saved) throw new Error("Сервер не принял товар");
+      await refreshRemoteState();
+      showToast("Товар сохранён");
+      renderSeller();
     });
-    saveDb({ localOnly: true, silentLocalStorageError: true });
-    const saved = await persistSellerAdminStore();
-    if (!saved) return;
-    await refreshRemoteState();
-    showToast("Товар сохранён");
-    renderSeller();
   };
   bindAdminProductForms();
 }
@@ -11134,6 +11233,15 @@ function bindButtonFeedback(scope = document) {
     });
   });
 }
+
+["input", "change", "focusin"].forEach((eventName) => {
+  document.addEventListener(eventName, (event) => {
+    const form = event.target?.closest?.(".shop-panel-page form, .seller-admin-screen form");
+    if (!form) return;
+    form.dataset.shopFormDirty = "1";
+    markShopPanelFormActivity();
+  }, true);
+});
 
 function bindGroupFloatingWidget() {
   document.querySelectorAll("[data-group-widget-toggle]").forEach((button) => {
