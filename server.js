@@ -4395,13 +4395,19 @@ app.post("/api/admin/stores", async (req, res, next) => {
     await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
-    await saveOwnerStoreFallback(protectedStore);
-    await clearDeletedStoreTombstone(protectedStore.id);
+    saveOwnerStoreFallback(protectedStore).catch((error) => {
+      console.error("[admin-store] fallback save deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
+    clearDeletedStoreTombstone(protectedStore.id).catch((error) => {
+      console.error("[admin-store] tombstone clear deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
     const panel = adminStorePanelLinks(protectedStore, panelPassword);
-    await appendAdminLog("store_created", admin.login, { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
+    appendAdminLog("store_created", admin.login, { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl }).catch((error) => {
+      console.error("[admin-store] create log deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
     console.log("[admin-store] created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
     notifyRealtime("store_created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, source: "market-admin" });
-    res.json({ store: publicStoreForState(protectedStore, { includeStaff: true }), panel, overview: adminBuildOverview(await adminLoadMarketplace()) });
+    res.json({ ok: true, store: publicStoreForState(protectedStore, { includeStaff: true }), panel });
   } catch (error) {
     next(error);
   }
@@ -4417,12 +4423,18 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
-    await saveOwnerStoreFallback(protectedStore);
-    await clearDeletedStoreTombstone(protectedStore.id);
-    await appendAdminLog("store_updated", admin.login, { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
+    saveOwnerStoreFallback(protectedStore).catch((error) => {
+      console.error("[admin-store] fallback update deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
+    clearDeletedStoreTombstone(protectedStore.id).catch((error) => {
+      console.error("[admin-store] tombstone clear deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
+    appendAdminLog("store_updated", admin.login, { storeId: protectedStore.id, fields: Object.keys(req.body || {}) }).catch((error) => {
+      console.error("[admin-store] update log deferred failed", { storeId: protectedStore.id, message: error.message });
+    });
     console.log("[admin-store] updated", { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
     notifyRealtime("store_updated", { storeId: protectedStore.id, source: "market-admin" });
-    res.json({ ...adminBuildOverview(await adminLoadMarketplace()), panel: adminStorePanelLinks(protectedStore, panelPassword) });
+    res.json({ ok: true, store: publicStoreForState(protectedStore, { includeStaff: true }), panel: adminStorePanelLinks(protectedStore, panelPassword) });
   } catch (error) {
     next(error);
   }
@@ -4442,13 +4454,17 @@ app.delete("/api/admin/stores/:id", async (req, res, next) => {
     if (!state.deletedStoreIds.includes(storeId)) state.deletedStoreIds.push(storeId);
     state.orders = (state.orders || []).filter((order) => order.storeId !== storeId);
     state.storeApplications = (state.storeApplications || []).filter((item) => item.storeId !== storeId && item.id !== storeId);
-    await saveSettingsState(state);
+    await saveSettingsState(state, { deferSideEffects: true });
     await supabase.from("stores").delete().eq("id", storeId);
-    await removeOwnerStoreFallback(storeId);
-    await appendAdminLog("store_deleted", admin.login, { storeId, name: storeData.name || "" });
+    removeOwnerStoreFallback(storeId).catch((error) => {
+      console.error("[admin-store] fallback delete deferred failed", { storeId, message: error.message });
+    });
+    appendAdminLog("store_deleted", admin.login, { storeId, name: storeData.name || "" }).catch((error) => {
+      console.error("[admin-store] delete log deferred failed", { storeId, message: error.message });
+    });
     console.log("[admin-store] deleted", { storeId, name: storeData.name || "" });
     notifyRealtime("store_deleted", { storeId, source: "market-admin" });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.json({ ok: true, deletedStoreId: storeId });
   } catch (error) {
     next(error);
   }
@@ -4478,10 +4494,12 @@ app.post("/api/admin/exchangers", async (req, res, next) => {
       createdBy: admin.login
     };
     state.exchangers.unshift(exchanger);
-    await saveSettingsState(state);
-    await appendAdminLog("exchanger_created", admin.login, { exchangerId: id, login: profile.login });
+    await saveSettingsState(state, { deferSideEffects: true });
+    appendAdminLog("exchanger_created", admin.login, { exchangerId: id, login: profile.login }).catch((error) => {
+      console.error("[admin-exchanger] create log deferred failed", { exchangerId: id, message: error.message });
+    });
     notifyRealtime("exchanger_created", { exchangerId: id, login: profile.login });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.json({ ok: true, exchanger: adminExchangersForState([exchanger], [profile])[0] || exchanger });
   } catch (error) {
     next(error);
   }
@@ -4506,10 +4524,12 @@ app.patch("/api/admin/exchangers/:id", async (req, res, next) => {
       updatedAt: Date.now(),
       updatedBy: admin.login
     };
-    await saveSettingsState(state);
-    await appendAdminLog("exchanger_updated", admin.login, { exchangerId: req.params.id, login: profile.login, fields: Object.keys(req.body || {}) });
+    await saveSettingsState(state, { deferSideEffects: true });
+    appendAdminLog("exchanger_updated", admin.login, { exchangerId: req.params.id, login: profile.login, fields: Object.keys(req.body || {}) }).catch((error) => {
+      console.error("[admin-exchanger] update log deferred failed", { exchangerId: req.params.id, message: error.message });
+    });
     notifyRealtime("exchanger_updated", { exchangerId: req.params.id, login: profile.login });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.json({ ok: true, exchanger: adminExchangersForState([state.exchangers[index]], [profile])[0] || state.exchangers[index] });
   } catch (error) {
     next(error);
   }
@@ -4523,10 +4543,12 @@ app.delete("/api/admin/exchangers/:id", async (req, res, next) => {
     const removed = before.find((item) => String(item.id || "") === String(req.params.id || ""));
     if (!removed) return res.status(404).json({ error: "Обменник не найден" });
     state.exchangers = before.filter((item) => String(item.id || "") !== String(req.params.id || ""));
-    await saveSettingsState(state, { allowEmptyExchangers: true });
-    await appendAdminLog("exchanger_deleted", admin.login, { exchangerId: req.params.id, login: removed.login || removed.ownerLogin || "" });
+    await saveSettingsState(state, { allowEmptyExchangers: true, deferSideEffects: true });
+    appendAdminLog("exchanger_deleted", admin.login, { exchangerId: req.params.id, login: removed.login || removed.ownerLogin || "" }).catch((error) => {
+      console.error("[admin-exchanger] delete log deferred failed", { exchangerId: req.params.id, message: error.message });
+    });
     notifyRealtime("exchanger_deleted", { exchangerId: req.params.id });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.json({ ok: true, deletedExchangerId: req.params.id });
   } catch (error) {
     next(error);
   }
@@ -5501,7 +5523,14 @@ async function saveSettingsState(state, options = {}) {
   };
   preserveExistingStateCollections(next, currentData, state || {}, options);
   await supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" });
-  await saveSettingsBackupState(next);
+  const backupSave = saveSettingsBackupState(next);
+  if (options.deferSideEffects) {
+    backupSave.catch((error) => {
+      console.error("[settings-backup] deferred save failed", { message: error.message });
+    });
+  } else {
+    await backupSave;
+  }
   if (
     state
     && (
@@ -5516,9 +5545,10 @@ async function saveSettingsState(state, options = {}) {
       state.lang
     )
   ) {
-    await savePublicCatalogSnapshot(next).catch((error) => {
+    const catalogSave = savePublicCatalogSnapshot(next).catch((error) => {
       console.error("[public-catalog] sync after settings save failed", { message: error.message });
     });
+    if (!options.deferSideEffects) await catalogSave;
   }
   notifyRealtime("state_updated");
   if (state && (state.orders || state.walletDeposits || state.walletWithdrawals || state.walletTransactions)) {

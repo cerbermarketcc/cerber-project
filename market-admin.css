@@ -384,6 +384,55 @@ tr:hover td {
   padding: 16px;
 }
 
+.admin-create-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.admin-create-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-create-panel summary strong,
+.admin-create-panel summary small {
+  display: block;
+}
+
+.admin-create-panel summary strong {
+  font-size: 20px;
+}
+
+.admin-create-panel summary small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-create-panel summary b {
+  display: grid;
+  place-items: center;
+  flex: 0 0 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #14120e;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.admin-create-panel[open] summary b {
+  transform: rotate(45deg);
+}
+
+.admin-create-panel form,
+.admin-create-panel > .muted {
+  margin-top: 14px;
+}
+
 .row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -815,6 +864,36 @@ tr:hover td {
     overflow-x: hidden;
   }
 
+  .admin-create-panel {
+    position: sticky;
+    top: 105px;
+    z-index: 12;
+    padding: 12px;
+    background: rgba(25, 27, 24, 0.98);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+  }
+
+  .admin-create-panel[open] {
+    position: static;
+  }
+
+  .admin-create-panel summary {
+    min-height: 48px;
+  }
+
+  .admin-create-panel summary strong {
+    font-size: 17px;
+    line-height: 1.15;
+  }
+
+  .admin-create-panel summary small {
+    font-size: 11px;
+  }
+
+  .admin-create-panel form {
+    max-height: none;
+  }
+
   .topline {
     display: grid;
     align-items: stretch;
@@ -908,12 +987,25 @@ tr:hover td {
     align-items: center;
     gap: 8px;
     min-height: 44px;
+    line-height: 1.25;
     background: rgba(255, 255, 255, 0.035);
+  }
+
+  .checks input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
   }
 
   .field {
     margin: 10px 0;
     font-size: 13px;
+  }
+
+  .field input,
+  .field select,
+  .field textarea {
+    border-radius: 10px;
   }
 
   input[type="file"] {
@@ -966,9 +1058,9 @@ tr:hover td {
 
   td {
     display: grid;
-    grid-template-columns: minmax(94px, 35%) minmax(0, 1fr);
-    gap: 10px;
-    align-items: center;
+    grid-template-columns: 1fr;
+    gap: 5px;
+    align-items: start;
     border-bottom: 1px solid var(--line);
     padding: 10px 12px;
     word-break: break-word;
@@ -1007,6 +1099,13 @@ tr:hover td {
   .ghost {
     min-height: 46px;
     border-radius: 10px;
+  }
+
+  button,
+  .primary,
+  .ghost,
+  .chip {
+    min-height: 46px;
   }
 
   .admin-form-actions,

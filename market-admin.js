@@ -515,6 +515,39 @@ function beginAdminFormSubmit(form, loadingText = "Сохраняю...") {
   };
 }
 
+function adminUpsertById(items = [], item = {}) {
+  if (!item?.id) return Array.isArray(items) ? items : [];
+  const list = Array.isArray(items) ? items.slice() : [];
+  const index = list.findIndex((row) => String(row?.id || "") === String(item.id));
+  if (index >= 0) list[index] = { ...list[index], ...item };
+  else list.unshift(item);
+  return list;
+}
+
+function adminRemoveById(items = [], id = "") {
+  return (Array.isArray(items) ? items : []).filter((row) => String(row?.id || "") !== String(id || ""));
+}
+
+function adminStoreRowFromPayload(store = {}, panel = {}) {
+  return {
+    sales: 0,
+    grossRevenue: 0,
+    revenue: 0,
+    commission: 0,
+    clients: 0,
+    products: Array.isArray(store.products) ? store.products.length : 0,
+    disputes: 0,
+    registeredAt: store.createdAt || Date.now(),
+    commissionPercent: Number(store.commissionPercent || 0),
+    homepagePosition: Number(store.homepagePosition || store.position || 0),
+    autoReleaseHours: Number(store.autoReleaseHours || 24),
+    placements: Array.isArray(store.placements) ? store.placements : [],
+    coins: store.enabledCoins || store.coins || {},
+    ...store,
+    panel: { ...(store.panel || {}), ...(panel || {}) }
+  };
+}
+
 function renderSection() {
   if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
@@ -593,9 +626,10 @@ function periodTable() {
 
 function renderStores() {
   const rows = filterRows(data.stores, ["id", "name", "ownerLogin", "status"]);
+  const createPanelOpen = window.innerWidth > 720 ? "open" : "";
   return `
-    <article class="split-card">
-      <h2>Создать магазин</h2>
+    <details class="split-card admin-create-panel" ${createPanelOpen}>
+      <summary><span><strong>Создать магазин</strong><small>Основное, доступы, размещение</small></span><b>+</b></summary>
       <form data-create-store-form>
         <label class="field">Фото магазина файлом<input name="imageFile" type="file" accept="image/*"></label>
         <div class="checks">
@@ -624,8 +658,8 @@ function renderStores() {
         <button class="primary" type="submit">Создать магазин</button>
       </form>
       <div data-created-store></div>
-    </article>
-    <section class="split">
+    </details>
+    <section class="split admin-manage-split">
       <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход магазина</th><th>Комиссия владельца</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
         ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
       </tbody></table></article>
@@ -715,10 +749,11 @@ function exchangerUserOptions() {
 
 function renderExchangers() {
   const rows = filterRows(data.exchangers || [], ["id", "login", "name", "title", "description", "status"]);
+  const createPanelOpen = window.innerWidth > 720 ? "open" : "";
   return `
     <datalist id="exchanger-users">${exchangerUserOptions()}</datalist>
-    <article class="split-card">
-      <h2>Создать обменник</h2>
+    <details class="split-card admin-create-panel" ${createPanelOpen}>
+      <summary><span><strong>Создать обменник</strong><small>Логин, описание, фото</small></span><b>+</b></summary>
       <p class="muted">Привяжите обменник к уже зарегистрированному логину. Когда клиент нажмет “Отправить сообщение обменнику”, личный диалог откроется именно с этим пользователем.</p>
       <form data-exchanger-create-form>
         <div class="row">
@@ -738,8 +773,8 @@ function renderExchangers() {
         </div>
         <button class="primary" type="submit">Создать обменник</button>
       </form>
-    </article>
-    <section class="split">
+    </details>
+    <section class="split admin-manage-split">
       <article class="table-card">
         <table><thead><tr><th>Фото</th><th>Аватар</th><th>Название</th><th>Логин</th><th>Статус</th><th>Позиция</th><th>Создан</th><th></th></tr></thead><tbody>
           ${rows.map((item) => `<tr><td>${item.image ? `<img src="${esc(item.image)}" alt="" style="width:56px;height:40px;object-fit:cover;border-radius:8px">` : "-"}</td><td>${item.avatar ? `<img src="${esc(item.avatar)}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:50%">` : "-"}</td><td><strong>${esc(item.name || item.title || "")}</strong><br><span class="muted">${esc(String(item.description || "").slice(0, 90))}</span></td><td>${esc(item.login || "")}</td><td><span class="status ${item.active ? "" : "off"}">${esc(item.status || "active")}</span></td><td>${Number(item.position || 0)}</td><td>${fmtDate(item.createdAt)}</td><td><button class="ghost" data-exchanger-edit="${esc(item.id)}">Открыть</button></td></tr>`).join("") || `<tr><td colspan="8">Обменников пока нет.</td></tr>`}
@@ -1413,7 +1448,7 @@ function bindActions() {
     try {
       const image = await formImageValue(fd, "imageFile");
       const avatar = await formImageValue(fd, "avatarFile");
-      data = await api("/api/admin/exchangers", {
+      const payload = await api("/api/admin/exchangers", {
         method: "POST",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
         body: JSON.stringify({
@@ -1426,9 +1461,11 @@ function bindActions() {
           status: fd.get("status")
         })
       });
+      if (payload?.exchanger) data.exchangers = adminUpsertById(data.exchangers, payload.exchanger);
       toast("Обменник создан");
       endSubmit();
       renderShell();
+      refreshData(true);
     } catch (error) {
       endSubmit();
       toast(error.message, true);
@@ -1453,7 +1490,7 @@ function bindActions() {
       try {
         const image = await formImageValue(fd, "imageFile");
         const avatar = await formImageValue(fd, "avatarFile");
-        data = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
+        const payload = await api(`/api/admin/exchangers/${encodeURIComponent(form.dataset.exchangerUpdateForm)}`, {
           method: "PATCH",
           timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
           body: JSON.stringify({
@@ -1466,9 +1503,11 @@ function bindActions() {
             status: fd.get("status")
           })
         });
+        if (payload?.exchanger) data.exchangers = adminUpsertById(data.exchangers, payload.exchanger);
         toast("Обменник сохранен");
         endSubmit();
         renderShell();
+        refreshData(true);
       } catch (error) {
         endSubmit();
         toast(error.message, true);
@@ -1479,9 +1518,11 @@ function bindActions() {
     button.onclick = async () => {
       if (!confirm("Удалить обменник из каталога?")) return;
       try {
-        data = await api(`/api/admin/exchangers/${encodeURIComponent(button.dataset.exchangerDelete)}`, { method: "DELETE" });
+        const payload = await api(`/api/admin/exchangers/${encodeURIComponent(button.dataset.exchangerDelete)}`, { method: "DELETE" });
+        data.exchangers = adminRemoveById(data.exchangers, payload.deletedExchangerId || button.dataset.exchangerDelete);
         toast("Обменник удален");
         renderShell();
+        refreshData(true);
       } catch (error) {
         toast(error.message, true);
       }
@@ -1522,14 +1563,23 @@ function bindActions() {
           enabledCoins
         })
       });
-      data = result.overview;
+      if (result?.overview) data = result.overview;
+      else if (result?.store) {
+        data.stores = adminUpsertById(data.stores, adminStoreRowFromPayload(result.store, result.panel));
+        selectedStoreId = result.store.id || selectedStoreId;
+      }
       toast("Магазин создан");
       endSubmit();
       renderShell();
       setTimeout(() => {
         const box = root.querySelector("[data-created-store]");
-        if (box) box.innerHTML = `<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`;
+        if (box) {
+          box.closest("details")?.setAttribute("open", "");
+          box.innerHTML = `<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`;
+          box.scrollIntoView?.({ block: "nearest" });
+        }
       });
+      refreshData(true);
     } catch (error) {
       endSubmit();
       toast(error.message, true);
@@ -1566,7 +1616,7 @@ function bindActions() {
     try {
       const image = await formImageValue(fd, "imageFile");
       const cover = await formImageValue(fd, "coverFile");
-      data = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
+      const payload = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
         body: JSON.stringify({
@@ -1587,9 +1637,12 @@ function bindActions() {
           enabledCoins
         })
       });
+      if (payload?.stores) data = payload;
+      else if (payload?.store) data.stores = adminUpsertById(data.stores, adminStoreRowFromPayload(payload.store, payload.panel));
       toast("Магазин сохранен");
       endSubmit();
       renderShell();
+      refreshData(true);
     } catch (error) {
       endSubmit();
       toast(error.message, true);
@@ -1598,9 +1651,13 @@ function bindActions() {
   root.querySelectorAll("[data-delete-store]").forEach((button) => button.onclick = async () => {
     if (!confirm("DELETE удалит магазин, товары и данные магазина с сайта. Удалить?")) return;
     try {
-      data = await api(`/api/admin/stores/${encodeURIComponent(button.dataset.deleteStore)}`, { method: "DELETE" });
+      const payload = await api(`/api/admin/stores/${encodeURIComponent(button.dataset.deleteStore)}`, { method: "DELETE" });
+      if (payload?.stores) data = payload;
+      else data.stores = adminRemoveById(data.stores, payload.deletedStoreId || button.dataset.deleteStore);
+      if (selectedStoreId === button.dataset.deleteStore) selectedStoreId = "";
       toast("Магазин удален");
       renderShell();
+      refreshData(true);
     } catch (error) {
       toast(error.message, true);
     }
