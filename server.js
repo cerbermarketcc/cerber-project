@@ -3621,7 +3621,7 @@ app.post("/api/admin/login", async (req, res, next) => {
 app.get("/api/admin/overview", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    const data = await adminLoadMarketplace();
+    const data = await adminLoadMarketplace({ compact: req.query.compact === "1" });
     res.json({ admin, ...adminBuildOverview(data) });
   } catch (error) {
     next(error);
@@ -6321,7 +6321,10 @@ async function upsertPrivateMessage(message) {
   });
 }
 
-async function adminLoadMarketplace() {
+async function adminLoadMarketplace(options = {}) {
+  const compact = Boolean(options.compact);
+  const messagesLimit = compact ? 350 : 1500;
+  const sessionsLimit = compact ? 800 : 3000;
   await withTimeout(ensureSeed(), "admin marketplace seed", 5000).catch((error) => {
     console.error("[admin] seed skipped", { message: error.message });
   });
@@ -6330,7 +6333,7 @@ async function adminLoadMarketplace() {
       console.error("[admin] stores fallback", { message: error.message });
       return { data: null, failed: true };
     }),
-    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1500), "admin messages query", 12000).catch((error) => {
+    withTimeout(supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(messagesLimit), "admin messages query", compact ? 8000 : 12000).catch((error) => {
       console.error("[admin] messages fallback", { message: error.message });
       return { data: [] };
     }),
@@ -6342,7 +6345,7 @@ async function adminLoadMarketplace() {
       console.error("[admin] profiles fallback", { message: error.message });
       return { data: [] };
     }),
-    withTimeout(supabase.from("sessions").select("login_key,created_at"), "admin sessions query", 8000).catch((error) => {
+    withTimeout(supabase.from("sessions").select("login_key,created_at").order("created_at", { ascending: false }).limit(sessionsLimit), "admin sessions query", compact ? 6000 : 8000).catch((error) => {
       console.error("[admin] sessions fallback", { message: error.message });
       return { data: [] };
     }),

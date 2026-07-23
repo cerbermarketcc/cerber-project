@@ -302,20 +302,33 @@ async function api(path, options = {}) {
   throw lastError || new Error("API error");
 }
 
+function adminAuthError(error) {
+  const message = String(error?.message || "");
+  return /session required|unauthorized|forbidden|401|403|admin session/i.test(message);
+}
+
 async function refreshData(silent = false) {
   if (!token) return;
   try {
-    data = await api("/api/admin/overview");
+    data = await api("/api/admin/overview?compact=1", { timeoutMs: silent ? 45000 : 90000 });
     if (!silent) renderShell();
     else if (adminCanSilentRender()) renderCurrentView({ preserveScroll: true });
   } catch (error) {
-    if (!silent) renderLogin("Сессия истекла");
+    if (!silent) {
+      if (adminAuthError(error)) {
+        adminStorageRemove(TOKEN_KEY);
+        token = "";
+        renderLogin("Сессия истекла. Войдите заново.");
+      } else {
+        renderLogin(error.message || "Сервер долго отвечает. Попробуйте войти ещё раз.");
+      }
+    }
   }
 }
 
 function connectRealtime() {
   clearInterval(refreshTimer);
-  refreshTimer = setInterval(() => refreshData(true), 6000);
+  refreshTimer = setInterval(() => refreshData(true), 20000);
   try {
     const api = new URL(API_ORIGIN);
     const protocol = api.protocol === "https:" ? "wss:" : "ws:";
@@ -1986,5 +1999,5 @@ document.addEventListener("pointerdown", (event) => {
   }, true);
 });
 
-if (token) load().catch(() => renderLogin("Сессия истекла"));
+if (token) load().catch((error) => renderLogin(error?.message || "Сервер долго отвечает. Попробуйте войти ещё раз."));
 else renderLogin();
