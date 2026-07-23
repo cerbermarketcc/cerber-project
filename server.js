@@ -20,6 +20,7 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
+const internalCaptchaTtlMs = 10 * 60 * 1000;
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -899,6 +900,7 @@ async function timedDbCheck(label, run, timeoutMs = 5000) {
 }
 
 async function verifyCaptcha(token, req) {
+  if (verifyInternalCaptcha(token)) return;
   if (!turnstileEnabled) {
     console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
     return;
@@ -954,6 +956,44 @@ async function verifyCaptcha(token, req) {
     const error = new Error(message);
     error.status = status;
     throw error;
+  }
+}
+
+function captchaSecret() {
+  return process.env.ADMIN_JWT_SECRET || process.env.SELLER_ADMIN_JWT_SECRET || supabaseServiceKey || "cerber-local-captcha";
+}
+
+function signInternalCaptcha(payload) {
+  return crypto.createHmac("sha256", captchaSecret()).update(payload).digest("base64url");
+}
+
+function createInternalCaptcha() {
+  const a = 2 + crypto.randomInt(8);
+  const b = 2 + crypto.randomInt(8);
+  const expiresAt = Date.now() + internalCaptchaTtlMs;
+  const payload = Buffer.from(JSON.stringify({ a, b, answer: a + b, expiresAt }), "utf8").toString("base64url");
+  return {
+    question: `${a} + ${b} = ?`,
+    token: `${payload}.${signInternalCaptcha(payload)}`,
+    expiresAt
+  };
+}
+
+function verifyInternalCaptcha(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw.startsWith("cerber-internal:")) return false;
+  const rest = raw.slice("cerber-internal:".length);
+  const splitAt = rest.lastIndexOf(":");
+  if (splitAt <= 0) return false;
+  const token = rest.slice(0, splitAt);
+  const answer = Number(rest.slice(splitAt + 1));
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature || signature !== signInternalCaptcha(payload)) return false;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return Date.now() <= Number(data.expiresAt || 0) && Number(data.answer) === answer;
+  } catch {
+    return false;
   }
 }
 async function ensureSeed() {
@@ -2357,6 +2397,10 @@ function verifySellerAdminToken(req) {
   }
 }
 
+app.get("/api/auth/captcha", (req, res) => {
+  res.json(createInternalCaptcha());
+});
+
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
@@ -2708,7 +2752,7 @@ function sellerStorePatch(existing = {}, input = {}) {
     avatar: image,
     cover,
     banner: cover,
-    gallery: Array.isArray(input.gallery) ? input.gallery.slice(0, 5) : (Array.isArray(existing.gallery) ? existing.gallery : []),
+    gallery: Array.isArray(input.gallery) ? input.gallery.slice(0, 12) : (Array.isArray(existing.gallery) ? existing.gallery : []),
     products: Array.isArray(input.products) ? input.products.map((product) => sellerProductPatch(existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {}, product)) : existingProducts,
     reviewsList: Array.isArray(input.reviewsList) ? input.reviewsList : (Array.isArray(existing.reviewsList) ? existing.reviewsList : []),
     enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
@@ -6658,6 +6702,9 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const topPosition = Math.max(0, Number(body.top_position ?? body.topPosition ?? existing?.top_position ?? position));
   const image = sellerImagePatch(existing?.image || existing?.avatar, body.image || body.avatar) || "assets/cerber-emblem.png";
   const cover = sellerImagePatch(existing?.cover || existing?.banner, body.cover || body.banner) || image || "assets/market-banner.png";
+  const gallery = Array.isArray(body.gallery)
+    ? body.gallery.map((item) => sellerImagePatch("", item)).filter(Boolean).slice(0, 12)
+    : (Array.isArray(existing?.gallery) ? existing.gallery : []);
   const visibleInCatalog = adminStoreVisible(body, existing, flags);
   const isStopped = body.is_stopped === true || body.stopped === true || body.salesBlocked === true || existing?.salesBlocked === true || existing?.is_stopped === true;
   return {
@@ -6674,6 +6721,7 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     avatar: image,
     cover,
     banner: cover,
+    gallery,
     status: adminNormalizeStoreStatus(body.status || existing?.status || "ACTIVE"),
     is_active: body.is_active !== false,
     is_deleted: body.is_deleted === true || body.deleted === true,

@@ -262,6 +262,17 @@ async function formImageValue(formData, fileName, fallbackName = "") {
   return String(formData.get(fallbackName || fileName) || "").trim();
 }
 
+async function formImageValues(formData, fileName, limit = 12) {
+  const files = Array.from(formData.getAll(fileName)).filter((file) => file && file.size).slice(0, limit);
+  const values = [];
+  for (const file of files) {
+    const value = await fileToDataUrl(file);
+    if (value) values.push(value);
+    else if (file.size > ADMIN_IMAGE_HARD_LIMIT_BYTES) toast("Р¤РѕС‚Рѕ СЃР»РёС€РєРѕРј Р±РѕР»СЊС€РѕРµ Рё Р±СѓРґРµС‚ РїСЂРѕРїСѓС‰РµРЅРѕ.", true);
+  }
+  return values;
+}
+
 async function api(path, options = {}) {
   const fetchJson = async (url) => {
     const { timeoutMs = 45000, headers: optionHeaders = {}, ...fetchOptions } = options;
@@ -645,6 +656,7 @@ function renderStores() {
       <summary><span><strong>Создать магазин</strong><small>Основное, доступы, размещение</small></span><b>+</b></summary>
       <form data-create-store-form>
         <label class="field">Фото магазина файлом<input name="imageFile" type="file" accept="image/*"></label>
+        <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
         <div class="checks">
           <label><input name="placement_TOP10" type="checkbox" checked> TOP 10</label>
           <label><input name="placement_TOP" type="checkbox"> TOP</label>
@@ -706,6 +718,8 @@ function storeDetail(id) {
     <form data-store-form="${esc(store.id)}">
       <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
       <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
+      <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
+      ${Array.isArray(store.gallery) && store.gallery.length ? `<div class="admin-gallery">${store.gallery.slice(0, 12).map((image) => `<img src="${esc(image)}" alt="">`).join("")}</div>` : ""}
       <div class="checks">
         <label><input name="placement_TOP10" type="checkbox" ${placements.includes("TOP 10") ? "checked" : ""}> TOP 10</label>
         <label><input name="placement_TOP" type="checkbox" ${placements.includes("TOP") ? "checked" : ""}> TOP</label>
@@ -1559,6 +1573,7 @@ function bindActions() {
     if (!endSubmit) return;
     try {
       const image = await formImageValue(fd, "imageFile");
+      const gallery = await formImageValues(fd, "galleryFiles", 12);
       const result = await api("/api/admin/stores", {
         method: "POST",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
@@ -1567,6 +1582,7 @@ function bindActions() {
           ownerLogin: fd.get("ownerLogin"),
           adminPassword: fd.get("adminPassword"),
           image,
+          gallery,
           description: fd.get("description"),
           placement: placements[0] || "stores",
           placements,
@@ -1629,6 +1645,8 @@ function bindActions() {
     try {
       const image = await formImageValue(fd, "imageFile");
       const cover = await formImageValue(fd, "coverFile");
+      const gallery = await formImageValues(fd, "galleryFiles", 12);
+      const existingStore = data.stores.find((item) => item.id === form.dataset.storeForm) || {};
       const payload = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
@@ -1638,6 +1656,7 @@ function bindActions() {
           description: fd.get("description"),
           image: image || undefined,
           cover: cover || undefined,
+          gallery: gallery.length ? [...(Array.isArray(existingStore.gallery) ? existingStore.gallery : []), ...gallery].slice(0, 12) : undefined,
           status: fd.get("status"),
           placement: placements[0] || "stores",
           placements,

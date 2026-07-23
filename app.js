@@ -32,6 +32,7 @@ let turnstileRenderTimer = null;
 let turnstileRenderStartedAt = 0;
 let turnstileWaitStartedAt = 0;
 let turnstileScriptPromise = null;
+let internalCaptchaChallenge = null;
 let authSubmitting = false;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
@@ -1427,7 +1428,7 @@ function normalizeDb(next) {
       status: store.status || "active",
       salesBlocked: Boolean(store.salesBlocked),
       autoReleaseHours: Math.max(1, Number(store.autoReleaseHours || next.ownerSettings.defaultAutoReleaseHours || 24)),
-      gallery: Array.isArray(store.gallery) ? store.gallery.slice(0, 5) : [],
+      gallery: Array.isArray(store.gallery) ? store.gallery.slice(0, 12) : [],
       products: Array.isArray(store.products) ? store.products.map((product) => normalizeProduct(product, store)) : [],
       productOrders: Array.isArray(store.productOrders) ? store.productOrders : [],
       storeGrossUsd: Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : undefined,
@@ -2256,8 +2257,8 @@ async function loadRemoteConfig() {
   if (!API_ENABLED) return;
   try {
     const config = await apiFetch("/api/config");
-    TURNSTILE_SITE_KEY = config.turnstileSiteKey || "";
-    TURNSTILE_ENABLED = Boolean(config.turnstileEnabled && TURNSTILE_SITE_KEY);
+    TURNSTILE_SITE_KEY = "";
+    TURNSTILE_ENABLED = false;
     remoteConfigLoaded = true;
     remoteConfigError = "";
     applyCmsTextOverrides(config.cmsTexts || {});
@@ -2267,6 +2268,33 @@ async function loadRemoteConfig() {
     remoteConfigLoaded = true;
     remoteConfigError = error.message || "Не удалось загрузить настройки капчи";
   }
+}
+
+async function loadInternalCaptcha(force = false) {
+  if (!API_ENABLED) return null;
+  if (!force && internalCaptchaChallenge && Number(internalCaptchaChallenge.expiresAt || 0) > Date.now() + 15000) return internalCaptchaChallenge;
+  internalCaptchaChallenge = await apiFetch("/api/auth/captcha", { timeoutMs: 12000 });
+  return internalCaptchaChallenge;
+}
+
+function mountInternalCaptcha(force = false) {
+  if (!API_ENABLED) return;
+  const box = document.querySelector("[data-internal-captcha]");
+  if (!box) return;
+  box.querySelector("[data-internal-captcha-status]").textContent = "Загружаем проверку...";
+  loadInternalCaptcha(force).then((challenge) => {
+    if (!challenge || !document.querySelector("[data-internal-captcha]")) return;
+    const question = document.querySelector("[data-internal-captcha-question]");
+    const token = document.querySelector("[name='captchaChallenge']");
+    const answer = document.querySelector("[name='captchaAnswer']");
+    if (question) question.textContent = challenge.question || "2 + 2 = ?";
+    if (token) token.value = challenge.token || "";
+    if (answer) answer.value = "";
+    box.querySelector("[data-internal-captcha-status]").textContent = "";
+  }).catch((error) => {
+    const status = box.querySelector("[data-internal-captcha-status]");
+    if (status) status.textContent = error.message || "Не удалось загрузить проверку";
+  });
 }
 
 function siteEmojiPickerHtml(scope) {
@@ -2789,7 +2817,6 @@ function filteredStores(filters = catalogFilters()) {
     const products = Array.isArray(store.products) ? store.products : [];
     if (!storeLocationMatches(store, filters)) return false;
     if (query && !storeSearchBlob(store).includes(query)) return false;
-    if (!categoryIsAll(filters.category) && !products.some((product) => productMatchesFilters(product, store, filters))) return false;
     return true;
   }), filters);
 }
@@ -2810,7 +2837,7 @@ function storeInPlacement(store, placement) {
   if (placement === "NEW") return placements.includes("NEW") || store.isNew === true || store.is_new === true;
   if (placement === "stores") {
     if (!storeIsVisible(store)) return false;
-    if (storeHasExplicitPlacements(store)) return placements.includes("STORES");
+    if (storeHasExplicitPlacements(store)) return placements.includes("STORES") || store.visibleInCatalog !== false;
     return store.visibleInCatalog !== false;
   }
   return false;
@@ -3627,7 +3654,6 @@ function renderAuth(message = "") {
   turnstileWidgetId = null;
   turnstileToken = "";
   authSubmitting = false;
-  const captchaRequired = API_ENABLED && TURNSTILE_ENABLED && TURNSTILE_SITE_KEY;
   const captchaPending = API_ENABLED && !remoteConfigLoaded;
   const captchaBlocked = API_ENABLED && Boolean(remoteConfigError);
   const authSubmitDisabled = captchaPending || captchaBlocked;
@@ -3652,13 +3678,17 @@ function renderAuth(message = "") {
                 <p class="captcha-status">Не удалось загрузить настройки капчи: ${esc(remoteConfigError)}</p>
                 <button class="link-button captcha-retry" type="button" data-config-retry>Повторить загрузку</button>
               </div>
-            ` : captchaRequired ? `
+            ` : `
               <div class="captcha-box">
-                <div id="turnstile-widget"></div>
-                <p class="captcha-status" data-captcha-status>Загрузка капчи...</p>
-                <button class="link-button captcha-retry" type="button" data-captcha-retry hidden>Обновить капчу</button>
+                <label class="field">Проверка сайта
+                  <span class="internal-captcha-question" data-internal-captcha-question>...</span>
+                  <input name="captchaAnswer" inputmode="numeric" autocomplete="off" placeholder="Ответ" required>
+                </label>
+                <input type="hidden" name="captchaChallenge">
+                <p class="captcha-status" data-internal-captcha-status></p>
+                <button class="link-button captcha-retry" type="button" data-internal-captcha-retry>Обновить проверку</button>
               </div>
-            ` : ""}
+            `}
           ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit" data-auth-submit ${authSubmitDisabled ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
@@ -3677,6 +3707,7 @@ function renderAuth(message = "") {
     resetCaptcha();
     mountTurnstile(true);
   });
+  document.querySelector("[data-internal-captcha-retry]")?.addEventListener("click", () => mountInternalCaptcha(true));
   document.querySelector("[data-config-retry]")?.addEventListener("click", async () => {
     remoteConfigLoaded = false;
     remoteConfigError = "";
@@ -3684,6 +3715,7 @@ function renderAuth(message = "") {
     await loadRemoteConfig();
     renderAuth();
   });
+  mountInternalCaptcha();
   mountTurnstile();
   applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
@@ -3902,8 +3934,10 @@ async function handleAuth(event) {
   const data = new FormData(form);
   const login = data.get("login").trim();
   const password = data.get("password");
-  const captcha = API_ENABLED ? captchaToken() : data.get("captcha");
-  if ((API_ENABLED && TURNSTILE_ENABLED && TURNSTILE_SITE_KEY && !captcha) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
+  const captcha = API_ENABLED
+    ? `cerber-internal:${String(data.get("captchaChallenge") || "")}:${String(data.get("captchaAnswer") || "").trim()}`
+    : data.get("captcha");
+  if ((API_ENABLED && (!data.get("captchaChallenge") || !String(data.get("captchaAnswer") || "").trim())) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
   authSubmitting = true;
   if (submitButton) setButtonLoading(submitButton, true, authMode === "login" ? tr("enter") : tr("create"));
   updateAuthSubmitCaptchaState();
@@ -3926,6 +3960,7 @@ async function handleAuth(event) {
         return renderCurrent();
       } catch (error) {
         resetCaptcha();
+        internalCaptchaChallenge = null;
         return renderAuth(error.message);
       }
     }
@@ -3952,6 +3987,7 @@ async function handleAuth(event) {
       return renderCurrent();
     } catch (error) {
       resetCaptcha();
+      internalCaptchaChallenge = null;
       return renderAuth(error.message);
     }
   }
@@ -4563,6 +4599,35 @@ function storeCard(store) {
   `;
 }
 
+function storeGalleryImages(store = {}) {
+  return [...new Set([
+    store.cover || store.banner || "",
+    store.image || "",
+    ...(Array.isArray(store.gallery) ? store.gallery : [])
+  ].filter(Boolean))].slice(0, 12);
+}
+
+function storeGalleryView(store = {}) {
+  const images = storeGalleryImages(store);
+  if (!images.length) return "";
+  return `
+    <div class="store-gallery">
+      ${images.map((image, index) => `
+        <button type="button" class="store-gallery-item ${index === 0 ? "main" : ""}" data-store-gallery-image="${esc(image)}">
+          <img src="${esc(image)}" alt="${esc(localizedValue(store, "name"))}">
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function openStoreGalleryImage(image, store) {
+  showModal(`
+    <img class="modal-image" src="${esc(image || fallbackImage)}" alt="${esc(localizedValue(store, "name"))}">
+    <button class="primary" data-close-modal>${tr("close")}</button>
+  `);
+}
+
 function renderStore(storeId, tab = activeStoreTab || "positions") {
   route = "store";
   activeStoreId = storeId;
@@ -4590,6 +4655,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
           <div class="shop-title"><h1 class="profile-title">${esc(storeName)}</h1><span class="verify">✓</span></div>
           <p>${esc(storeShort)}</p>
           <p class="desc">${esc(storeDescription).slice(0, 130)}...</p>
+          ${storeGalleryView(store)}
           <button class="read-button" data-read="${esc(store.id)}">${tr("read")}</button>
           <div class="stats">
             <div class="stat"><strong>${esc(store.orders)}</strong><span>${tr("orders")}</span></div>
@@ -4607,6 +4673,9 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
       ${content}
     </section>
   `);
+  document.querySelectorAll("[data-store-gallery-image]").forEach((button) => {
+    button.onclick = () => openStoreGalleryImage(button.dataset.storeGalleryImage, store);
+  });
 }
 
 function productStockSummary(product = {}) {
@@ -8700,6 +8769,8 @@ function ownerStoreManager(store) {
         </div>
         <label class="field">Аватарка<input name="image" type="file" accept="image/*"></label>
         <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
+        <label class="field">Дополнительные фото магазина<input name="gallery" type="file" accept="image/*" multiple></label>
+        ${storeGalleryView(store)}
         <button class="primary">Сохранить профиль</button>
       </form>
       <form class="form store-filter-form" data-owner-store-filter-form data-store-id="${esc(store.id)}">
@@ -8959,8 +9030,13 @@ async function handleOwnerProfileSave(event) {
   store.adminPassword = String(data.get("adminPassword") || "").trim();
   const imageFile = data.get("image");
   const coverFile = data.get("cover");
+  const galleryFiles = Array.from(data.getAll("gallery")).filter((file) => file && file.size).slice(0, 12);
   if (imageFile && imageFile.size) store.image = await fileToDataUrl(imageFile);
   if (coverFile && coverFile.size) store.cover = await fileToDataUrl(coverFile);
+  if (galleryFiles.length) {
+    const gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
+    store.gallery = [...(Array.isArray(store.gallery) ? store.gallery : []), ...gallery].slice(0, 12);
+  }
   saveDb();
   showToast("Профиль магазина сохранен");
   renderOwnerPanel();
@@ -9834,6 +9910,8 @@ function shopProfileTab(store) {
           <label class="field">Аватар<input name="image" type="file" accept="image/*"></label>
           <label class="field">Баннер<input name="cover" type="file" accept="image/*"></label>
         </div>
+        <label class="field">Дополнительные фото магазина<input name="gallery" type="file" accept="image/*" multiple></label>
+        ${storeGalleryView(store)}
         <button class="primary">Сохранить профиль</button>
       </form>
     </section>
@@ -10535,9 +10613,14 @@ function bindShopPanelActions(store, activeTab) {
       store.description = String(data.get("description") || "").trim();
       const image = data.get("image");
       const cover = data.get("cover");
+      const galleryFiles = Array.from(data.getAll("gallery")).filter((file) => file && file.size).slice(0, 12);
       if (image && image.size) store.image = await fileToDataUrl(image);
       if (cover && cover.size) store.cover = await fileToDataUrl(cover);
       if (!store.cover) store.cover = store.image || fallbackImage;
+      if (galleryFiles.length) {
+        const gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
+        store.gallery = [...(Array.isArray(store.gallery) ? store.gallery : []), ...gallery].slice(0, 12);
+      }
       await shopPersistAndRender("profile");
     });
   });
@@ -10883,6 +10966,8 @@ function renderSeller() {
           <label class="field">Короткое описание<input name="short" value="${esc(store.short || "")}"></label>
           <label class="field">Описание страницы<textarea name="description">${esc(store.description || "")}</textarea></label>
           <label class="field">Фото страницы<input name="image" type="file" accept="image/*"></label>
+          <label class="field">Дополнительные фото магазина<input name="gallery" type="file" accept="image/*" multiple></label>
+          ${storeGalleryView(store)}
           <button class="primary">Сохранить страницу</button>
         </form>
       </article>
@@ -10935,6 +11020,7 @@ function renderSeller() {
     await runShopFormSubmit(form, "Сохраняю...", async () => {
       const data = new FormData(form);
       const file = data.get("image");
+      const galleryFiles = Array.from(data.getAll("gallery")).filter((file) => file && file.size).slice(0, 12);
       store.name = data.get("name").trim();
       store.short = data.get("short").trim();
       store.description = data.get("description").trim();
@@ -10942,6 +11028,10 @@ function renderSeller() {
         const image = await fileToDataUrl(file);
         store.image = image;
         store.cover = image;
+      }
+      if (galleryFiles.length) {
+        const gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
+        store.gallery = [...(Array.isArray(store.gallery) ? store.gallery : []), ...gallery].slice(0, 12);
       }
       saveDb({ localOnly: true, silentLocalStorageError: true });
       const saved = await persistSellerAdminStore();

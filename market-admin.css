@@ -563,6 +563,22 @@ tr:hover td {
   color: var(--red);
 }
 
+.admin-gallery {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.admin-gallery img {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--panel-2);
+}
+
 .user-profile .grid {
   margin: 12px 0;
 }
@@ -776,6 +792,43 @@ tr:hover td {
   .split,
   .row {
     grid-template-columns: 1fr;
+  }
+
+  .content {
+    padding: 12px;
+  }
+
+  .topline {
+    align-items: stretch;
+  }
+
+  .topline input {
+    max-width: none;
+    min-height: 48px;
+    font-size: 16px;
+  }
+
+  .split-card,
+  .card {
+    padding: 14px;
+  }
+
+  .checks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  input,
+  select,
+  textarea,
+  .primary,
+  .ghost,
+  .chip {
+    min-height: 48px;
+    font-size: 16px;
+  }
+
+  .admin-gallery {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .admin-modal {
