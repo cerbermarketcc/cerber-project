@@ -445,20 +445,39 @@ function sessionSource(req) {
 }
 
 async function createUserSession(req, loginKeyValue = "") {
-  const token = crypto.randomBytes(32).toString("hex");
-  const row = { token, login_key: loginKeyValue, ...sessionSource(req) };
-  let { error } = await supabase.from("sessions").insert(row);
-  if (error && /ip|user_agent|schema cache|column/i.test(String(error.message || ""))) {
-    console.warn("[auth] session source columns unavailable, retrying minimal session", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
-    ({ error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue }));
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const token = crypto.randomBytes(32).toString("hex");
+    const row = { token, login_key: loginKeyValue, ...sessionSource(req) };
+    let { error } = await supabase.from("sessions").insert(row);
+    if (error && /ip|user_agent|schema cache|column/i.test(String(error.message || ""))) {
+      console.warn("[auth] session source columns unavailable, retrying minimal session", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
+      ({ error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue }));
+    }
+    if (!error) return token;
+    lastError = error;
+    if (!isDuplicateDbError(error)) break;
   }
-  if (error) {
+  {
+    const error = lastError || new Error("Session insert failed");
     console.error("[auth] session insert failed", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
     const sessionError = new Error("Не удалось создать сессию. Попробуйте войти заново.");
     sessionError.status = 500;
     throw sessionError;
   }
-  return token;
+}
+
+function isDuplicateDbError(error) {
+  return /duplicate key|23505|pkey/i.test(String(error?.message || error?.code || ""));
+}
+
+async function passwordMatchesProfile(profile, password) {
+  if (!profile?.password_hash) return false;
+  try {
+    return await bcrypt.compare(String(password || ""), profile.password_hash);
+  } catch {
+    return false;
+  }
 }
 
 function adminSecret() {
@@ -2065,6 +2084,25 @@ async function authStateForUserWithStores(user, state = {}) {
   return authStateForUser(user, state);
 }
 
+function authResponseTimeout(promise, label, timeoutMs = 7000) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timeout after ${timeoutMs}ms`);
+      error.status = 504;
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function loadAuthSettingsState(label = "auth settings") {
+  return authResponseTimeout(loadSettingsState(), label, 7000).catch((error) => {
+    console.error("[auth] settings load fallback", { label, message: error.message });
+    return { __authStateFallback: true };
+  });
+}
+
 async function telegramUserSummary(user) {
   await ensureSeed();
   const [state, { data: messageRows }] = await Promise.all([
@@ -2415,21 +2453,45 @@ app.post("/api/auth/register", async (req, res, next) => {
     const key = loginKey(login);
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
     const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
-    const { data: existing } = await supabase.from("profiles").select("login_key").eq("login_key", key).maybeSingle();
-    if (existing) return res.status(409).json({ error: "Такой логин уже есть" });
+    const { data: existing } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    if (existing) {
+      if (await passwordMatchesProfile(existing, password)) {
+        const state = await loadAuthSettingsState("register recovery settings");
+        if (adminIsUserBlocked(state, existing.login)) {
+          return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
+        }
+        const token = await createUserSession(req, existing.login_key || key);
+        appendAdminLog("user_register_recovered", existing.login, { login: existing.login, ...requestSource(req) }).catch((error) => {
+          console.error("[auth] register recovery log failed", { login: existing.login, message: error.message });
+        });
+        return res.json({ token, recovered: true, ...(await authStateForUserWithStores(existing, state)) });
+      }
+      return res.status(409).json({ error: "Такой логин уже есть" });
+    }
 
     const passwordHash = await bcrypt.hash(password, 12);
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
     const referral = await applyReferralRegistrationWithPrefixFallback(state, login, referralCode, referralOwnerLogin);
     if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode, referralOwnerLogin);
-    const { data: user, error } = await supabase.from("profiles").insert({
+    const profileInsert = {
       login,
       login_key: key,
       password_hash: passwordHash,
       name,
       role: "user"
-    }).select("*").single();
+    };
+    let { data: user, error } = await supabase.from("profiles").insert(profileInsert).select("*").single();
+    if (error && isDuplicateDbError(error)) {
+      const { data: duplicateProfile, error: duplicateReadError } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+      if (duplicateReadError) throw duplicateReadError;
+      if (duplicateProfile && await passwordMatchesProfile(duplicateProfile, password)) {
+        user = duplicateProfile;
+        error = null;
+      } else {
+        return res.status(409).json({ error: "Такой логин уже есть" });
+      }
+    }
     if (error) throw error;
     await withTimeout(saveSettingsState(state), "register referral save", 6000).catch((saveError) => {
       console.error("[auth] referral save delayed", { login, message: saveError.message });
@@ -2457,17 +2519,18 @@ app.post("/api/auth/login", async (req, res, next) => {
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
     const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
-    const state = await loadSettingsState();
+    const state = await loadAuthSettingsState("login settings");
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
     const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
-    const repairedReferral = referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode, referralOwnerLogin) : null;
-    const pendingReferral = !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode, referralOwnerLogin) : null;
+    const canRepairReferral = !state.__authStateFallback;
+    const repairedReferral = canRepairReferral && referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode, referralOwnerLogin) : null;
+    const pendingReferral = canRepairReferral && !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode, referralOwnerLogin) : null;
     if (repairedReferral || pendingReferral) {
       await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
         console.error("[auth] login referral repair delayed", { login: user.login, message: saveError.message });
@@ -2494,10 +2557,10 @@ app.post("/api/auth/restore-session", async (req, res, next) => {
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
     const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Нужно войти заново" });
     }
-    const state = await loadSettingsState();
+    const state = await loadAuthSettingsState("restore session settings");
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
     }
@@ -2519,7 +2582,7 @@ app.post("/api/telegram/login", async (req, res, next) => {
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
     const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
     const state = await loadSettingsState();
@@ -8805,7 +8868,7 @@ async function siteNotifyHandleLogin(state, chatId, telegramUser, text) {
   const key = loginKey(parts[1]);
   const password = parts.slice(2).join(" ");
   const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+  if (!user || !(await passwordMatchesProfile(user, password))) {
     await siteNotifySendMessage(chatId, "Неверный логин или пароль.");
     return;
   }
@@ -9113,7 +9176,7 @@ async function handleBotLogin(state, chatId, text) {
   const key = loginKey(parts[1]);
   const password = parts.slice(2).join(" ");
   const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+  if (!user || !(await passwordMatchesProfile(user, password))) {
     await botSendMessage(state, chatId, "Неверный логин или пароль.", botMainKeyboard());
     return;
   }
