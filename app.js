@@ -2281,7 +2281,18 @@ function mountInternalCaptcha(force = false) {
   if (!API_ENABLED) return;
   const box = document.querySelector("[data-internal-captcha]");
   if (!box) return;
-  box.querySelector("[data-internal-captcha-status]").textContent = "Загружаем проверку...";
+  const question = box.querySelector("[data-internal-captcha-question]");
+  const token = box.querySelector("[name='captchaChallenge']");
+  const answer = box.querySelector("[name='captchaAnswer']");
+  const status = box.querySelector("[data-internal-captcha-status]");
+  if (question) question.textContent = "Загружаем вопрос...";
+  if (token) token.value = "";
+  if (answer) {
+    answer.value = "";
+    answer.disabled = true;
+    answer.placeholder = "Сейчас появится пример";
+  }
+  if (status) status.textContent = "Проверка загружается автоматически.";
   loadInternalCaptcha(force).then((challenge) => {
     if (!challenge || !document.querySelector("[data-internal-captcha]")) return;
     const question = document.querySelector("[data-internal-captcha-question]");
@@ -2289,10 +2300,19 @@ function mountInternalCaptcha(force = false) {
     const answer = document.querySelector("[name='captchaAnswer']");
     if (question) question.textContent = challenge.question || "2 + 2 = ?";
     if (token) token.value = challenge.token || "";
-    if (answer) answer.value = "";
+    if (answer) {
+      answer.value = "";
+      answer.disabled = false;
+      answer.placeholder = "Ответ";
+    }
     box.querySelector("[data-internal-captcha-status]").textContent = "";
   }).catch((error) => {
     const status = box.querySelector("[data-internal-captcha-status]");
+    if (question) question.textContent = "Не загрузилось";
+    if (answer) {
+      answer.disabled = true;
+      answer.placeholder = "Нажмите обновить";
+    }
     if (status) status.textContent = error.message || "Не удалось загрузить проверку";
   });
 }
@@ -3681,8 +3701,8 @@ function renderAuth(message = "") {
             ` : `
               <div class="captcha-box">
                 <label class="field">Проверка сайта
-                  <span class="internal-captcha-question" data-internal-captcha-question>...</span>
-                  <input name="captchaAnswer" inputmode="numeric" autocomplete="off" placeholder="Ответ" required>
+                  <span class="internal-captcha-question" data-internal-captcha-question>Загружаем вопрос...</span>
+                  <input name="captchaAnswer" inputmode="numeric" autocomplete="off" placeholder="Сейчас появится пример" required disabled>
                 </label>
                 <input type="hidden" name="captchaChallenge">
                 <p class="captcha-status" data-internal-captcha-status></p>
