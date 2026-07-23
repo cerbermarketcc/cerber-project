@@ -3698,23 +3698,15 @@ function renderAuth(message = "") {
                 <p class="captcha-status">Не удалось загрузить настройки капчи: ${esc(remoteConfigError)}</p>
                 <button class="link-button captcha-retry" type="button" data-config-retry>Повторить загрузку</button>
               </div>
-            ` : `
-              <div class="captcha-box">
-                <label class="field">Проверка сайта
-                  <span class="internal-captcha-question" data-internal-captcha-question>Загружаем вопрос...</span>
-                  <input name="captchaAnswer" inputmode="numeric" autocomplete="off" placeholder="Сейчас появится пример" required disabled>
-                </label>
-                <input type="hidden" name="captchaChallenge">
-                <p class="captcha-status" data-internal-captcha-status></p>
-                <button class="link-button captcha-retry" type="button" data-internal-captcha-retry>Обновить проверку</button>
-              </div>
-            `}
+            ` : ""}
           ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit" data-auth-submit ${authSubmitDisabled ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
         <p><button class="link-button" data-auth-switch>${authMode === "login" ? tr("register") : tr("login")}</button></p>
       </section>
     </main>
+    <div class="modal-backdrop" data-modal></div>
+    <div class="toast"></div>
   `;
   applyLanguageDomTranslations(root);
   bindButtonFeedback(root);
@@ -3727,7 +3719,6 @@ function renderAuth(message = "") {
     resetCaptcha();
     mountTurnstile(true);
   });
-  document.querySelector("[data-internal-captcha-retry]")?.addEventListener("click", () => mountInternalCaptcha(true));
   document.querySelector("[data-config-retry]")?.addEventListener("click", async () => {
     remoteConfigLoaded = false;
     remoteConfigError = "";
@@ -3735,7 +3726,6 @@ function renderAuth(message = "") {
     await loadRemoteConfig();
     renderAuth();
   });
-  mountInternalCaptcha();
   mountTurnstile();
   applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
@@ -3946,20 +3936,69 @@ function resetCaptcha() {
   scheduleTurnstileWatch();
 }
 
+function authCaptchaTokenFromForm(data) {
+  return `cerber-internal:${String(data.get("captchaChallenge") || "")}:${String(data.get("captchaAnswer") || "").trim()}`;
+}
+
+function openAuthCaptchaModal(authDraft) {
+  showModal(`
+    <div class="auth-captcha-dialog">
+      <h2>Проверка сайта</h2>
+      <p>Ответьте на вопрос, чтобы продолжить ${authMode === "login" ? "вход" : "регистрацию"}.</p>
+      <form class="form" data-auth-captcha-form>
+        <div class="captcha-box auth-modal-captcha" data-internal-captcha>
+          <label class="field">Вопрос
+            <span class="internal-captcha-question" data-internal-captcha-question>Загружаем вопрос...</span>
+            <input name="captchaAnswer" inputmode="numeric" autocomplete="off" placeholder="Сейчас появится пример" required disabled>
+          </label>
+          <input type="hidden" name="captchaChallenge">
+          <p class="captcha-status" data-internal-captcha-status></p>
+          <button class="link-button captcha-retry" type="button" data-internal-captcha-retry>Обновить проверку</button>
+        </div>
+        <button class="primary" type="submit">Продолжить</button>
+        <button class="ghost-button" type="button" data-close-modal>Назад</button>
+      </form>
+    </div>
+  `, "auth-captcha-modal");
+  const modal = document.querySelector("[data-modal]");
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal || event.target.closest("[data-close-modal]")) modal.classList.remove("open");
+  });
+  document.querySelector("[data-internal-captcha-retry]")?.addEventListener("click", () => mountInternalCaptcha(true));
+  document.querySelector("[data-auth-captcha-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const captchaData = new FormData(event.currentTarget);
+    if (!captchaData.get("captchaChallenge") || !String(captchaData.get("captchaAnswer") || "").trim()) return;
+    document.querySelector("[data-modal]")?.classList.remove("open");
+    await submitAuthDraft(authDraft, authCaptchaTokenFromForm(captchaData));
+  });
+  mountInternalCaptcha(true);
+  requestAnimationFrame(() => document.querySelector("[name='captchaAnswer']")?.focus());
+}
+
 async function handleAuth(event) {
   event.preventDefault();
   if (authSubmitting) return;
   const form = event.currentTarget;
-  const submitButton = form.querySelector("[data-auth-submit]");
   const data = new FormData(form);
-  const login = data.get("login").trim();
-  const password = data.get("password");
-  const captcha = API_ENABLED
-    ? `cerber-internal:${String(data.get("captchaChallenge") || "")}:${String(data.get("captchaAnswer") || "").trim()}`
-    : data.get("captcha");
-  if ((API_ENABLED && (!data.get("captchaChallenge") || !String(data.get("captchaAnswer") || "").trim())) || (!API_ENABLED && !captcha)) return renderAuth(tr("needCaptcha"));
+  const login = String(data.get("login") || "").trim();
+  const password = String(data.get("password") || "");
+  const name = String(data.get("name") || "").trim() || login;
+  if (!login || !password) return renderAuth("Введите логин и пароль");
+  if (API_ENABLED) {
+    if (!remoteConfigLoaded || remoteConfigError) return renderAuth(remoteConfigError || "Настройки ещё загружаются");
+    return openAuthCaptchaModal({ login, password, name });
+  }
+  if (!data.get("captcha")) return renderAuth(tr("needCaptcha"));
+  return submitAuthDraft({ login, password, name }, "");
+}
+
+async function submitAuthDraft(authDraft, captcha) {
+  if (authSubmitting) return;
+  const login = String(authDraft.login || "").trim();
+  const password = String(authDraft.password || "");
+  const name = String(authDraft.name || login).trim() || login;
   authSubmitting = true;
-  if (submitButton) setButtonLoading(submitButton, true, authMode === "login" ? tr("enter") : tr("create"));
   updateAuthSubmitCaptchaState();
 
   if (authMode === "register") {
@@ -3967,7 +4006,7 @@ async function handleAuth(event) {
       try {
         const payload = await apiFetch("/api/auth/register", {
           method: "POST",
-          body: JSON.stringify({ login, password, name: data.get("name").trim() || login, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
+          body: JSON.stringify({ login, password, name, captchaToken: captcha, ref: pendingReferralCode(), referrerLogin: pendingReferralOwner() }),
           timeoutMs: 60000
         });
         rememberApiToken(payload.token);
@@ -3981,11 +4020,12 @@ async function handleAuth(event) {
       } catch (error) {
         resetCaptcha();
         internalCaptchaChallenge = null;
+        authSubmitting = false;
         return renderAuth(error.message);
       }
     }
     if (db.users.some((user) => sameLogin(user.login, login))) return renderAuth(tr("already"));
-    db.users.push({ login, password, name: data.get("name").trim() || login, role: "user", createdAt: isoDate(new Date()) });
+    db.users.push({ login, password, name, role: "user", createdAt: isoDate(new Date()) });
     db.currentUser = login;
     registerReferral(login);
     saveDb();
@@ -4008,6 +4048,7 @@ async function handleAuth(event) {
     } catch (error) {
       resetCaptcha();
       internalCaptchaChallenge = null;
+      authSubmitting = false;
       return renderAuth(error.message);
     }
   }

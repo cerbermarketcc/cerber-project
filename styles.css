@@ -5733,9 +5733,63 @@ details[data-shop-storage-item] .form {
   font-weight: 900;
 }
 
+.auth-captcha-modal .modal {
+  width: min(420px, calc(100vw - 24px));
+  border-radius: 8px;
+  padding: 22px;
+}
+
+.auth-captcha-dialog {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-captcha-dialog h2,
+.auth-captcha-dialog p {
+  margin: 0;
+}
+
+.auth-modal-captcha {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+  padding: 14px;
+}
+
+.auth-modal-captcha .internal-captcha-question {
+  min-height: 48px;
+  font-size: 24px;
+}
+
+.auth-modal-captcha input {
+  min-height: 54px;
+  font-size: 20px;
+  text-align: center;
+}
+
+.auth-captcha-dialog .primary,
+.auth-captcha-dialog .ghost-button {
+  width: 100%;
+  min-height: 52px;
+}
+
 @media (max-width: 560px) {
   .store-gallery {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .auth-captcha-modal .modal {
+    align-self: end;
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+    border-radius: 8px 8px 0 0;
+    padding: 20px;
+  }
+
+  .auth-modal-captcha {
+    padding: 16px;
   }
 
   .store-gallery-item.main {
