@@ -4054,7 +4054,7 @@ async function submitAuthDraft(authDraft, captcha) {
         rememberLocalPassword(payload.user?.login || login, password);
         registerReferral(payload.user?.login || login);
         saveDb();
-        authMode = "login";
+        authSubmitting = false;
         refreshRemoteStateAfterAuth();
         return renderCurrent();
       } catch (error) {
@@ -4069,7 +4069,7 @@ async function submitAuthDraft(authDraft, captcha) {
     db.currentUser = login;
     registerReferral(login);
     saveDb();
-    authMode = "login";
+    authSubmitting = false;
     return renderHome();
   }
 
