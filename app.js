@@ -2074,8 +2074,16 @@ async function refreshShopPanelState(force = false) {
     timeoutMs: 15000,
     headers: { Authorization: `Bearer ${token}` }
   }).then((payload) => {
+    const localStore = shopPanelStore() || sellerAdminStore();
     applyRemoteState(payload);
-    if (payload.store) restoreShopPanelStore(payload.store);
+    if (payload.store) {
+      const restoredStore = richerShopPanelStore(localStore, payload.store);
+      const shouldSyncLocal = storeContentWeight(restoredStore) > storeContentWeight(payload.store);
+      restoreShopPanelStore(restoredStore);
+      if (shouldSyncLocal) {
+        persistSellerAdminStore().catch((error) => console.error("[shop-admin] recovered local store sync failed", error));
+      }
+    }
     shopPanelLastStateRefreshAt = Date.now();
     return true;
   }).finally(() => {
@@ -2091,6 +2099,29 @@ function rememberShopPanelStore(store) {
   } catch {
     return JSON.parse(JSON.stringify(store));
   }
+}
+
+function storeContentWeight(store = {}) {
+  const products = Array.isArray(store.products) ? store.products : [];
+  const positions = products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0);
+  const gallery = Array.isArray(store.gallery) ? store.gallery.length : 0;
+  return products.length * 1000 + positions * 20 + gallery;
+}
+
+function richerShopPanelStore(localStore = null, remoteStore = null) {
+  if (!localStore?.id) return remoteStore;
+  if (!remoteStore?.id) return localStore;
+  if (String(localStore.id) !== String(remoteStore.id)) return remoteStore;
+  if (storeContentWeight(localStore) <= storeContentWeight(remoteStore)) return remoteStore;
+  return {
+    ...remoteStore,
+    products: Array.isArray(localStore.products) ? localStore.products : (remoteStore.products || []),
+    gallery: Array.isArray(localStore.gallery) && localStore.gallery.length ? localStore.gallery : (remoteStore.gallery || []),
+    image: localStore.image || remoteStore.image,
+    avatar: localStore.avatar || localStore.image || remoteStore.avatar,
+    cover: localStore.cover || remoteStore.cover,
+    banner: localStore.banner || localStore.cover || remoteStore.banner
+  };
 }
 
 function restoreShopPanelStore(store) {
@@ -3764,7 +3795,16 @@ function renderSellerAdminLogin(storeId = "", message = "") {
           body: JSON.stringify({ storeId: store.id, password })
         });
         rememberSellerAdminApiToken(payload.token);
+        const localStore = db.stores.find((item) => item.id === store.id) || store;
         applyRemoteState(payload);
+        if (payload.store) {
+          const restoredStore = richerShopPanelStore(localStore, payload.store);
+          const shouldSyncLocal = storeContentWeight(restoredStore) > storeContentWeight(payload.store);
+          restoreShopPanelStore(restoredStore);
+          if (shouldSyncLocal) {
+            persistSellerAdminStore().catch((syncError) => console.error("[seller-admin] recovered local store sync failed", syncError));
+          }
+        }
       } catch (error) {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
         return;
@@ -10488,9 +10528,13 @@ function renderShopPanelLogin(message = "") {
         storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
       }
       sellerAdminStoreId = nextStoreId;
+      const localStore = db.stores.find((item) => item.id === nextStoreId) || null;
       applyRemoteState(payload);
-      const store = db.stores.find((item) => item.id === nextStoreId) || payload.store || null;
+      const store = richerShopPanelStore(localStore, payload.store || db.stores.find((item) => item.id === nextStoreId) || null);
       if (store) restoreShopPanelStore(store);
+      if (payload.store && storeContentWeight(store) > storeContentWeight(payload.store)) {
+        persistSellerAdminStore().catch((syncError) => console.error("[shop-admin] recovered local store sync failed", syncError));
+      }
       renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
     } catch (error) {
       renderShopPanelLogin(error.message || "Неверный пароль");
