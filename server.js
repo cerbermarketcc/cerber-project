@@ -1334,6 +1334,23 @@ function publicStoresFromRows(rows = [], settingsData = {}) {
     .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
 }
 
+async function loadPublicStoresFromDb(settingsData = {}, label = "public stores db query", timeoutMs = 5000) {
+  const result = await withTimeout(
+    supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(500),
+    label,
+    timeoutMs
+  );
+  return publicStoresFromRows(Array.isArray(result?.data) ? result.data : [], settingsData);
+}
+
+async function refreshPublicCatalogFromStoreRows(settingsData = {}, label = "public catalog stores refresh") {
+  const stores = await loadPublicStoresFromDb(settingsData, label, 10000);
+  if (!stores.length) return null;
+  rememberPublicStoresCache(stores);
+  const nextState = { ...(settingsData || {}), publicStoresCache: stores, publicStoresCacheAt: Date.now() };
+  return savePublicCatalogSnapshot(nextState, stores);
+}
+
 function rememberPublicStoresCache(stores = []) {
   if (!Array.isArray(stores) || !stores.length) return;
   publicStoresMemoryCache = stores.map((store) => ({ ...store }));
@@ -1342,12 +1359,7 @@ function rememberPublicStoresCache(stores = []) {
 
 function refreshPublicStoresCacheInBackground(settingsData = {}) {
   if (publicStoresRefreshPromise) return publicStoresRefreshPromise;
-  publicStoresRefreshPromise = withTimeout(
-    supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
-    "background public stores refresh",
-    120000
-  ).then((result) => {
-    const stores = publicStoresFromRows(result?.data || [], settingsData);
+  publicStoresRefreshPromise = loadPublicStoresFromDb(settingsData, "background public stores refresh", 120000).then((stores) => {
     if (stores.length) {
       rememberPublicStoresCache(stores);
       savePublicStoresCache(stores).catch((error) => {
@@ -1396,8 +1408,19 @@ async function stateFor(user) {
       ]);
       const publicCatalog = await loadPublicCatalogSnapshot();
       if (publicCatalog) {
-        const catalogStores = sanitizeStoresForVisualReset(publicCatalog.stores);
+        const freshStores = await loadPublicStoresFromDb(publicCatalog, "public catalog fresh stores query", 2500).catch((error) => {
+          console.error("[stateFor] public catalog fresh stores skipped", { message: error.message });
+          return [];
+        });
+        const catalogStores = sanitizeStoresForVisualReset(freshStores.length
+          ? mergeStoreSources(freshStores, publicCatalog.stores || [])
+          : publicCatalog.stores);
         if (catalogStores.length) rememberPublicStoresCache(catalogStores);
+        if (freshStores.length) {
+          savePublicCatalogSnapshot({ ...publicCatalog, publicStoresCache: catalogStores }, catalogStores).catch((error) => {
+            console.error("[public-catalog] fresh stores snapshot save failed", { message: error.message });
+          });
+        }
         return {
           user: null,
           state: {
@@ -1461,10 +1484,11 @@ async function stateFor(user) {
           .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
       }
       if (publicStores.length) rememberPublicStoresCache(publicStores);
-      if (!publicStores.length) {
-        const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
-        if (storeRows.length) {
-          publicStores = publicStoresFromRows(storeRows.filter((row) => isMarketplaceRecordAfterVisualReset({ ...row.data, createdAt: row.data?.createdAt || row.created_at })), settingsData);
+      const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
+      if (storeRows.length) {
+        const storesFromDb = publicStoresFromRows(storeRows.filter((row) => isMarketplaceRecordAfterVisualReset({ ...row.data, createdAt: row.data?.createdAt || row.created_at })), settingsData);
+        if (storesFromDb.length) {
+          publicStores = publicStores.length ? mergeStoreSources(storesFromDb, publicStores) : storesFromDb;
           rememberPublicStoresCache(publicStores);
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
@@ -2972,7 +2996,12 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     }
     const mergedStore = await normalizeStoreSecrets(sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token)));
     await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
-    await saveOwnerStoreFallback(mergedStore);
+    await saveOwnerStoreFallback(mergedStore).catch((error) => {
+      console.error("[store-admin] fallback cache save failed", { storeId: mergedStore.id, message: error.message });
+    });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(mergedStore)] }, "store-admin public catalog refresh").catch((error) => {
+      console.error("[store-admin] public catalog refresh failed", { storeId: mergedStore.id, message: error.message });
+    });
     console.log("[store-admin] store saved", {
       storeId: mergedStore.id,
       ownerLogin: mergedStore.ownerLogin || "",
@@ -4857,6 +4886,9 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
       if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) product[key] = req.body[key];
     });
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(store)] }, "admin product public catalog refresh").catch((error) => {
+      console.error("[product] public catalog refresh failed", { storeId: store.id, productId: product.id, message: error.message });
+    });
     await appendAdminLog("product_updated", admin.login, { storeId: store.id, productId: product.id });
     console.log("[product] updated", { storeId: store.id, productId: product.id });
     notifyRealtime("product_updated", { storeId: store.id, productId: product.id });
@@ -4874,6 +4906,9 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
     const store = row.data;
     store.products = (store.products || []).filter((item) => item.id !== req.params.productId);
     await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(store)] }, "admin product delete public catalog refresh").catch((error) => {
+      console.error("[product] public catalog refresh failed", { storeId: store.id, productId: req.params.productId, message: error.message });
+    });
     await appendAdminLog("product_deleted", admin.login, { storeId: store.id, productId: req.params.productId });
     console.log("[product] deleted", { storeId: store.id, productId: req.params.productId });
     notifyRealtime("product_deleted", { storeId: store.id, productId: req.params.productId });

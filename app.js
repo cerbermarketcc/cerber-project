@@ -10653,7 +10653,7 @@ async function shopPersistAndRender(tab = "dashboard") {
     showToast("Сохранено");
   } else {
     restoreShopPanelStore(localStore);
-    showToast("Сохранено локально, сервер не принял изменения. Проверьте вход в Shop Admin.");
+    throw new Error("Сервер не сохранил изменения. Войдите в Shop Admin заново и попробуйте ещё раз.");
   }
 
   renderShopPanel(tab);
