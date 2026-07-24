@@ -2108,6 +2108,12 @@ function storeContentWeight(store = {}) {
   return products.length * 1000 + positions * 20 + gallery;
 }
 
+function storeProductsWeight(store = {}) {
+  const products = Array.isArray(store.products) ? store.products : [];
+  const positions = products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0);
+  return products.length * 1000 + positions * 20;
+}
+
 function richerShopPanelStore(localStore = null, remoteStore = null) {
   if (!localStore?.id) return remoteStore;
   if (!remoteStore?.id) return localStore;
@@ -2529,13 +2535,48 @@ async function persistSellerAdminStore() {
     });
 
     applyRemoteState(payload);
+    const remoteProductWeight = storeProductsWeight(payload.store || {});
+    const localProductWeight = storeProductsWeight(localStore || store);
+    if (localProductWeight > remoteProductWeight) {
+      const productPayload = await persistSellerAdminProducts(localStore || store, token);
+      applyRemoteState(productPayload);
+      restoreShopPanelStore(productPayload.store || localStore);
+      return true;
+    }
     restoreShopPanelStore(payload.store || localStore);
     return true;
   } catch (error) {
     console.error("[store-admin] persist failed", error);
+    if (Array.isArray(store?.products) && store.products.length) {
+      try {
+        const productPayload = await persistSellerAdminProducts(localStore || store, token);
+        applyRemoteState(productPayload);
+        restoreShopPanelStore(productPayload.store || localStore);
+        return true;
+      } catch (productError) {
+        console.error("[store-admin] products persist failed", productError);
+        showToast(productError.message || error.message || "Админка магазина временно не сохранила товары в базе");
+        return false;
+      }
+    }
     showToast(error.message || "Админка магазина временно не сохранила изменения в базе");
     return false;
   }
+}
+
+async function persistSellerAdminProducts(store, token = sellerAdminApiSessionToken()) {
+  if (!API_ENABLED || !token || !store?.id) throw new Error("Войдите в Shop Admin заново");
+  return apiFetch("/api/store-admin/products", {
+    method: "PUT",
+    timeoutMs: 90000,
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      storeId: store.id,
+      products: Array.isArray(store.products) ? store.products : []
+    })
+  });
 }
 
 function saveDb(options = {}) {

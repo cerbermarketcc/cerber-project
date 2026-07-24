@@ -3020,6 +3020,47 @@ app.put("/api/store-admin/store", async (req, res, next) => {
   }
 });
 
+app.put("/api/store-admin/products", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token || !token.storeId) {
+      return res.status(401).json({ error: "Нет доступа к этой админке" });
+    }
+    if (!sellerTokenCanAccess(token, "cards", "products", "storage")) return sellerForbidden(res);
+    const productsInput = Array.isArray(req.body.products) ? req.body.products : (Array.isArray(req.body.store?.products) ? req.body.store.products : null);
+    if (!productsInput) return res.status(400).json({ error: "Нет товаров для сохранения" });
+    const existing = await loadStoreWithFallback(token.storeId) || {};
+    const existingProducts = Array.isArray(existing.products) ? existing.products : [];
+    const mergedStore = await normalizeStoreSecrets({
+      ...existing,
+      products: productsInput.map((product) => sellerProductPatch(
+        existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {},
+        product
+      )),
+      updatedAt: Date.now()
+    });
+    await supabase.from("stores").upsert({ id: mergedStore.id || token.storeId, data: mergedStore }, { onConflict: "id" });
+    await saveOwnerStoreFallback(mergedStore).catch((error) => {
+      console.error("[store-admin] products fallback cache save failed", { storeId: mergedStore.id || token.storeId, message: error.message });
+    });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(mergedStore)] }, "store-admin products public catalog refresh").catch((error) => {
+      console.error("[store-admin] products public catalog refresh failed", { storeId: mergedStore.id || token.storeId, message: error.message });
+    });
+    console.log("[store-admin] products saved", {
+      storeId: mergedStore.id || token.storeId,
+      products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
+      positions: Array.isArray(mergedStore.products)
+        ? mergedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
+        : 0
+    });
+    notifyRealtime("store_updated", { storeId: mergedStore.id || token.storeId, source: "store-admin-products" });
+    res.json({ store: publicStoreForState(mergedStore, { includeStaff: true }), ...(await stateForStoreAdmin(mergedStore.id || token.storeId, token)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
   try {
     requireDb();
