@@ -4172,6 +4172,101 @@ app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
 app.delete("/api/admin/marketplace-data", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
+    requireDb();
+    const state = await loadSettingsState();
+    const { data: storeRows, error: storesLoadError } = await withTimeout(
+      supabase.from("stores").select("id,data"),
+      "marketplace bulk clear stores load",
+      20000
+    );
+    if (storesLoadError) throw storesLoadError;
+    const allStores = mergeStoreSources(
+      (Array.isArray(storeRows) ? storeRows : []).map((row) => row.data || { id: row.id }),
+      mergeStoreSources(state.ownerStores || [], state.publicStoresCache || [])
+    );
+    const storeIds = new Set(allStores.map((store) => String(store?.id || "")).filter(Boolean));
+    const previousCounts = {
+      stores: storeIds.size,
+      storeRows: Array.isArray(storeRows) ? storeRows.length : 0,
+      ownerStores: Array.isArray(state.ownerStores) ? state.ownerStores.length : 0,
+      publicStoresCache: Array.isArray(state.publicStoresCache) ? state.publicStoresCache.length : 0,
+      exchangers: Array.isArray(state.exchangers) ? state.exchangers.length : 0,
+      exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards.length : 0,
+      storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications.length : 0,
+      exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests.length : 0
+    };
+    state.ownerStores = [];
+    state.publicStoresCache = [];
+    state.publicStoresCacheAt = Date.now();
+    state.exchangers = [];
+    state.exchangeCards = [];
+    state.storeApplications = [];
+    state.exchangeRequests = [];
+    state.deletedStoreIds = [];
+    state.orders = (Array.isArray(state.orders) ? state.orders : []).filter((order) => {
+      const storeId = String(order?.storeId || order?.store_id || "");
+      return storeId && !storeIds.has(storeId);
+    });
+    state.updatedAt = Date.now();
+    await saveSettingsState(state, {
+      allowEmptyExchangers: true,
+      allowEmptyKeys: [
+        "ownerStores",
+        "publicStoresCache",
+        "exchangers",
+        "exchangeCards",
+        "storeApplications",
+        "exchangeRequests",
+        "deletedStoreIds",
+        "orders"
+      ]
+    });
+    const deleteResult = await withTimeout(
+      supabase.from("stores").delete().neq("id", ""),
+      "marketplace bulk clear stores delete",
+      30000
+    );
+    if (deleteResult?.error) throw deleteResult.error;
+    const emptyCatalog = {
+      theme: state.theme || "light",
+      lang: state.lang || "ru",
+      stores: [],
+      exchangeCards: [],
+      exchangers: [],
+      groupSettings: normalizeGroupSettings(state.groupSettings || {}),
+      referralPeriod: state.referralPeriod || {},
+      filters: state.filters || {},
+      clearedAt: Date.now(),
+      clearedBy: admin.login,
+      updatedAt: Date.now()
+    };
+    publicStoresMemoryCache = [];
+    publicStoresMemoryCacheAt = Date.now();
+    publicCatalogMemorySnapshot = cloneJson(emptyCatalog);
+    await withTimeout(
+      supabase.from("app_settings").upsert([
+        { id: publicCatalogRowId, data: emptyCatalog },
+        { id: publicCatalogBackupRowId, data: { ...emptyCatalog, backupOf: publicCatalogRowId, backupAt: Date.now() } }
+      ], { onConflict: "id" }),
+      "marketplace bulk clear public catalog save",
+      12000
+    );
+    await appendAdminLog("marketplace_bulk_cleared", admin.login, previousCounts);
+    console.log("[admin] marketplace bulk cleared", previousCounts);
+    notifyRealtime("marketplace_bulk_cleared", previousCounts);
+    res.json({
+      ok: true,
+      cleared: previousCounts,
+      ...(adminBuildOverview(await adminLoadMarketplace({ compact: true })))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/marketplace-data-blocked-legacy", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
     await appendAdminLog("marketplace_bulk_clear_blocked", admin.login, {});
     res.status(403).json({ error: "РњР°СЃСЃРѕРІР°СЏ РѕС‡РёСЃС‚РєР° РјР°СЂРєРµС‚РїР»РµР№СЃР° РѕС‚РєР»СЋС‡РµРЅР°" });
   } catch (error) {
