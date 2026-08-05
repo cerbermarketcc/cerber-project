@@ -3544,6 +3544,11 @@ function showToast(message) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 2600);
 }
 
+function renderCurrentWithToast(message = "") {
+  renderCurrent();
+  if (message) requestAnimationFrame(() => showToast(message));
+}
+
 function setButtonLoading(button, loading, label = "Загрузка") {
   if (!button) return;
   if (loading) {
@@ -4071,7 +4076,7 @@ async function submitAuthDraft(authDraft, captcha) {
         saveDb();
         authSubmitting = false;
         refreshRemoteStateAfterAuth();
-        return renderCurrent();
+        return renderCurrentWithToast(payload.recovered ? "Вы вошли в уже созданный аккаунт." : "Регистрация успешна. Вы уже вошли в аккаунт.");
       } catch (error) {
         resetCaptcha();
         internalCaptchaChallenge = null;
@@ -4100,7 +4105,7 @@ async function submitAuthDraft(authDraft, captcha) {
       rememberLocalPassword(payload.user?.login || login, password);
       authSubmitting = false;
       refreshRemoteStateAfterAuth();
-      return renderCurrent();
+      return renderCurrentWithToast("Вход выполнен. Добро пожаловать.");
     } catch (error) {
       resetCaptcha();
       internalCaptchaChallenge = null;
