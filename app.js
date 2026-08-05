@@ -2579,6 +2579,20 @@ async function persistSellerAdminProducts(store, token = sellerAdminApiSessionTo
   });
 }
 
+async function persistSellerAdminProductPositions(store, product, token = sellerAdminApiSessionToken()) {
+  if (!API_ENABLED || !token || !store?.id || !product?.id) throw new Error("Войдите в Shop Admin заново");
+  return apiFetch(`/api/store-admin/products/${encodeURIComponent(product.id)}/positions`, {
+    method: "PUT",
+    timeoutMs: 45000,
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      positions: Array.isArray(product.positions) ? product.positions : []
+    })
+  });
+}
+
 function saveDb(options = {}) {
   normalizeOrders(db);
   saveAuth();
@@ -10832,14 +10846,26 @@ function bindShopPanelActions(store, activeTab) {
       });
       if (!product.priceUsd) product.priceUsd = priceUsd;
       if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
-      await shopPersistAndRender("products");
+      const payload = await persistSellerAdminProductPositions(store, product);
+      applyRemoteState(payload);
+      restoreShopPanelStore(payload.store || store);
+      showToast("Товар сохранён и виден на сайте");
+      renderShopPanel("products");
     });
   });
   document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
     const product = (store.products || []).find((item) => item.id === button.dataset.cardId);
     if (!product) return;
     product.positions = (product.positions || []).filter((position) => position.id !== button.dataset.shopPositionDelete);
-    await shopPersistAndRender(activeTab === "storage" ? "storage" : "products");
+    try {
+      const payload = await persistSellerAdminProductPositions(store, product);
+      applyRemoteState(payload);
+      restoreShopPanelStore(payload.store || store);
+      showToast("Субтовар удалён");
+      renderShopPanel(activeTab === "storage" ? "storage" : "products");
+    } catch (error) {
+      showToast(error.message || "Не удалось удалить субтовар");
+    }
   });
 
   document.querySelectorAll("[data-shop-position-edit]").forEach((form) => {
@@ -10868,7 +10894,11 @@ function bindShopPanelActions(store, activeTab) {
         position.stock = Math.max(deliveryItems.length, Number.isFinite(stockValue) ? stockValue : deliveryItems.length);
         position.status = String(data.get("status") || position.status || "ready");
 
-        await shopPersistAndRender("storage");
+        const payload = await persistSellerAdminProductPositions(store, product);
+        applyRemoteState(payload);
+        restoreShopPanelStore(payload.store || store);
+        showToast("Субтовар сохранён и виден на сайте");
+        renderShopPanel("storage");
       });
     });
   });

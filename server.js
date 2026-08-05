@@ -3087,6 +3087,61 @@ app.put("/api/store-admin/products", async (req, res, next) => {
   }
 });
 
+app.put("/api/store-admin/products/:productId/positions", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token || !token.storeId) {
+      return res.status(401).json({ error: "Нет доступа к этой админке" });
+    }
+    if (!sellerTokenCanAccess(token, "products", "storage")) return sellerForbidden(res);
+    const positionsInput = Array.isArray(req.body.positions) ? req.body.positions : null;
+    if (!positionsInput) return res.status(400).json({ error: "Нет субтоваров для сохранения" });
+    const existing = await loadStoreWithFallback(token.storeId) || {};
+    const products = Array.isArray(existing.products) ? existing.products : [];
+    const product = products.find((item) => String(item?.id || "") === String(req.params.productId || ""));
+    if (!product) return res.status(404).json({ error: "Карточка не найдена" });
+    product.positions = positionsInput.map((position) => ({
+      id: String(position?.id || `position-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`),
+      title: String(position?.title || product.title || "Товар").trim(),
+      description: String(position?.description || "").trim(),
+      deliveryItems: Array.isArray(position?.deliveryItems) ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      priceUsd: Number(position?.priceUsd || product.priceUsd || 0),
+      country: String(position?.country || "moldova"),
+      city: String(position?.city || "chisinau"),
+      district: String(position?.district || "").trim(),
+      deliveryType: String(position?.deliveryType || "Товар").trim(),
+      weight: String(position?.weight ?? "").trim(),
+      stock: Math.max(0, Number(position?.stock || 0)),
+      status: String(position?.status || "ready")
+    }));
+    if (product.positions.length) {
+      const firstReady = product.positions.find((position) => position.status !== "disabled") || product.positions[0];
+      product.priceUsd = Number(product.priceUsd || firstReady.priceUsd || 0);
+      product.price = product.price || `от ${Number(product.priceUsd || 0)}$`;
+    }
+    const savedStore = await saveStoreRow({ ...existing, products, updatedAt: Date.now() }, "store-admin product positions save");
+    const savedProduct = (Array.isArray(savedStore.products) ? savedStore.products : []).find((item) => String(item?.id || "") === String(product.id || ""));
+    const savedPositions = Array.isArray(savedProduct?.positions) ? savedProduct.positions : [];
+    if (savedPositions.length < positionsInput.length) {
+      const error = new Error("Субтовары не сохранились полностью. Попробуйте ещё раз.");
+      error.status = 500;
+      throw error;
+    }
+    await saveOwnerStoreFallback(savedStore).catch((error) => {
+      console.error("[store-admin] positions fallback cache save failed", { storeId: savedStore.id, productId: product.id, message: error.message });
+    });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin positions public catalog refresh").catch((error) => {
+      console.error("[store-admin] positions public catalog refresh failed", { storeId: savedStore.id, productId: product.id, message: error.message });
+    });
+    console.log("[store-admin] positions saved", { storeId: savedStore.id, productId: product.id, positions: savedPositions.length });
+    notifyRealtime("store_updated", { storeId: savedStore.id, productId: product.id, source: "store-admin-positions" });
+    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
   try {
     requireDb();
