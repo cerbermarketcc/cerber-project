@@ -2894,6 +2894,31 @@ async function loadStoreWithFallback(storeId) {
   return fallbackStores.find((item) => String(item?.id || "") === id) || null;
 }
 
+async function saveStoreRow(store = {}, label = "store save") {
+  const id = String(store.id || "").trim();
+  if (!id) {
+    const error = new Error("Store id is required");
+    error.status = 400;
+    throw error;
+  }
+  const { data: savedRow, error } = await supabase
+    .from("stores")
+    .upsert({ id, data: store }, { onConflict: "id" })
+    .select("id,data")
+    .single();
+  if (error) {
+    console.error("[store] db save failed", { label, storeId: id, message: error.message, code: error.code || "" });
+    throw error;
+  }
+  if (!savedRow?.data) {
+    const readError = new Error(`${label} did not return saved store`);
+    readError.status = 500;
+    console.error("[store] db save missing readback", { label, storeId: id });
+    throw readError;
+  }
+  return savedRow.data;
+}
+
 async function findSellerAdminStore(storeId, login) {
   if (storeId) return loadStoreWithFallback(storeId);
   const key = loginKey(login);
@@ -2995,26 +3020,26 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
     const mergedStore = await normalizeStoreSecrets(sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token)));
-    await supabase.from("stores").upsert({ id: mergedStore.id, data: mergedStore }, { onConflict: "id" });
-    await saveOwnerStoreFallback(mergedStore).catch((error) => {
-      console.error("[store-admin] fallback cache save failed", { storeId: mergedStore.id, message: error.message });
+    const savedStore = await saveStoreRow(mergedStore, "store-admin store save");
+    await saveOwnerStoreFallback(savedStore).catch((error) => {
+      console.error("[store-admin] fallback cache save failed", { storeId: savedStore.id, message: error.message });
     });
-    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(mergedStore)] }, "store-admin public catalog refresh").catch((error) => {
-      console.error("[store-admin] public catalog refresh failed", { storeId: mergedStore.id, message: error.message });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin public catalog refresh").catch((error) => {
+      console.error("[store-admin] public catalog refresh failed", { storeId: savedStore.id, message: error.message });
     });
     console.log("[store-admin] store saved", {
-      storeId: mergedStore.id,
-      ownerLogin: mergedStore.ownerLogin || "",
-      image: Boolean(mergedStore.image),
-      cover: Boolean(mergedStore.cover),
-      products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
-      positions: Array.isArray(mergedStore.products)
-        ? mergedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
+      storeId: savedStore.id,
+      ownerLogin: savedStore.ownerLogin || "",
+      image: Boolean(savedStore.image),
+      cover: Boolean(savedStore.cover),
+      products: Array.isArray(savedStore.products) ? savedStore.products.length : 0,
+      positions: Array.isArray(savedStore.products)
+        ? savedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
         : 0,
-      productTitles: Array.isArray(mergedStore.products) ? mergedStore.products.map((product) => product.title).slice(0, 10) : []
+      productTitles: Array.isArray(savedStore.products) ? savedStore.products.map((product) => product.title).slice(0, 10) : []
     });
-    notifyRealtime("store_updated", { storeId: mergedStore.id, source: "store-admin" });
-    res.json({ store: publicStoreForState(mergedStore, { includeStaff: true }), ...(await stateForStoreAdmin(mergedStore.id, token)) });
+    notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin" });
+    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
   } catch (error) {
     next(error);
   }
@@ -3034,28 +3059,29 @@ app.put("/api/store-admin/products", async (req, res, next) => {
     const existingProducts = Array.isArray(existing.products) ? existing.products : [];
     const mergedStore = await normalizeStoreSecrets({
       ...existing,
+      id: existing.id || token.storeId,
       products: productsInput.map((product) => sellerProductPatch(
         existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {},
         product
       )),
       updatedAt: Date.now()
     });
-    await supabase.from("stores").upsert({ id: mergedStore.id || token.storeId, data: mergedStore }, { onConflict: "id" });
-    await saveOwnerStoreFallback(mergedStore).catch((error) => {
-      console.error("[store-admin] products fallback cache save failed", { storeId: mergedStore.id || token.storeId, message: error.message });
+    const savedStore = await saveStoreRow(mergedStore, "store-admin products save");
+    await saveOwnerStoreFallback(savedStore).catch((error) => {
+      console.error("[store-admin] products fallback cache save failed", { storeId: savedStore.id, message: error.message });
     });
-    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(mergedStore)] }, "store-admin products public catalog refresh").catch((error) => {
-      console.error("[store-admin] products public catalog refresh failed", { storeId: mergedStore.id || token.storeId, message: error.message });
+    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin products public catalog refresh").catch((error) => {
+      console.error("[store-admin] products public catalog refresh failed", { storeId: savedStore.id, message: error.message });
     });
     console.log("[store-admin] products saved", {
-      storeId: mergedStore.id || token.storeId,
-      products: Array.isArray(mergedStore.products) ? mergedStore.products.length : 0,
-      positions: Array.isArray(mergedStore.products)
-        ? mergedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
+      storeId: savedStore.id,
+      products: Array.isArray(savedStore.products) ? savedStore.products.length : 0,
+      positions: Array.isArray(savedStore.products)
+        ? savedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
         : 0
     });
-    notifyRealtime("store_updated", { storeId: mergedStore.id || token.storeId, source: "store-admin-products" });
-    res.json({ store: publicStoreForState(mergedStore, { includeStaff: true }), ...(await stateForStoreAdmin(mergedStore.id || token.storeId, token)) });
+    notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-products" });
+    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
   } catch (error) {
     next(error);
   }
@@ -4289,8 +4315,8 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       if (panelPassword) await adminEnsureSellerProfile(login, panelPassword, login);
       store.adminPassword = panelPassword;
       const protectedStore = await normalizeStoreSecrets(store);
-      await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
-      await saveOwnerStoreFallback(protectedStore);
+      const savedStore = await saveStoreRow(protectedStore, "admin seller store save");
+      await saveOwnerStoreFallback(savedStore);
     }
 
     await appendAdminLog("user_updated", admin.login, { login, role, name: name || "", sellerPanel: Boolean(role === "seller" || storePassword) });
@@ -4571,20 +4597,20 @@ app.post("/api/admin/stores", async (req, res, next) => {
     if (existing) return res.status(409).json({ error: "Магазин с таким ID уже существует" });
     await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
-    await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
-    saveOwnerStoreFallback(protectedStore).catch((error) => {
-      console.error("[admin-store] fallback save deferred failed", { storeId: protectedStore.id, message: error.message });
+    const savedStore = await saveStoreRow(protectedStore, "admin store create");
+    saveOwnerStoreFallback(savedStore).catch((error) => {
+      console.error("[admin-store] fallback save deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    clearDeletedStoreTombstone(protectedStore.id).catch((error) => {
-      console.error("[admin-store] tombstone clear deferred failed", { storeId: protectedStore.id, message: error.message });
+    clearDeletedStoreTombstone(savedStore.id).catch((error) => {
+      console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    const panel = adminStorePanelLinks(protectedStore, panelPassword);
-    appendAdminLog("store_created", admin.login, { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl }).catch((error) => {
-      console.error("[admin-store] create log deferred failed", { storeId: protectedStore.id, message: error.message });
+    const panel = adminStorePanelLinks(savedStore, panelPassword);
+    appendAdminLog("store_created", admin.login, { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl }).catch((error) => {
+      console.error("[admin-store] create log deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    console.log("[admin-store] created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
-    notifyRealtime("store_created", { storeId: protectedStore.id, ownerLogin: protectedStore.ownerLogin, source: "market-admin" });
-    res.json({ ok: true, store: publicStoreForState(protectedStore, { includeStaff: true }), panel });
+    console.log("[admin-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
+    notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "market-admin" });
+    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }), panel });
   } catch (error) {
     next(error);
   }
@@ -4599,19 +4625,19 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     const panelPassword = String(req.body?.adminPassword || "").trim();
     if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
-    await supabase.from("stores").upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" });
-    saveOwnerStoreFallback(protectedStore).catch((error) => {
-      console.error("[admin-store] fallback update deferred failed", { storeId: protectedStore.id, message: error.message });
+    const savedStore = await saveStoreRow(protectedStore, "admin store update");
+    saveOwnerStoreFallback(savedStore).catch((error) => {
+      console.error("[admin-store] fallback update deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    clearDeletedStoreTombstone(protectedStore.id).catch((error) => {
-      console.error("[admin-store] tombstone clear deferred failed", { storeId: protectedStore.id, message: error.message });
+    clearDeletedStoreTombstone(savedStore.id).catch((error) => {
+      console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    appendAdminLog("store_updated", admin.login, { storeId: protectedStore.id, fields: Object.keys(req.body || {}) }).catch((error) => {
-      console.error("[admin-store] update log deferred failed", { storeId: protectedStore.id, message: error.message });
+    appendAdminLog("store_updated", admin.login, { storeId: savedStore.id, fields: Object.keys(req.body || {}) }).catch((error) => {
+      console.error("[admin-store] update log deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    console.log("[admin-store] updated", { storeId: protectedStore.id, fields: Object.keys(req.body || {}) });
-    notifyRealtime("store_updated", { storeId: protectedStore.id, source: "market-admin" });
-    res.json({ ok: true, store: publicStoreForState(protectedStore, { includeStaff: true }), panel: adminStorePanelLinks(protectedStore, panelPassword) });
+    console.log("[admin-store] updated", { storeId: savedStore.id, fields: Object.keys(req.body || {}) });
+    notifyRealtime("store_updated", { storeId: savedStore.id, source: "market-admin" });
+    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }), panel: adminStorePanelLinks(savedStore, panelPassword) });
   } catch (error) {
     next(error);
   }

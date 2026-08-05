@@ -3746,9 +3746,7 @@ function renderAuth(message = "") {
   turnstileWidgetId = null;
   turnstileToken = "";
   authSubmitting = false;
-  const captchaPending = API_ENABLED && !remoteConfigLoaded;
-  const captchaBlocked = API_ENABLED && Boolean(remoteConfigError);
-  const authSubmitDisabled = captchaPending || captchaBlocked;
+  const authSubmitDisabled = false;
   document.body.dataset.theme = db.theme;
   root.innerHTML = `
     <main class="auth-wrap">
@@ -3760,18 +3758,7 @@ function renderAuth(message = "") {
           ${authMode === "register" ? `<label class="field">${tr("name")}<input name="name" required></label>` : ""}
           <label class="field">${tr("username")}<input name="login" required autocomplete="username"></label>
           <label class="field">${tr("password")}<input name="password" type="password" required autocomplete="current-password"></label>
-          ${API_ENABLED ? `
-            ${captchaPending ? `
-              <div class="captcha-box">
-                <p class="captcha-status">Загрузка настроек капчи...</p>
-              </div>
-            ` : captchaBlocked ? `
-              <div class="captcha-box">
-                <p class="captcha-status">Не удалось загрузить настройки капчи: ${esc(remoteConfigError)}</p>
-                <button class="link-button captcha-retry" type="button" data-config-retry>Повторить загрузку</button>
-              </div>
-            ` : ""}
-          ` : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
+          ${API_ENABLED ? "" : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit" data-auth-submit ${authSubmitDisabled ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
         <p><button class="link-button" data-auth-switch>${authMode === "login" ? tr("register") : tr("login")}</button></p>
@@ -3787,18 +3774,6 @@ function renderAuth(message = "") {
     renderAuth();
   };
   document.querySelector("[data-auth-form]").onsubmit = handleAuth;
-  document.querySelector("[data-captcha-retry]")?.addEventListener("click", () => {
-    resetCaptcha();
-    mountTurnstile(true);
-  });
-  document.querySelector("[data-config-retry]")?.addEventListener("click", async () => {
-    remoteConfigLoaded = false;
-    remoteConfigError = "";
-    renderAuth();
-    await loadRemoteConfig();
-    renderAuth();
-  });
-  mountTurnstile();
   applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
   mountCmsVisualEditor();
@@ -3888,7 +3863,7 @@ function setCaptchaStatus(message = "", retryVisible = false) {
 function updateAuthSubmitCaptchaState() {
   const button = document.querySelector("[data-auth-submit]");
   if (!button) return;
-  button.disabled = Boolean(authSubmitting || (API_ENABLED && (!remoteConfigLoaded || remoteConfigError)));
+  button.disabled = Boolean(authSubmitting);
 }
 
 function scheduleTurnstileWatch() {
@@ -4067,7 +4042,6 @@ async function handleAuth(event) {
   const name = String(data.get("name") || "").trim() || login;
   if (!login || !password) return renderAuth("Введите логин и пароль");
   if (API_ENABLED) {
-    if (!remoteConfigLoaded || remoteConfigError) return renderAuth(remoteConfigError || "Настройки ещё загружаются");
     return openAuthCaptchaModal({ login, password, name });
   }
   if (!data.get("captcha")) return renderAuth(tr("needCaptcha"));
@@ -4124,6 +4098,7 @@ async function submitAuthDraft(authDraft, captcha) {
       rememberApiToken(payload.token);
       applyRemoteState(payload);
       rememberLocalPassword(payload.user?.login || login, password);
+      authSubmitting = false;
       refreshRemoteStateAfterAuth();
       return renderCurrent();
     } catch (error) {
