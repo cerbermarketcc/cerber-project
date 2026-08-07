@@ -10582,7 +10582,7 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>
-    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small></span><strong>${finiteMoney(item.amountUsd).toFixed(2)} $<br><small>${finiteMoney(item.amountLtc).toFixed(8)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
+    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small>${item.payoutFailureMessage ? `<br><small>${esc(item.payoutFailureMessage)}</small>` : ""}</span><strong>${finiteMoney(item.amountUsd).toFixed(2)} $<br><small>${finiteMoney(item.amountLtc).toFixed(6)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
   </section>`;
 }
 
