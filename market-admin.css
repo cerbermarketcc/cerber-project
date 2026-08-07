@@ -320,6 +320,10 @@ canvas {
   overflow: auto;
 }
 
+.nav .nav-logout {
+  display: none;
+}
+
 .admin-table-actions,
 .admin-form-actions {
   display: flex;
@@ -437,6 +441,69 @@ tr:hover td {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
+.broadcast-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.broadcast-form {
+  border-right: 1px solid var(--line);
+  padding-right: 16px;
+}
+
+.broadcast-form header p {
+  margin-bottom: 16px;
+}
+
+.broadcast-filters {
+  margin: 14px 0;
+  border-block: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.broadcast-filters summary {
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.broadcast-preview {
+  position: sticky;
+  top: 20px;
+  min-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #151713;
+  padding: 18px;
+}
+
+.broadcast-preview h3,
+.broadcast-preview p {
+  overflow-wrap: anywhere;
+}
+
+.broadcast-preview .primary {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 10px;
+  text-decoration: none;
+}
+
+.broadcast-history {
+  margin-top: 18px;
+}
+
+.broadcast-history h2 {
+  padding: 16px 16px 0;
 }
 
 .checks {
@@ -787,11 +854,26 @@ tr:hover td {
     scroll-snap-align: center;
   }
 
+  .nav .nav-logout {
+    display: flex;
+    color: var(--red);
+  }
+
   .grid,
   .charts,
   .split,
-  .row {
+  .row,
+  .broadcast-compose {
     grid-template-columns: 1fr;
+  }
+
+  .broadcast-form {
+    border-right: 0;
+    padding-right: 0;
+  }
+
+  .broadcast-preview {
+    position: static;
   }
 
   .content {
@@ -864,14 +946,18 @@ tr:hover td {
   }
 
   .sidebar {
-    padding: 10px 10px 8px;
+    position: fixed;
+    inset: auto 0 0;
+    z-index: 50;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+    border-bottom: 0;
     background: rgba(18, 20, 16, 0.98);
     backdrop-filter: blur(14px);
   }
 
   .brand {
-    align-items: center;
-    margin-bottom: 10px;
+    display: none;
   }
 
   .brand strong {
@@ -886,8 +972,8 @@ tr:hover td {
   }
 
   .nav {
-    margin-inline: -2px;
-    padding: 0 2px 4px;
+    margin: 0;
+    padding: 0;
   }
 
   .nav button {
@@ -913,13 +999,13 @@ tr:hover td {
   }
 
   .content {
-    padding: 14px 10px 32px;
+    padding: 14px 10px calc(92px + env(safe-area-inset-bottom));
     overflow-x: hidden;
   }
 
   .admin-create-panel {
     position: sticky;
-    top: 105px;
+    top: 8px;
     z-index: 12;
     padding: 12px;
     background: rgba(25, 27, 24, 0.98);
@@ -1013,6 +1099,15 @@ tr:hover td {
 
   .split {
     gap: 10px;
+  }
+
+  .broadcast-compose {
+    gap: 12px;
+  }
+
+  .broadcast-preview {
+    min-height: 160px;
+    padding: 14px;
   }
 
   .split-card,

@@ -7,13 +7,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import bcrypt from "bcryptjs";
+import compression from "compression";
 import { createClient } from "@supabase/supabase-js";
 import WebSocket, { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-07-21-v117";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v118";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -28,8 +29,9 @@ const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
-const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber-project.onrender.com";
-const referralPublicBaseUrl = publicBaseUrl.includes("onrender.com") ? "https://cerber.to" : publicBaseUrl;
+const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.to";
+const referralPublicBaseUrl = publicBaseUrl;
+const mediaBucketName = process.env.SUPABASE_MEDIA_BUCKET || "cerber-media";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
@@ -140,10 +142,10 @@ function supabaseHttpRequest(input, init = {}, timeoutMs = 20000) {
 }
 
 async function supabaseFetchWithTimeout(input, init = {}) {
-  const timeoutMs = Math.max(10000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 45000));
+  const timeoutMs = Math.max(8000, Number(process.env.SUPABASE_FETCH_TIMEOUT_MS || 12000));
   const method = String(init.method || "GET").toUpperCase();
   const canRetry = ["GET", "HEAD"].includes(method);
-  const maxAttempts = canRetry ? Math.max(1, Number(process.env.SUPABASE_FETCH_RETRIES || 3)) : 1;
+  const maxAttempts = canRetry ? Math.max(1, Number(process.env.SUPABASE_FETCH_RETRIES || 2)) : 1;
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -233,7 +235,11 @@ let financeMirrorPromise = null;
 let publicStoresMemoryCache = [];
 let publicStoresMemoryCacheAt = 0;
 let publicCatalogMemorySnapshot = null;
+let publicCatalogMemorySnapshotAt = 0;
 let publicStoresRefreshPromise = null;
+let mediaBucketReadyPromise = null;
+let inlineMediaMigrationPromise = null;
+let adminLogMemory = [];
 let settingsBackupMemorySnapshot = null;
 let settingsBackupMemoryAt = 0;
 const settingsBackupCacheMs = 15 * 1000;
@@ -386,6 +392,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "40mb" }));
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
@@ -569,19 +576,20 @@ function markAdminLoginAttempt(req, login, ok) {
   adminLoginAttempts.set(key, record);
 }
 
-async function ensureAdminSecurity() {
+async function ensureAdminSecurity(options = {}) {
+  const fullState = Boolean(options.fullState);
   const fallbackLogin = process.env.MARKET_ADMIN_LOGIN || "admin";
   const fallbackPassword = process.env.MARKET_ADMIN_PASSWORD || "admin1212";
   const { data: settings } = await withTimeout(
-    supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
+    supabase.from("app_settings").select(fullState ? "data" : "adminSecurity:data->adminSecurity").eq("id", mainSettingsRowId).maybeSingle(),
     "admin security settings query",
     3000
   ).catch((error) => {
     console.error("[admin-login] settings skipped", { message: error.message });
     return { data: null };
   });
-  const canPersistSecurity = Boolean(settings?.data);
-  const state = settings?.data || {};
+  const canPersistSecurity = fullState && Boolean(settings?.data);
+  const state = fullState ? (settings?.data || {}) : { adminSecurity: settings?.adminSecurity || {} };
   state.adminSecurity = state.adminSecurity || {};
   if (!state.adminSecurity.passwordHash) {
     state.adminSecurity.login = state.adminSecurity.login || fallbackLogin;
@@ -610,22 +618,16 @@ async function ensureAdminSecurity() {
 }
 
 async function appendAdminLog(action, actor = "admin", details = {}) {
+  const entry = {
+    id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    action,
+    actor,
+    details,
+    createdAt: Date.now()
+  };
   try {
-    const state = await withTimeout(loadSettingsState(), "admin log state load", 6000);
-    state.adminLogs = Array.isArray(state.adminLogs) ? state.adminLogs : [];
-    const entry = {
-      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      action,
-      actor,
-      details,
-      createdAt: Date.now()
-    };
-    state.adminLogs.unshift(entry);
-    state.adminLogs = state.adminLogs.slice(0, 500);
-    await withTimeout(saveSettingsState(state), "admin log save", 6000);
-    mirrorAuditLog(entry).catch((error) => {
-      console.warn("[audit-log] sql mirror skipped", { message: error.message });
-    });
+    adminLogMemory = [entry, ...adminLogMemory.filter((item) => item.id !== entry.id)].slice(0, 500);
+    await withTimeout(mirrorAuditLog(entry), "admin audit log save", 4000);
     console.log(`[admin-log] ${action}`, { actor, ...details });
     notifyRealtime(action, details);
   } catch (error) {
@@ -820,6 +822,114 @@ function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") 
   return image;
 }
 
+function inlineImagePayload(value = "") {
+  const source = String(value || "").trim();
+  const match = source.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) return null;
+  const mimeType = String(match[1] || "").toLowerCase();
+  if (!allowedInlineImageTypes.has(mimeType)) return null;
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (!buffer.length || buffer.length > 5 * 1024 * 1024) return null;
+  const extension = mimeType.includes("png")
+    ? "png"
+    : mimeType.includes("webp")
+      ? "webp"
+      : mimeType.includes("gif")
+        ? "gif"
+        : "jpg";
+  return { source, mimeType, buffer, extension };
+}
+
+function safeMediaPathSegment(value = "store") {
+  return String(value || "store").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "store";
+}
+
+async function ensureMediaBucket() {
+  requireDb();
+  if (mediaBucketReadyPromise) return mediaBucketReadyPromise;
+  mediaBucketReadyPromise = (async () => {
+    const { error } = await supabase.storage.createBucket(mediaBucketName, {
+      public: true,
+      fileSizeLimit: 5 * 1024 * 1024,
+      allowedMimeTypes: [...allowedInlineImageTypes]
+    });
+    if (error && !/already exists|duplicate|resource exists/i.test(String(error.message || ""))) throw error;
+    return true;
+  })().catch((error) => {
+    mediaBucketReadyPromise = null;
+    throw error;
+  });
+  return mediaBucketReadyPromise;
+}
+
+async function externalizeInlineImage(value = "", scope = "stores") {
+  const payload = inlineImagePayload(value);
+  if (!payload) return String(value || "");
+  await ensureMediaBucket();
+  const digest = crypto.createHash("sha256").update(payload.buffer).digest("hex");
+  const objectPath = `${safeMediaPathSegment(scope)}/${digest}.${payload.extension}`;
+  const { error } = await supabase.storage.from(mediaBucketName).upload(objectPath, payload.buffer, {
+    contentType: payload.mimeType,
+    cacheControl: "31536000",
+    upsert: false
+  });
+  if (error && !/already exists|duplicate|resource exists/i.test(String(error.message || ""))) throw error;
+  const { data } = supabase.storage.from(mediaBucketName).getPublicUrl(objectPath);
+  if (!data?.publicUrl) throw new Error("Supabase Storage did not return a public media URL");
+  return data.publicUrl;
+}
+
+async function externalizeStoreMedia(store = {}) {
+  const next = cloneJson(store || {});
+  if (!JSON.stringify(next).includes("data:image/")) return { store: next, changed: false };
+  try {
+    await ensureMediaBucket();
+  } catch (error) {
+    console.error("[media] storage unavailable; retaining inline store images", {
+      storeId: next.id || "",
+      message: error.message
+    });
+    return { store: next, changed: false };
+  }
+  const pending = new Map();
+  let convertedImages = 0;
+  const scope = `stores/${safeMediaPathSegment(next.id || next.ownerLogin || "store")}`;
+  const upload = async (value) => {
+    const source = String(value || "");
+    if (!inlineImagePayload(source)) return source;
+    if (!pending.has(source)) {
+      pending.set(source, externalizeInlineImage(source, scope)
+        .then((result) => {
+          if (result && result !== source) convertedImages += 1;
+          return result;
+        })
+        .catch((error) => {
+          console.error("[media] inline image upload failed; retaining original", {
+            storeId: next.id || "",
+            message: error.message
+          });
+          return source;
+        }));
+    }
+    return pending.get(source);
+  };
+  const mapImages = async (items = []) => Promise.all((Array.isArray(items) ? items : []).map(upload));
+
+  next.image = await upload(next.image || next.avatar || "");
+  next.cover = await upload(next.cover || next.banner || next.image || "");
+  delete next.avatar;
+  delete next.banner;
+  next.gallery = await mapImages(next.gallery);
+  next.products = await Promise.all((Array.isArray(next.products) ? next.products : []).map(async (product) => {
+    const item = { ...product };
+    item.image = await upload(item.image || item.images?.[0] || next.image || "");
+    item.images = await mapImages(item.images);
+    item.gallery = await mapImages(item.gallery);
+    return item;
+  }));
+  return { store: next, changed: convertedImages > 0 };
+}
+
 function publicStaffMemberForState(member = {}) {
   const { password, passwordHash, adminPassword, ...item } = member || {};
   item.hasPassword = Boolean(password || passwordHash || adminPassword);
@@ -844,9 +954,9 @@ function stripStoreSecretsForState(item = {}, options = {}) {
 function publicStoreForState(store = {}, options = {}) {
   const item = { ...store };
   item.image = publicImageForState(item.image || item.avatar, "assets/cerber-emblem.png");
-  item.avatar = item.image;
   item.cover = publicImageForState(item.cover || item.banner || item.image, "assets/market-banner.png");
-  item.banner = item.cover;
+  delete item.avatar;
+  delete item.banner;
   item.gallery = Array.isArray(item.gallery)
     ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 12)
     : [];
@@ -883,9 +993,8 @@ function requireDb() {
 }
 
 function withTimeout(promise, label, timeoutMs = 8000) {
-  const effectiveTimeoutMs = /supabase|query|settings|stores|messages|profiles|sessions|catalog|table|seed|backup/i.test(String(label || ""))
-    ? Math.max(timeoutMs, dbQueryTimeoutMs)
-    : timeoutMs;
+  const requestedTimeoutMs = Number(timeoutMs);
+  const effectiveTimeoutMs = Math.max(1000, Number.isFinite(requestedTimeoutMs) ? requestedTimeoutMs : dbQueryTimeoutMs);
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -1225,6 +1334,9 @@ function mergePublicCatalogSnapshots(primary = {}, backup = {}) {
 
 async function loadPublicCatalogSnapshot() {
   if (!supabase) return null;
+  if (catalogHasContent(publicCatalogMemorySnapshot) && Date.now() - publicCatalogMemorySnapshotAt < 30 * 1000) {
+    return cloneJson(publicCatalogMemorySnapshot);
+  }
   const memorySnapshot = catalogHasContent(publicCatalogMemorySnapshot)
     ? { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true }
     : null;
@@ -1255,6 +1367,7 @@ async function loadPublicCatalogSnapshot() {
       )
     );
     publicCatalogMemorySnapshot = cloneJson(merged);
+    publicCatalogMemorySnapshotAt = Date.now();
     if (restoredFromBackup) {
       console.warn("[public-catalog] repaired snapshot from backup", {
         stores: merged.stores?.length || 0,
@@ -1284,6 +1397,7 @@ async function savePublicCatalogSnapshot(state = {}, storesSource = null) {
   const snapshot = buildPublicCatalogSnapshot(state, storesSource);
   if (!catalogHasContent(snapshot)) return null;
   publicCatalogMemorySnapshot = cloneJson(snapshot);
+  publicCatalogMemorySnapshotAt = Date.now();
   await withTimeout(
     supabase.from("app_settings").upsert([
       { id: publicCatalogRowId, data: snapshot },
@@ -1352,9 +1466,30 @@ async function refreshPublicCatalogFromStoreRows(settingsData = {}, label = "pub
 }
 
 function rememberPublicStoresCache(stores = []) {
-  if (!Array.isArray(stores) || !stores.length) return;
+  if (!Array.isArray(stores)) return;
   publicStoresMemoryCache = stores.map((store) => ({ ...store }));
   publicStoresMemoryCacheAt = Date.now();
+}
+
+function rememberSavedStore(store = {}) {
+  if (!store?.id) return;
+  const publicStore = publicStoreForState(store);
+  rememberPublicStoresCache([
+    publicStore,
+    ...publicStoresMemoryCache.filter((item) => String(item?.id || "") !== String(publicStore.id))
+  ]);
+  if (publicCatalogMemorySnapshot && typeof publicCatalogMemorySnapshot === "object") {
+    publicCatalogMemorySnapshot = {
+      ...publicCatalogMemorySnapshot,
+      stores: [
+        publicStore,
+        ...(Array.isArray(publicCatalogMemorySnapshot.stores) ? publicCatalogMemorySnapshot.stores : [])
+          .filter((item) => String(item?.id || "") !== String(publicStore.id))
+      ],
+      updatedAt: Date.now()
+    };
+    publicCatalogMemorySnapshotAt = Date.now();
+  }
 }
 
 function refreshPublicStoresCacheInBackground(settingsData = {}) {
@@ -1385,38 +1520,17 @@ async function stateFor(user) {
     }
     const seedMs = Date.now() - seedStartedAt;
     if (!user) {
-      const fallbackPublicStatePromise = Promise.all([
-        withTimeout(
-          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
-          "public app_settings query",
-          4000
-        ).catch((error) => {
-          console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
-            message: error.message,
-            status: error.status || 500
-          });
-          return { data: { data: {} }, error: null };
-        }),
-        withTimeout(
-          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
-          "public stores fallback query",
-          5000
-        ).catch((error) => {
-          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
-          return null;
-        })
-      ]);
       const publicCatalog = await loadPublicCatalogSnapshot();
       if (publicCatalog) {
         const freshStores = await loadPublicStoresFromDb(publicCatalog, "public catalog fresh stores query", 2500).catch((error) => {
           console.error("[stateFor] public catalog fresh stores skipped", { message: error.message });
-          return [];
+          return null;
         });
-        const catalogStores = sanitizeStoresForVisualReset(freshStores.length
-          ? mergeStoreSources(freshStores, publicCatalog.stores || [])
-          : publicCatalog.stores);
-        if (catalogStores.length) rememberPublicStoresCache(catalogStores);
-        if (freshStores.length) {
+        const catalogStores = sanitizeStoresForVisualReset(Array.isArray(freshStores)
+          ? freshStores
+          : (publicCatalog.stores || []));
+        rememberPublicStoresCache(catalogStores);
+        if (Array.isArray(freshStores)) {
           savePublicCatalogSnapshot({ ...publicCatalog, publicStoresCache: catalogStores }, catalogStores).catch((error) => {
             console.error("[public-catalog] fresh stores snapshot save failed", { message: error.message });
           });
@@ -1462,6 +1576,27 @@ async function stateFor(user) {
           }
         };
       }
+      const fallbackPublicStatePromise = Promise.all([
+        withTimeout(
+          supabase.from("app_settings").select(publicStateSettingsSelect).eq("id", mainSettingsRowId).maybeSingle(),
+          "public app_settings query",
+          4000
+        ).catch((error) => {
+          console.error("[stateFor] public app_settings query failed; using empty settings fallback", {
+            message: error.message,
+            status: error.status || 500
+          });
+          return { data: { data: {} }, error: null };
+        }),
+        withTimeout(
+          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
+          "public stores fallback query",
+          5000
+        ).catch((error) => {
+          console.error("[stateFor] public stores fallback failed", { message: error.message, status: error.status || 500 });
+          return null;
+        })
+      ]);
       const [settingsResult, storesResult] = await fallbackPublicStatePromise;
       if (settingsResult.error) throw settingsResult.error;
       let settingsData = compactSettingsData(settingsResult.data || {});
@@ -1484,21 +1619,22 @@ async function stateFor(user) {
           .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
       }
       if (publicStores.length) rememberPublicStoresCache(publicStores);
-      const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
-      if (storeRows.length) {
+      const storesQuerySucceeded = Array.isArray(storesResult?.data);
+      const storeRows = storesQuerySucceeded ? storesResult.data : [];
+      if (storesQuerySucceeded) {
         const storesFromDb = publicStoresFromRows(storeRows.filter((row) => isMarketplaceRecordAfterVisualReset({ ...row.data, createdAt: row.data?.createdAt || row.created_at })), settingsData);
+        publicStores = storesFromDb;
+        rememberPublicStoresCache(publicStores);
         if (storesFromDb.length) {
-          publicStores = publicStores.length ? mergeStoreSources(storesFromDb, publicStores) : storesFromDb;
-          rememberPublicStoresCache(publicStores);
           savePublicStoresCache(publicStores).catch((error) => {
             console.error("[stateFor] public stores fallback cache save failed", { message: error.message });
           });
         }
       }
-      if (!publicStores.length && publicStoresMemoryCache.length) {
+      if (!storesQuerySucceeded && !publicStores.length && publicStoresMemoryCache.length) {
         publicStores = sanitizeStoresForVisualReset(publicStoresMemoryCache).map((store) => ({ ...store }));
       }
-      if (!publicStores.length) {
+      if (!storesQuerySucceeded && !publicStores.length) {
         refreshPublicStoresCacheInBackground(settingsData);
       }
       const visibleExchangeCards = publicExchangeCardsForState(settingsData.exchangeCards);
@@ -1642,9 +1778,7 @@ async function stateFor(user) {
       : Array.isArray(settingsData.ownerStores)
         ? settingsData.ownerStores
       : [];
-    const allStores = sanitizeStoresForVisualReset(storesFromDb
-      ? mergeStoreSources(storesFromDb, settingsData.ownerStores || [])
-      : fallbackStores);
+    const allStores = sanitizeStoresForVisualReset(storesFromDb ?? fallbackStores);
     const embeddedStoreOrders = allStores.flatMap((store) => (
       Array.isArray(store?.productOrders)
         ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || store.id, storeName: order.storeName || store.name || store.id }))
@@ -2310,10 +2444,37 @@ function sellerForbidden(res) {
 
 async function stateForStoreAdmin(storeId, token = {}) {
   const id = String(storeId || "");
-  let state = await withTimeout(loadSettingsState(), "store-admin app_settings query", 6000).catch(async (error) => {
-    console.error("[store-admin] app_settings fallback", { message: error.message });
-    return loadSettingsBackupState();
-  });
+  const [loadedState, messagesResult, ledgerResult, storeResult] = await Promise.all([
+    withTimeout(loadSettingsState(), "store-admin app_settings query", 6000).catch(async (error) => {
+      console.error("[store-admin] app_settings fallback", { message: error.message });
+      return loadSettingsBackupState();
+    }),
+    withTimeout(
+      supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
+      "store-admin messages query",
+      8000
+    ).catch((error) => {
+      console.error("[store-admin] messages fallback", { message: error.message });
+      return { data: [] };
+    }),
+    withTimeout(
+      supabase.from("messages").select("data").like("id", "sale-ledger-%").order("created_at", { ascending: false }).limit(300),
+      "store-admin ledger messages query",
+      8000
+    ).catch((error) => {
+      console.error("[store-admin] ledger messages fallback", { message: error.message });
+      return { data: [] };
+    }),
+    withTimeout(
+      supabase.from("stores").select("data").eq("id", id).maybeSingle(),
+      "store-admin store query",
+      8000
+    ).catch((error) => {
+      console.error("[store-admin] store fallback", { storeId: id, message: error.message });
+      return { data: null };
+    })
+  ]);
+  let state = loadedState;
   if (!stateHasDurableContent(state)) {
     const publicCatalog = await loadPublicCatalogSnapshot().catch((error) => {
       console.error("[store-admin] public catalog fallback failed", { message: error.message });
@@ -2331,32 +2492,11 @@ async function stateForStoreAdmin(storeId, token = {}) {
   }
   state = sanitizeStateForVisualReset(state);
   const orders = Array.isArray(state.orders) ? state.orders : [];
-  const messages = (await withTimeout(
-    supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
-    "store-admin messages query",
-    8000
-  ).catch((error) => {
-    console.error("[store-admin] messages fallback", { message: error.message });
-    return { data: [] };
-  })).data || [];
-  const ledgerMessages = (await withTimeout(
-    supabase.from("messages").select("data").like("id", "sale-ledger-%").order("created_at", { ascending: false }).limit(300),
-    "store-admin ledger messages query",
-    8000
-  ).catch((error) => {
-    console.error("[store-admin] ledger messages fallback", { message: error.message });
-    return { data: [] };
-  })).data || [];
-  const { data: storeRow } = await withTimeout(
-    supabase.from("stores").select("data").eq("id", id).maybeSingle(),
-    "store-admin store query",
-    8000
-  ).catch((error) => {
-    console.error("[store-admin] store fallback", { storeId: id, message: error.message });
-    return { data: null };
-  });
+  const messages = messagesResult?.data || [];
+  const ledgerMessages = ledgerResult?.data || [];
+  const storeRow = storeResult?.data || null;
   const stateStores = sanitizeStoresForVisualReset(mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []));
-  let store = storeRow?.data || stateStores.find((item) => String(item?.id || "") === id) || null;
+  let store = storeRow || stateStores.find((item) => String(item?.id || "") === id) || null;
   if (store && !isMarketplaceRecordAfterVisualReset(store)) store = null;
   const embeddedOrders = Array.isArray(store?.productOrders)
     ? store.productOrders.map((order) => ({ ...order, storeId: order.storeId || id, storeName: order.storeName || store.name || id }))
@@ -2439,7 +2579,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
   payload.state.walletWithdrawals = sellerTokenCanAccess(token, "finances")
     ? (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id)
     : [];
-  return payload;
+  const responseStore = payload.state.stores[0] || (store ? publicStoreForState(store, { includeStaff: true }) : null);
+  payload.state.stores = [];
+  return { ...payload, store: responseStore };
 }
 
 function verifySellerAdminToken(req) {
@@ -2875,6 +3017,7 @@ async function loadStoreWithFallback(storeId) {
   const id = String(storeId || "").trim();
   if (!id) return null;
   let row = null;
+  let databaseAnswered = false;
   try {
     const result = await withTimeout(
       supabase.from("stores").select("data").eq("id", id).maybeSingle(),
@@ -2882,10 +3025,12 @@ async function loadStoreWithFallback(storeId) {
       5000
     );
     row = result?.data || null;
+    databaseAnswered = true;
   } catch (error) {
     console.error("[store-admin] direct store load failed; using fallback", { storeId: id, message: error.message });
   }
   if (row?.data) return row.data;
+  if (databaseAnswered) return null;
   const state = await withTimeout(loadSettingsState(), "store-admin fallback state", 6000).catch(async (error) => {
     console.error("[store-admin] settings fallback failed; using backup", { storeId: id, message: error.message });
     return loadSettingsBackupState();
@@ -2901,11 +3046,17 @@ async function saveStoreRow(store = {}, label = "store save") {
     error.status = 400;
     throw error;
   }
-  const { data: savedRow, error } = await supabase
-    .from("stores")
-    .upsert({ id, data: store }, { onConflict: "id" })
-    .select("id,data")
-    .single();
+  const mediaResult = await externalizeStoreMedia(store);
+  const durableStore = mediaResult.store;
+  const { data: savedRow, error } = await withTimeout(
+    supabase
+      .from("stores")
+      .upsert({ id, data: durableStore }, { onConflict: "id" })
+      .select("id,data")
+      .single(),
+    label,
+    10000
+  );
   if (error) {
     console.error("[store] db save failed", { label, storeId: id, message: error.message, code: error.code || "" });
     throw error;
@@ -2916,7 +3067,79 @@ async function saveStoreRow(store = {}, label = "store save") {
     console.error("[store] db save missing readback", { label, storeId: id });
     throw readError;
   }
+  rememberSavedStore(savedRow.data);
   return savedRow.data;
+}
+
+function scheduleStorePublication(store = {}, label = "store publication") {
+  rememberSavedStore(store);
+  Promise.resolve()
+    .then(() => saveOwnerStoreFallback(store))
+    .then(() => refreshPublicCatalogFromStoreRows({}, `${label} catalog refresh`))
+    .catch((error) => {
+      console.error("[store] background publication failed", {
+        storeId: store.id || "",
+        label,
+        message: error.message
+      });
+    });
+}
+
+function migrateStateStoreMedia(state = {}, stores = []) {
+  const byId = new Map((Array.isArray(stores) ? stores : []).map((store) => [String(store?.id || ""), store]));
+  const replace = (items = []) => (Array.isArray(items) ? items : []).map((store) => byId.get(String(store?.id || "")) || store);
+  return {
+    ...state,
+    ownerStores: replace(state.ownerStores),
+    publicStoresCache: replace(state.publicStoresCache).map(publicStoreForState),
+    publicStoresCacheAt: Date.now()
+  };
+}
+
+async function migrateInlineStoreMedia() {
+  if (!supabase) return { checked: 0, migrated: 0 };
+  if (inlineMediaMigrationPromise) return inlineMediaMigrationPromise;
+  inlineMediaMigrationPromise = (async () => {
+    const result = await withTimeout(
+      supabase.from("stores").select("id,data").limit(500),
+      "inline store media migration query",
+      10000
+    );
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const migratedStores = [];
+    for (const row of rows) {
+      if (!row?.data) continue;
+      const mediaResult = await externalizeStoreMedia(row.data);
+      if (mediaResult.changed) {
+        const saved = await saveStoreRow(mediaResult.store, "inline store media migration save");
+        migratedStores.push(saved);
+      } else {
+        rememberSavedStore(row.data);
+      }
+    }
+    if (migratedStores.length) {
+      const state = await withTimeout(loadSettingsState(), "inline media settings migration", 10000).catch(() => null);
+      if (state) {
+        await withTimeout(
+          saveSettingsState(migrateStateStoreMedia(state, migratedStores), { deferSideEffects: true }),
+          "inline media settings save",
+          15000
+        ).catch((error) => {
+          console.error("[media] settings cache migration failed", { message: error.message });
+        });
+      }
+      await refreshPublicCatalogFromStoreRows({}, "inline media public catalog refresh").catch((error) => {
+        console.error("[media] public catalog migration failed", { message: error.message });
+      });
+    }
+    console.log("[media] inline store migration complete", { checked: rows.length, migrated: migratedStores.length });
+    return { checked: rows.length, migrated: migratedStores.length };
+  })().catch((error) => {
+    inlineMediaMigrationPromise = null;
+    console.error("[media] inline store migration failed", { message: error.message });
+    return { checked: 0, migrated: 0, error: error.message };
+  });
+  return inlineMediaMigrationPromise;
 }
 
 async function findSellerAdminStore(storeId, login) {
@@ -2930,7 +3153,7 @@ async function findSellerAdminStore(storeId, login) {
       6000
     ).catch((error) => {
       console.error("[store-admin] stores lookup fallback", { login, message: error.message });
-      return { data: [] };
+      return { data: [], failed: true };
     }),
     withTimeout(loadSettingsState(), "store-admin login settings", 6000).catch(async (error) => {
       console.error("[store-admin] login settings fallback", { login, message: error.message });
@@ -2938,7 +3161,8 @@ async function findSellerAdminStore(storeId, login) {
     })
   ]);
   const fallbackStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
-  return mergeStoreSources((storesResult?.data || []).map((row) => row.data), fallbackStores).find((item) => (
+  const candidateStores = storesResult?.failed ? fallbackStores : (storesResult?.data || []).map((row) => row.data);
+  return candidateStores.find((item) => (
     item && (loginKey(item.ownerLogin) === key || loginKey(item.id) === key)
   )) || null;
 }
@@ -3021,12 +3245,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     }
     const mergedStore = await normalizeStoreSecrets(sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token)));
     const savedStore = await saveStoreRow(mergedStore, "store-admin store save");
-    await saveOwnerStoreFallback(savedStore).catch((error) => {
-      console.error("[store-admin] fallback cache save failed", { storeId: savedStore.id, message: error.message });
-    });
-    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin public catalog refresh").catch((error) => {
-      console.error("[store-admin] public catalog refresh failed", { storeId: savedStore.id, message: error.message });
-    });
+    scheduleStorePublication(savedStore, "store-admin store save");
     console.log("[store-admin] store saved", {
       storeId: savedStore.id,
       ownerLogin: savedStore.ownerLogin || "",
@@ -3039,7 +3258,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(savedStore.products) ? savedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin" });
-    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
+    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
   } catch (error) {
     next(error);
   }
@@ -3067,12 +3286,7 @@ app.put("/api/store-admin/products", async (req, res, next) => {
       updatedAt: Date.now()
     });
     const savedStore = await saveStoreRow(mergedStore, "store-admin products save");
-    await saveOwnerStoreFallback(savedStore).catch((error) => {
-      console.error("[store-admin] products fallback cache save failed", { storeId: savedStore.id, message: error.message });
-    });
-    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin products public catalog refresh").catch((error) => {
-      console.error("[store-admin] products public catalog refresh failed", { storeId: savedStore.id, message: error.message });
-    });
+    scheduleStorePublication(savedStore, "store-admin products save");
     console.log("[store-admin] products saved", {
       storeId: savedStore.id,
       products: Array.isArray(savedStore.products) ? savedStore.products.length : 0,
@@ -3081,7 +3295,7 @@ app.put("/api/store-admin/products", async (req, res, next) => {
         : 0
     });
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-products" });
-    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
+    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
   } catch (error) {
     next(error);
   }
@@ -3128,15 +3342,10 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
       error.status = 500;
       throw error;
     }
-    await saveOwnerStoreFallback(savedStore).catch((error) => {
-      console.error("[store-admin] positions fallback cache save failed", { storeId: savedStore.id, productId: product.id, message: error.message });
-    });
-    await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(savedStore)] }, "store-admin positions public catalog refresh").catch((error) => {
-      console.error("[store-admin] positions public catalog refresh failed", { storeId: savedStore.id, productId: product.id, message: error.message });
-    });
+    scheduleStorePublication(savedStore, "store-admin positions save");
     console.log("[store-admin] positions saved", { storeId: savedStore.id, productId: product.id, positions: savedPositions.length });
     notifyRealtime("store_updated", { storeId: savedStore.id, productId: product.id, source: "store-admin-positions" });
-    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), ...(await stateForStoreAdmin(savedStore.id, token)) });
+    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
   } catch (error) {
     next(error);
   }
@@ -4243,6 +4452,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
     publicStoresMemoryCache = [];
     publicStoresMemoryCacheAt = Date.now();
     publicCatalogMemorySnapshot = cloneJson(emptyCatalog);
+    publicCatalogMemorySnapshotAt = Date.now();
     await withTimeout(
       supabase.from("app_settings").upsert([
         { id: publicCatalogRowId, data: emptyCatalog },
@@ -4284,12 +4494,6 @@ app.delete("/api/admin/public-stores-cache", async (req, res, next) => {
   }
 });
 
-app.use("/api/owner", (_req, res) => {
-  res.status(410).json({
-    error: "Legacy owner API is disabled. Use /market-admin.html and /api/admin endpoints."
-  });
-});
-
 app.post("/api/owner/stores", async (req, res, next) => {
   try {
     requireDb();
@@ -4300,28 +4504,12 @@ app.post("/api/owner/stores", async (req, res, next) => {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
     const protectedStore = await normalizeStoreSecrets(store);
-    const { data: savedRow, error: storeError } = await supabase
-      .from("stores")
-      .upsert({ id: protectedStore.id, data: protectedStore }, { onConflict: "id" })
-      .select("id,data")
-      .single();
-    if (storeError) {
-      console.error("[owner-store] db save failed", { storeId: store.id, ownerLogin: store.ownerLogin, error: storeError.message });
-      throw storeError;
-    }
-    const savedStore = savedRow?.data || protectedStore;
-    const { data: readBack, error: readBackError } = await supabase.from("stores").select("id,data").eq("id", savedStore.id).maybeSingle();
-    if (readBackError || !readBack?.data) {
-      console.error("[owner-store] db readback failed", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, error: readBackError?.message || "missing row" });
-      const error = new Error("Store was not saved in database");
-      error.status = 500;
-      throw error;
-    }
-    await saveOwnerStoreFallback(readBack.data);
-    await clearDeletedStoreTombstone(savedStore.id);
+    const savedStore = await saveStoreRow(protectedStore, "owner store save");
+    scheduleStorePublication(savedStore, "owner store save");
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
-    res.json({ store: publicStoreForState(readBack.data, { includeStaff: true }), panel: adminStorePanelLinks(readBack.data, panelPassword), verifiedSaved: Boolean(savedRow?.id), verifiedReadBack: true });
+    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), panel: adminStorePanelLinks(savedStore, panelPassword), verifiedSaved: true, verifiedReadBack: true });
     Promise.resolve().then(async () => {
+      await clearDeletedStoreTombstone(savedStore.id);
       await adminEnsureSellerProfile(savedStore.ownerLogin, panelPassword, savedStore.ownerLogin);
       await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
       console.log("[owner-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
@@ -4474,6 +4662,12 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.use("/api/owner", (_req, res) => {
+  res.status(410).json({
+    error: "Legacy owner API is disabled. Use /market-admin.html and /api/admin endpoints."
+  });
 });
 
 app.post("/api/admin/disputes/test", async (req, res, next) => {
@@ -4748,9 +4942,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
-    saveOwnerStoreFallback(savedStore).catch((error) => {
-      console.error("[admin-store] fallback save deferred failed", { storeId: savedStore.id, message: error.message });
-    });
+    scheduleStorePublication(savedStore, "admin store create");
     clearDeletedStoreTombstone(savedStore.id).catch((error) => {
       console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
     });
@@ -4776,9 +4968,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
     const protectedStore = await normalizeStoreSecrets(store);
     const savedStore = await saveStoreRow(protectedStore, "admin store update");
-    saveOwnerStoreFallback(savedStore).catch((error) => {
-      console.error("[admin-store] fallback update deferred failed", { storeId: savedStore.id, message: error.message });
-    });
+    scheduleStorePublication(savedStore, "admin store update");
     clearDeletedStoreTombstone(savedStore.id).catch((error) => {
       console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
     });
@@ -5298,12 +5488,16 @@ app.delete("/api/admin/logs", async (req, res, next) => {
 app.post("/api/admin/password", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    const state = await ensureAdminSecurity();
+    const state = await ensureAdminSecurity({ fullState: true });
     const currentPassword = String(req.body.currentPassword || "");
     const nextPassword = String(req.body.nextPassword || "");
-    if (!(await bcrypt.compare(currentPassword, state.adminSecurity.passwordHash))) return res.status(401).json({ error: "Текущий пароль неверный" });
+    const currentPasswordOk = state.adminSecurity.passwordHash
+      ? await bcrypt.compare(currentPassword, state.adminSecurity.passwordHash)
+      : currentPassword === String(state.adminSecurity.plainPassword || process.env.MARKET_ADMIN_PASSWORD || "admin1212");
+    if (!currentPasswordOk) return res.status(401).json({ error: "Текущий пароль неверный" });
     if (nextPassword.length < 8) return res.status(400).json({ error: "Минимум 8 символов" });
     state.adminSecurity.passwordHash = await bcrypt.hash(nextPassword, 12);
+    delete state.adminSecurity.plainPassword;
     await saveSettingsState(state);
     await appendAdminLog("admin_password_changed", admin.login);
     res.json({ ok: true });
@@ -5332,11 +5526,21 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
       createdAt: Date.now(),
       createdBy: admin.login
     };
+    if (!broadcast.title || !broadcast.body) return res.status(400).json({ error: "Укажите заголовок и текст рассылки" });
+    if (broadcast.buttonUrl && !/^https?:\/\//i.test(broadcast.buttonUrl)) {
+      return res.status(400).json({ error: "Ссылка кнопки должна начинаться с http:// или https://" });
+    }
+    if (inlineImagePayload(broadcast.photoUrl)) {
+      broadcast.photoUrl = await externalizeInlineImage(broadcast.photoUrl, `broadcasts/${broadcast.id}`).catch((error) => {
+        console.error("[broadcast] photo upload failed; using inline fallback", { broadcastId: broadcast.id, message: error.message });
+        return broadcast.photoUrl;
+      });
+    }
     await adminDeliverBroadcast(state, broadcast, market.profiles, market.sessions);
     state.broadcasts.unshift(broadcast);
     await saveSettingsState(state);
     await appendAdminLog("broadcast_created", admin.login, { broadcastId: broadcast.id, channel: broadcast.channel, sent: broadcast.stats.sent });
-    res.json({ broadcast, overview: adminBuildOverview(await adminLoadMarketplace()) });
+    res.json({ ok: true, broadcast });
   } catch (error) {
     next(error);
   }
@@ -6094,6 +6298,27 @@ async function mirrorAuditLog(entry = {}) {
   }
 }
 
+async function loadAuditLogs(limit = 500) {
+  if (!supabase || disabledMirrorTables.has("audit_logs")) return [];
+  const { data, error } = await supabase
+    .from("audit_logs")
+    .select("id,action,actor,details,created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    if (mirrorTableUnavailable(error)) disabledMirrorTables.add("audit_logs");
+    else console.warn("[audit-log] read skipped", { message: error.message, code: error.code || "" });
+    return [];
+  }
+  return (Array.isArray(data) ? data : []).map((row) => ({
+    id: row.id,
+    action: row.action,
+    actor: row.actor,
+    details: row.details || {},
+    createdAt: Date.parse(row.created_at) || 0
+  }));
+}
+
 async function loadMirrorTableData(table = "", limit = 1000) {
   if (!supabase || disabledMirrorTables.has(table)) return [];
   const { data, error } = await supabase.from(table).select("data").limit(limit);
@@ -6687,7 +6912,7 @@ async function adminLoadMarketplace(options = {}) {
   await withTimeout(ensureSeed(), "admin marketplace seed", 5000).catch((error) => {
     console.error("[admin] seed skipped", { message: error.message });
   });
-  const [storesResult, messagesResult, settingsResult, profilesResult, sessionsResult, publicCatalog] = await Promise.all([
+  const [storesResult, messagesResult, settingsResult, profilesResult, sessionsResult, publicCatalog, auditLogs] = await Promise.all([
     withTimeout(supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }), "admin stores query", 12000).catch((error) => {
       console.error("[admin] stores fallback", { message: error.message });
       return { data: null, failed: true };
@@ -6708,7 +6933,8 @@ async function adminLoadMarketplace(options = {}) {
       console.error("[admin] sessions fallback", { message: error.message });
       return { data: [] };
     }),
-    loadPublicCatalogSnapshot()
+    loadPublicCatalogSnapshot(),
+    withTimeout(loadAuditLogs(compact ? 200 : 500), "admin audit logs query", compact ? 5000 : 8000).catch(() => [])
   ]);
   let state = settingsResult?.data?.data || {};
   if (!stateHasDurableContent(state)) {
@@ -6732,11 +6958,16 @@ async function adminLoadMarketplace(options = {}) {
     state.filters = state.filters || publicCatalog.filters || {};
   }
   state = sanitizeStateForVisualReset(state);
+  state.adminLogs = mergeById(
+    mergeById(adminLogMemory, auditLogs),
+    Array.isArray(state.adminLogs) ? state.adminLogs : []
+  ).sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0)).slice(0, 500);
   const storeRows = Array.isArray(storesResult?.data) ? storesResult.data : [];
   const fallbackStores = Array.isArray(state.ownerStores) && state.ownerStores.length
     ? state.ownerStores
     : (Array.isArray(state.publicStoresCache) ? state.publicStoresCache : []);
-  const mergedStores = sanitizeStoresForVisualReset(mergeStoreSources(storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at })), fallbackStores));
+  const databaseStores = storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at }));
+  const mergedStores = sanitizeStoresForVisualReset(storesResult?.failed ? fallbackStores : databaseStores);
   const messages = Array.isArray(messagesResult?.data) ? messagesResult.data : [];
   const messageItems = sanitizeMessagesForVisualReset(messages.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })));
   recoverMissingProductOrdersFromDisputeMessages(state, mergedStores, messageItems);
@@ -7563,7 +7794,12 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
 
   if (["telegram", "both"].includes(broadcast.channel)) {
     const bots = adminCollectBots(state).filter((bot) => !bot.blocked && bot.chatId && (!bot.loginKey || recipientKeys.has(loginKey(bot.loginKey))));
-    for (const bot of bots) {
+    let cursor = 0;
+    const deliverNext = async () => {
+      const index = cursor;
+      cursor += 1;
+      if (index >= bots.length) return;
+      const bot = bots[index];
       try {
         const reply_markup = broadcast.buttonUrl ? {
           inline_keyboard: [[{ text: broadcast.buttonText || "Открыть", url: broadcast.buttonUrl }]]
@@ -7604,7 +7840,10 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
         });
         telegramFailed += 1;
       }
-    }
+      await deliverNext();
+    };
+    await Promise.all(Array.from({ length: Math.min(4, bots.length) }, () => deliverNext()));
+    broadcast.stats.telegramTargets = bots.length;
   }
 
   broadcast.recipients = recipients.map((user) => ({ login: user.login, loginKey: user.login_key }));
@@ -11384,6 +11623,9 @@ const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
+  setTimeout(() => {
+    migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", error));
+  }, 1500);
 });
 
 adminRealtimeServer = new WebSocketServer({ noServer: true });

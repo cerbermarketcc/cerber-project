@@ -5806,7 +5806,7 @@ details[data-shop-storage-item] .form {
   }
 
   .shop-panel-page .seller-dashboard-main {
-    padding: 12px;
+    padding: 12px 12px calc(84px + env(safe-area-inset-bottom));
   }
 
   .shop-panel-page .seller-dashboard-top,
@@ -5817,20 +5817,27 @@ details[data-shop-storage-item] .form {
   }
 
   .shop-panel-page .seller-dashboard-nav {
-    position: sticky;
-    top: 0;
+    position: fixed;
+    inset: auto 0 0;
     z-index: 30;
     display: flex;
     overflow-x: auto;
     gap: 8px;
-    padding: 10px 12px;
+    min-height: 64px;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(255, 255, 255, .12);
     -webkit-overflow-scrolling: touch;
+  }
+
+  .shop-panel-page .seller-dashboard-brand {
+    display: none;
   }
 
   .shop-panel-page .seller-dashboard-nav a,
   .shop-panel-page .seller-dashboard-nav button {
     flex: 0 0 auto;
     min-height: 44px;
+    min-width: 108px;
     white-space: nowrap;
   }
 

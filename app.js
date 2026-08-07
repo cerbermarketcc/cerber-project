@@ -1895,7 +1895,7 @@ function protectIncomingState(incomingState = {}, payload = {}) {
     const value = incoming[key];
     const incomingEmpty = Array.isArray(value) && value.length === 0;
     const shouldKeepExisting = !hasIncoming || incomingEmpty;
-    if (shouldKeepExisting && (partial || PUBLIC_CATALOG_STATE_KEYS.includes(key) || !catalogsAuthoritative)) {
+    if (shouldKeepExisting && (partial || !catalogsAuthoritative)) {
       incoming[key] = existing;
       return;
     }
@@ -2074,16 +2074,8 @@ async function refreshShopPanelState(force = false) {
     timeoutMs: 15000,
     headers: { Authorization: `Bearer ${token}` }
   }).then((payload) => {
-    const localStore = shopPanelStore() || sellerAdminStore();
     applyRemoteState(payload);
-    if (payload.store) {
-      const restoredStore = richerShopPanelStore(localStore, payload.store);
-      const shouldSyncLocal = storeContentWeight(restoredStore) > storeContentWeight(payload.store);
-      restoreShopPanelStore(restoredStore);
-      if (shouldSyncLocal) {
-        persistSellerAdminStore().catch((error) => console.error("[shop-admin] recovered local store sync failed", error));
-      }
-    }
+    if (payload.store) restoreShopPanelStore(payload.store);
     shopPanelLastStateRefreshAt = Date.now();
     return true;
   }).finally(() => {
@@ -3831,16 +3823,8 @@ function renderSellerAdminLogin(storeId = "", message = "") {
         });
         const nextStoreId = payload.store?.id || store.id;
         rememberSellerAdminApiToken(payload.token);
-        const localStore = db.stores.find((item) => item.id === store.id) || store;
         applyRemoteState(payload);
-        if (payload.store) {
-          const restoredStore = richerShopPanelStore(localStore, payload.store);
-          const shouldSyncLocal = storeContentWeight(restoredStore) > storeContentWeight(payload.store);
-          restoreShopPanelStore(restoredStore);
-          if (shouldSyncLocal) {
-            persistSellerAdminStore().catch((syncError) => console.error("[seller-admin] recovered local store sync failed", syncError));
-          }
-        }
+        if (payload.store) restoreShopPanelStore(payload.store);
         try {
           storageSet(SELLER_ADMIN_KEY, nextStoreId);
           storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
@@ -9592,7 +9576,6 @@ function bindAdminProductForms() {
       if (route === "seller") {
         const saved = await persistSellerAdminStore();
         if (!saved) return;
-        await refreshRemoteState();
         showToast("Товар сохранён");
         renderSeller();
         return;
@@ -10573,13 +10556,9 @@ function renderShopPanelLogin(message = "") {
         storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
       }
       sellerAdminStoreId = nextStoreId;
-      const localStore = db.stores.find((item) => item.id === nextStoreId) || null;
       applyRemoteState(payload);
-      const store = richerShopPanelStore(localStore, payload.store || db.stores.find((item) => item.id === nextStoreId) || null);
+      const store = payload.store || db.stores.find((item) => item.id === nextStoreId) || null;
       if (store) restoreShopPanelStore(store);
-      if (payload.store && storeContentWeight(store) > storeContentWeight(payload.store)) {
-        persistSellerAdminStore().catch((syncError) => console.error("[shop-admin] recovered local store sync failed", syncError));
-      }
       renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
     } catch (error) {
       renderShopPanelLogin(error.message || "Неверный пароль");
@@ -10706,6 +10685,7 @@ function renderShopPanel(activeTab = "dashboard") {
     renderShopPanelLogin();
   });
   bindShopPanelActions(store, activeTab);
+  root.querySelector(".seller-dashboard-nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
 }
 
 function shopLines(value) {
@@ -10732,13 +10712,6 @@ async function shopPersistAndRender(tab = "dashboard") {
   }
 
   if (savedRemote) {
-    try {
-      await refreshRemoteState();
-      restoreShopPanelStore(localStore);
-    } catch (error) {
-      console.error("[shop-admin] refresh after save failed", error);
-      restoreShopPanelStore(localStore);
-    }
     showToast("Сохранено");
   } else {
     restoreShopPanelStore(localStore);
@@ -11202,7 +11175,6 @@ function renderSeller() {
       saveDb({ localOnly: true, silentLocalStorageError: true });
       const saved = await persistSellerAdminStore();
       if (!saved) throw new Error("Сервер не принял изменения магазина");
-      await refreshRemoteState();
       showToast("Страница магазина сохранена");
       renderSeller();
     });
@@ -11261,7 +11233,6 @@ function renderSeller() {
       saveDb({ localOnly: true, silentLocalStorageError: true });
       const saved = await persistSellerAdminStore();
       if (!saved) throw new Error("Сервер не принял товар");
-      await refreshRemoteState();
       showToast("Товар сохранён");
       renderSeller();
     });

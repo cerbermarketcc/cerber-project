@@ -289,7 +289,11 @@ async function api(path, options = {}) {
         signal: fetchOptions.signal || controller.signal
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || "API error");
+      if (!response.ok) {
+        const error = new Error(payload.error || "API error");
+        error.status = response.status;
+        throw error;
+      }
       return payload;
     } catch (error) {
       if (error.name === "AbortError") throw new Error("Сервер долго отвечает. Проверьте интернет и попробуйте ещё раз.");
@@ -315,15 +319,16 @@ async function api(path, options = {}) {
 
 function adminAuthError(error) {
   const message = String(error?.message || "");
-  return /session required|unauthorized|forbidden|401|403|admin session/i.test(message);
+  return [401, 403].includes(Number(error?.status || 0)) || /session required|unauthorized|forbidden|401|403|admin session/i.test(message);
 }
 
 async function refreshData(silent = false) {
-  if (!token) return;
+  if (!token) return false;
   try {
     data = await api("/api/admin/overview?compact=1", { timeoutMs: silent ? 45000 : 90000 });
     if (!silent) renderShell();
     else if (adminCanSilentRender()) renderCurrentView({ preserveScroll: true });
+    return true;
   } catch (error) {
     if (!silent) {
       if (adminAuthError(error)) {
@@ -331,10 +336,41 @@ async function refreshData(silent = false) {
         token = "";
         renderLogin("Сессия истекла. Войдите заново.");
       } else {
-        renderLogin(error.message || "Сервер долго отвечает. Попробуйте войти ещё раз.");
+        renderAdminLoadError(error.message);
       }
     }
+    return false;
   }
+}
+
+function renderAdminLoadError(message = "") {
+  root.innerHTML = `
+    <section class="login-page">
+      <div class="login-card admin-load-card">
+        <p class="eyebrow">CERBER MARKETPLACE</p>
+        <h1>Вход выполнен</h1>
+        <p class="notice">${esc(message || "Данные панели временно не загрузились. Сессия сохранена.")}</p>
+        <div class="actions">
+          <button class="primary" data-admin-retry>Повторить</button>
+          <button class="ghost" data-admin-login-reset>Выйти</button>
+        </div>
+      </div>
+    </section>
+  `;
+  root.querySelector("[data-admin-retry]").onclick = async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.textContent = "Загружаю...";
+    const loaded = await refreshData();
+    if (loaded) connectRealtime();
+  };
+  root.querySelector("[data-admin-login-reset]").onclick = () => {
+    adminStorageRemove(TOKEN_KEY);
+    token = "";
+    renderLogin();
+  };
+  bindAdminButtonFeedback(root);
 }
 
 function connectRealtime() {
@@ -346,7 +382,9 @@ function connectRealtime() {
     realtimeSocket?.close();
     realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime?token=${encodeURIComponent(token)}`);
     realtimeSocket.onmessage = () => refreshData(true);
-    realtimeSocket.onclose = () => setTimeout(connectRealtime, 5000);
+    realtimeSocket.onclose = () => {
+      if (token) setTimeout(connectRealtime, 5000);
+    };
   } catch {}
 }
 
@@ -367,7 +405,10 @@ function renderLogin(message = "") {
   bindAdminButtonFeedback(root);
   root.querySelector("[data-login-form]").onsubmit = async (event) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const endSubmit = beginAdminFormSubmit(formElement, "Вхожу...");
+    if (!endSubmit) return;
     try {
       const payload = await api("/api/admin/login", {
         method: "POST",
@@ -375,17 +416,19 @@ function renderLogin(message = "") {
       });
       token = payload.token;
       adminStorageSet(TOKEN_KEY, token);
-      await refreshData();
-      connectRealtime();
+      const loaded = await refreshData();
+      if (loaded) connectRealtime();
     } catch (error) {
       renderLogin(error.message);
+    } finally {
+      endSubmit();
     }
   };
 }
 
 async function load() {
-  await refreshData();
-  connectRealtime();
+  const loaded = await refreshData();
+  if (loaded) connectRealtime();
 }
 
 function renderShell() {
@@ -396,6 +439,7 @@ function renderShell() {
         <div class="brand"><strong>CERBER Admin</strong><button class="ghost" data-logout>Выйти</button></div>
         <nav class="nav" aria-label="Admin sections">
           ${nav.map((item) => `<button class="${section === item ? "active" : ""}" data-section="${esc(item)}">${esc(item)}<span>›</span></button>`).join("")}
+          <button class="nav-logout" data-logout>Выйти</button>
         </nav>
       </aside>
       <section class="content">
@@ -415,13 +459,15 @@ function renderShell() {
     persistAdminUiState();
     renderShell();
   });
-  root.querySelector("[data-logout]").onclick = () => {
-    adminStorageRemove(TOKEN_KEY);
-    token = "";
-    realtimeSocket?.close();
-    clearInterval(refreshTimer);
-    renderLogin();
-  };
+  root.querySelectorAll("[data-logout]").forEach((button) => {
+    button.onclick = () => {
+      adminStorageRemove(TOKEN_KEY);
+      token = "";
+      realtimeSocket?.close();
+      clearInterval(refreshTimer);
+      renderLogin();
+    };
+  });
   root.querySelector("[data-search]").oninput = (event) => {
     query = event.target.value.toLowerCase();
     persistAdminUiState();
@@ -1108,22 +1154,41 @@ function showDisputeChatModal(payload) {
 }
 
 function renderBroadcasts() {
-  return `<section class="split"><article class="split-card"><h2>Новая рассылка</h2><form data-broadcast-form>
-    <label class="field">Фото файлом<input name="photoFile" type="file" accept="image/*"></label>
-    <label class="field">Заголовок<input name="title" required></label>
-    <label class="field">Текст<textarea name="body" required></textarea></label>
-    <div class="row"><label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label></div>
-    <div class="row"><label class="field">Текст кнопки<input name="buttonText" placeholder="Открыть"></label><label class="field">Ссылка кнопки<input name="buttonUrl" placeholder="https://..."></label></div>
-    <div class="row"><label class="field">Тип<select name="type"><option value="popup">Popup</option><option value="banner">Баннер</option><option value="push">Push</option></select></label><label class="field">Кому отправить<select name="audience"><option value="all">Всем пользователям</option><option value="online">Онлайн пользователям</option><option value="buyers">С покупками</option><option value="no_purchases">Без покупок</option><option value="balance">С балансом</option><option value="custom">По фильтрам ниже</option></select></label></div>
-    <div class="row"><label class="field">Мин. сумма покупок<input name="minPurchase" type="number" step="0.01" placeholder="1"></label><label class="field">Макс. сумма покупок<input name="maxPurchase" type="number" step="0.01" placeholder="1000"></label></div>
-    <div class="row"><label class="field">Без покупок N дней<input name="noPurchasesDays" type="number" step="1" placeholder="2"></label><label class="field">Баланс<select name="balanceMode"><option value="">Не важно</option><option value="with">С балансом</option><option value="without">Без баланса</option></select></label></div>
-    <div class="row"><label class="field">Магазин<select name="storeId"><option value="">Любой</option>${data.stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name)}</option>`).join("")}</select></label><label class="field">Товар<input name="product" placeholder="название или ID"></label></div>
-    <label class="field">Категория<input name="category" placeholder="категория товара"></label>
-    <label class="field">Конкретные пользователи<input name="specificLogins" placeholder="login1, login2, login3"></label>
-    <button class="primary">Отправить рассылку</button>
-  </form></article><article class="table-card"><table><thead><tr><th>Название</th><th>Канал</th><th>Отправлено</th><th>Ошибки</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
-    ${data.broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0} / targets ${b.stats?.telegramTargets || 0}</span></td><td>${b.stats?.sent || 0}</td><td>${b.stats?.telegramFailed || b.stats?.notDelivered || 0}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("")}
-  </tbody></table></article></section>`;
+  const broadcasts = Array.isArray(data.broadcasts) ? data.broadcasts : [];
+  return `
+    <section class="broadcast-compose">
+      <form class="broadcast-form" data-broadcast-form>
+        <header><h2>Новая рассылка</h2><p class="muted">Сообщение сохраняется в истории и отправляется только выбранной аудитории.</p></header>
+        <label class="field">Заголовок<input name="title" maxlength="120" required></label>
+        <label class="field">Текст<textarea name="body" rows="6" maxlength="4000" required></textarea></label>
+        <div class="row">
+          <label class="field">Канал<select name="channel"><option value="both">Сайт + Telegram</option><option value="site">Только сайт</option><option value="telegram">Только Telegram</option></select></label>
+          <label class="field">Вид на сайте<select name="type"><option value="popup">Всплывающее окно</option><option value="banner">Баннер</option><option value="push">Уведомление</option></select></label>
+        </div>
+        <label class="field">Фото<input name="photoFile" type="file" accept="image/*"></label>
+        <div class="row"><label class="field">Текст кнопки<input name="buttonText" placeholder="Открыть"></label><label class="field">Ссылка кнопки<input name="buttonUrl" type="url" placeholder="https://..."></label></div>
+        <details class="broadcast-filters">
+          <summary>Аудитория и фильтры</summary>
+          <label class="field">Получатели<select name="audience"><option value="all">Все пользователи</option><option value="online">Сейчас онлайн</option><option value="buyers">С покупками</option><option value="no_purchases">Без покупок</option><option value="balance">С балансом</option><option value="custom">По фильтрам</option></select></label>
+          <div class="row"><label class="field">Покупки от, $<input name="minPurchase" type="number" min="0" step="0.01"></label><label class="field">Покупки до, $<input name="maxPurchase" type="number" min="0" step="0.01"></label></div>
+          <div class="row"><label class="field">Без покупок, дней<input name="noPurchasesDays" type="number" min="0" step="1"></label><label class="field">Баланс<select name="balanceMode"><option value="">Не важно</option><option value="with">Есть баланс</option><option value="without">Нет баланса</option></select></label></div>
+          <div class="row"><label class="field">Магазин<select name="storeId"><option value="">Любой</option>${data.stores.map((store) => `<option value="${esc(store.id)}">${esc(store.name)}</option>`).join("")}</select></label><label class="field">Товар<input name="product" placeholder="Название или ID"></label></div>
+          <label class="field">Категория<input name="category"></label>
+          <label class="field">Точные логины<input name="specificLogins" placeholder="login1, login2"></label>
+        </details>
+        <button class="primary" type="submit">Отправить рассылку</button>
+      </form>
+      <aside class="broadcast-preview" aria-live="polite">
+        <p class="eyebrow">Предпросмотр</p>
+        <h3 data-broadcast-preview-title>Заголовок</h3>
+        <p data-broadcast-preview-body>Текст сообщения появится здесь.</p>
+        <a class="primary is-hidden" data-broadcast-preview-button>Открыть</a>
+      </aside>
+    </section>
+    <article class="table-card broadcast-history"><h2>История рассылок</h2><table><thead><tr><th>Название</th><th>Канал</th><th>Отправлено</th><th>Ошибки</th><th>Клики</th><th>Закрыли</th><th>Дата</th></tr></thead><tbody>
+      ${broadcasts.length ? broadcasts.map((b) => `<tr><td>${esc(b.title)}<br><span class="muted">получателей: ${(b.recipients || []).length}</span></td><td>${esc(b.channel)}<br><span class="muted">site ${b.stats?.siteSent || 0} / tg ${b.stats?.telegramSent || 0} / targets ${b.stats?.telegramTargets || 0}</span></td><td>${b.stats?.sent || 0}</td><td>${b.stats?.telegramFailed || b.stats?.notDelivered || 0}</td><td>${b.stats?.clicked || 0}</td><td>${b.stats?.closed || 0}</td><td>${fmtDate(b.createdAt)}</td></tr>`).join("") : `<tr><td colspan="7" class="muted">Рассылок пока нет.</td></tr>`}
+    </tbody></table></article>
+  `;
 }
 
 function renderFinance() {
@@ -1804,8 +1869,11 @@ function bindActions() {
   });
   root.querySelector("[data-broadcast-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const body = Object.fromEntries(new FormData(event.currentTarget).entries());
-    const formData = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const endSubmit = beginAdminFormSubmit(formElement, "Отправляю...");
+    if (!endSubmit) return;
+    const body = Object.fromEntries(new FormData(formElement).entries());
+    const formData = new FormData(formElement);
     const photoUrl = await formImageValue(formData, "photoFile");
     const filters = {
       audience: body.audience,
@@ -1823,13 +1891,33 @@ function bindActions() {
         method: "POST",
         body: JSON.stringify({ title: body.title, body: body.body, photoUrl, buttonText: body.buttonText, buttonUrl: body.buttonUrl, channel: body.channel, type: body.type, filters })
       });
-      data = result.overview;
+      data.broadcasts = adminUpsertById(data.broadcasts, result.broadcast);
       toast(`Рассылка отправлена: ${result.broadcast.stats.sent}, ошибок: ${result.broadcast.stats.telegramFailed || 0}`);
       renderShell();
     } catch (error) {
       toast(error.message, true);
+    } finally {
+      endSubmit();
     }
   });
+  const broadcastPreviewForm = root.querySelector("[data-broadcast-form]");
+  if (broadcastPreviewForm) {
+    const updateBroadcastPreview = () => {
+      const values = new FormData(broadcastPreviewForm);
+      const title = root.querySelector("[data-broadcast-preview-title]");
+      const body = root.querySelector("[data-broadcast-preview-body]");
+      const button = root.querySelector("[data-broadcast-preview-button]");
+      if (title) title.textContent = String(values.get("title") || "Заголовок");
+      if (body) body.textContent = String(values.get("body") || "Текст сообщения появится здесь.");
+      if (button) {
+        const buttonText = String(values.get("buttonText") || "").trim();
+        button.textContent = buttonText || "Открыть";
+        button.classList.toggle("is-hidden", !buttonText);
+      }
+    };
+    broadcastPreviewForm.addEventListener("input", updateBroadcastPreview);
+    broadcastPreviewForm.addEventListener("change", updateBroadcastPreview);
+  }
   root.querySelectorAll("[data-bot-action]").forEach((button) => button.onclick = async () => {
     if (button.dataset.botAction === "delete" && !confirm("Удалить зеркало?")) return;
     try {
