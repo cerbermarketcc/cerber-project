@@ -9851,6 +9851,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           ${navHtml}
         </aside>
         <div class="seller-dashboard-main">
+          ${shopPanelMobileNavigation(activeTab)}
           <header class="seller-dashboard-top">
             <div>
               <strong>${esc(store.name)}</strong>
@@ -9879,6 +9880,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         ${navHtml}
       </aside>
       <div class="seller-dashboard-main">
+        ${shopPanelMobileNavigation(activeTab)}
         <header class="seller-dashboard-top">
           <div>
             <strong>${esc(store.name)}</strong>
@@ -10066,10 +10068,21 @@ function shopPanelNavV2(activeTab = "dashboard") {
     ["settings", "*", "Настройки"]
   ];
   return SHOP_PANEL_TABS.filter(([id]) => canAccessShopTab(id)).map(([id, icon, label]) => `
-    <button class="${activeTab === id ? "active" : ""}" data-shop-tab="${id}" type="button">
+    <button class="${activeTab === id ? "active" : ""}" data-shop-tab="${id}" type="button" ${activeTab === id ? 'aria-current="page"' : ""}>
       <span>${icon}</span>${label}
     </button>
   `).join("");
+}
+
+function shopPanelMobileNavigation(activeTab = "dashboard") {
+  const options = SHOP_PANEL_TABS
+    .filter(([id]) => canAccessShopTab(id))
+    .map(([id, , label]) => `<option value="${esc(id)}" ${activeTab === id ? "selected" : ""}>${esc(label)}</option>`)
+    .join("");
+  return `<label class="shop-mobile-section-picker">
+    <span>Раздел</span>
+    <select data-shop-tab-select aria-label="Раздел Shop Admin">${options}</select>
+  </label>`;
 }
 
 function shopPanelTabContent(tab, data) {
@@ -10078,7 +10091,14 @@ function shopPanelTabContent(tab, data) {
   if (tab === "cards") return shopCardsTab(store, products);
   if (tab === "products") return shopProductsTab(store, products);
   if (tab === "disputes") return shopDisputesTab(store);
-  if (tab === "finances") return shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows);
+  if (tab === "finances") {
+    try {
+      return shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows);
+    } catch (error) {
+      console.error("[shop-admin] finances render failed", error);
+      return shopFinancesFallbackTab(store);
+    }
+  }
   if (tab === "settings") return shopSettingsTab(store);
   if (tab === "orders") {
     return `
@@ -10522,13 +10542,14 @@ function bindShopDisputeModalActions() {
   });
 }
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
-  const grossUsd = Number.isFinite(Number(store.storeGrossUsd)) ? Number(store.storeGrossUsd) : financeRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0);
-  const commissionUsd = Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : financeRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0);
-  const netUsd = Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
+  const rows = (Array.isArray(financeRows) ? financeRows : []).filter((row) => row && typeof row === "object");
+  const grossUsd = Number.isFinite(Number(store?.storeGrossUsd)) ? Number(store.storeGrossUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.grossUsd), 0);
+  const commissionUsd = Number.isFinite(Number(store?.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.commissionUsd), 0);
+  const netUsd = Number.isFinite(Number(store?.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.netUsd), 0);
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-  const monthlyUsd = financeRows
+  const monthlyUsd = rows
     .filter((row) => Number(row.createdAt || 0) >= monthStart.getTime() && !["held", "pending", "dispute", "cancelled", "canceled", "rejected"].includes(String(row.status || "").toLowerCase()))
     .reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
   const heldUsd = storeHeldUsd(store.id, store);
@@ -10536,7 +10557,7 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const availableUsd = Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Math.max(0, Number(store.storeAvailableBalanceUsd)) : Math.max(0, netUsd - requestedUsd);
   const wallet = store.ltcWallet || storeWallets(store).ltc || "";
   const withdrawals = (Array.isArray(db.walletWithdrawals) ? db.walletWithdrawals : [])
-    .filter((item) => item.scope === "store" && item.storeId === store.id)
+    .filter((item) => item && typeof item === "object" && item.scope === "store" && item.storeId === store.id)
     .slice()
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
@@ -10556,13 +10577,35 @@ function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
     <button class="primary" data-shop-payout-request="${esc(store.id)}">Вывести средства</button>
   </section>
   <section class="seller-dashboard-card seller-wide-card">
-    <div class="seller-card-head"><h3>Операции по заказам</h3><span>${financeRows.length}</span></div>
-    ${financeRows.length ? financeRows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title)} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${Number(tx.netUsd || 0).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
+    <div class="seller-card-head"><h3>Операции по заказам</h3><span>${rows.length}</span></div>
+    ${rows.length ? rows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title || "Операция")} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${finiteMoney(tx.netUsd).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>
-    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${fmtDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small></span><strong>${Number(item.amountUsd || 0).toFixed(2)} $<br><small>${Number(item.amountLtc || 0).toFixed(8)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
+    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small></span><strong>${finiteMoney(item.amountUsd).toFixed(2)} $<br><small>${finiteMoney(item.amountLtc).toFixed(8)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
   </section>`;
+}
+
+function finiteMoney(value = 0) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function shopFinanceDate(value) {
+  const date = Number(value) ? new Date(Number(value)) : new Date(value || 0);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("ru-RU");
+}
+
+function shopFinancesFallbackTab(store = {}) {
+  const availableUsd = Math.max(0, finiteMoney(store.storeAvailableBalanceUsd ?? store.storeBalanceUsd));
+  const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
+  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Баланс и вывод средств магазина.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Доступно к выводу</h3><span>${availableUsd.toFixed(2)} $</span></div>
+      <p class="desc">${usdToLtc(availableUsd).toFixed(8)} LTC</p>
+      <p class="desc">LTC кошелёк: <strong>${esc(wallet || "не сохранён")}</strong></p>
+      <button class="primary" data-shop-payout-request="${esc(store.id || "")}">Вывести средства</button>
+    </section>`;
 }
 function shopStaffTab(store) {
   const staff = Array.isArray(store.staff) ? store.staff : [];
@@ -10792,7 +10835,17 @@ function renderShopPanel(activeTab = "dashboard") {
     <div class="toast"></div>
   `;
   document.querySelectorAll("[data-shop-tab]").forEach((button) => {
-    button.onclick = () => renderShopPanel(button.dataset.shopTab);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      const nextTab = String(event.currentTarget.dataset.shopTab || "dashboard");
+      activeShopPanelTab = nextTab;
+      renderShopPanel(nextTab);
+    });
+  });
+  document.querySelector("[data-shop-tab-select]")?.addEventListener("change", (event) => {
+    const nextTab = String(event.currentTarget.value || "dashboard");
+    activeShopPanelTab = nextTab;
+    renderShopPanel(nextTab);
   });
   document.querySelector("[data-modal]")?.addEventListener("click", (event) => {
     const overlay = event.currentTarget;

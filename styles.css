@@ -5427,6 +5427,10 @@ details[data-shop-storage-item] .form {
   }
 }
 
+.shop-mobile-section-picker {
+  display: none;
+}
+
 .owner-market-settings-panel,
 .owner-store-control-panel {
   display: none;
@@ -5833,6 +5837,38 @@ details[data-shop-storage-item] .form {
     min-height: 44px;
     min-width: 108px;
     white-space: nowrap;
+    touch-action: manipulation;
+    scroll-snap-align: center;
+  }
+
+  .shop-panel-page .seller-dashboard-nav {
+    scroll-snap-type: x proximity;
+  }
+
+  .shop-panel-page .seller-dashboard-nav button[data-shop-tab="dashboard"] { order: 1; }
+  .shop-panel-page .seller-dashboard-nav button[data-shop-tab="finances"] { order: 2; }
+  .shop-panel-page .seller-dashboard-nav button[data-shop-tab="orders"] { order: 3; }
+  .shop-panel-page .seller-dashboard-nav button[data-shop-tab="disputes"] { order: 4; }
+
+  .shop-mobile-section-picker {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    font-weight: 800;
+  }
+
+  .shop-mobile-section-picker select {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
   }
 
   .shop-panel-page .row,
