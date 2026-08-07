@@ -2781,13 +2781,47 @@ function categoryIsAll(value = "") {
   return !value || value === "Все товары";
 }
 
+function catalogCategoryKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function catalogProductCategories() {
+  return filterOptions.categories.filter((category) => !categoryIsAll(category));
+}
+
+function canonicalCatalogCategory(value = "") {
+  const key = catalogCategoryKey(value);
+  return catalogProductCategories().find((category) => catalogCategoryKey(category) === key) || "";
+}
+
+function productCategorySelectOptions(selected = "") {
+  const canonicalSelected = canonicalCatalogCategory(selected);
+  const placeholder = canonicalSelected
+    ? ""
+    : `<option value="" selected disabled>Выберите товар из фильтра</option>`;
+  return `${placeholder}${catalogProductCategories().map((category) => (
+    `<option value="${esc(category)}" ${canonicalSelected === category ? "selected" : ""}>${esc(category)}</option>`
+  )).join("")}`;
+}
+
 function locationFilterActive(filters = catalogFilters()) {
   return Boolean(filters.country || filters.city || filters.district);
 }
 
 function categoryMatches(product = {}, filters = catalogFilters()) {
   if (categoryIsAll(filters.category)) return true;
-  return searchText(localizedValue(product, "category") || product.category).includes(searchText(filters.category));
+  const selectedKey = catalogCategoryKey(filters.category);
+  return [
+    product.category,
+    product.title,
+    localizedValue(product, "category"),
+    localizedValue(product, "title")
+  ].some((value) => catalogCategoryKey(value) === selectedKey);
 }
 
 function positionMatchesFilters(position = {}, filters = catalogFilters()) {
@@ -2912,8 +2946,13 @@ function filteredStores(filters = catalogFilters()) {
   const query = searchText(filters.query);
   return sortStoresForFilters((db.stores || []).filter((store) => {
     if (!storeIsVisible(store) && !isAdmin()) return false;
-    const products = Array.isArray(store.products) ? store.products : [];
+    const products = (Array.isArray(store.products) ? store.products : [])
+      .filter((product) => product.status !== "disabled");
     if (!storeLocationMatches(store, filters)) return false;
+    if (!categoryIsAll(filters.category)) {
+      const categoryFilters = { ...filters, query: "" };
+      if (!products.some((product) => productMatchesFilters(product, store, categoryFilters))) return false;
+    }
     if (query && !storeSearchBlob(store).includes(query)) return false;
     return true;
   }), filters);
@@ -8916,7 +8955,7 @@ function ownerStoreManager(store) {
         <h3>Блоки товаров</h3>
         <form class="form" data-owner-add-product data-store-id="${esc(store.id)}">
           <div class="row">
-            <label class="field">Название товара<input name="title" required></label>
+            <label class="field">Название товара<select name="title" required>${productCategorySelectOptions()}</select></label>
             <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="10" required></label>
           </div>
           <label class="field">Описание<textarea name="description"></textarea></label>
@@ -9192,8 +9231,8 @@ async function handleOwnerAddProduct(event) {
   const store = storeById(form.dataset.storeId);
   if (!store) return;
   const data = new FormData(form);
-  const title = String(data.get("title") || "").trim();
-  if (!title) return;
+  const title = canonicalCatalogCategory(data.get("title"));
+  if (!title) return showToast("Выберите название товара из фильтра");
   const imageFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
   const images = imageFiles.length ? await Promise.all(imageFiles.map(fileToDataUrl)) : [store.image || fallbackImage];
   const image = images[0];
@@ -9202,7 +9241,7 @@ async function handleOwnerAddProduct(event) {
   store.products.unshift(normalizeProduct({
     id: `product-${Date.now()}`,
     title,
-    category: "Товар",
+    category: title,
     description: String(data.get("description") || "").trim(),
     price: `${priceUsd}$`,
     priceUsd,
@@ -9466,11 +9505,10 @@ function adminStoreEditor(store) {
           ${storeFilterPicker("Районы фильтра", "districts", storeFilterDistrictOptions(store.countries || [], store.cities || [], store.districts || [], "storeDistricts"))}
         </div>
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
-        <label class="field">Название товара<input name="title" value="${esc(product.title || "Подработка")}" required></label>
+        <label class="field">Название товара<select name="title" required>${productCategorySelectOptions(product.category || product.title)}</select></label>
         <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
         <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ">${esc((product.deliveryItems || []).join("\n"))}</textarea></label>
         <div class="row">
-          <label class="field">Категория<input name="category" value="${esc(product.category || "Работа / Курьер")}"></label>
           <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="${esc(product.priceUsd || position.priceUsd || 50)}"></label>
         </div>
         <div class="row" data-location-group>
@@ -9510,6 +9548,8 @@ function bindAdminProductForms() {
     form.onsubmit = async (event) => {
       event.preventDefault();
       const data = new FormData(form);
+      const selectedCategory = canonicalCatalogCategory(data.get("title"));
+      if (!selectedCategory) return showToast("Выберите название товара из фильтра");
       const store = storeById(form.dataset.storeId);
       let product = productById(store, form.dataset.productId);
       if (!product) {
@@ -9536,8 +9576,8 @@ function bindAdminProductForms() {
       store.countries = listFromForm(data, "storeCountries");
       store.cities = listFromForm(data, "storeCities");
       store.districts = listFromForm(data, "storeDistricts");
-      product.title = data.get("title").trim();
-      product.category = data.get("category").trim();
+      product.title = selectedCategory;
+      product.category = selectedCategory;
       product.description = data.get("description").trim();
       product.sellerManaged = true;
       product.deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
@@ -10053,7 +10093,7 @@ function shopCardsTab(store, products) {
     <section class="seller-dashboard-card seller-wide-card">
       <form class="form" data-shop-card-form>
         <div class="row">
-         <label class="field">Название<input name="title" value="" placeholder="Название товара" required></label>
+         <label class="field">Название товара<select name="title" required>${productCategorySelectOptions()}</select></label>
 <label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="" placeholder="Цена товара" required></label>
         </div>
         <label class="field">Описание<textarea name="description"></textarea></label>
@@ -10754,8 +10794,8 @@ function bindShopPanelActions(store, activeTab) {
     const form = event.currentTarget;
     await runShopFormSubmit(form, "Создаю...", async () => {
       const data = new FormData(form);
-      const title = String(data.get("title") || "").trim();
-      if (!title) return;
+      const title = canonicalCatalogCategory(data.get("title"));
+      if (!title) return showToast("Выберите название товара из фильтра");
       const mainFile = data.get("mainImage");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
       const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
