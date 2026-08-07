@@ -3822,13 +3822,14 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   document.querySelector("[data-seller-admin-login]").onsubmit = async (event) => {
     event.preventDefault();
     const password = new FormData(event.currentTarget).get("password");
-        if (API_ENABLED) {
+    if (API_ENABLED) {
       try {
         const payload = await apiFetch("/api/store-admin/login", {
           method: "POST",
           timeoutMs: 12000,
           body: JSON.stringify({ storeId: store.id, password })
         });
+        const nextStoreId = payload.store?.id || store.id;
         rememberSellerAdminApiToken(payload.token);
         const localStore = db.stores.find((item) => item.id === store.id) || store;
         applyRemoteState(payload);
@@ -3840,6 +3841,15 @@ function renderSellerAdminLogin(storeId = "", message = "") {
             persistSellerAdminStore().catch((syncError) => console.error("[seller-admin] recovered local store sync failed", syncError));
           }
         }
+        try {
+          storageSet(SELLER_ADMIN_KEY, nextStoreId);
+          storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
+        } catch {}
+        sellerAdminStoreId = nextStoreId;
+        route = "seller";
+        location.hash = `seller-${nextStoreId}`;
+        renderSeller();
+        return;
       } catch (error) {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
         return;
