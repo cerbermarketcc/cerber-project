@@ -14,7 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v120";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v121";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3145,6 +3145,9 @@ async function migrateInlineStoreMedia() {
   if (inlineMediaMigrationPromise) return inlineMediaMigrationPromise;
   inlineMediaMigrationPromise = (async () => {
     inlineMediaMigrationStatus = { state: "running", checked: 0, migrated: 0, updatedAt: Date.now() };
+    await ensureMediaBucket().catch((error) => {
+      console.error("[media] bucket verification failed", { message: error.message });
+    });
     const result = await withTimeout(
       supabase.from("stores").select("id,data").limit(500),
       "inline store media migration query",
