@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v129";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v130";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -6018,7 +6018,23 @@ function litecoinToUsd(amountLtc = 0) {
 }
 
 function nowpaymentsPaymentIsPaid(status = "") {
-  return ["confirmed", "sending", "finished", "paid"].includes(String(status || "").toLowerCase());
+  return ["finished", "paid"].includes(String(status || "").toLowerCase());
+}
+
+function nowpaymentsPaymentCoversExpected(payload = {}) {
+  const expectedCrypto = Number(payload.pay_amount || 0);
+  const actuallyPaidCrypto = Number(payload.actually_paid || 0);
+  if (expectedCrypto > 0 && actuallyPaidCrypto > 0) {
+    const tolerance = Math.max(1e-8, expectedCrypto * 1e-6);
+    return actuallyPaidCrypto + tolerance >= expectedCrypto;
+  }
+  const expectedFiat = Number(payload.price_amount || 0);
+  const actuallyPaidFiat = Number(payload.actually_paid_at_fiat || 0);
+  if (expectedFiat > 0 && actuallyPaidFiat > 0) {
+    const tolerance = Math.max(0.000001, expectedFiat * 1e-6);
+    return actuallyPaidFiat + tolerance >= expectedFiat;
+  }
+  return false;
 }
 
 function nowpaymentsPaymentIsCancelled(status = "") {
@@ -6466,7 +6482,7 @@ function cleanAttachmentUrl(value = "") {
 }
 
 function verifyNowpaymentsSignature(req) {
-  if (!nowpaymentsIpnSecret) return true;
+  if (!nowpaymentsIpnSecret) return false;
   const signature = String(req.headers["x-nowpayments-sig"] || "");
   if (!signature) return false;
   const body = JSON.stringify(sortedObject(req.body));
@@ -9028,17 +9044,24 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
         statuses[status] = Number(statuses[status] || 0) + 1;
         order.lastPaymentCheckAt = Date.now();
         order.providerPaymentStatus = status;
-        order.providerActuallyPaid = Number(payment.actually_paid || payment.pay_amount || 0);
+        order.providerActuallyPaid = Number(payment.actually_paid || 0);
+        order.providerOutcomeAmount = Number(payment.outcome_amount || 0);
+        order.providerOutcomeCurrency = String(payment.outcome_currency || "").toLowerCase();
         order.payAmount = Number(payment.pay_amount || order.payAmount || 0);
         order.payAddress = String(payment.pay_address || order.payAddress || "");
         order.walletDepositAmountLtc = order.payAmount || Number(order.walletDepositAmountLtc || 0);
         order.walletDepositAddress = order.payAddress || order.walletDepositAddress || "";
         order.paymentProviderPayload = payment;
         changed = changed || previousStatus !== status;
-        if (nowpaymentsPaymentIsPaid(status)) {
-          order.ltcAmount = Number(payment.pay_amount || payment.actually_paid || order.payAmount || order.ltcAmount || 0);
+        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment)) {
+          order.ltcAmount = Number(payment.actually_paid || payment.pay_amount || order.payAmount || order.ltcAmount || 0);
+          delete order.paymentReviewReason;
           await completeProductOrder(order, state, payment);
           completed += 1;
+          changed = true;
+        } else if (nowpaymentsPaymentIsPaid(status)) {
+          order.paymentStatus = "underpaid";
+          order.paymentReviewReason = "provider_amount_below_expected";
           changed = true;
         }
       } catch (error) {
@@ -9666,6 +9689,7 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
     const fingerprint = nowpaymentsIpnFingerprint(req, "payment");
     const orderId = String(req.body.order_id || req.body.order || req.body.orderId || "");
+    const callbackPaymentId = String(req.body.payment_id || req.body.id || "");
     const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
     const paid = nowpaymentsPaymentIsPaid(status);
     const cancelled = nowpaymentsPaymentIsCancelled(status);
@@ -9680,8 +9704,10 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const order = orders.find((item) => item.id === orderId);
     if (!order) {
       const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
-      const paymentId = String(req.body.payment_id || req.body.id || "");
-      const deposit = deposits.find((item) => item.id === orderId || String(item.paymentId || "") === paymentId);
+      const deposit = deposits.find((item) => (
+        (item.id === orderId && (!item.paymentId || !callbackPaymentId || String(item.paymentId) === callbackPaymentId))
+        || (callbackPaymentId && String(item.paymentId || "") === callbackPaymentId)
+      ));
       if (!deposit) return res.status(404).json({ error: "Order not found" });
       if (paid) await completeWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
       else if (cancelled) await cancelWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
@@ -9689,13 +9715,26 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
       return res.json({ ok: true });
     }
 
+    if (order.paymentId && callbackPaymentId && String(order.paymentId) !== callbackPaymentId) {
+      return res.status(409).json({ error: "Payment does not match order" });
+    }
+
     order.providerPaymentStatus = status;
-    order.providerActuallyPaid = Number(req.body.actually_paid || req.body.pay_amount || 0);
+    order.providerActuallyPaid = Number(req.body.actually_paid || 0);
+    order.providerOutcomeAmount = Number(req.body.outcome_amount || 0);
+    order.providerOutcomeCurrency = String(req.body.outcome_currency || "").toLowerCase();
     order.lastPaymentCheckAt = Date.now();
     if (!paid) {
       await saveSettingsState({ ...state, orders });
       return res.json({ ok: true, ignored: status });
     }
+    if (!nowpaymentsPaymentCoversExpected(req.body)) {
+      order.paymentStatus = "underpaid";
+      order.paymentReviewReason = "provider_amount_below_expected";
+      await saveSettingsState({ ...state, orders });
+      return res.json({ ok: true, ignored: "underpaid" });
+    }
+    delete order.paymentReviewReason;
     await completeProductOrder(order, { ...state, orders }, req.body);
 
     res.json({ ok: true });
