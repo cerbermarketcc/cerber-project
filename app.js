@@ -145,7 +145,7 @@ const NEW_STORE_STATS = {
 };
 const exchangeMethods = ["Мия", "RunPay", "BPay"];
 const defaultExchangeRequisites = exchangeMethods.map((method) => ({ method, value: "60327998", active: true }));
-let ltcUsdCache = 54.2;
+let ltcUsdCache = 45.8;
 
 function city(label, districts = []) {
   const base = ["Центр", "Северная зона", "Южная зона", "Восточная зона", "Западная зона", "Автовокзал", "Промзона"];
@@ -2007,7 +2007,7 @@ function mergeOrderLists(remoteOrders = [], localOrders = []) {
     if (!order?.id) return;
     const existing = merged.get(order.id);
     if (existing) {
-      merged.set(order.id, { ...existing, ...order });
+      merged.set(order.id, { ...order, ...existing });
       return;
     }
     const freshLocal = Number(order.createdAt || 0) >= keepLocalAfter;
@@ -2030,6 +2030,24 @@ async function loadRemoteSession() {
       clearApiSession();
       return ensureApiSession();
     }
+    return false;
+  }
+}
+
+async function syncPendingProductPayments() {
+  if (!API_ENABLED || !apiSessionToken()) return false;
+  const hasPendingPayment = (db.orders || []).some((order) => (
+    order?.type === "product"
+    && order.paymentId
+    && String(order.status || "").toLowerCase() === "pending_payment"
+  ));
+  if (!hasPendingPayment) return false;
+  try {
+    const payload = await apiFetch("/api/orders/payments/sync", { method: "POST", timeoutMs: 40000 });
+    applyRemoteState(payload);
+    return true;
+  } catch (error) {
+    console.error("[payments] status sync failed", error);
     return false;
   }
 }
@@ -3064,6 +3082,17 @@ function usdToLtc(amountUsd) {
   return rate > 0 ? Number(amountUsd || 0) / rate : 0;
 }
 
+function productOrderLtcAmount(order = {}) {
+  return Number(
+    order.payAmount
+    || order.walletDepositAmountLtc
+    || order.paymentProviderPayload?.pay_amount
+    || order.paymentProviderPayload?.payAmount
+    || order.ltcAmount
+    || usdToLtc(order.amountUsd || 0)
+  );
+}
+
 function walletCoinById(id) {
   return WALLET_COINS.find((coin) => coin.id === id || coin.payCurrency === id) || WALLET_COINS[0];
 }
@@ -3519,9 +3548,9 @@ function parseAnyDate(value) {
 
 async function fetchLitecoinUsdRate() {
   try {
-    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd", { cache: "no-store" });
+    const response = await fetch("/api/rates/ltc-usd", { cache: "no-store" });
     const data = await response.json();
-    const value = Number(data?.litecoin?.usd);
+    const value = Number(data?.rate || 0);
     if (value > 0) {
       ltcUsdCache = value;
       db.exchangeCards.forEach((card) => {
@@ -4334,7 +4363,7 @@ function orderCard(order) {
       <div>
         <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
-        <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
+        <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
         ${order.paymentStatus === "paid" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
@@ -4356,7 +4385,12 @@ function orderCard(order) {
 
 function productOrderStatus(order) {
   if (order.disputeOpen || order.status === "dispute") return "Спор";
-  if (order.status === "pending_payment") return "Ожидает оплату";
+  if (order.status === "pending_payment") {
+    const providerStatus = String(order.providerPaymentStatus || "").toLowerCase();
+    if (providerStatus === "confirming") return "Оплата подтверждается";
+    if (providerStatus === "partially_paid") return "Оплачено не полностью";
+    return "Ожидает оплату";
+  }
   if (order.status === "completed") return "Завершён";
   if (order.status === "canceled") return "Отменён";
   if (order.status === "closed") return "Закрыт";
@@ -4391,8 +4425,8 @@ function productOrderDisputeChat(order) {
 function showProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
   const linkedDeposit = order.walletDepositId ? (db.walletDeposits || []).find((item) => item.id === order.walletDepositId) : null;
+  const ltcAmount = productOrderLtcAmount(order);
   const orderCoin = walletCoinById(linkedDeposit?.coinId || order.coinId || "ltc");
   const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || (order.status === "pending_payment" ? MAIN_LTC_WALLET : "");
   const orderDepositPayAmount = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
@@ -4426,6 +4460,7 @@ function showProductOrder(orderId) {
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p>Истекает через ${Math.max(0, Math.ceil((Number(order.paymentExpiresAt || 0) - Date.now()) / 60000))} минут</p>
         <p><span>Сумма:</span><strong>${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+        ${order.providerPaymentStatus ? `<p><span>Статус платежа:</span><strong>${esc(productOrderStatus(order))}</strong></p>` : ""}
         ${orderDepositAddress ? `
           <p><span>Счет пополнения:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
           <p><span>Куда оплатить:</span><strong class="mono-line">${esc(orderDepositAddress)}</strong></p>
@@ -5275,7 +5310,7 @@ async function handleProductPurchase(storeId, productId, positionId) {
 function payProductOrderFromBalance(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.status !== "pending_payment") return;
-  const ltcAmount = Number(order.ltcAmount || usdToLtc(order.amountUsd || 0));
+  const ltcAmount = productOrderLtcAmount(order);
   if (userLtcBalance() < ltcAmount) {
     showToast("У вас недостаточно средств");
     return;
@@ -9710,7 +9745,7 @@ async function handleExchangeCardCreate(event) {
     regions: listFromForm(data, "countries"),
     exchangeRate: Number(data.get("exchangeRate")),
     cashoutRate: Number(data.get("cashoutRate")),
-    ltcUsd: 54.2,
+    ltcUsd: ltcUsdCache,
     ltcWallet: data.get("ltcWallet"),
     requisites: exchangeMethods.map((method) => ({ method, value: data.get(`req_${method}`), active: true })),
     active: true
@@ -10150,7 +10185,7 @@ function shopSaleHistoryList(store, orders, title, emptyText) {
               <p><span>Заказ</span><strong>${esc(order.id || "-")}</strong></p>
               <p><span>Карточка</span><strong>${esc(product?.title || order.product || "-")}</strong></p>
               <p><span>Субтовар</span><strong>${esc(position?.title || order.positionTitle || order.product || "-")}</strong></p>
-              <p><span>Цена</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || usdToLtc(order.amountUsd || 0)).toFixed(6)} LTC</strong></p>
+              <p><span>Цена</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC</strong></p>
               <p><span>Локация</span><strong>${esc(order.location || locationLabel(position || {}))}</strong></p>
               <p><span>Статус</span><strong>${esc(order.status || "")} / ${esc(order.paymentStatus || "")}</strong></p>
               ${description ? `<p><span>Описание</span><strong>${esc(description)}</strong></p>` : ""}
@@ -11734,6 +11769,7 @@ async function initApp() {
     await loadCmsTextOverrides();
     await loadRemoteState();
     await loadRemoteSession();
+    await syncPendingProductPayments();
     await fetchLitecoinUsdRate();
   } catch (error) {
     console.error("[init] remote bootstrap failed", error);

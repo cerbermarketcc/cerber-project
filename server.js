@@ -14,7 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v123";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v124";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -39,6 +39,7 @@ const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
+const paymentReconcileIntervalMs = 30 * 1000;
 const dbQueryTimeoutMs = Math.max(12000, Number(process.env.DB_QUERY_TIMEOUT_MS || 25000));
 const exchangerReviewCooldownMs = 6 * 60 * 60 * 1000;
 const visualMarketplaceResetAt = 1784727156485;
@@ -52,6 +53,9 @@ const walletCoins = [
   { id: "eth", payCurrency: "eth", symbol: "ETH" },
   { id: "sol", payCurrency: "sol", symbol: "SOL" }
 ];
+let litecoinUsdRateCache = { rate: 0, sources: [], updatedAt: 0 };
+let paymentReconcilePromise = null;
+let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -2159,7 +2163,7 @@ async function settleProductReferralReward(state = {}, order = {}) {
       grossUsd: amountUsd,
       percent: payment.percent || 3,
       sourceId,
-      amountLtc: Number(payment.reward || 0) / 54.2,
+      amountLtc: usdToLitecoin(payment.reward || 0),
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt: Date.now(),
@@ -2877,6 +2881,16 @@ app.get("/api/config", async (_req, res, next) => {
   }
 });
 
+app.get("/api/rates/ltc-usd", async (_req, res, next) => {
+  try {
+    const result = await loadLitecoinUsdRate();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ rate: result.rate, sources: result.sources.map((item) => item.source), updatedAt: result.updatedAt });
+  } catch (error) {
+    next(error);
+  }
+});
+
 function baseHealthPayload(startedAt = Date.now()) {
   return {
     ok: true,
@@ -2909,6 +2923,8 @@ function baseHealthPayload(startedAt = Date.now()) {
       },
       tables: {},
       bots: { mirrors: 0, active: 0, errors: 0 },
+      payments: paymentReconcileStatus,
+      rates: { ltcUsd: litecoinUsdRateCache },
       media: { storage: mediaStorageStatus, migration: inlineMediaMigrationStatus }
     },
     durationMs: 0
@@ -3574,7 +3590,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       storeName: store.name || store.id,
       login: store.ownerLogin || store.id,
       amountUsd,
-      amountLtc: amountUsd / 54.2,
+      amountLtc: usdToLitecoin(amountUsd),
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -4778,7 +4794,7 @@ app.post("/api/admin/disputes/test", async (req, res, next) => {
       paidAt: now,
       amountUsd,
       priceUsd: amountUsd,
-      ltcAmount: amountUsd / 54.2,
+      ltcAmount: usdToLitecoin(amountUsd),
       location: [position.city, position.district].filter(Boolean).join(", ") || "Тестовая позиция",
       productDescription: product.description || "Тестовый диспут создан владельцем сайта",
       reservedDescription: String(position.description || product.description || "Тестовая позиция").trim(),
@@ -5452,7 +5468,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       scope: "owner",
       login: admin.login,
       amountUsd,
-      amountLtc: amountUsd / 54.2,
+      amountLtc: usdToLitecoin(amountUsd),
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -5848,6 +5864,65 @@ async function nowpaymentsRequest(pathname, options = {}) {
   return body;
 }
 
+async function marketRateJson(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", "User-Agent": "CERBER/1.0" },
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) throw new Error(`Rate source returned ${response.status}`);
+  return response.json();
+}
+
+async function loadLitecoinUsdRate(force = false) {
+  const now = Date.now();
+  if (!force && litecoinUsdRateCache.rate > 0 && now - litecoinUsdRateCache.updatedAt < 60 * 1000) {
+    return litecoinUsdRateCache;
+  }
+  const results = await Promise.allSettled([
+    marketRateJson("https://api.coinbase.com/v2/prices/LTC-USD/spot")
+      .then((body) => ({ source: "coinbase", rate: Number(body?.data?.amount || 0) })),
+    marketRateJson("https://api.kraken.com/0/public/Ticker?pair=LTCUSD")
+      .then((body) => ({ source: "kraken", rate: Number(Object.values(body?.result || {})[0]?.c?.[0] || 0) })),
+    marketRateJson("https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd")
+      .then((body) => ({ source: "coingecko", rate: Number(body?.litecoin?.usd || 0) }))
+  ]);
+  const sources = results
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value)
+    .filter((item) => Number.isFinite(item.rate) && item.rate > 1 && item.rate < 10000)
+    .sort((a, b) => a.rate - b.rate);
+  if (!sources.length) {
+    if (litecoinUsdRateCache.rate > 0) return litecoinUsdRateCache;
+    const error = new Error("Курс LTC временно недоступен");
+    error.status = 503;
+    throw error;
+  }
+  const rate = sources[Math.floor(sources.length / 2)].rate;
+  litecoinUsdRateCache = { rate, sources, updatedAt: now };
+  return litecoinUsdRateCache;
+}
+
+function cachedLitecoinUsdRate() {
+  return Number(litecoinUsdRateCache.rate || 45.8);
+}
+
+function usdToLitecoin(amountUsd = 0) {
+  const rate = cachedLitecoinUsdRate();
+  return rate > 0 ? Number(amountUsd || 0) / rate : 0;
+}
+
+function litecoinToUsd(amountLtc = 0) {
+  return Number(amountLtc || 0) * cachedLitecoinUsdRate();
+}
+
+function nowpaymentsPaymentIsPaid(status = "") {
+  return ["confirmed", "sending", "finished", "paid"].includes(String(status || "").toLowerCase());
+}
+
+function nowpaymentsPaymentIsCancelled(status = "") {
+  return ["failed", "expired", "refunded", "cancelled", "canceled"].includes(String(status || "").toLowerCase());
+}
+
 async function nowpaymentsPayoutToken() {
   if (!nowpaymentsEmail || !nowpaymentsPassword) {
     const error = new Error("NOWPAYMENTS_EMAIL/PASSWORD не настроены для автоматического вывода");
@@ -6038,7 +6113,6 @@ const PRESERVED_STATE_ARRAY_KEYS = [
   "supportTickets",
   "mirrorBots"
 ];
-
 const PRESERVED_STATE_OBJECT_KEYS = [
   "balances",
   "ltcBalances",
@@ -7427,7 +7501,7 @@ function requestedWithdrawalUsd(body = {}, availableUsd = 0) {
   const amountUsd = Number(body.amountUsd || 0);
   if (Number.isFinite(amountUsd) && amountUsd > 0) return amountUsd;
   const amountLtc = Number(body.amountLtc || 0);
-  if (Number.isFinite(amountLtc) && amountLtc > 0) return amountLtc * 54.2;
+  if (Number.isFinite(amountLtc) && amountLtc > 0) return litecoinToUsd(amountLtc);
   return 0;
 }
 
@@ -7467,7 +7541,7 @@ function recordProductOrderLedger(order, state = {}, store = null) {
     existingStoreTx.amountUsd = sellerUsd;
     existingStoreTx.grossUsd = amountUsd;
     existingStoreTx.commissionUsd = commissionUsd;
-    existingStoreTx.amountLtc = sellerUsd / 54.2;
+    existingStoreTx.amountLtc = usdToLitecoin(sellerUsd);
   } else if (storeId) {
     state.walletTransactions.unshift({
       id: storeTxId,
@@ -7481,7 +7555,7 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       amountUsd: sellerUsd,
       grossUsd: amountUsd,
       commissionUsd,
-      amountLtc: sellerUsd / 54.2,
+      amountLtc: usdToLitecoin(sellerUsd),
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt,
@@ -7508,7 +7582,7 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       amountUsd: commissionUsd,
       grossUsd: amountUsd,
       commissionPercent: Number(order.platformCommissionPercent || 0),
-      amountLtc: commissionUsd / 54.2,
+      amountLtc: usdToLitecoin(commissionUsd),
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt,
@@ -7586,7 +7660,7 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
     createdAt,
     paidAt: createdAt,
     amountUsd,
-    ltcAmount: amountUsd > 0 ? amountUsd / 54.2 : 0,
+    ltcAmount: amountUsd > 0 ? usdToLitecoin(amountUsd) : 0,
     location: [position.city, position.district].filter(Boolean).join(", "),
     productDescription: product.description || "",
     reservedDescription: String(options.reservedDescription || position.description || product.description || "").trim(),
@@ -8486,6 +8560,82 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   }
 
   await saveSettingsState(state);
+  if (!wasAlreadyPaid) notifyRealtime("order_paid", { orderId: order.id, storeId: order.storeId || "" });
+}
+
+async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
+  if (!nowpaymentsApiKey || !supabase) return paymentReconcileStatus;
+  if (paymentReconcilePromise) return paymentReconcilePromise;
+  paymentReconcilePromise = (async () => {
+    const startedAt = Date.now();
+    const state = await loadSettingsState();
+    const orders = Array.isArray(state.orders) ? state.orders : [];
+    const candidates = orders
+      .filter((order) => (
+        order?.type === "product"
+        && order.paymentId
+        && String(order.status || "").toLowerCase() === "pending_payment"
+        && String(order.paymentStatus || "").toLowerCase() !== "paid"
+      ))
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
+      .slice(0, 30);
+    let checked = 0;
+    let completed = 0;
+    let changed = false;
+    const statuses = {};
+    const errors = [];
+    for (const order of candidates) {
+      if (!force && Date.now() - Number(order.lastPaymentCheckAt || 0) < 20 * 1000) continue;
+      try {
+        const payment = await nowpaymentsRequest(`payment/${encodeURIComponent(order.paymentId)}`, { method: "GET" });
+        const status = String(payment.payment_status || payment.status || "waiting").toLowerCase();
+        const previousStatus = String(order.providerPaymentStatus || "").toLowerCase();
+        checked += 1;
+        statuses[status] = Number(statuses[status] || 0) + 1;
+        order.lastPaymentCheckAt = Date.now();
+        order.providerPaymentStatus = status;
+        order.providerActuallyPaid = Number(payment.actually_paid || payment.pay_amount || 0);
+        order.payAmount = Number(payment.pay_amount || order.payAmount || 0);
+        order.payAddress = String(payment.pay_address || order.payAddress || "");
+        order.walletDepositAmountLtc = order.payAmount || Number(order.walletDepositAmountLtc || 0);
+        order.walletDepositAddress = order.payAddress || order.walletDepositAddress || "";
+        order.paymentProviderPayload = payment;
+        changed = changed || previousStatus !== status;
+        if (nowpaymentsPaymentIsPaid(status)) {
+          order.ltcAmount = Number(payment.pay_amount || payment.actually_paid || order.payAmount || order.ltcAmount || 0);
+          await completeProductOrder(order, state, payment);
+          completed += 1;
+          changed = true;
+        }
+      } catch (error) {
+        errors.push(String(error.message || error).slice(0, 200));
+      }
+    }
+    if (changed && completed === 0) await saveSettingsState(state);
+    paymentReconcileStatus = {
+      state: errors.length && !checked ? "error" : "ready",
+      checked,
+      completed,
+      pending: Math.max(0, candidates.length - completed),
+      statuses,
+      updatedAt: Date.now(),
+      durationMs: Date.now() - startedAt,
+      error: errors[0] || ""
+    };
+    return paymentReconcileStatus;
+  })().catch((error) => {
+    paymentReconcileStatus = {
+      ...paymentReconcileStatus,
+      state: "error",
+      updatedAt: Date.now(),
+      error: String(error.message || error).slice(0, 300)
+    };
+    console.error("[payments] reconciliation failed", { message: error.message });
+    return paymentReconcileStatus;
+  }).finally(() => {
+    paymentReconcilePromise = null;
+  });
+  return paymentReconcilePromise;
 }
 
 async function completeWalletDeposit(deposit, state, providerPayload = {}) {
@@ -8495,7 +8645,11 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
   }
 
   const paidUsd = Number(deposit.amountUsd || providerPayload.price_amount || 0);
-  const paidLtc = Number(deposit.amountLtcExpected || deposit.amountLtc || (deposit.payCurrency === "ltc" ? (providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0) : (paidUsd / 54.2)));
+  const providerPaidLtc = Number(providerPayload.actually_paid || providerPayload.pay_amount || deposit.payAmount || 0);
+  const liveRate = deposit.payCurrency === "ltc" ? 0 : Number((await loadLitecoinUsdRate().catch(() => ({ rate: 0 }))).rate || 0);
+  const paidLtc = deposit.payCurrency === "ltc"
+    ? Number(providerPaidLtc || deposit.amountLtc || deposit.amountLtcExpected || 0)
+    : Number(deposit.amountLtc || (liveRate > 0 ? paidUsd / liveRate : deposit.amountLtcExpected || 0));
   deposit.status = "completed";
   deposit.paidAt = Date.now();
   deposit.amountLtc = paidLtc;
@@ -8589,7 +8743,8 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     state.ltcBalances = state.ltcBalances || {};
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
-    const ltcAmount = priceUsd / 54.2;
+    const ltcUsdRate = Number((await loadLitecoinUsdRate()).rate || 0);
+    const ltcAmount = ltcUsdRate > 0 ? priceUsd / ltcUsdRate : 0;
     const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
     if (balance + 0.00000001 < ltcAmount) return res.status(400).json({ error: "Недостаточно LTC на балансе" });
@@ -8741,7 +8896,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
       autoReleaseAt: 0,
       amountUsd: priceUsd,
-      ltcAmount: priceUsd / 54.2,
+      ltcAmount: 0,
       coinId: coin.id,
       payCurrency: coin.payCurrency,
       sellerWallet: coin.id === "ltc" ? String(store.ltcWallet || "") : String(store.wallets?.[coin.id] || ""),
@@ -8765,6 +8920,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     order.paymentId = payment.payment_id || payment.id || "";
     order.payAddress = payment.pay_address || payment.address || "";
     order.payAmount = Number(payment.pay_amount || 0);
+    order.ltcAmount = order.payAmount;
     order.paymentUrl = payment.payment_url || payment.invoice_url || "";
     order.paymentStatus = payment.payment_status || "waiting";
     order.walletDepositAmountUsd = priceUsd;
@@ -8982,7 +9138,7 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
       login: user.login,
       loginKey: user.login_key,
       amountLtc,
-      amountUsd: amountLtc * 54.2,
+      amountUsd: litecoinToUsd(amountLtc),
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -9077,8 +9233,8 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const fingerprint = nowpaymentsIpnFingerprint(req, "payment");
     const orderId = String(req.body.order_id || req.body.order || req.body.orderId || "");
     const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
-    const paid = ["finished", "confirmed", "sending", "partially_paid"].includes(status);
-    const cancelled = ["failed", "expired", "refunded", "cancelled", "canceled"].includes(status);
+    const paid = nowpaymentsPaymentIsPaid(status);
+    const cancelled = nowpaymentsPaymentIsCancelled(status);
     if (!orderId) return res.status(400).json({ error: "Unsupported payment callback" });
 
     const state = await loadSettingsState();
@@ -9099,10 +9255,27 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
       return res.json({ ok: true });
     }
 
-    if (!paid) return res.json({ ok: true, ignored: status });
+    order.providerPaymentStatus = status;
+    order.providerActuallyPaid = Number(req.body.actually_paid || req.body.pay_amount || 0);
+    order.lastPaymentCheckAt = Date.now();
+    if (!paid) {
+      await saveSettingsState({ ...state, orders });
+      return res.json({ ok: true, ignored: status });
+    }
     await completeProductOrder(order, { ...state, orders }, req.body);
 
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/orders/payments/sync", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    await reconcilePendingNowpaymentsOrders({ force: true });
+    res.json(await stateFor(user));
   } catch (error) {
     next(error);
   }
@@ -11697,12 +11870,21 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", error));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
   setTimeout(() => {
     migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", error));
   }, 1500);
+  setTimeout(() => {
+    reconcilePendingNowpaymentsOrders({ force: true }).catch((error) => console.error("Payment reconciliation startup error", error));
+  }, 2500);
 });
+
+const paymentReconcileTimer = setInterval(() => {
+  reconcilePendingNowpaymentsOrders().catch((error) => console.error("Payment reconciliation interval error", error));
+}, paymentReconcileIntervalMs);
+paymentReconcileTimer.unref?.();
 
 adminRealtimeServer = new WebSocketServer({ noServer: true });
 adminRealtimeServer.on("connection", (socket, req) => {
