@@ -14,7 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v118";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v119";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -239,6 +239,8 @@ let publicCatalogMemorySnapshotAt = 0;
 let publicStoresRefreshPromise = null;
 let mediaBucketReadyPromise = null;
 let inlineMediaMigrationPromise = null;
+let mediaStorageStatus = { state: "pending", bucket: mediaBucketName, updatedAt: Date.now() };
+let inlineMediaMigrationStatus = { state: "pending", checked: 0, migrated: 0, updatedAt: Date.now() };
 let adminLogMemory = [];
 let settingsBackupMemorySnapshot = null;
 let settingsBackupMemoryAt = 0;
@@ -721,6 +723,19 @@ function mergeStoreSources(primaryStores = [], fallbackStores = []) {
   return Array.from(map.values());
 }
 
+function hydrateStoreRow(row = {}, fallbackStores = []) {
+  const rowData = row?.data && typeof row.data === "object" ? row.data : {};
+  const id = String(rowData.id || row.id || "").trim();
+  const fallback = (Array.isArray(fallbackStores) ? fallbackStores : []).find((store) => String(store?.id || "") === id) || {};
+  return {
+    ...fallback,
+    ...rowData,
+    id,
+    createdAt: rowData.createdAt || row.created_at || fallback.createdAt,
+    updatedAt: rowData.updatedAt || row.updated_at || fallback.updatedAt
+  };
+}
+
 function visualResetTimestamp(item = {}) {
   const candidates = [
     item.createdAt,
@@ -854,8 +869,10 @@ async function ensureMediaBucket() {
       allowedMimeTypes: [...allowedInlineImageTypes]
     });
     if (error && !/already exists|duplicate|resource exists/i.test(String(error.message || ""))) throw error;
+    mediaStorageStatus = { state: "ready", bucket: mediaBucketName, updatedAt: Date.now() };
     return true;
   })().catch((error) => {
+    mediaStorageStatus = { state: "error", bucket: mediaBucketName, error: String(error.message || error).slice(0, 300), updatedAt: Date.now() };
     mediaBucketReadyPromise = null;
     throw error;
   });
@@ -876,6 +893,7 @@ async function externalizeInlineImage(value = "", scope = "stores") {
   if (error && !/already exists|duplicate|resource exists/i.test(String(error.message || ""))) throw error;
   const { data } = supabase.storage.from(mediaBucketName).getPublicUrl(objectPath);
   if (!data?.publicUrl) throw new Error("Supabase Storage did not return a public media URL");
+  mediaStorageStatus = { state: "ready", bucket: mediaBucketName, lastUploadAt: Date.now(), updatedAt: Date.now() };
   return data.publicUrl;
 }
 
@@ -904,6 +922,7 @@ async function externalizeStoreMedia(store = {}) {
           return result;
         })
         .catch((error) => {
+          mediaStorageStatus = { state: "error", bucket: mediaBucketName, error: String(error.message || error).slice(0, 300), updatedAt: Date.now() };
           console.error("[media] inline image upload failed; retaining original", {
             storeId: next.id || "",
             message: error.message
@@ -1410,7 +1429,14 @@ async function savePublicCatalogSnapshot(state = {}, storesSource = null) {
 }
 
 function compactStoreData(row = {}) {
-  if (row?.data && typeof row.data === "object") return row.data;
+  if (row?.data && typeof row.data === "object") {
+    return {
+      ...row.data,
+      id: row.data.id || row.id,
+      createdAt: row.data.createdAt || row.created_at,
+      updatedAt: row.data.updatedAt || row.updated_at
+    };
+  }
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -1443,8 +1469,12 @@ function compactStoreData(row = {}) {
 }
 
 function publicStoresFromRows(rows = [], settingsData = {}) {
+  const fallbackStores = mergeStoreSources(
+    settingsData.ownerStores || [],
+    mergeStoreSources(settingsData.publicStoresCache || [], settingsData.stores || [])
+  );
   return (Array.isArray(rows) ? rows : [])
-    .map((row) => publicStoreForState(compactStoreData({ ...row, data: row.data ? { ...row.data, createdAt: row.data.createdAt || row.created_at, updatedAt: row.data.updatedAt || row.updated_at } : row.data })))
+    .map((row) => publicStoreForState(hydrateStoreRow(row, fallbackStores)))
     .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
 }
 
@@ -1711,7 +1741,7 @@ async function stateFor(user) {
       settingsQuery
     ]);
     const storesResult = await withTimeout(
-      supabase.from("stores").select("data").order("created_at", { ascending: true }).limit(500),
+      supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(500),
       "stores query",
       8000
     ).catch((error) => {
@@ -1770,14 +1800,14 @@ async function stateFor(user) {
       (Array.isArray(settingsData.orders) ? [...settingsData.orders] : []).filter((order) => order.id !== "order-cerber-paid-preview" && order.storeId !== "skboy"),
       allMessages
     );
-    const storesFromDb = Array.isArray(storesResult.data)
-      ? sanitizeStoresForVisualReset(storesResult.data.map((row) => row.data))
-      : null;
     const fallbackStores = Array.isArray(settingsData.publicStoresCache)
       ? mergeStoreSources(settingsData.publicStoresCache, settingsData.ownerStores || [])
       : Array.isArray(settingsData.ownerStores)
         ? settingsData.ownerStores
       : [];
+    const storesFromDb = Array.isArray(storesResult.data)
+      ? sanitizeStoresForVisualReset(storesResult.data.map((row) => hydrateStoreRow(row, fallbackStores)))
+      : null;
     const allStores = sanitizeStoresForVisualReset(storesFromDb ?? fallbackStores);
     const embeddedStoreOrders = allStores.flatMap((store) => (
       Array.isArray(store?.productOrders)
@@ -2868,7 +2898,8 @@ function baseHealthPayload(startedAt = Date.now()) {
         insecureDefaultMarketAdminPassword: !process.env.MARKET_ADMIN_PASSWORD
       },
       tables: {},
-      bots: { mirrors: 0, active: 0, errors: 0 }
+      bots: { mirrors: 0, active: 0, errors: 0 },
+      media: { storage: mediaStorageStatus, migration: inlineMediaMigrationStatus }
     },
     durationMs: 0
   };
@@ -3020,7 +3051,7 @@ async function loadStoreWithFallback(storeId) {
   let databaseAnswered = false;
   try {
     const result = await withTimeout(
-      supabase.from("stores").select("data").eq("id", id).maybeSingle(),
+      supabase.from("stores").select("id,data,created_at,updated_at").eq("id", id).maybeSingle(),
       "store-admin load store",
       5000
     );
@@ -3029,14 +3060,17 @@ async function loadStoreWithFallback(storeId) {
   } catch (error) {
     console.error("[store-admin] direct store load failed; using fallback", { storeId: id, message: error.message });
   }
-  if (row?.data) return row.data;
-  if (databaseAnswered) return null;
+  const directStore = row?.data ? hydrateStoreRow(row) : null;
+  const directStoreComplete = Boolean(directStore?.id && directStore?.name && directStore?.ownerLogin && (directStore?.adminPasswordHash || directStore?.adminPassword));
+  if (directStoreComplete) return directStore;
+  if (databaseAnswered && !row?.data) return null;
   const state = await withTimeout(loadSettingsState(), "store-admin fallback state", 6000).catch(async (error) => {
     console.error("[store-admin] settings fallback failed; using backup", { storeId: id, message: error.message });
     return loadSettingsBackupState();
   });
   const fallbackStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
-  return fallbackStores.find((item) => String(item?.id || "") === id) || null;
+  const fallbackStore = fallbackStores.find((item) => String(item?.id || "") === id) || null;
+  return row?.data ? hydrateStoreRow(row, fallbackStores) : fallbackStore;
 }
 
 async function saveStoreRow(store = {}, label = "store save") {
@@ -3100,28 +3134,35 @@ async function migrateInlineStoreMedia() {
   if (!supabase) return { checked: 0, migrated: 0 };
   if (inlineMediaMigrationPromise) return inlineMediaMigrationPromise;
   inlineMediaMigrationPromise = (async () => {
+    inlineMediaMigrationStatus = { state: "running", checked: 0, migrated: 0, updatedAt: Date.now() };
     const result = await withTimeout(
       supabase.from("stores").select("id,data").limit(500),
       "inline store media migration query",
       10000
     );
     const rows = Array.isArray(result?.data) ? result.data : [];
+    const migrationState = await withTimeout(loadSettingsState(), "inline media migration settings", 10000).catch(async (error) => {
+      console.error("[media] migration settings fallback", { message: error.message });
+      return loadSettingsBackupState();
+    });
+    const fallbackStores = mergeStoreSources(migrationState.ownerStores || [], migrationState.publicStoresCache || []);
     const migratedStores = [];
     for (const row of rows) {
       if (!row?.data) continue;
-      const mediaResult = await externalizeStoreMedia(row.data);
-      if (mediaResult.changed) {
+      const sourceStore = hydrateStoreRow(row, fallbackStores);
+      const rowIncomplete = !row.data.id || !row.data.name || !row.data.ownerLogin || (!row.data.adminPasswordHash && !row.data.adminPassword);
+      const mediaResult = await externalizeStoreMedia(sourceStore);
+      if (mediaResult.changed || rowIncomplete) {
         const saved = await saveStoreRow(mediaResult.store, "inline store media migration save");
         migratedStores.push(saved);
       } else {
-        rememberSavedStore(row.data);
+        rememberSavedStore(sourceStore);
       }
     }
     if (migratedStores.length) {
-      const state = await withTimeout(loadSettingsState(), "inline media settings migration", 10000).catch(() => null);
-      if (state) {
+      if (migrationState) {
         await withTimeout(
-          saveSettingsState(migrateStateStoreMedia(state, migratedStores), { deferSideEffects: true }),
+          saveSettingsState(migrateStateStoreMedia(migrationState, migratedStores), { deferSideEffects: true }),
           "inline media settings save",
           15000
         ).catch((error) => {
@@ -3133,9 +3174,11 @@ async function migrateInlineStoreMedia() {
       });
     }
     console.log("[media] inline store migration complete", { checked: rows.length, migrated: migratedStores.length });
+    inlineMediaMigrationStatus = { state: "complete", checked: rows.length, migrated: migratedStores.length, updatedAt: Date.now() };
     return { checked: rows.length, migrated: migratedStores.length };
   })().catch((error) => {
     inlineMediaMigrationPromise = null;
+    inlineMediaMigrationStatus = { state: "error", checked: 0, migrated: 0, error: String(error.message || error).slice(0, 300), updatedAt: Date.now() };
     console.error("[media] inline store migration failed", { message: error.message });
     return { checked: 0, migrated: 0, error: error.message };
   });
@@ -3148,7 +3191,7 @@ async function findSellerAdminStore(storeId, login) {
   if (!key) return null;
   const [storesResult, state] = await Promise.all([
     withTimeout(
-      supabase.from("stores").select("data").limit(500),
+      supabase.from("stores").select("id,data,created_at,updated_at").limit(500),
       "store-admin stores lookup",
       6000
     ).catch((error) => {
@@ -3161,7 +3204,7 @@ async function findSellerAdminStore(storeId, login) {
     })
   ]);
   const fallbackStores = mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []);
-  const candidateStores = storesResult?.failed ? fallbackStores : (storesResult?.data || []).map((row) => row.data);
+  const candidateStores = storesResult?.failed ? fallbackStores : (storesResult?.data || []).map((row) => hydrateStoreRow(row, fallbackStores));
   return candidateStores.find((item) => (
     item && (loginKey(item.ownerLogin) === key || loginKey(item.id) === key)
   )) || null;
@@ -6966,7 +7009,7 @@ async function adminLoadMarketplace(options = {}) {
   const fallbackStores = Array.isArray(state.ownerStores) && state.ownerStores.length
     ? state.ownerStores
     : (Array.isArray(state.publicStoresCache) ? state.publicStoresCache : []);
-  const databaseStores = storeRows.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || row.created_at, updatedAt: row.updated_at }));
+  const databaseStores = storeRows.map((row) => hydrateStoreRow(row, fallbackStores));
   const mergedStores = sanitizeStoresForVisualReset(storesResult?.failed ? fallbackStores : databaseStores);
   const messages = Array.isArray(messagesResult?.data) ? messagesResult.data : [];
   const messageItems = sanitizeMessagesForVisualReset(messages.map((row) => ({ ...row.data, createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0 })));
