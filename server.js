@@ -14,7 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v119";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v120";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -727,13 +727,23 @@ function hydrateStoreRow(row = {}, fallbackStores = []) {
   const rowData = row?.data && typeof row.data === "object" ? row.data : {};
   const id = String(rowData.id || row.id || "").trim();
   const fallback = (Array.isArray(fallbackStores) ? fallbackStores : []).find((store) => String(store?.id || "") === id) || {};
-  return {
+  const legacyDefaults = id === "magazin"
+    ? { id, name: "Magazin", ownerLogin: "Magazinn", tag: "@magazin", status: "active", visibleInCatalog: true }
+    : {};
+  const hydrated = {
+    ...legacyDefaults,
     ...fallback,
     ...rowData,
     id,
     createdAt: rowData.createdAt || row.created_at || fallback.createdAt,
     updatedAt: rowData.updatedAt || row.updated_at || fallback.updatedAt
   };
+  ["name", "ownerLogin", "tag", "status", "adminPasswordHash", "adminPassword"].forEach((key) => {
+    if (hydrated[key] === null || hydrated[key] === undefined || String(hydrated[key]).trim() === "") {
+      hydrated[key] = fallback[key] || legacyDefaults[key] || "";
+    }
+  });
+  return hydrated;
 }
 
 function visualResetTimestamp(item = {}) {
@@ -3150,6 +3160,14 @@ async function migrateInlineStoreMedia() {
     for (const row of rows) {
       if (!row?.data) continue;
       const sourceStore = hydrateStoreRow(row, fallbackStores);
+      if (!sourceStore.adminPasswordHash && !sourceStore.adminPassword && sourceStore.ownerLogin) {
+        const { data: ownerProfile } = await withTimeout(
+          supabase.from("profiles").select("password_hash").eq("login_key", loginKey(sourceStore.ownerLogin)).maybeSingle(),
+          "inline media owner password repair",
+          5000
+        ).catch(() => ({ data: null }));
+        if (ownerProfile?.password_hash) sourceStore.adminPasswordHash = ownerProfile.password_hash;
+      }
       const rowIncomplete = !row.data.id || !row.data.name || !row.data.ownerLogin || (!row.data.adminPasswordHash && !row.data.adminPassword);
       const mediaResult = await externalizeStoreMedia(sourceStore);
       if (mediaResult.changed || rowIncomplete) {
