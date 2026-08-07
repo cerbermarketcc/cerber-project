@@ -13,8 +13,9 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v124";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v126";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -22,6 +23,7 @@ const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const internalCaptchaTtlMs = 10 * 60 * 1000;
+const userSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -56,6 +58,7 @@ const walletCoins = [
 let litecoinUsdRateCache = { rate: 0, sources: [], updatedAt: 0 };
 let paymentReconcilePromise = null;
 let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
+const withdrawalPayoutJobs = new Set();
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -270,6 +273,7 @@ const allowedCorsOrigins = new Set([
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const clientRateLimits = new Map();
+const usedInternalCaptchas = new Map();
 const allowedInlineImageTypes = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
 const cspDirectives = [
   "default-src 'self'",
@@ -286,18 +290,8 @@ const cspDirectives = [
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
 
-function isAllowedMirrorOrigin(origin = "") {
-  try {
-    const url = new URL(origin);
-    const hostname = url.hostname.toLowerCase();
-    return hostname.includes("cerber") || hostname.endsWith(".onion");
-  } catch {
-    return false;
-  }
-}
-
 function isAllowedCorsOrigin(origin = "") {
-  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin) || isAllowedMirrorOrigin(origin);
+  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin);
 }
 
 function maskSecret(value = "") {
@@ -369,9 +363,8 @@ function storeSecretsSnapshot(store = {}) {
 
 app.use((req, res, next) => {
   const origin = String(req.headers.origin || "");
-  if (!origin) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (isAllowedCorsOrigin(origin)) {
+  const allowedOrigin = origin && isAllowedCorsOrigin(origin);
+  if (allowedOrigin) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
   res.setHeader("Vary", "Origin");
@@ -379,18 +372,28 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-admin-password, x-owner-password, x-telegram-bot-api-secret-token");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+  res.setHeader("Origin-Agent-Cluster", "?1");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
   res.setHeader("Content-Security-Policy", cspDirectives);
   if (req.secure || String(req.headers["x-forwarded-proto"] || "").includes("https")) {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
   }
-  if (req.method === "OPTIONS") return res.sendStatus(204);
+  if (req.method === "OPTIONS") {
+    if (origin && !allowedOrigin) return res.status(403).end();
+    return res.sendStatus(204);
+  }
   next();
 });
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
   const freshAsset = pathname === "/" || /\.(?:html|js|css)$/i.test(pathname);
+  if (pathname.startsWith("/api/")) {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+  }
   if (req.method === "GET" && freshAsset) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
@@ -399,7 +402,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(compression({ threshold: 1024 }));
-app.use(express.json({ limit: "40mb" }));
+app.use(express.json({ limit: "20mb" }));
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
   if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini)$/i.test(pathname)) {
@@ -421,24 +424,39 @@ async function writeCmsTexts(payload) {
   await fs.writeFile(cmsTextsPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
-function verifyCmsAdmin(req) {
-  const expected = process.env.ADMIN_PASSWORD || "admincerbercc1212";
-  const password = String(req.headers["x-admin-password"] || req.body?.password || "");
-  if (password !== expected) {
+function secretValuesMatch(actualValue, expectedValue) {
+  const actualBuffer = Buffer.from(String(actualValue || ""));
+  const expectedBuffer = Buffer.from(String(expectedValue || ""));
+  return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function verifyConfiguredPassword(actualValue, expectedValue, label) {
+  if (!String(expectedValue || "")) {
+    const error = new Error(`${label} is not configured`);
+    error.status = 503;
+    throw error;
+  }
+  if (!secretValuesMatch(actualValue, expectedValue)) {
     const error = new Error("Bad admin password");
     error.status = 401;
     throw error;
   }
 }
 
+function verifyCmsAdmin(req) {
+  verifyConfiguredPassword(
+    req.headers["x-admin-password"] || req.body?.password,
+    process.env.ADMIN_PASSWORD,
+    "ADMIN_PASSWORD"
+  );
+}
+
 function verifyOwnerPanel(req) {
-  const expected = process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "admincerbercc1212";
-  const password = String(req.headers["x-owner-password"] || req.body?.ownerPassword || "");
-  if (password !== expected) {
-    const error = new Error("Bad owner password");
-    error.status = 401;
-    throw error;
-  }
+  verifyConfiguredPassword(
+    req.headers["x-owner-password"] || req.body?.ownerPassword,
+    process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD,
+    "OWNER_PANEL_PASSWORD"
+  );
 }
 
 function requestSource(req) {
@@ -493,8 +511,10 @@ async function passwordMatchesProfile(profile, password) {
   }
 }
 
+const runtimeAdminSecret = crypto.randomBytes(32).toString("hex");
+
 function adminSecret() {
-  return supabaseServiceKey || process.env.ADMIN_JWT_SECRET || "cerber-local-admin-secret";
+  return process.env.ADMIN_JWT_SECRET || supabaseServiceKey || runtimeAdminSecret;
 }
 
 function signAdminToken(login, role = "admin") {
@@ -585,7 +605,7 @@ function markAdminLoginAttempt(req, login, ok) {
 async function ensureAdminSecurity(options = {}) {
   const fullState = Boolean(options.fullState);
   const fallbackLogin = process.env.MARKET_ADMIN_LOGIN || "admin";
-  const fallbackPassword = process.env.MARKET_ADMIN_PASSWORD || "admin1212";
+  const fallbackPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
   const { data: settings } = await withTimeout(
     supabase.from("app_settings").select(fullState ? "data" : "adminSecurity:data->adminSecurity").eq("id", mainSettingsRowId).maybeSingle(),
     "admin security settings query",
@@ -598,6 +618,11 @@ async function ensureAdminSecurity(options = {}) {
   const state = fullState ? (settings?.data || {}) : { adminSecurity: settings?.adminSecurity || {} };
   state.adminSecurity = state.adminSecurity || {};
   if (!state.adminSecurity.passwordHash) {
+    if (!fallbackPassword) {
+      const error = new Error("MARKET_ADMIN_PASSWORD is not configured");
+      error.status = 503;
+      throw error;
+    }
     state.adminSecurity.login = state.adminSecurity.login || fallbackLogin;
     state.adminSecurity.plainPassword = fallbackPassword;
     if (canPersistSecurity) bcrypt.hash(fallbackPassword, 12).then((passwordHash) => {
@@ -1063,8 +1088,9 @@ async function timedDbCheck(label, run, timeoutMs = 5000) {
 async function verifyCaptcha(token, req) {
   if (verifyInternalCaptcha(token)) return;
   if (!turnstileEnabled) {
-    console.warn("[captcha] Turnstile is not fully configured; captcha verification skipped");
-    return;
+    const error = new Error("Проверка устарела или введена неверно. Обновите её и попробуйте снова.");
+    error.status = 400;
+    throw error;
   }
   if (!token) {
     const error = new Error("Подтвердите, что вы не робот");
@@ -1149,10 +1175,23 @@ function verifyInternalCaptcha(value = "") {
   const token = rest.slice(0, splitAt);
   const answer = Number(rest.slice(splitAt + 1));
   const [payload, signature] = token.split(".");
-  if (!payload || !signature || signature !== signInternalCaptcha(payload)) return false;
+  if (!payload || !signature) return false;
+  const expected = signInternalCaptcha(payload);
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return false;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return Date.now() <= Number(data.expiresAt || 0) && Number(data.answer) === answer;
+    const expiresAt = Number(data.expiresAt || 0);
+    const fingerprint = crypto.createHash("sha256").update(token).digest("hex");
+    if (Date.now() > expiresAt || Number(data.answer) !== answer || usedInternalCaptchas.has(fingerprint)) return false;
+    usedInternalCaptchas.set(fingerprint, expiresAt);
+    if (usedInternalCaptchas.size > 5000) {
+      for (const [key, expiry] of usedInternalCaptchas) {
+        if (Date.now() > Number(expiry || 0)) usedInternalCaptchas.delete(key);
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -1170,7 +1209,8 @@ async function ensureSeed() {
     if (adminError) throw adminError;
 
     if (!existingAdmin) {
-      const adminPassword = process.env.ADMIN_PASSWORD || "admincerbercc1212";
+      const adminPassword = String(process.env.ADMIN_PASSWORD || "");
+      if (!adminPassword) throw new Error("ADMIN_PASSWORD is required to seed the admin profile");
       const adminHash = await bcrypt.hash(adminPassword, 12);
       const { error } = await supabase.from("profiles").upsert([
         { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
@@ -1958,8 +1998,13 @@ async function userFromRequest(req) {
   requireDb();
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
-  const { data: session } = await supabase.from("sessions").select("login_key").eq("token", token).maybeSingle();
+  const { data: session } = await supabase.from("sessions").select("login_key,created_at").eq("token", token).maybeSingle();
   if (!session) return null;
+  const createdAt = Date.parse(session.created_at || "");
+  if (Number.isFinite(createdAt) && Date.now() - createdAt > userSessionTtlMs) {
+    supabase.from("sessions").delete().eq("token", token).then(() => {}).catch(() => {});
+    return null;
+  }
   const { data: user } = await supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle();
   if (user) {
     const state = await loadSettingsState();
@@ -2586,7 +2631,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
   );
   const finance = storeLedgerFinance(state, store, storeOrders);
   const requestedUsd = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
-    .filter((item) => item.scope === "store" && item.storeId === id && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
+    .filter((item) => item.scope === "store" && item.storeId === id && withdrawalConsumesBalance(item))
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
   const isStaff = token?.role === "staff";
   const payload = {
@@ -2621,7 +2666,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
       : storeOrders;
   payload.state.messages = isStaff && !sellerTokenCanAccess(token, "connect", "disputes") ? [] : storeMessages;
   payload.state.walletWithdrawals = sellerTokenCanAccess(token, "finances")
-    ? (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => item.storeId === id)
+    ? (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
+      .filter((item) => item.storeId === id)
+      .map(storeAdminWithdrawalForState)
     : [];
   const responseStore = payload.state.stores[0] || (store ? publicStoreForState(store, { includeStaff: true }) : null);
   payload.state.stores = [];
@@ -2646,12 +2693,14 @@ function verifySellerAdminToken(req) {
 }
 
 app.get("/api/auth/captcha", (req, res) => {
+  assertClientRateLimit(req, "auth-captcha", { limit: 30, windowMs: 60 * 1000 });
   res.json(createInternalCaptcha());
 });
 
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
+    assertClientRateLimit(req, "auth-register-ip", { limit: 10, windowMs: 15 * 60 * 1000 });
     assertClientRateLimit(req, "auth-register", { limit: 5, windowMs: 15 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
@@ -2723,6 +2772,7 @@ app.post("/api/auth/register", async (req, res, next) => {
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     requireDb();
+    assertClientRateLimit(req, "auth-login-ip", { limit: 30, windowMs: 10 * 60 * 1000 });
     assertClientRateLimit(req, "auth-login", { limit: 10, windowMs: 10 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
     await ensureSeed();
@@ -2924,6 +2974,7 @@ function baseHealthPayload(startedAt = Date.now()) {
       tables: {},
       bots: { mirrors: 0, active: 0, errors: 0 },
       payments: paymentReconcileStatus,
+      payouts: { total: 0, activeJobs: withdrawalPayoutJobs.size, statuses: {} },
       rates: { ltcUsd: litecoinUsdRateCache },
       media: { storage: mediaStorageStatus, migration: inlineMediaMigrationStatus }
     },
@@ -2971,11 +3022,23 @@ app.get("/api/health/deep", async (_req, res) => {
     health.checks.tables = Object.fromEntries(tableResults);
     const state = supabase ? await loadSettingsState().catch(() => ({})) : {};
     const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    const withdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     health.checks.bots = {
       mirrors: mirrors.length,
       active: mirrors.filter((bot) => bot.active !== false && !bot.blocked).length,
       errors: mirrors.reduce((sum, bot) => sum + Number(bot.telegramErrorsCount || 0), 0),
       lastErrorAt: mirrors.map((bot) => Number(bot.lastErrorAt || 0)).filter(Boolean).sort((a, b) => b - a)[0] || null
+    };
+    health.checks.payouts = {
+      total: withdrawals.length,
+      activeJobs: withdrawalPayoutJobs.size,
+      statuses: withdrawals.reduce((statuses, withdrawal) => {
+        const status = withdrawal.autoPayoutError && !withdrawal.providerPayoutId
+          ? "failed"
+          : String(withdrawal.status || "pending").toLowerCase();
+        statuses[status] = Number(statuses[status] || 0) + 1;
+        return statuses;
+      }, {})
     };
     health.ok = Boolean(health.checks.supabase.ok) && Object.values(health.checks.tables).every((item) => item.ok);
     health.durationMs = Date.now() - startedAt;
@@ -3256,6 +3319,18 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
+    assertClientRateLimit(req, "store-admin-login-ip", {
+      limit: 30,
+      windowMs: 10 * 60 * 1000
+    });
+    assertClientRateLimit(req, "store-admin-login", {
+      limit: 8,
+      windowMs: 10 * 60 * 1000,
+      identity: `${storeId}:${login}`
+    });
+    if (storeId.length > 120 || login.length > 120 || password.length > 256) {
+      return res.status(400).json({ error: "Некорректные данные входа" });
+    }
     const store = await findSellerAdminStore(storeId, login);
     if (!store) {
       return res.status(401).json({ error: "Неверный пароль" });
@@ -3436,17 +3511,14 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     requireDb();
     const admin = verifyAdminToken(req);
     const sellerToken = admin ? null : verifySellerAdminToken(req);
-    const user = (!admin && !sellerToken) ? await userFromRequest(req) : null;
-    if (!admin && !sellerToken && !user) return res.status(401).json({ error: "Нет доступа" });
-    if (sellerToken && !sellerTokenCanAccess(sellerToken, "disputes")) return sellerForbidden(res);
+    if (sellerToken) return res.status(403).json({ error: "Закрыть диспут может только клиент или владелец сайта" });
+    const user = admin ? null : await userFromRequest(req);
+    if (!admin && !user) return res.status(401).json({ error: "Нет доступа" });
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const found = await findProductOrderForDispute(state, req.params.id);
     const order = found.order;
     if (!order) return res.status(404).json({ error: "Заказ не найден" });
-    if (sellerToken && String(order.storeId || "") !== String(sellerToken.storeId || "")) {
-      return res.status(403).json({ error: "Нет доступа к спору этого магазина" });
-    }
     if (user && !sameLogin(order.login, user.login)) {
       return res.status(403).json({ error: "Нет доступа к этому спору" });
     }
@@ -3485,7 +3557,7 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
-      fromLogin: admin?.login || sellerToken?.login || user?.login || store?.ownerLogin || store?.id || "admin",
+      fromLogin: admin?.login || user?.login || "admin",
       subject: `Диспут #${publicNumber} по заказу ${order.id}`,
       body: "Диспут закрыт. История переписки сохранена.",
       createdAt: now,
@@ -3495,9 +3567,6 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
     }, order, store));
     notifyRealtime("dispute_closed", { orderId: order.id, storeId: order.storeId });
-    if (sellerToken) {
-      return res.json({ order, ...(await stateForStoreAdmin(sellerToken.storeId, sellerToken)) });
-    }
     res.json({ order, ...(await stateFor(user || null)) });
   } catch (error) {
     next(error);
@@ -3509,6 +3578,18 @@ app.get("/api/session", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     res.json(await stateFor(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/logout", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (token) await supabase.from("sessions").delete().eq("token", token);
+    res.setHeader("Clear-Site-Data", '"cache"');
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -3546,7 +3627,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const storeId = String(req.body.storeId || sellerToken.storeId || "").trim();
     if (!storeId || storeId !== sellerToken.storeId) return res.status(403).json({ error: "Нет доступа к магазину" });
     const address = String(req.body.address || "").trim();
-    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC кошелек магазина" });
+    if (!isValidLitecoinAddress(address)) return res.status(400).json({ error: "Укажите корректный LTC кошелек магазина" });
 
     const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
     const store = row?.data || await loadStoreForAdmin(storeId);
@@ -3566,7 +3647,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     const finance = storeLedgerFinance(state, store, orders.filter((order) => String(order.storeId || "") === storeId));
     const earnedUsd = finance.netUsd;
     const requestedUsd = state.walletWithdrawals
-      .filter((item) => item.scope === "store" && item.storeId === storeId && !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase()))
+      .filter((item) => item.scope === "store" && item.storeId === storeId && withdrawalConsumesBalance(item))
       .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
     const availableUsd = Math.max(0, earnedUsd - requestedUsd);
     if (availableUsd <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
@@ -3578,7 +3659,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       idempotencyKey: withdrawalRequest.idempotencyKey,
       signature: withdrawalRequest.signature
     });
-    if (existingWithdrawal) return res.json({ withdrawal: existingWithdrawal, reused: true, ...(await stateForStoreAdmin(storeId, sellerToken)) });
+    if (existingWithdrawal) return res.json({ withdrawal: storeAdminWithdrawalForState(existingWithdrawal), reused: true, ...(await stateForStoreAdmin(storeId, sellerToken)) });
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
     if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступного баланса" });
 
@@ -3596,15 +3677,11 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       address,
       idempotencyKey: withdrawalRequest.idempotencyKey,
       requestSignature: withdrawalRequest.signature,
-      status: "pending",
+      status: nowpaymentsPayoutsEnabled ? "queued" : "pending",
       provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU")
     };
-    await attachNowpaymentsPayoutToWithdrawal(request, {
-      address,
-      description: `CERBER store withdrawal ${store.name || store.id} / ${request.id}`
-    });
     state.walletWithdrawals.unshift(request);
     await notifySiteUser(state, store.ownerLogin || store.id, {
       id: `notice-store-withdrawal-${request.id}-${loginKey(store.ownerLogin || store.id)}`,
@@ -3623,9 +3700,10 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       body: `${store.name || store.id}: ${amountUsd.toFixed(2)} $ на ${address}.`
     });
     await saveSettingsState(state);
+    scheduleNowpaymentsWithdrawalPayout(request.id);
     await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
-    res.json({ withdrawal: request, ...(await stateForStoreAdmin(storeId, sellerToken)) });
+    res.json({ withdrawal: storeAdminWithdrawalForState(request), ...(await stateForStoreAdmin(storeId, sellerToken)) });
   } catch (error) {
     next(error);
   }
@@ -5452,7 +5530,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
     if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступной комиссии" });
     const address = String(req.body.address || state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
-    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC счет для вывода" });
+    if (!isValidLitecoinAddress(address)) return res.status(400).json({ error: "Укажите корректный LTC счет для вывода" });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "owner", identity: admin.login, amountUsd, address });
     const existingWithdrawal = findReusableWithdrawal(state, {
@@ -5474,15 +5552,11 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       address,
       idempotencyKey: withdrawalRequest.idempotencyKey,
       requestSignature: withdrawalRequest.signature,
-      status: "pending",
+      status: nowpaymentsPayoutsEnabled ? "queued" : "pending",
       provider: nowpaymentsPayoutsEnabled ? "nowpayments" : "manual",
       createdAt: Date.now(),
       date: new Date().toLocaleString("ru-RU")
     };
-    await attachNowpaymentsPayoutToWithdrawal(request, {
-      address,
-      description: `CERBER owner commission withdrawal / ${request.id}`
-    });
     state.walletWithdrawals.unshift(request);
     await notifySiteUser(state, admin.login, {
       id: `notice-owner-withdrawal-${request.id}-${loginKey(admin.login)}`,
@@ -5492,9 +5566,10 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       body: `Запрошен вывод ${amountUsd.toFixed(2)} $ (${request.amountLtc.toFixed(8)} LTC) на ${address}.`
     });
     await saveSettingsState(state);
+    scheduleNowpaymentsWithdrawalPayout(request.id);
     await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, scope: "owner" });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.json(adminBuildOverview(data));
   } catch (error) {
     next(error);
   }
@@ -5589,7 +5664,7 @@ app.post("/api/admin/password", async (req, res, next) => {
     const nextPassword = String(req.body.nextPassword || "");
     const currentPasswordOk = state.adminSecurity.passwordHash
       ? await bcrypt.compare(currentPassword, state.adminSecurity.passwordHash)
-      : currentPassword === String(state.adminSecurity.plainPassword || process.env.MARKET_ADMIN_PASSWORD || "admin1212");
+      : secretValuesMatch(currentPassword, state.adminSecurity.plainPassword || process.env.MARKET_ADMIN_PASSWORD);
     if (!currentPasswordOk) return res.status(401).json({ error: "Текущий пароль неверный" });
     if (nextPassword.length < 8) return res.status(400).json({ error: "Минимум 8 символов" });
     state.adminSecurity.passwordHash = await bcrypt.hash(nextPassword, 12);
@@ -5957,6 +6032,13 @@ function nowpaymentsPayoutId(payload = {}) {
   );
 }
 
+function isValidLitecoinAddress(value = "") {
+  const address = String(value || "").trim();
+  if (/^[LM3][a-km-zA-HJ-NP-Z1-9]{25,49}$/.test(address)) return true;
+  if (!/^ltc1[ac-hj-np-z02-9]{8,87}$/i.test(address)) return false;
+  return address === address.toLowerCase() || address === address.toUpperCase();
+}
+
 async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", description = "" } = {}) {
   if (!nowpaymentsPayoutsEnabled) {
     const error = new Error("Автоматические NOWPayments payouts выключены");
@@ -6017,12 +6099,107 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
     withdrawal.autoPayoutAt = Date.now();
     withdrawal.requiresProviderVerification = !payoutResult.verification;
   } catch (error) {
-    withdrawal.status = "pending";
-    withdrawal.provider = "manual";
+    withdrawal.status = "failed";
+    withdrawal.provider = "nowpayments";
+    withdrawal.providerStatus = "failed";
     withdrawal.autoPayoutError = String(error?.message || error).slice(0, 500);
     withdrawal.autoPayoutErrorAt = Date.now();
   }
   return withdrawal;
+}
+
+async function processNowpaymentsWithdrawalPayout(withdrawalId = "") {
+  if (!nowpaymentsPayoutsEnabled || !withdrawalId) return;
+  const state = await loadSettingsState();
+  state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+  const withdrawal = state.walletWithdrawals.find((item) => String(item.id || "") === String(withdrawalId));
+  if (!withdrawal || String(withdrawal.status || "").toLowerCase() !== "queued") return;
+
+  withdrawal.status = "submitting";
+  withdrawal.provider = "nowpayments";
+  withdrawal.payoutSubmissionStartedAt = Date.now();
+  await saveSettingsState(state);
+
+  const payoutDraft = { ...withdrawal };
+  await attachNowpaymentsPayoutToWithdrawal(payoutDraft, {
+    address: payoutDraft.address,
+    description: payoutDraft.scope === "owner"
+      ? `CERBER owner commission withdrawal / ${payoutDraft.id}`
+      : `CERBER store withdrawal ${payoutDraft.storeName || payoutDraft.storeId || "store"} / ${payoutDraft.id}`
+  });
+  payoutDraft.payoutSubmissionFinishedAt = Date.now();
+
+  const latestState = await loadSettingsState();
+  latestState.walletWithdrawals = Array.isArray(latestState.walletWithdrawals) ? latestState.walletWithdrawals : [];
+  const latestWithdrawal = latestState.walletWithdrawals.find((item) => String(item.id || "") === String(withdrawalId));
+  if (!latestWithdrawal) return;
+  [
+    "status",
+    "provider",
+    "providerStatus",
+    "providerPayoutId",
+    "providerPayload",
+    "autoPayoutAt",
+    "autoPayoutError",
+    "autoPayoutErrorAt",
+    "requiresProviderVerification",
+    "payoutSubmissionFinishedAt"
+  ].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(payoutDraft, key)) latestWithdrawal[key] = payoutDraft[key];
+  });
+
+  await notifySiteUser(latestState, latestWithdrawal.login || latestWithdrawal.storeId || "admin", {
+    id: `notice-withdrawal-provider-${latestWithdrawal.id}-${latestWithdrawal.status}`,
+    eventType: "withdrawal_provider_status",
+    withdrawalId: latestWithdrawal.id,
+    storeId: latestWithdrawal.storeId || "",
+    title: latestWithdrawal.status === "failed" ? "Не удалось отправить выплату" : "Выплата отправлена в обработку",
+    body: latestWithdrawal.status === "failed"
+      ? "Средства снова доступны для вывода. Проверьте LTC адрес и повторите заявку."
+      : `Заявка ${latestWithdrawal.id} передана в NOWPayments.`
+  });
+  await saveSettingsState(latestState);
+  await appendAdminLog("withdrawal_provider_submitted", "system", {
+    id: latestWithdrawal.id,
+    scope: latestWithdrawal.scope || "user",
+    status: latestWithdrawal.status,
+    providerPayoutId: latestWithdrawal.providerPayoutId || ""
+  });
+  notifyRealtime("wallet_withdrawal_status_updated", {
+    id: latestWithdrawal.id,
+    status: latestWithdrawal.status,
+    scope: latestWithdrawal.scope || "user"
+  });
+}
+
+function scheduleNowpaymentsWithdrawalPayout(withdrawalId = "") {
+  const id = String(withdrawalId || "");
+  if (!nowpaymentsPayoutsEnabled || !id || withdrawalPayoutJobs.has(id)) return;
+  withdrawalPayoutJobs.add(id);
+  const timer = setTimeout(() => {
+    processNowpaymentsWithdrawalPayout(id)
+      .catch((error) => console.error("[payout] background submission failed", { id, message: error.message }))
+      .finally(() => withdrawalPayoutJobs.delete(id));
+  }, 0);
+  timer.unref?.();
+}
+
+async function resumeQueuedWithdrawalPayouts() {
+  if (!nowpaymentsPayoutsEnabled) return;
+  const state = await loadSettingsState();
+  const withdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+  let changed = false;
+  withdrawals.forEach((withdrawal) => {
+    const status = String(withdrawal.status || "").toLowerCase();
+    if (status === "queued") scheduleNowpaymentsWithdrawalPayout(withdrawal.id);
+    if (status === "submitting" && !withdrawal.providerPayoutId && Date.now() - Number(withdrawal.payoutSubmissionStartedAt || 0) > 5 * 60 * 1000) {
+      withdrawal.status = "manual_review";
+      withdrawal.providerStatus = "submission_uncertain";
+      withdrawal.requiresManualReview = true;
+      changed = true;
+    }
+  });
+  if (changed) await saveSettingsState(state);
 }
 
 async function createNowpaymentsWalletPayment(paymentPayload) {
@@ -7464,9 +7641,30 @@ function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
     .filter((item) => {
       if (scope && item.scope !== scope) return false;
       if (storeId && item.storeId !== storeId) return false;
-      return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
+      return withdrawalConsumesBalance(item);
     })
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
+function withdrawalConsumesBalance(withdrawal = {}) {
+  const status = String(withdrawal.status || "pending").toLowerCase();
+  if (["cancelled", "canceled", "rejected", "failed", "payout_failed"].includes(status)) return false;
+  if (withdrawal.autoPayoutError && !withdrawal.providerPayoutId) return false;
+  return true;
+}
+
+function storeAdminWithdrawalForState(withdrawal = {}) {
+  const {
+    providerPayload,
+    providerStatusPayload,
+    requestSignature,
+    idempotencyKey,
+    autoPayoutError,
+    ...safeWithdrawal
+  } = withdrawal || {};
+  if (autoPayoutError && !safeWithdrawal.providerPayoutId) safeWithdrawal.status = "failed";
+  safeWithdrawal.payoutFailed = ["failed", "payout_failed"].includes(String(safeWithdrawal.status || "").toLowerCase());
+  return safeWithdrawal;
 }
 
 function withdrawalRequestFingerprint(req, { scope = "", identity = "", amountUsd = 0, amountLtc = 0, address = "" } = {}) {
@@ -7485,7 +7683,7 @@ function reusableWithdrawalStatuses(status = "") {
 function findReusableWithdrawal(state = {}, { scope = "", login = "", storeId = "", idempotencyKey = "", signature = "", windowMs = 2 * 60 * 1000 } = {}) {
   const now = Date.now();
   return (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).find((item) => {
-    if (!reusableWithdrawalStatuses(item.status)) return false;
+    if (!reusableWithdrawalStatuses(item.status) || !withdrawalConsumesBalance(item)) return false;
     if (scope && item.scope !== scope) return false;
     if (storeId && String(item.storeId || "") !== String(storeId || "")) return false;
     if (login && !sameLogin(item.login || item.loginKey, login)) return false;
@@ -9116,7 +9314,7 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
     const address = String(req.body.address || "").trim();
     const note = String(req.body.note || "").trim().slice(0, 500);
     if (!Number.isFinite(amountLtc) || amountLtc <= 0) return res.status(400).json({ error: "Укажите сумму LTC" });
-    if (!address || address.length < 12) return res.status(400).json({ error: "Укажите LTC адрес" });
+    if (!isValidLitecoinAddress(address)) return res.status(400).json({ error: "Укажите корректный LTC адрес" });
 
     const state = await loadSettingsState();
     state.ltcBalances = state.ltcBalances || {};
@@ -11879,12 +12077,20 @@ const server = app.listen(port, () => {
   setTimeout(() => {
     reconcilePendingNowpaymentsOrders({ force: true }).catch((error) => console.error("Payment reconciliation startup error", error));
   }, 2500);
+  setTimeout(() => {
+    resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue startup error", error));
+  }, 3500);
 });
 
 const paymentReconcileTimer = setInterval(() => {
   reconcilePendingNowpaymentsOrders().catch((error) => console.error("Payment reconciliation interval error", error));
 }, paymentReconcileIntervalMs);
 paymentReconcileTimer.unref?.();
+
+const withdrawalPayoutTimer = setInterval(() => {
+  resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue interval error", error));
+}, 60 * 1000);
+withdrawalPayoutTimer.unref?.();
 
 adminRealtimeServer = new WebSocketServer({ noServer: true });
 adminRealtimeServer.on("connection", (socket, req) => {
@@ -11908,6 +12114,11 @@ server.on("upgrade", (req, socket, head) => {
   try {
     pathname = new URL(req.url || "", `http://${req.headers.host || "localhost"}`).pathname;
   } catch {
+    socket.destroy();
+    return;
+  }
+  const origin = String(req.headers.origin || "");
+  if (origin && !isAllowedCorsOrigin(origin)) {
     socket.destroy();
     return;
   }

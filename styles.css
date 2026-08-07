@@ -3268,12 +3268,6 @@ body[data-theme="dark"] .mirror-row {
   stroke: currentColor;
 }
 
-.ref-domain-note {
-  color: var(--muted);
-  font-weight: 800;
-  overflow-wrap: anywhere;
-}
-
 .ref-terms {
   display: flex;
   justify-content: space-between;
@@ -5865,5 +5859,95 @@ details[data-shop-storage-item] .form {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  .orders-screen .order-tabs {
+    display: grid;
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
+  .orders-screen .order-tabs button {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    white-space: normal;
+  }
+
+  .orders-screen .order-tabs span {
+    min-width: 24px;
+    min-height: 24px;
+    margin-left: 4px;
+  }
+
+  .shop-panel-page,
+  .shop-panel-page .seller-dashboard-shell,
+  .shop-panel-page .seller-dashboard-main,
+  .shop-panel-page .seller-dashboard-card,
+  .shop-panel-page .seller-dashboard-top > *,
+  .shop-panel-page .shop-dispute-layout {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .shop-panel-page .seller-dashboard-top strong,
+  .shop-panel-page .seller-dashboard-top span,
+  .shop-panel-page .seller-dashboard-top small,
+  .shop-panel-page .seller-dashboard-user,
+  .shop-panel-page .seller-dashboard-card,
+  .shop-panel-page .admin-dispute-bubble {
+    overflow-wrap: anywhere;
+  }
+
+  .shop-panel-page .shop-dispute-table {
+    overflow: visible;
+  }
+
+  .shop-panel-page .shop-dispute-head {
+    display: none;
+  }
+
+  .shop-panel-page .shop-dispute-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    min-width: 0;
+    padding: 12px;
+  }
+
+  .shop-panel-page .shop-dispute-row > strong {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  .shop-panel-page .shop-dispute-row > span[data-label] {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .shop-panel-page .shop-dispute-row > span[data-label]::before {
+    content: attr(data-label) ":";
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .shop-panel-page .shop-dispute-row .status-pill,
+  .shop-panel-page .shop-dispute-row .shop-dispute-open {
+    justify-self: start;
+  }
+
+  .shop-panel-page .admin-dispute-actions,
+  .shop-panel-page .admin-dispute-actions > *,
+  .shop-panel-page .admin-dispute-reply .primary {
+    width: 100%;
   }
 }

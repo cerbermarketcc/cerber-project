@@ -81,7 +81,8 @@ const PARTIAL_STATE_OBJECT_KEYS = [
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
-const ADMIN_PANEL_PASSWORD = "admincerbercc1212";
+// The legacy in-app admin is disabled; privileged access is server-authenticated.
+const ADMIN_PANEL_PASSWORD = "";
 let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
@@ -433,6 +434,16 @@ function testSellerSeedStore() {
 }
 
 let db = loadDb();
+if (API_ENABLED) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
+    localStorage.setItem(AUTH_KEY, JSON.stringify({ currentUser: db.currentUser, users: (db.users || []).map(clientStorageUser) }));
+    localStorage.removeItem("cerber_text_admin_password");
+    localStorage.removeItem(OWNER_ACCESS_PASSWORD_KEY);
+    localStorage.removeItem(ADMIN_ACCESS_KEY);
+    localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
+  } catch {}
+}
 let route = "home";
 let activeStoreId = "";
 let activeStoreTab = "positions";
@@ -642,7 +653,6 @@ Object.assign(text.ru, {
   any: "Любой",
   ready: "Готовый",
   preorder: "Предзаказ",
-  noStores: "Магазины появятся после добавления в админке.",
   noPositions: "Позиции пока не добавлены",
   noFilteredProducts: "По выбранным фильтрам товаров нет.",
   openFilters: "Открыть фильтры",
@@ -703,7 +713,6 @@ Object.assign(text.md, {
   any: "Oricare",
   ready: "Gata",
   preorder: "Precomanda",
-  noStores: "Magazinele vor aparea dupa adaugarea in admin.",
   noPositions: "Pozitiile nu au fost adaugate inca",
   noFilteredProducts: "Nu exista produse pentru filtrele selectate.",
   openFilters: "Deschide filtrele",
@@ -764,7 +773,6 @@ Object.assign(text.en, {
   any: "Any",
   ready: "Ready",
   preorder: "Preorder",
-  noStores: "Stores will appear after they are added in admin.",
   noPositions: "No positions added yet",
   noFilteredProducts: "No products match the selected filters.",
   openFilters: "Open filters",
@@ -837,7 +845,6 @@ const uiPhraseTranslations = {
     "Открыть фильтры": "Deschide filtrele",
     "Позиции пока не добавлены": "Pozitiile nu au fost adaugate inca",
     "По выбранным фильтрам товаров нет.": "Nu exista produse pentru filtrele selectate.",
-    "Магазины появятся после добавления в админке.": "Magazinele vor aparea dupa adaugarea in admin.",
     "Сообщение": "Mesaj",
     "Отправить": "Trimite",
     "Закрыть": "Inchide",
@@ -880,7 +887,6 @@ const uiPhraseTranslations = {
     "Открыть фильтры": "Open filters",
     "Позиции пока не добавлены": "No positions added yet",
     "По выбранным фильтрам товаров нет.": "No products match the selected filters.",
-    "Магазины появятся после добавления в админке.": "Stores will appear after they are added in admin.",
     "Сообщение": "Message",
     "Отправить": "Send",
     "Закрыть": "Close",
@@ -1220,7 +1226,7 @@ function mountCmsVisualEditor() {
 
   toolbar.querySelector("[data-cms-save]").onclick = async () => {
     const adminPassword = password.value.trim();
-    storageSet("cerber_text_admin_password", adminPassword);
+    sessionStorageSet("cerber_text_admin_password", adminPassword);
     document.querySelectorAll("[data-cms-original-text]").forEach((element) => {
       const next = cmsNormalizeText(element.textContent);
       const original = element.dataset.cmsOriginalText;
@@ -1344,6 +1350,10 @@ function applyVisualMarketplaceReset(next = {}) {
 }
 
 function normalizeDb(next) {
+  if (API_ENABLED) {
+    next.users = (Array.isArray(next.users) ? next.users : []).map(clientStorageUser);
+    next.stores = (Array.isArray(next.stores) ? next.stores : []).map(clientStorageStore);
+  }
   if (!Array.isArray(next.orders)) next.orders = [];
   if (!Array.isArray(next.groupMessages)) next.groupMessages = [];
   if (!next.groupSettings) next.groupSettings = structuredClone(defaults.groupSettings);
@@ -1707,7 +1717,7 @@ function saveAuth() {
   try {
     const auth = {
       currentUser: db.currentUser,
-      users: db.users
+      users: API_ENABLED ? (db.users || []).map(clientStorageUser) : db.users
     };
     storageSet(AUTH_KEY, JSON.stringify(auth));
     if (db.currentUser) storageSet(SESSION_KEY, db.currentUser);
@@ -1757,6 +1767,19 @@ function storageSet(key, value) {
   return saved;
 }
 
+function sessionStorageSet(key, value) {
+  const text = String(value ?? "");
+  runtimeStorage.set(key, text);
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+  try {
+    sessionStorage.setItem(key, text);
+    return true;
+  } catch {}
+  return runtimeStorage.has(key);
+}
+
 function storageRemove(key) {
   runtimeStorage.delete(key);
   try {
@@ -1783,7 +1806,7 @@ function sellerAdminApiSessionToken() {
 
 function rememberSellerAdminApiToken(token = "") {
   runtimeSellerAdminApiToken = String(token || "");
-  if (runtimeSellerAdminApiToken) storageSet(SELLER_ADMIN_API_TOKEN_KEY, runtimeSellerAdminApiToken);
+  if (runtimeSellerAdminApiToken) sessionStorageSet(SELLER_ADMIN_API_TOKEN_KEY, runtimeSellerAdminApiToken);
   else storageRemove(SELLER_ADMIN_API_TOKEN_KEY);
 }
 
@@ -1934,9 +1957,6 @@ function applyRemoteState(payload) {
   const rememberedGroupMessages = Array.isArray(db?.groupMessages) ? db.groupMessages : [];
   const rememberedOrders = Array.isArray(db?.orders) ? db.orders : [];
   const rememberedUsers = Array.isArray(db?.users) ? db.users : [];
-  const rememberedPasswords = new Map((Array.isArray(db?.users) ? db.users : [])
-    .filter((user) => user?.login && typeof user.password === "string" && user.password)
-    .map((user) => [loginKey(user.login), user.password]));
   db = merge(db, protectIncomingState(payload.state || {}, payload));
   if (payload.user) db.currentUser = payload.user.login;
   else if (previousCurrentUser && payload.state && !payload.state.currentUser) db.currentUser = previousCurrentUser;
@@ -1950,10 +1970,7 @@ function applyRemoteState(payload) {
   rememberedUsers.forEach((savedUser) => {
     if (savedUser?.login && !db.users.some((user) => sameLogin(user.login, savedUser.login))) db.users.push(savedUser);
   });
-  db.users = db.users.map((user) => {
-    const password = rememberedPasswords.get(loginKey(user.login));
-    return password && !user.password ? { ...user, password } : user;
-  });
+  if (API_ENABLED) db.users = db.users.map(clientStorageUser);
   db.messages = mergeMessageLists(db.messages, rememberedPrivateMessages);
   db.groupMessages = mergeMessageLists(db.groupMessages, rememberedGroupMessages);
   db.orders = mergeOrderLists(db.orders, rememberedOrders);
@@ -1963,7 +1980,7 @@ function applyRemoteState(payload) {
   writeStoredGroupMembers(db.groupSettings.members);
   saveAuth();
   try {
-    storageSet(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
   } catch {}
 }
 
@@ -2032,6 +2049,46 @@ async function loadRemoteSession() {
     }
     return false;
   }
+}
+
+function clientStorageUser(user = {}) {
+  const {
+    password,
+    password_hash,
+    passwordHash,
+    plainPassword,
+    adminPassword,
+    adminPasswordHash,
+    ...safeUser
+  } = user || {};
+  return safeUser;
+}
+
+function clientStorageStore(store = {}) {
+  const {
+    adminPassword,
+    adminPasswordHash,
+    password,
+    passwordHash,
+    ...safeStore
+  } = store || {};
+  safeStore.staff = (Array.isArray(safeStore.staff) ? safeStore.staff : []).map(clientStorageUser);
+  if (safeStore.panel && typeof safeStore.panel === "object") {
+    const { password: panelPassword, ...safePanel } = safeStore.panel;
+    safeStore.panel = safePanel;
+  }
+  return safeStore;
+}
+
+function clientStorageSnapshot(source = db) {
+  if (!API_ENABLED) return source;
+  return {
+    ...source,
+    users: (Array.isArray(source?.users) ? source.users : []).map(clientStorageUser),
+    stores: (Array.isArray(source?.stores) ? source.stores : []).map(clientStorageStore),
+    exchangers: (Array.isArray(source?.exchangers) ? source.exchangers : []).map(clientStorageStore),
+    storeApplications: (Array.isArray(source?.storeApplications) ? source.storeApplications : []).map(clientStorageStore)
+  };
 }
 
 async function syncPendingProductPayments() {
@@ -2150,7 +2207,7 @@ function restoreShopPanelStore(store) {
   }
   normalizeDb(db);
   try {
-    storageSet(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
   } catch {}
 }
 
@@ -2606,7 +2663,7 @@ async function persistSellerAdminProductPositions(store, product, token = seller
 function saveDb(options = {}) {
   normalizeOrders(db);
   saveAuth();
-  const serialized = JSON.stringify(db);
+  const serialized = JSON.stringify(clientStorageSnapshot(db));
   const saved = storageSet(STORE_KEY, serialized);
   if (!saved && !API_ENABLED && !options.silentLocalStorageError) showToast("LocalStorage недоступен");
   if (!options.localOnly) persistRemoteState();
@@ -2618,7 +2675,7 @@ function clearSession() {
     storageRemove(SESSION_KEY);
     clearApiSession();
     saveAuth();
-    storageSet(STORE_KEY, JSON.stringify(db));
+    storageSet(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
   } catch {
     saveDb();
   }
@@ -2637,6 +2694,7 @@ function hasApiSession() {
 }
 
 function currentLocalPassword(login = db.currentUser) {
+  if (API_ENABLED) return "";
   const key = loginKey(login || db.currentUser || storageGet(SESSION_KEY));
   const user = key ? db.users.find((item) => sameLogin(item.login, key)) : currentUser();
   if (typeof user?.password === "string" && user.password) return user.password;
@@ -2650,37 +2708,24 @@ function currentLocalPassword(login = db.currentUser) {
 }
 
 function rememberLocalPassword(login = "", password = "") {
+  if (API_ENABLED) {
+    db.users = (db.users || []).map(clientStorageUser);
+    saveAuth();
+    storageSet(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
+    return;
+  }
   const value = String(password || "");
   if (!login || !value) return;
   const existing = db.users.find((user) => sameLogin(user.login, login));
   if (existing) existing.password = value;
   else db.users.push({ login, password: value, name: login, role: "user", createdAt: isoDate(new Date()) });
   saveAuth();
-  storageSet(STORE_KEY, JSON.stringify(db));
+  storageSet(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
 }
 
 async function ensureApiSession() {
   if (!API_ENABLED) return true;
-  if (hasApiSession()) return true;
-  const user = currentUser();
-  const login = user?.login || db.currentUser || storageGet(SESSION_KEY);
-  const password = currentLocalPassword(login);
-  if (!login || !password) return false;
-  if (!db.currentUser) db.currentUser = login;
-  try {
-    const payload = await apiFetch("/api/auth/restore-session", {
-      method: "POST",
-      timeoutMs: 15000,
-      body: JSON.stringify({ login, password })
-    });
-    rememberApiToken(payload.token);
-    applyRemoteState(payload);
-    rememberLocalPassword(payload.user?.login || login, password);
-    return true;
-  } catch {
-    clearApiSession();
-    return false;
-  }
+  return hasApiSession();
 }
 
 function isAdmin() {
@@ -3145,7 +3190,9 @@ function activeWithdrawalUsd(scope = "", storeId = "") {
     .filter((item) => {
       if (scope && item.scope !== scope) return false;
       if (storeId && item.storeId !== storeId) return false;
-      return !["cancelled", "canceled", "rejected"].includes(String(item.status || "").toLowerCase());
+      const status = String(item.status || "pending").toLowerCase();
+      if (["cancelled", "canceled", "rejected", "failed", "payout_failed"].includes(status)) return false;
+      return !(item.autoPayoutError && !item.providerPayoutId);
     })
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
 }
@@ -3154,6 +3201,10 @@ function walletWithdrawalStatusText(status = "pending") {
   const raw = String(status || "pending").toLowerCase();
   if (raw === "completed" || raw === "paid") return "Завершено";
   if (raw === "cancelled" || raw === "canceled" || raw === "rejected") return "Отменено";
+  if (raw === "failed" || raw === "payout_failed") return "Ошибка выплаты";
+  if (raw === "manual_review") return "Требует проверки";
+  if (raw === "queued") return "В очереди";
+  if (raw === "submitting" || raw === "creating") return "Отправляется";
   if (raw === "maintenance") return "Техработы";
   return "В обработке";
 }
@@ -4201,7 +4252,7 @@ function renderHome() {
   route = "home";
   const filters = catalogFilters();
   const stores = homeStores(activeHomeTab);
-  const cards = stores.map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
+  const cards = stores.map((store) => storeCard(store)).join("");
   layout(`
     <section class="feed home-mirrors-first">
       ${officialMirrorsView()}
@@ -4270,7 +4321,7 @@ function officialMirrorsView() {
 function renderCatalog() {
   route = "catalog";
   const filters = catalogFilters();
-  const cards = visibleStores(false).map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Магазины появятся после добавления в админке.</p></article>`;
+  const cards = visibleStores(false).map((store) => storeCard(store)).join("");
   layout(`
     <section class="hero">
       <h1>Магазины</h1>
@@ -7209,7 +7260,6 @@ function renderReferrals(tab = activeReferralTab) {
               <button data-copy-ref aria-label="Скопировать">⧉</button>
               <button class="qr-button" data-show-qr aria-label="QR">${navIcon("qr")}</button>
             </div>
-            <small class="ref-domain-note">Ссылка создана для домена: ${esc(linkHost)}</small>
           ` : `<button class="primary" data-create-ref>Создать ссылку</button>`}
         </article>
         <article class="ref-terms"><strong>Правила начислений</strong><button data-ref-terms>Подробнее</button></article>
@@ -8742,8 +8792,8 @@ function renderOwnerAccess() {
     const password = new FormData(event.currentTarget).get("password");
     if (password !== ADMIN_PANEL_PASSWORD) return showToast("Неверный пароль");
     try {
-      storageSet(ADMIN_ACCESS_KEY, "ok");
-      storageSet(OWNER_ACCESS_PASSWORD_KEY, password);
+      sessionStorageSet(ADMIN_ACCESS_KEY, "ok");
+      sessionStorageSet(OWNER_ACCESS_PASSWORD_KEY, password);
     } catch {}
     renderOwnerPanel();
   };
@@ -9200,7 +9250,7 @@ async function handleOwnerCreateStore(event) {
     try {
       const payload = await apiFetch("/api/owner/stores", {
         method: "POST",
-        headers: { "x-owner-password": storageGet(OWNER_ACCESS_PASSWORD_KEY) || ADMIN_PANEL_PASSWORD },
+        headers: { "x-owner-password": storageGet(OWNER_ACCESS_PASSWORD_KEY) || "" },
         body: JSON.stringify(store)
       });
       const savedStore = payload.store || store;
@@ -9427,7 +9477,7 @@ function renderAdmin() {
         return;
       }
       try {
-        storageSet(ADMIN_ACCESS_KEY, "ok");
+        sessionStorageSet(ADMIN_ACCESS_KEY, "ok");
       } catch {}
       renderAdmin();
     };
@@ -10358,10 +10408,10 @@ function shopDisputeRow(order, active = false) {
   const searchText = [label, String(label).replace("#", ""), order.id, order.login, order.product, order.storeName, productOrderStatus(order)].join(" ").toLowerCase();
   return `<button class="shop-dispute-row ${active ? "active" : ""}" data-shop-dispute-card data-search-text="${esc(searchText)}" data-shop-dispute-select="${esc(order.id)}">
     <strong>${esc(label)}<small>${esc(order.product || order.id)}</small></strong>
-    <span>${esc(order.login || "-")}</span>
-    <span>${Number(order.amountUsd || 0).toFixed(2)} $</span>
-    <span class="status-pill">${closed ? "closed" : "open"}</span>
-    <span>Профиль</span>
+    <span data-label="Клиент">${esc(order.login || "-")}</span>
+    <span data-label="Сумма">${Number(order.amountUsd || 0).toFixed(2)} $</span>
+    <span data-label="Статус" class="status-pill">${closed ? "closed" : "open"}</span>
+    <span class="shop-dispute-open">Открыть</span>
   </button>`;
 }
 
@@ -10409,7 +10459,6 @@ function shopDisputeDetail(order, store = null) {
     <div class="admin-dispute-actions">
       <button class="primary" data-shop-dispute-chat="${esc(order.id)}">Открыть чат</button>
       ${!closed ? `<button class="ghost-button" data-shop-dispute-join="${esc(order.id)}">Войти в диспут</button>` : ""}
-      ${!closed ? `<button class="ghost-button danger" data-shop-dispute-close="${esc(order.id)}">Закрыть диспут полностью</button>` : ""}
     </div>
     <h3>Последние сообщения</h3>
     <div class="admin-dispute-chat">
@@ -11038,27 +11087,6 @@ function bindShopPanelActions(store, activeTab) {
     button.onclick = () => showShopDisputeChatModal(button.dataset.shopDisputeChat || "");
   });
 
-  document.querySelectorAll("[data-shop-dispute-close]").forEach((button) => {
-    button.onclick = async () => {
-      const token = sellerAdminApiSessionToken();
-      if (!token) return showToast("Войдите в Shop Admin заново");
-      try {
-        const payload = await apiFetch(`/api/orders/${encodeURIComponent(button.dataset.shopDisputeClose)}/dispute/close`, {
-          method: "POST",
-          timeoutMs: 15000,
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        });
-        applyRemoteState(payload);
-        activeShopDisputeId = button.dataset.shopDisputeClose || activeShopDisputeId;
-        showToast("Спор закрыт");
-        renderShopPanel("disputes");
-      } catch (error) {
-        showToast(error.message || "Не удалось закрыть спор");
-      }
-    };
-  });
   document.querySelectorAll("[data-shop-dispute-join]").forEach((button) => {
     button.onclick = async () => {
       const token = sellerAdminApiSessionToken();
@@ -11138,13 +11166,13 @@ async function requestShopPayout(event) {
   try {
     const payload = await apiFetch("/api/store-admin/withdrawals", {
       method: "POST",
-      timeoutMs: 15000,
+      timeoutMs: 30000,
       headers: { Authorization: `Bearer ${token}` },
       body: JSON.stringify({ storeId: store.id, amountUsd, address })
     });
     applyRemoteState(payload);
     document.querySelector("[data-modal]")?.classList.remove("open");
-    showToast("Вывод магазина отправлен");
+    showToast("Заявка сохранена. Выплата отправляется");
     renderShopPanel("finances");
   } catch (error) {
     showToast(error.message || "Не удалось создать заявку на вывод");
@@ -11557,6 +11585,14 @@ function bindGlobal() {
   });
   document.querySelectorAll("[data-logout]").forEach((button) => {
     button.onclick = () => {
+      const token = apiSessionToken();
+      if (API_ENABLED && token) {
+        apiFetch("/api/auth/logout", {
+          method: "POST",
+          timeoutMs: 8000,
+          headers: { Authorization: `Bearer ${token}` }
+        }).catch(() => {});
+      }
       clearSession();
       renderAuth();
     };

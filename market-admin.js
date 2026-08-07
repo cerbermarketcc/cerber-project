@@ -28,6 +28,16 @@ const supportTopics = [
 ];
 
 function adminStorageGet(key) {
+  if (key === TOKEN_KEY) {
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+    try {
+      return sessionStorage.getItem(key) || adminRuntimeStorage.get(key) || "";
+    } catch {
+      return adminRuntimeStorage.get(key) || "";
+    }
+  }
   try {
     const value = localStorage.getItem(key);
     if (value !== null && value !== "") return value;
@@ -42,6 +52,16 @@ function adminStorageGet(key) {
 function adminStorageSet(key, value) {
   const text = String(value ?? "");
   adminRuntimeStorage.set(key, text);
+  if (key === TOKEN_KEY) {
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+    try {
+      sessionStorage.setItem(key, text);
+      return true;
+    } catch {}
+    return adminRuntimeStorage.has(key);
+  }
   let saved = false;
   try {
     localStorage.setItem(key, text);
