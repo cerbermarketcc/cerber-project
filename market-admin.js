@@ -4,7 +4,8 @@ const UI_STATE_KEY = "cerber_market_admin_ui_state";
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const IS_LOCAL_ADMIN_HOST = LOCAL_API_HOSTS.includes(location.hostname);
-const API_ORIGIN = IS_LOCAL_ADMIN_HOST ? location.origin : PRIMARY_API_ORIGIN;
+const SAME_ORIGIN_API = ["http:", "https:"].includes(location.protocol) ? location.origin : "";
+const API_ORIGIN = SAME_ORIGIN_API || PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
 const ADMIN_FORM_LOCK_MS = 5 * 60 * 1000;
 const ADMIN_UPLOAD_TIMEOUT_MS = 90000;
@@ -274,8 +275,9 @@ async function formImageValues(formData, fileName, limit = 12) {
 }
 
 async function api(path, options = {}) {
+  const { transportRetry = false, ...requestOptions } = options;
   const fetchJson = async (url) => {
-    const { timeoutMs = 45000, headers: optionHeaders = {}, ...fetchOptions } = options;
+    const { timeoutMs = 45000, headers: optionHeaders = {}, ...fetchOptions } = requestOptions;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -292,11 +294,21 @@ async function api(path, options = {}) {
       if (!response.ok) {
         const error = new Error(payload.error || "API error");
         error.status = response.status;
+        if ([502, 503, 504].includes(response.status)) error.code = "ADMIN_API_UPSTREAM";
         throw error;
       }
       return payload;
     } catch (error) {
-      if (error.name === "AbortError") throw new Error("Сервер долго отвечает. Проверьте интернет и попробуйте ещё раз.");
+      if (error.name === "AbortError") {
+        const timeoutError = new Error("Сервер долго отвечает. Проверьте интернет и попробуйте ещё раз.");
+        timeoutError.code = "ADMIN_API_TIMEOUT";
+        throw timeoutError;
+      }
+      if (!error?.status && (error instanceof TypeError || /load failed|failed to fetch|networkerror|network request failed/i.test(String(error?.message || "")))) {
+        const networkError = new Error("Не удалось связаться с сервером. Проверьте интернет и повторите действие.");
+        networkError.code = "ADMIN_API_NETWORK";
+        throw networkError;
+      }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -306,12 +318,16 @@ async function api(path, options = {}) {
     return fetchJson(path);
   }
   let lastError = null;
-  for (const origin of API_ORIGINS) {
+  const method = String(requestOptions.method || "GET").toUpperCase();
+  const canRetryTransport = transportRetry || method === "GET" || method === "HEAD";
+  for (let index = 0; index < API_ORIGINS.length; index += 1) {
+    const origin = API_ORIGINS[index];
     try {
       return await fetchJson(`${origin}${path}`);
     } catch (error) {
       lastError = error;
-      if (origin === PRIMARY_API_ORIGIN) break;
+      const isTransportError = ["ADMIN_API_TIMEOUT", "ADMIN_API_NETWORK", "ADMIN_API_UPSTREAM"].includes(String(error?.code || ""));
+      if (!canRetryTransport || !isTransportError || index === API_ORIGINS.length - 1) break;
     }
   }
   throw lastError || new Error("API error");
@@ -1642,12 +1658,13 @@ function bindActions() {
       const result = await api("/api/admin/stores", {
         method: "POST",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
+        transportRetry: true,
         body: JSON.stringify({
           name: fd.get("name"),
           ownerLogin: fd.get("ownerLogin"),
           adminPassword: fd.get("adminPassword"),
           image,
-          gallery,
+          gallery: gallery.length ? gallery : undefined,
           description: fd.get("description"),
           placement: placements[0] || "stores",
           placements,
@@ -1662,7 +1679,7 @@ function bindActions() {
         data.stores = adminUpsertById(data.stores, adminStoreRowFromPayload(result.store, result.panel));
         selectedStoreId = result.store.id || selectedStoreId;
       }
-      toast("Магазин создан");
+      toast(result?.recovered ? "Магазин уже был создан. Данные восстановлены" : "Магазин создан");
       endSubmit();
       renderShell();
       setTimeout(() => {

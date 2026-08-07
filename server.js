@@ -14,7 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v121";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v122";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -4996,27 +4996,43 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
 app.post("/api/admin/stores", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
-    const store = adminBuildStoreFromBody(req.body || {});
-    const panelPassword = String(req.body?.adminPassword || store.adminPassword || "").trim();
-    if (!store.name || !store.ownerLogin || !panelPassword) {
+    const requestedStore = adminBuildStoreFromBody(req.body || {});
+    const panelPassword = String(req.body?.adminPassword || requestedStore.adminPassword || "").trim();
+    if (!requestedStore.name || !requestedStore.ownerLogin || !panelPassword) {
       return res.status(400).json({ error: "Укажите название магазина, логин владельца и пароль панели" });
     }
-    const { data: existing } = await supabase.from("stores").select("id").eq("id", store.id).maybeSingle();
-    if (existing) return res.status(409).json({ error: "Магазин с таким ID уже существует" });
-    await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
+    const { data: existing, error: existingError } = await withTimeout(
+      supabase.from("stores").select("id,data").eq("id", requestedStore.id).maybeSingle(),
+      "admin store duplicate check",
+      10000
+    );
+    if (existingError) throw existingError;
+    const recovered = Boolean(existing?.data);
+    const existingOwnerKey = loginKey(existing?.data?.ownerLogin || "");
+    if (recovered && existingOwnerKey && existingOwnerKey !== loginKey(requestedStore.ownerLogin)) {
+      return res.status(409).json({ error: "Магазин с таким названием уже привязан к другому владельцу" });
+    }
+    const store = recovered ? adminBuildStoreFromBody(req.body || {}, existing.data) : requestedStore;
     const protectedStore = await normalizeStoreSecrets(store);
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
+    await withTimeout(
+      adminEnsureSellerProfile(savedStore.ownerLogin, panelPassword, savedStore.ownerLogin),
+      "admin seller profile sync",
+      15000
+    ).catch((error) => {
+      console.error("[admin-store] seller profile sync deferred", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, message: error.message });
+    });
     scheduleStorePublication(savedStore, "admin store create");
     clearDeletedStoreTombstone(savedStore.id).catch((error) => {
       console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
     });
     const panel = adminStorePanelLinks(savedStore, panelPassword);
-    appendAdminLog("store_created", admin.login, { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl }).catch((error) => {
+    appendAdminLog(recovered ? "store_create_recovered" : "store_created", admin.login, { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl }).catch((error) => {
       console.error("[admin-store] create log deferred failed", { storeId: savedStore.id, message: error.message });
     });
-    console.log("[admin-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
+    console.log(recovered ? "[admin-store] create recovered" : "[admin-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "market-admin" });
-    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }), panel });
+    res.json({ ok: true, recovered, store: publicStoreForState(savedStore, { includeStaff: true }), panel });
   } catch (error) {
     next(error);
   }
@@ -7273,22 +7289,18 @@ function adminStorePanelLinks(store, passwordOverride = "") {
 async function adminEnsureSellerProfile(login, password, name = "") {
   const key = loginKey(login);
   if (!key) return null;
-  const { data: existing } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
-  if (existing) {
-    const updates = { role: "seller" };
-    if (name) updates.name = existing.name || name;
-    if (password) updates.password_hash = await bcrypt.hash(String(password), 12);
-    await supabase.from("profiles").update(updates).eq("login_key", key);
-    return { ...existing, ...updates };
-  }
-  const passwordHash = await bcrypt.hash(String(password || "123"), 12);
-  const { data: user, error } = await supabase.from("profiles").insert({
+  const { data: existing, error: readError } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  if (readError) throw readError;
+  const passwordHash = password
+    ? await bcrypt.hash(String(password), 12)
+    : (existing?.password_hash || await bcrypt.hash("123", 12));
+  const { data: user, error } = await supabase.from("profiles").upsert({
     login,
     login_key: key,
     password_hash: passwordHash,
-    name: name || login,
+    name: existing?.name || name || login,
     role: "seller"
-  }).select("*").single();
+  }, { onConflict: "login_key" }).select("*").single();
   if (error) throw error;
   return user;
 }
