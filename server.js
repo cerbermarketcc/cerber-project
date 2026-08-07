@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-07-v128";
+const cerberBuildVersion = "marketplace-stability-2026-08-07-v129";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3058,7 +3058,11 @@ app.get("/api/health/deep", async (_req, res) => {
         ltcBalancePositive: payoutAccount.balanceOk ? payoutAccount.ltcAvailable > 0 : false,
         coversLatestFailed: payoutAccount.balanceOk && latestAmount > 0 ? payoutAccount.ltcAvailable + 1e-8 >= latestAmount : null,
         balanceErrorCode: payoutAccount.balanceErrorCode || "",
+        balanceHttpStatus: payoutAccount.balanceHttpStatus,
+        balanceProviderCode: payoutAccount.balanceProviderCode || "",
         authErrorCode: payoutAccount.authErrorCode || "",
+        authHttpStatus: payoutAccount.authHttpStatus,
+        authProviderCode: payoutAccount.authProviderCode || "",
         latestFailureCode: latestFailed ? nowpaymentsPayoutErrorCode(latestFailed) : "",
         latestFailureStage: String(latestFailed?.autoPayoutStage || "")
       };
@@ -6117,10 +6121,13 @@ function nowpaymentsPayoutErrorCode(value = {}) {
   if (/6\s*decimal|decimal.{0,20}(place|digit)|precision/.test(text)) return "amount_precision";
   if (/white.?list|not.{0,20}allowed.{0,20}(ip|address)|ip.{0,20}not.{0,20}allowed/.test(text)) return "whitelist_required";
   if (/insufficient|not enough|low balance|balance.{0,20}(low|exceed)/.test(text)) return "insufficient_balance";
+  if (/custod|primary.{0,20}balance|balance.{0,30}(disabled|not enabled|not available)/.test(text)) return "custody_unavailable";
   if (/2fa|two.?factor|verification.?code|authenticator|\botp\b|\btotp\b/.test(text)) return "two_factor_failed";
   if (/invalid.{0,20}(payout.?address|address)|bad_create_withdrawal_request/.test(text)) return "invalid_address";
   if (/minimum|minimal|below.{0,20}min/.test(text)) return "below_minimum";
+  if (/api.?key/.test(text)) return "api_key_invalid";
   if (/401|unauthori[sz]ed|invalid.{0,20}(credential|password|token)|jwt|email.{0,20}password/.test(text)) return "auth_failed";
+  if (/403|forbidden|access denied/.test(text)) return "access_forbidden";
   if (/timeout|timed out|aborterror/.test(text)) return "timeout";
   if (/fetch failed|econn|enotfound|network|service unavailable|502|503|504/.test(text)) return "provider_unavailable";
   return "provider_rejected";
@@ -6131,10 +6138,13 @@ function nowpaymentsPayoutFailureMessage(code = "provider_rejected") {
     amount_precision: "Старая заявка была отклонена из-за формата суммы LTC. Формат выплаты уже исправлен, создайте новую заявку.",
     whitelist_required: "NOWPayments отклонил выплату настройками Whitelist. Владельцу нужно разрешить IP сервера и адрес выплаты в NOWPayments.",
     insufficient_balance: "На Primary balance NOWPayments недостаточно LTC для этой выплаты.",
+    custody_unavailable: "Primary/Custody balance NOWPayments недоступен для API. Включите его в аккаунте NOWPayments.",
     two_factor_failed: "NOWPayments не принял код 2FA. Проверьте секрет 2FA для автоматических выплат.",
     invalid_address: "NOWPayments отклонил LTC-адрес получателя.",
     below_minimum: "Сумма меньше минимальной суммы выплаты NOWPayments.",
     auth_failed: "NOWPayments не принял данные входа для выплат.",
+    api_key_invalid: "NOWPayments не принял API-ключ для проверки баланса или выплаты.",
+    access_forbidden: "NOWPayments запретил доступ к выплатам настройками аккаунта или Whitelist.",
     timeout: "NOWPayments не подтвердил результат вовремя. Заявка оставлена на ручной проверке, повторять её пока нельзя.",
     provider_unavailable: "NOWPayments временно недоступен. Повторите заявку позднее.",
     provider_rejected: "NOWPayments отклонил выплату. Причина доступна владельцу в разделе финансов."
@@ -6163,13 +6173,19 @@ async function nowpaymentsPayoutAccountDiagnostic(force = false) {
     ]);
     const balancePayload = balanceResult.status === "fulfilled" ? balanceResult.value : null;
     const ltcAvailable = balanceResult.status === "fulfilled" ? nowpaymentsAvailableLtc(balancePayload) : Number.NaN;
+    const balanceError = balanceResult.status === "rejected" ? balanceResult.reason : null;
+    const authError = authResult.status === "rejected" ? authResult.reason : null;
     const value = {
       checkedAt: Date.now(),
       balanceOk: balanceResult.status === "fulfilled" && Number.isFinite(ltcAvailable),
       authOk: authResult.status === "fulfilled",
       ltcAvailable,
-      balanceErrorCode: balanceResult.status === "rejected" ? nowpaymentsPayoutErrorCode(balanceResult.reason) : "",
-      authErrorCode: authResult.status === "rejected" ? nowpaymentsPayoutErrorCode(authResult.reason) : ""
+      balanceErrorCode: balanceError ? nowpaymentsPayoutErrorCode(balanceError) : "",
+      balanceHttpStatus: Number(balanceError?.status || balanceError?.body?.statusCode || 0) || null,
+      balanceProviderCode: String(balanceError?.body?.code || balanceError?.body?.errorCode || "").slice(0, 80),
+      authErrorCode: authError ? nowpaymentsPayoutErrorCode(authError) : "",
+      authHttpStatus: Number(authError?.status || authError?.body?.statusCode || 0) || null,
+      authProviderCode: String(authError?.body?.code || authError?.body?.errorCode || "").slice(0, 80)
     };
     nowpaymentsPayoutDiagnosticCache = { expiresAt: Date.now() + 60 * 1000, value, promise: null };
     return value;
