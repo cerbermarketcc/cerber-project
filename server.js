@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-09-v137";
+const cerberBuildVersion = "marketplace-stability-2026-08-09-v138";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -332,11 +332,11 @@ async function verifyPanelPassword(password = "", passwordHash = "", legacyPassw
   return Boolean(legacy && value === legacy);
 }
 
-async function normalizeStoreSecrets(store = {}) {
+async function normalizeStoreSecrets(store = {}, options = {}) {
   const item = { ...store };
   const legacyAdminPassword = String(item.adminPassword || "").trim();
   if (legacyAdminPassword) {
-    item.adminPasswordHash = await hashPanelPassword(legacyAdminPassword);
+    item.adminPasswordHash = String(options.adminPasswordHash || "").trim() || await hashPanelPassword(legacyAdminPassword);
   }
   delete item.adminPassword;
   item.staff = await Promise.all((Array.isArray(item.staff) ? item.staff : []).map(async (member) => {
@@ -580,6 +580,10 @@ function assertClientRateLimit(req, scope, { limit = 30, windowMs = 60 * 1000, i
     error.status = 429;
     throw error;
   }
+}
+
+function resetClientRateLimit(req, scope, identity = "") {
+  clientRateLimits.delete(`${scope}:${clientIp(req)}:${loginKey(identity)}`);
 }
 
 function assertAdminRateLimit(req, login) {
@@ -3395,19 +3399,26 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
-    if (ownerLoginOk && await verifyPanelPassword(password, store.adminPasswordHash, store.adminPassword)) {
-      await persistStoreSecretMigration(store);
+    const ownerAuth = ownerLoginOk
+      ? await verifyStoreOwnerCredentials(store, password)
+      : { ok: false, source: "login", storePasswordOk: false, profilePasswordHash: "" };
+    if (ownerAuth.ok) {
+      const authenticatedStore = await reconcileStoreOwnerCredentials(store, password, ownerAuth);
+      resetClientRateLimit(req, "store-admin-login-ip");
+      resetClientRateLimit(req, "store-admin-login", `${storeId}:${login}`);
       const ownerToken = { role: "owner" };
-      appendAdminLog("store_admin_login", store.ownerLogin || store.id, { storeId: store.id, role: "owner", ...requestSource(req) }).catch((error) => {
-        console.error("[store-admin] owner login log failed", { storeId: store.id, message: error.message });
+      appendAdminLog("store_admin_login", authenticatedStore.ownerLogin || authenticatedStore.id, { storeId: authenticatedStore.id, role: "owner", credentialSource: ownerAuth.source, ...requestSource(req) }).catch((error) => {
+        console.error("[store-admin] owner login log failed", { storeId: authenticatedStore.id, message: error.message });
       });
-      return res.json({ token: signSellerAdminToken(store.id, ownerToken), store: publicStoreForState(store, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(store.id, ownerToken)) });
+      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken), store: publicStoreForState(authenticatedStore, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     await persistStoreSecretMigration(store);
+    resetClientRateLimit(req, "store-admin-login-ip");
+    resetClientRateLimit(req, "store-admin-login", `${storeId}:${login}`);
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     appendAdminLog("store_staff_login", staff.login || store.id, { storeId: store.id, staffLogin: staff.login, role: "staff", ...requestSource(req) }).catch((error) => {
       console.error("[store-admin] staff login log failed", { storeId: store.id, staffLogin: staff.login, message: error.message });
@@ -3457,7 +3468,24 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
-    const mergedStore = await normalizeStoreSecrets(sellerStorePatch(existing, sellerStoreInputForToken(existing, store, token)));
+    const allowedStoreInput = sellerStoreInputForToken(existing, store, token);
+    const nextPanelPassword = token.role === "staff" ? "" : String(allowedStoreInput.adminPassword || "").trim();
+    const nextPanelPasswordHash = nextPanelPassword ? await hashPanelPassword(nextPanelPassword) : "";
+    const mergedStore = await normalizeStoreSecrets(
+      sellerStorePatch(existing, allowedStoreInput),
+      { adminPasswordHash: nextPanelPasswordHash }
+    );
+    const canonicalPanelPasswordHash = nextPanelPasswordHash || String(mergedStore.adminPasswordHash || "").trim();
+    if (mergedStore.ownerLogin && canonicalPanelPasswordHash) {
+      const profileSync = adminEnsureSellerProfile(mergedStore.ownerLogin, "", mergedStore.ownerLogin, { passwordHash: canonicalPanelPasswordHash });
+      if (nextPanelPassword) {
+        await withTimeout(profileSync, "store-admin password profile sync", 10000);
+      } else {
+        withTimeout(profileSync, "store-admin profile sync", 5000).catch((error) => {
+          console.error("[store-admin] background profile sync skipped", { storeId: mergedStore.id, message: error.message });
+        });
+      }
+    }
     const savedStore = await saveStoreRow(mergedStore, "store-admin store save");
     scheduleStorePublication(savedStore, "store-admin store save");
     console.log("[store-admin] store saved", {
@@ -4718,14 +4746,21 @@ app.post("/api/owner/stores", async (req, res, next) => {
     if (!store.name || !store.ownerLogin || !panelPassword) {
       return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
     }
-    const protectedStore = await normalizeStoreSecrets(store);
+    const panelPasswordHash = await hashPanelPassword(panelPassword);
+    const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
     const savedStore = await saveStoreRow(protectedStore, "owner store save");
+    await withTimeout(
+      adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
+      "owner seller profile sync",
+      10000
+    ).catch((error) => {
+      console.error("[owner-store] seller profile sync deferred", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, message: error.message });
+    });
     scheduleStorePublication(savedStore, "owner store save");
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
     res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), panel: adminStorePanelLinks(savedStore, panelPassword), verifiedSaved: true, verifiedReadBack: true });
     Promise.resolve().then(async () => {
       await clearDeletedStoreTombstone(savedStore.id);
-      await adminEnsureSellerProfile(savedStore.ownerLogin, panelPassword, savedStore.ownerLogin);
       await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
       console.log("[owner-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
     }).catch((error) => {
@@ -4865,9 +4900,10 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       };
       store.ownerLogin = login;
       const panelPassword = String(storePassword || store.adminPassword || "123").trim();
-      if (panelPassword) await adminEnsureSellerProfile(login, panelPassword, login);
+      const panelPasswordHash = await hashPanelPassword(panelPassword);
+      if (panelPassword) await adminEnsureSellerProfile(login, "", login, { passwordHash: panelPasswordHash });
       store.adminPassword = panelPassword;
-      const protectedStore = await normalizeStoreSecrets(store);
+      const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
       const savedStore = await saveStoreRow(protectedStore, "admin seller store save");
       await saveOwnerStoreFallback(savedStore);
     }
@@ -5164,10 +5200,11 @@ app.post("/api/admin/stores", async (req, res, next) => {
       return res.status(409).json({ error: "Магазин с таким названием уже привязан к другому владельцу" });
     }
     const store = recovered ? adminBuildStoreFromBody(req.body || {}, existing.data) : requestedStore;
-    const protectedStore = await normalizeStoreSecrets(store);
+    const panelPasswordHash = await hashPanelPassword(panelPassword);
+    const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
     await withTimeout(
-      adminEnsureSellerProfile(savedStore.ownerLogin, panelPassword, savedStore.ownerLogin),
+      adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
       "admin seller profile sync",
       15000
     ).catch((error) => {
@@ -5196,9 +5233,19 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = adminBuildStoreFromBody(req.body || {}, row.data);
     const panelPassword = String(req.body?.adminPassword || "").trim();
-    if (store.ownerLogin && panelPassword) await adminEnsureSellerProfile(store.ownerLogin, panelPassword, store.ownerLogin);
-    const protectedStore = await normalizeStoreSecrets(store);
+    const panelPasswordHash = panelPassword ? await hashPanelPassword(panelPassword) : "";
+    const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
     const savedStore = await saveStoreRow(protectedStore, "admin store update");
+    const canonicalPanelPasswordHash = panelPasswordHash || String(savedStore.adminPasswordHash || "").trim();
+    if (savedStore.ownerLogin && canonicalPanelPasswordHash) {
+      await withTimeout(
+        adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: canonicalPanelPasswordHash }),
+        "admin seller profile update sync",
+        10000
+      ).catch((error) => {
+        console.error("[admin-store] seller profile update sync deferred", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, message: error.message });
+      });
+    }
     scheduleStorePublication(savedStore, "admin store update");
     clearDeletedStoreTombstone(savedStore.id).catch((error) => {
       console.error("[admin-store] tombstone clear deferred failed", { storeId: savedStore.id, message: error.message });
@@ -7841,18 +7888,27 @@ function adminStorePanelLinks(store, passwordOverride = "") {
     shopPanelUrl: `${publicBaseUrl}/#shop-panel-${store.id}`,
     sellerPanelUrl: `${publicBaseUrl}/#seller-${store.id}`,
     login: store.ownerLogin || store.id,
-    password: String(passwordOverride || "")
+    password: String(passwordOverride || ""),
+    hasPassword: Boolean(passwordOverride || store.adminPasswordHash || store.adminPassword)
   };
 }
 
-async function adminEnsureSellerProfile(login, password, name = "") {
+async function adminSellerProfile(login) {
   const key = loginKey(login);
   if (!key) return null;
   const { data: existing, error: readError } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
   if (readError) throw readError;
-  const passwordHash = password
+  return existing || null;
+}
+
+async function adminEnsureSellerProfile(login, password, name = "", options = {}) {
+  const key = loginKey(login);
+  if (!key) return null;
+  const existing = await adminSellerProfile(login);
+  const suppliedPasswordHash = String(options.passwordHash || "").trim();
+  const passwordHash = suppliedPasswordHash || (password
     ? await bcrypt.hash(String(password), 12)
-    : (existing?.password_hash || await bcrypt.hash("123", 12));
+    : (existing?.password_hash || await bcrypt.hash("123", 12)));
   const { data: user, error } = await supabase.from("profiles").upsert({
     login,
     login_key: key,
@@ -7862,6 +7918,74 @@ async function adminEnsureSellerProfile(login, password, name = "") {
   }, { onConflict: "login_key" }).select("*").single();
   if (error) throw error;
   return user;
+}
+
+async function verifyStoreOwnerCredentials(store = {}, password = "") {
+  const storePasswordOk = await verifyPanelPassword(password, store.adminPasswordHash, store.adminPassword);
+  if (storePasswordOk) {
+    return {
+      ok: true,
+      source: "store",
+      storePasswordOk: true,
+      profilePasswordHash: ""
+    };
+  }
+  const profile = await withTimeout(
+    adminSellerProfile(store.ownerLogin),
+    "store-admin seller profile lookup",
+    5000
+  ).catch((error) => {
+    console.error("[store-admin] seller profile lookup failed", {
+      storeId: store.id || "",
+      ownerLogin: store.ownerLogin || "",
+      message: error.message
+    });
+    return null;
+  });
+  const profilePasswordHash = String(profile?.password_hash || "").trim();
+  const profilePasswordOk = profilePasswordHash
+    ? await verifyPanelPassword(password, profilePasswordHash)
+    : false;
+  return {
+    ok: profilePasswordOk,
+    source: profilePasswordOk ? "profile" : "none",
+    storePasswordOk: false,
+    profilePasswordHash
+  };
+}
+
+async function reconcileStoreOwnerCredentials(store = {}, password = "", auth = {}) {
+  if (!auth.ok || !store.id || !store.ownerLogin) return store;
+  let canonicalHash = auth.storePasswordOk ? String(store.adminPasswordHash || "").trim() : String(auth.profilePasswordHash || "").trim();
+  if (!canonicalHash) canonicalHash = await hashPanelPassword(password);
+  let reconciledStore = store;
+
+  if (!auth.storePasswordOk || !store.adminPasswordHash || store.adminPassword) {
+    const nextStore = { ...store, adminPasswordHash: canonicalHash, updatedAt: Date.now() };
+    delete nextStore.adminPassword;
+    try {
+      reconciledStore = await saveStoreRow(nextStore, "store-admin credential repair");
+      scheduleStorePublication(reconciledStore, "store-admin credential repair");
+      console.log("[store-admin] store credential repaired", { storeId: reconciledStore.id, source: auth.source || "unknown" });
+    } catch (error) {
+      console.error("[store-admin] store credential repair failed", { storeId: store.id, message: error.message });
+    }
+  }
+
+  if (auth.source !== "profile") {
+    Promise.resolve().then(() => withTimeout(
+      adminEnsureSellerProfile(reconciledStore.ownerLogin, "", reconciledStore.ownerLogin, { passwordHash: canonicalHash }),
+      "store-admin seller profile repair",
+      8000
+    )).catch((error) => {
+      console.error("[store-admin] seller profile repair failed", {
+        storeId: reconciledStore.id,
+        ownerLogin: reconciledStore.ownerLogin,
+        message: error.message
+      });
+    });
+  }
+  return reconciledStore;
 }
 
 function adminBuildStoreFromBody(body = {}, existing = null) {

@@ -798,10 +798,10 @@ function renderStores() {
         ${storePlacementPositionControls(["stores"], createPositions)}
         <div class="row">
           <label class="field">Название магазина<input name="name" required></label>
-          <label class="field">Логин владельца<input name="ownerLogin" required></label>
+          <label class="field">Логин владельца<input name="ownerLogin" required autocomplete="off" autocapitalize="none" spellcheck="false"></label>
         </div>
         <div class="row">
-          <label class="field">Пароль панели продавца<input name="adminPassword" required></label>
+          <label class="field">Пароль панели продавца<input name="adminPassword" type="password" required autocomplete="new-password" autocapitalize="none" spellcheck="false"></label>
           <label class="field">Процент владельца сайта с продаж<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="3"></label>
         </div>
         <label class="field">Описание магазина<textarea name="description"></textarea></label>
@@ -841,9 +841,11 @@ function storeDetail(id) {
   const storeRevenue = Number(store.revenue || 0);
   const ownerCommission = Number(store.commission || 0);
   const placements = adminStorePlacements(store);
+  const panelPassword = String(store.panel?.password || store.adminPassword || "");
+  const panelPasswordStatus = panelPassword || (store.panel?.hasPassword ? "настроен" : "не настроен - задайте новый ниже");
   return `
     <h2>${esc(store.name)}</h2>
-    <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
+    <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(panelPasswordStatus)}</strong></p>
     <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)}</strong> · К выводу магазину: <strong>${fmtMoney(storeRevenue)}</strong> · Комиссия владельца: <strong>${fmtMoney(ownerCommission)}</strong></p>
     <form data-store-form="${esc(store.id)}">
       <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
@@ -855,13 +857,13 @@ function storeDetail(id) {
       <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
       <div class="row">
         <label class="field">Статус<select name="status"><option value="ACTIVE" ${status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option value="DISABLE" ${status === "DISABLE" ? "selected" : ""}>DISABLE</option></select></label>
-        <label class="field">Логин владельца<input name="ownerLogin" value="${esc(store.ownerLogin || "")}"></label>
+        <label class="field">Логин владельца<input name="ownerLogin" value="${esc(store.ownerLogin || "")}" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
       </div>
       <div class="row">
         <label class="field">Комиссия 0-20%<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="${esc(store.commissionPercent)}"></label>
         <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
-      <label class="field">Пароль панели продавца<input name="adminPassword" placeholder="оставить пустым, если не менять"></label>
+      <label class="field">Пароль панели продавца<input name="adminPassword" type="password" autocomplete="new-password" autocapitalize="none" spellcheck="false" placeholder="оставить пустым, если не менять"></label>
       <div class="checks">
         <label><input name="region_moldova" type="checkbox" ${countries.includes("moldova") ? "checked" : ""}> Молдова</label>
         <label><input name="region_transnistria" type="checkbox" ${countries.includes("transnistria") ? "checked" : ""}> Приднестровье</label>
@@ -1798,6 +1800,7 @@ function bindActions() {
     if (fd.get("placement_TOP10")) placements.push("TOP 10");
     if (fd.get("placement_NEW")) placements.push("NEW");
     if (adminStorePlacements(existingStore).includes("TOP")) placements.push("TOP");
+    const nextPanelPassword = String(fd.get("adminPassword") || "").trim();
     const endSubmit = beginAdminFormSubmit(form, "Сохраняю...");
     if (!endSubmit) return;
     try {
@@ -1824,14 +1827,14 @@ function bindActions() {
           commissionPercent: Number(fd.get("commissionPercent")),
           homepagePosition: Number(fd.get("catalogPosition") || 1),
           autoReleaseHours: Number(fd.get("autoReleaseHours")),
-          adminPassword: fd.get("adminPassword") || undefined,
+          adminPassword: nextPanelPassword || undefined,
           countries,
           enabledCoins
         })
       });
       if (payload?.stores) data = payload;
       else if (payload?.store) data.stores = adminUpsertById(data.stores, adminStoreRowFromPayload(payload.store, payload.panel));
-      toast("Магазин сохранен");
+      toast(nextPanelPassword ? "Магазин сохранен. Новый пароль уже действует" : "Магазин сохранен");
       endSubmit();
       renderShell();
       refreshData(true);
