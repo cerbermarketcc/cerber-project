@@ -4844,22 +4844,33 @@ function storeCard(store) {
               ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
               <p class="desc">${esc(storeShort)}</p>
             </div>
-            <span>✉</span>
+            <span class="shop-message-icon" aria-hidden="true">${navIcon("messages")}</span>
           </div>
-          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
-          <p>${Number(store.rating).toFixed(2)} / ${esc(store.reviews)} ${tr("reviews")}</p>
+          ${marketplaceMetricsView(store.rating, store.reviews, "Магазин активен")}
         </div>
       </button>
     </article>
   `;
 }
 
+function marketplaceMetricsView(rating = 5, reviews = 0, statusLabel = "Доступно") {
+  return `
+    <div class="marketplace-metrics">
+      <span class="market-metric-icon market-metric-ok" aria-label="${esc(statusLabel)}">✓</span>
+      <span class="market-metric-icon market-metric-time" aria-label="Работает сейчас"></span>
+      <span class="market-metric-icon market-metric-star" aria-label="Рейтинг">★</span>
+      <strong>${Number(rating || 0).toFixed(2)}</strong>
+      <span class="market-metric-divider">/</span>
+      <span>${esc(reviews || 0)}</span>
+    </div>
+  `;
+}
+
 function storeGalleryImages(store = {}) {
-  return [...new Set([
-    store.cover || store.banner || "",
-    store.image || "",
-    ...(Array.isArray(store.gallery) ? store.gallery : [])
-  ].filter(Boolean))].slice(0, 12);
+  const profileMedia = new Set([store.cover, store.banner, store.image].filter(Boolean));
+  return [...new Set(Array.isArray(store.gallery) ? store.gallery : [])]
+    .filter((image) => image && !profileMedia.has(image))
+    .slice(0, 12);
 }
 
 function storeGalleryView(store = {}) {
@@ -4883,6 +4894,37 @@ function openStoreGalleryImage(image, store) {
   `);
 }
 
+function openProductGallery(images = [], productTitle = "", selectedIndex = 0) {
+  const galleryImages = [...new Set(images.filter(Boolean))];
+  if (!galleryImages.length) return;
+  const initialIndex = Math.max(0, Math.min(Number(selectedIndex) || 0, galleryImages.length - 1));
+  showModal(`
+    <div class="product-lightbox">
+      <img class="modal-image product-lightbox-main" data-product-lightbox-main src="${esc(galleryImages[initialIndex])}" alt="${esc(productTitle)}">
+      ${galleryImages.length > 1 ? `
+        <div class="product-lightbox-thumbs">
+          ${galleryImages.map((image, index) => `
+            <button type="button" class="${index === initialIndex ? "active" : ""}" data-product-lightbox-index="${index}" aria-label="Открыть фото ${index + 1}">
+              <img src="${esc(image)}" alt="">
+            </button>
+          `).join("")}
+        </div>
+      ` : ""}
+      <button class="primary" data-close-modal>${tr("close")}</button>
+    </div>
+  `, "product-lightbox-modal");
+  document.querySelectorAll("[data-product-lightbox-index]").forEach((button) => {
+    button.onclick = () => {
+      const nextIndex = Number(button.dataset.productLightboxIndex || 0);
+      const mainImage = document.querySelector("[data-product-lightbox-main]");
+      if (mainImage) mainImage.src = galleryImages[nextIndex] || galleryImages[0];
+      document.querySelectorAll("[data-product-lightbox-index]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+    };
+  });
+}
+
 function renderStore(storeId, tab = activeStoreTab || "positions") {
   route = "store";
   activeStoreId = storeId;
@@ -4893,7 +4935,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   const storeName = localizedValue(store, "name");
   const storeShort = localizedValue(store, "short");
   const storeDescription = localizedValue(store, "description");
-  const coverImage = store.cover || store.banner || store.image || fallbackImage;
+  const coverImage = store.cover || store.banner || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
   const publicProducts = sortProductsForFilters(sortedStoreProducts(store).filter((product) => productMatchesFilters(product, store)));
@@ -4902,7 +4944,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
     : (publicProducts.length ? publicProducts.map((product) => productCardView(product, store)).join("") : `<article class="panel empty-state"><p>${tr("noFilteredProducts")}</p><button class="primary" data-filters>${tr("openFilters")}</button></article>`);
   layout(`
     <section class="screen">
-      <article class="panel">
+      <article class="panel store-profile-panel">
         <img class="profile-cover" src="${esc(coverImage)}" alt="">
         <div class="profile-body">
           <img class="profile-avatar" src="${esc(avatarImage)}" alt="${esc(storeName)}">
@@ -4947,14 +4989,14 @@ function productCard(product, store) {
   return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
       <div class="product-body">
         <h3>${esc(productTitle)}</h3>
         <p>${esc(productCategory)}</p>
-        <p><strong>${esc(storeName)}</strong> <span class="verify">ok</span></p>
+        <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
         ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
-        <p>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)} · ${esc(product.purchases || 0)} ${tr("purchases")}</p>
+        ${marketplaceMetricsView(product.rating, product.reviews, "Товар доступен")}
         </div>
       </button>
     </article>
@@ -4971,18 +5013,14 @@ function productCardView(product, store) {
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
         <div class="product-body mega-product-body">
-          <div class="product-icon-row">
-            <span>#</span><span>*</span><span>+</span><span>-</span><span>/</span>
-            <i></i><span>ok</span><span>*</span><span>#</span>
-          </div>
           <h3>${esc(productTitle)}</h3>
           <p class="desc">${esc(productCategory)}</p>
-          <p><strong>${esc(storeName)}</strong> <span class="verify">ok</span></p>
+          <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
           ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
-          <p class="rating-line"><span class="ok-dot">ok</span><span class="time-dot">*</span><span class="star-dot">*</span>${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
+          ${marketplaceMetricsView(product.rating, product.reviews, "Товар доступен")}
         </div>
       </button>
     </article>
@@ -5016,7 +5054,11 @@ function renderProductView(storeId, productId) {
   const product = productById(store, productId);
   if (!product) return renderStore(store.id, "positions");
   const positions = productPositions(product);
-  const images = (product.images || [product.image || store.image]).slice(0, 5);
+  const images = [...new Set([
+    product.image || "",
+    ...(Array.isArray(product.images) ? product.images : [])
+  ].filter(Boolean))].slice(0, 5);
+  const galleryImages = images.length ? images : [fallbackImage];
   const storeName = localizedValue(store, "name");
   const productTitle = localizedValue(product, "title");
   const productCategory = localizedValue(product, "category");
@@ -5026,10 +5068,16 @@ function renderProductView(storeId, productId) {
       <p class="breadcrumbs">${tr("stores")} &gt; ${esc(storeName)} &gt; ${esc(productTitle)}</p>
       <h1 class="product-page-title">${esc(productTitle)}</h1>
       <p class="product-page-category">${esc(productCategory)}</p>
-      <div class="mega-gallery">
-        <img class="mega-gallery-main" src="${esc(images[0] || store.image || fallbackImage)}" alt="${esc(productTitle)}">
+      <div class="mega-gallery ${galleryImages.length === 1 ? "single-image" : ""}">
+        <button type="button" class="mega-gallery-button mega-gallery-main-button" data-product-gallery-index="0" aria-label="Открыть главное фото">
+          <img class="mega-gallery-main" src="${esc(galleryImages[0])}" alt="${esc(productTitle)}">
+        </button>
         <div class="mega-gallery-side">
-          ${images.slice(1).map((image) => `<img src="${esc(image)}" alt="">`).join("")}
+          ${galleryImages.slice(1).map((image, index) => `
+            <button type="button" class="mega-gallery-button" data-product-gallery-index="${index + 1}" aria-label="Открыть фото ${index + 2}">
+              <img src="${esc(image)}" alt="">
+            </button>
+          `).join("")}
         </div>
       </div>
       <article class="product-copy">
@@ -5054,6 +5102,9 @@ function renderProductView(storeId, productId) {
   `);
   document.querySelector("[data-read-product]")?.addEventListener("click", () => {
     showModal(`<h2>${esc(productTitle)}</h2><p>${esc(productDescription || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+  });
+  document.querySelectorAll("[data-product-gallery-index]").forEach((button) => {
+    button.addEventListener("click", () => openProductGallery(galleryImages, productTitle, button.dataset.productGalleryIndex));
   });
   fetchLitecoinUsdRate().then(() => {
     if (route === "product" && activeProductId === productId) {
