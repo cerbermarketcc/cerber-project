@@ -3597,6 +3597,20 @@ function parseAnyDate(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function storeCreatedDateLabel(store = {}) {
+  const rawValue = store.createdAt || store.created_at || store.registeredAt || store.publishedAt;
+  const numericValue = Number(rawValue);
+  const date = Number.isFinite(numericValue) && numericValue > 0
+    ? new Date(numericValue)
+    : parseAnyDate(rawValue);
+  if (!date || Number.isNaN(date.getTime())) return "00.00.0000";
+  return date.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  });
+}
+
 async function fetchLitecoinUsdRate() {
   try {
     const response = await fetch("/api/rates/ltc-usd", { cache: "no-store" });
@@ -4961,7 +4975,7 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
           </div>
           <div class="rating"><strong>${Number(store.rating).toFixed(2)}</strong><div class="stars">★★★★★</div><span>${tr("rating")}</span></div>
           <button class="primary" data-chat="${esc(store.id)}">${tr("openChat")} <span class="green-dot"></span></button>
-          <p class="store-age">На /// CERBER</p>
+          <p class="store-age">На /// CERBER с ${esc(storeCreatedDateLabel(store))}</p>
           <div class="pill-tabs">
             <button class="${activeStoreTab === "positions" ? "" : "muted"}" data-store-tab="positions" data-store-id="${esc(store.id)}">${tr("positions")}</button>
             <button class="${activeStoreTab === "reviews" ? "" : "muted"}" data-store-tab="reviews" data-store-id="${esc(store.id)}">${tr("reviews")} ${esc(store.reviews)}</button>
@@ -9290,6 +9304,7 @@ async function handleOwnerCreateStore(event) {
     image,
     cover: image,
     gallery: [],
+    createdAt: Date.now(),
     status: "active",
     salesBlocked: false,
     autoReleaseHours: Math.max(1, Number(db.ownerSettings?.defaultAutoReleaseHours || 24)),
@@ -9796,6 +9811,7 @@ async function handleStoreCreate(event) {
     description: data.get("description").trim(),
     image,
     cover,
+    createdAt: Date.now(),
     status: "active",
     salesBlocked: false,
     autoReleaseHours: Math.max(1, Number(db.ownerSettings?.defaultAutoReleaseHours || 24)),
