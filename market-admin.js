@@ -1428,7 +1428,7 @@ function renderLogs() {
     mirror_bot_checkApi: "Проверка API зеркала",
     mirror_bot_delete: "Зеркало удалено"
   }[action] || action);
-  return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
+  return `<div class="actions"><button class="ghost danger" type="button" data-clear-logs>Очистить логи</button></div><article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function healthStatus(value) {
@@ -2087,6 +2087,16 @@ function bindActions() {
       await api("/api/admin/password", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
       event.currentTarget.reset();
       toast("Пароль обновлен");
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  root.querySelector("[data-clear-logs]")?.addEventListener("click", async () => {
+    if (!confirm("Очистить весь журнал действий? Это не затронет пользователей, магазины, заказы и платежи.")) return;
+    try {
+      data = await api("/api/admin/logs", { method: "DELETE" });
+      toast("Логи очищены");
+      renderShell();
     } catch (error) {
       toast(error.message, true);
     }

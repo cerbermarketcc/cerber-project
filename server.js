@@ -15,7 +15,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-09-v135";
+const cerberBuildVersion = "marketplace-stability-2026-08-09-v136";
+const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -5703,9 +5704,7 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
 app.delete("/api/admin/logs", async (req, res, next) => {
   try {
     requireAdmin(req);
-    const state = await loadSettingsState();
-    state.adminLogs = [];
-    await saveSettingsState(state);
+    await clearAdminAuditLogs();
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -6922,6 +6921,34 @@ async function loadAuditLogs(limit = 500) {
     details: row.details || {},
     createdAt: Date.parse(row.created_at) || 0
   }));
+}
+
+async function clearAdminAuditLogs(state = null) {
+  requireDb();
+  const nextState = state || await loadSettingsState();
+  nextState.adminLogs = [];
+  adminLogMemory = [];
+  if (!disabledMirrorTables.has("audit_logs")) {
+    const { error } = await supabase.from("audit_logs").delete().not("id", "is", null);
+    if (error) {
+      if (mirrorTableUnavailable(error)) disabledMirrorTables.add("audit_logs");
+      else throw error;
+    }
+  }
+  await saveSettingsState(nextState, { allowEmptyKeys: ["adminLogs"] });
+  return nextState;
+}
+
+async function clearAdminAuditLogsOnce() {
+  if (!supabase) return false;
+  const state = await loadSettingsState();
+  state.maintenance = state.maintenance && typeof state.maintenance === "object" ? state.maintenance : {};
+  if (state.maintenance.adminAuditResetId === adminAuditResetId) return false;
+  state.maintenance.adminAuditResetId = adminAuditResetId;
+  state.maintenance.adminAuditResetAt = Date.now();
+  await clearAdminAuditLogs(state);
+  console.log("[admin-log] owner-requested audit reset completed", { resetId: adminAuditResetId });
+  return true;
 }
 
 async function loadMirrorTableData(table = "", limit = 1000) {
@@ -12378,6 +12405,7 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  clearAdminAuditLogsOnce().catch((error) => console.error("Admin audit reset error", error));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", error));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
