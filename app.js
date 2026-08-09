@@ -4846,6 +4846,7 @@ function storeCard(store) {
             </div>
             <span class="shop-message-icon" aria-hidden="true">${navIcon("messages")}</span>
           </div>
+          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
           ${marketplaceMetricsView(store.rating, store.reviews, "Магазин активен")}
         </div>
       </button>
