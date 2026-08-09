@@ -448,6 +448,8 @@ let route = "home";
 let activeStoreId = "";
 let activeStoreTab = "positions";
 let activeProductId = "";
+let activeProductTab = "positions";
+let activeProductMode = "any";
 let activePositionId = "";
 let authMode = "login";
 let activeOrdersTab = "all";
@@ -1536,7 +1538,8 @@ function normalizeProduct(product, store = {}) {
         deliveryType: position.deliveryType || "Курьер",
         weight: String(position.weight ?? "").trim(),
         stock: positionItems.length || deliveryItems.length || Number(position.stock || 0),
-        status: position.status || "ready"
+        saleMode: positionSaleMode(position),
+        status: String(position.status || "ready").toLowerCase() === "disabled" ? "disabled" : "ready"
       };
     }) : [],
     reviewsList: Array.isArray(product.reviewsList) ? product.reviewsList : []
@@ -2895,7 +2898,8 @@ function positionMatchesFilters(position = {}, filters = catalogFilters()) {
 }
 
 function productFilteredPositions(product = {}, filters = catalogFilters()) {
-  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const positions = (Array.isArray(product.positions) ? product.positions : [])
+    .filter((position) => String(position.status || "ready").toLowerCase() !== "disabled");
   const matched = !positions.length || !locationFilterActive(filters)
     ? positions.slice()
     : positions.filter((position) => positionMatchesFilters(position, filters));
@@ -4742,10 +4746,15 @@ async function handleProductReview(event) {
   if (!store) return;
   const review = {
     id: `review-${Date.now()}`,
+    orderId: order.id,
+    productId: order.productId || "",
+    positionId: order.positionId || "",
+    login: db.currentUser,
     serviceDate: new Date().toLocaleDateString("ru-RU"),
     rating,
     product: order.product,
-    text
+    text,
+    createdAt: Date.now()
   };
   store.reviewsList = [review, ...(store.reviewsList || [])];
   store.reviews = Number(store.reviews || 0) + 1;
@@ -4991,13 +5000,15 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
 }
 
 function productStockSummary(product = {}) {
-  const positions = Array.isArray(product.positions) ? product.positions : [];
+  const positions = (Array.isArray(product.positions) ? product.positions : [])
+    .filter((position) => String(position.status || "ready").toLowerCase() !== "disabled");
   const stock = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
   return { positions, stock };
 }
 
 function productCard(product, store) {
   const summary = productStockSummary(product);
+  const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
   const productTitle = localizedValue(product, "title");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
@@ -5011,7 +5022,7 @@ function productCard(product, store) {
         <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
         ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
-        ${marketplaceMetricsView(product.rating, product.reviews, "Товар доступен")}
+        ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
         </div>
       </button>
     </article>
@@ -5022,6 +5033,7 @@ function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
   const ltcAmount = usdToLtc(minPrice);
   const summary = productStockSummary(product);
+  const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
   const productTitle = localizedValue(product, "title");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
@@ -5035,7 +5047,7 @@ function productCardView(product, store) {
           <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
           ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
-          ${marketplaceMetricsView(product.rating, product.reviews, "Товар доступен")}
+          ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
         </div>
       </button>
     </article>
@@ -5044,6 +5056,27 @@ function productCardView(product, store) {
 
 function productPositions(product) {
   return productFilteredPositions(product, catalogFilters());
+}
+
+function positionSaleMode(position = {}) {
+  const value = String(position.saleMode || position.productMode || position.orderMode || position.status || "ready").toLowerCase();
+  return value === "preorder" ? "preorder" : "ready";
+}
+
+function productReviewsForView(product = {}, store = {}) {
+  const productId = String(product.id || "");
+  const productTitle = catalogCategoryKey(localizedValue(product, "title") || product.title || "");
+  const directReviews = Array.isArray(product.reviewsList) ? product.reviewsList : [];
+  const linkedStoreReviews = (Array.isArray(store.reviewsList) ? store.reviewsList : []).filter((review) => {
+    if (review.productId) return String(review.productId) === productId;
+    return productTitle && catalogCategoryKey(review.product || "") === productTitle;
+  });
+  const reviews = new Map();
+  [...directReviews, ...linkedStoreReviews].forEach((review, index) => {
+    const key = String(review.id || review.orderId || `${review.productId || productId}-${review.createdAt || review.serviceDate || index}`);
+    if (!reviews.has(key)) reviews.set(key, review);
+  });
+  return [...reviews.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 function positionWeightLabel(position = {}) {
@@ -5061,6 +5094,11 @@ function currentLocationFilterLabel() {
 }
 
 function renderProductView(storeId, productId) {
+  const productChanged = activeStoreId !== storeId || activeProductId !== productId;
+  if (productChanged) {
+    activeProductTab = "positions";
+    activeProductMode = "any";
+  }
   route = "product";
   activeStoreId = storeId;
   activeProductId = productId;
@@ -5068,7 +5106,12 @@ function renderProductView(storeId, productId) {
   if (!store) return renderCatalog();
   const product = productById(store, productId);
   if (!product) return renderStore(store.id, "positions");
-  const positions = productPositions(product);
+  const allPositions = productPositions(product);
+  const positions = activeProductMode === "any"
+    ? allPositions
+    : allPositions.filter((position) => positionSaleMode(position) === activeProductMode);
+  const productReviews = productReviewsForView(product, store);
+  const productReviewCount = Math.max(Number(product.reviews || 0), productReviews.length);
   const images = [...new Set([
     product.image || "",
     ...(Array.isArray(product.images) ? product.images : [])
@@ -5099,19 +5142,29 @@ function renderProductView(storeId, productId) {
         ${productDescription ? `<p>${esc(productDescription)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
         <p class="shop-line"><span>${tr("store")}:</span> <strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${Number(product.priceUsd || 0).toFixed(0)}$</p>
-        <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(product.reviews || 0)}</p>
+        <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(productReviewCount)}</p>
       </article>
       <button class="location-select" data-filters>${esc(currentLocationFilterLabel())}<span>⌄</span></button>
       <div class="pill-tabs">
-        <button>${tr("positions")} <span>${positions.length}</span></button>
-        <button class="muted">${tr("reviews")} <span>${esc(product.reviews || 0)}</span></button>
+        <button class="${activeProductTab === "positions" ? "" : "muted"}" data-product-detail-tab="positions">${tr("positions")} <span>${allPositions.length}</span></button>
+        <button class="${activeProductTab === "reviews" ? "" : "muted"}" data-product-detail-tab="reviews">${tr("reviews")} <span>${esc(productReviewCount)}</span></button>
       </div>
-      <div class="product-mode-tabs"><button class="active">${tr("any")}</button><button>${tr("ready")}</button><button>${tr("preorder")}</button></div>
-      ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
-        <article class="panel empty-state">
-          <p>${tr("noFilteredProducts")}</p>
-          <button class="primary" data-filters>${tr("openFilters")}</button>
-        </article>
+      ${activeProductTab === "reviews" ? `
+        <div class="product-review-list">
+          ${productReviews.length ? productReviews.map((review) => reviewCard(review)).join("") : `<article class="panel empty-state"><p>${tr("noReviews")}</p></article>`}
+        </div>
+      ` : `
+        <div class="product-mode-tabs" role="tablist" aria-label="Тип товара">
+          <button class="${activeProductMode === "any" ? "active" : ""}" data-product-mode="any">${tr("any")}</button>
+          <button class="${activeProductMode === "ready" ? "active" : ""}" data-product-mode="ready">${tr("ready")}</button>
+          <button class="${activeProductMode === "preorder" ? "active" : ""}" data-product-mode="preorder">${tr("preorder")}</button>
+        </div>
+        ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
+          <article class="panel empty-state">
+            <p>${activeProductMode === "any" ? tr("noFilteredProducts") : "Товаров этого типа пока нет."}</p>
+            ${activeProductMode === "any" ? `<button class="primary" data-filters>${tr("openFilters")}</button>` : ""}
+          </article>
+        `}
       `}
     </section>
   `);
@@ -5120,6 +5173,18 @@ function renderProductView(storeId, productId) {
   });
   document.querySelectorAll("[data-product-gallery-index]").forEach((button) => {
     button.addEventListener("click", () => openProductGallery(galleryImages, productTitle, button.dataset.productGalleryIndex));
+  });
+  document.querySelectorAll("[data-product-detail-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProductTab = button.dataset.productDetailTab || "positions";
+      renderProductView(storeId, productId);
+    });
+  });
+  document.querySelectorAll("[data-product-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProductMode = button.dataset.productMode || "any";
+      renderProductView(storeId, productId);
+    });
   });
   fetchLitecoinUsdRate().then(() => {
     if (route === "product" && activeProductId === productId) {
@@ -5142,6 +5207,7 @@ function positionCardView(position, product, store) {
         <p><span>${tr("quantity")}</span><strong>${esc(position.stock || 0)} ${tr("pieces")}</strong></p>
         <p><span>${tr("titleLabel")}</span><strong>${esc(positionTitle)}</strong></p>
         <p><span>${tr("type")}</span><strong>${esc(deliveryType)}</strong></p>
+        <p><span>Формат</span><strong>${positionSaleMode(position) === "preorder" ? tr("preorder") : tr("ready")}</strong></p>
         <p><span>${tr("weight")}</span><strong>${esc(positionWeightLabel(position))}</strong></p>
         <p><span>${tr("price")}</span><strong>${priceUsd.toFixed(0)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
@@ -5709,14 +5775,17 @@ function openProductDispute(orderId) {
   renderMessages();
 }
 function reviewCard(review) {
+  const createdAt = Number(review.createdAt || 0);
+  const reviewDate = review.serviceDate || (createdAt ? new Date(createdAt).toLocaleDateString("ru-RU") : "");
   return `
     <article class="review-card">
       <div class="review-head">
-        <strong>${esc(review.serviceDate)}</strong>
+        <strong>${esc(reviewDate)}</strong>
         <div class="review-stars" aria-label="${Number(review.rating || 5)} из 5">${stars(review.rating || 5)}</div>
       </div>
       <div class="review-body">
         <h3>${esc(review.product)}</h3>
+        ${review.login ? `<small>Покупатель: ${esc(review.login)}</small>` : ""}
         <p>${esc(review.text)}</p>
       </div>
     </article>
@@ -9139,6 +9208,7 @@ function ownerProductManager(store, product) {
         <div class="row">
           <label class="field">Тип<input name="deliveryType" placeholder="Прикоп / Курьер / Готовый"></label>
           <label class="field">Вес<input name="weight" placeholder="-"></label>
+          <label class="field">Формат товара<select name="saleMode"><option value="ready">Готовый</option><option value="preorder">Предзаказ</option></select></label>
         </div>
         <div class="row" data-location-group>
           <label class="field">Страна<select name="country" data-location-country>${countrySelectOptions((store.countries || [])[0] || "moldova")}</select></label>
@@ -9156,6 +9226,7 @@ function ownerProductManager(store, product) {
               <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
               <p><span>Название</span><strong>${esc(position.title || product.title)}</strong></p>
               <p><span>Тип</span><strong>${esc(position.deliveryType || "Товар")}</strong></p>
+              <p><span>Формат</span><strong>${positionSaleMode(position) === "preorder" ? "Предзаказ" : "Готовый"}</strong></p>
               <p><span>Вес</span><strong>${esc(positionWeightLabel(position))}</strong></p>
               <p><span>Цена</span><strong>${Number(position.priceUsd || product.priceUsd || 0).toFixed(2)} $</strong></p>
               <p><span>LTC</span><strong>${usdToLtc(Number(position.priceUsd || product.priceUsd || 0)).toFixed(6)} LTC</strong></p>
@@ -9429,6 +9500,7 @@ function handleOwnerAddPosition(event) {
     city: String(data.get("city") || "chisinau").trim(),
     district: String(data.get("district") || "").trim(),
     deliveryType: String(data.get("deliveryType") || "Товар").trim(),
+    saleMode: String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready",
     weight: String(data.get("weight") || "-").trim(),
     deliveryItems: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
     stock: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length,
@@ -9668,6 +9740,7 @@ function adminStoreEditor(store) {
           <label class="field">Город<select name="city" data-location-city>${citySelectOptions(position.country || "moldova", position.city || "chisinau")}</select></label>
           <label class="field">Район<select name="district" data-location-district>${districtSelectOptions(position.country || "moldova", position.city || "chisinau", position.district || "")}</select></label>
           <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
+          <label class="field">Формат товара<select name="saleMode"><option value="ready" ${positionSaleMode(position) === "ready" ? "selected" : ""}>Готовый</option><option value="preorder" ${positionSaleMode(position) === "preorder" ? "selected" : ""}>Предзаказ</option></select></label>
           <label class="field">Вес<input name="weight" value="${esc(position.weight ?? "")}"></label>
         </div>
         <label class="field">Фото страницы магазина<input name="storeImage" type="file" accept="image/*"></label>
@@ -9762,6 +9835,7 @@ function bindAdminProductForms() {
       position.city = data.get("city").trim() || "chisinau";
       position.district = data.get("district").trim();
       position.deliveryType = data.get("deliveryType").trim() || "Товар";
+      position.saleMode = String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready";
       position.weight = data.get("weight").trim();
       position.stock = product.deliveryItems.length;
       saveDb();
@@ -10389,6 +10463,10 @@ function shopStorageTab(store, products, stats = {}) {
                   <div class="row">
                     <label class="field">Вес<input name="weight" value="${esc(position.weight ?? "")}"></label>
                     <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
+                    <label class="field">Формат товара<select name="saleMode">
+                      <option value="ready" ${positionSaleMode(position) === "ready" ? "selected" : ""}>Готовый</option>
+                      <option value="preorder" ${positionSaleMode(position) === "preorder" ? "selected" : ""}>Предзаказ</option>
+                    </select></label>
                     <label class="field">Статус<select name="status">
                       <option value="ready" ${String(position.status || "ready") === "ready" ? "selected" : ""}>ready</option>
                       <option value="disabled" ${String(position.status || "") === "disabled" ? "selected" : ""}>disabled</option>
@@ -10437,6 +10515,7 @@ function shopProductsTab(store, products) {
         <div class="row">
           <label class="field">Вес<input name="weight" placeholder="1"></label>
           <label class="field">Тип<input name="deliveryType" placeholder="Самовывоз / Доставка"></label>
+          <label class="field">Формат товара<select name="saleMode"><option value="ready">Готовый</option><option value="preorder">Предзаказ</option></select></label>
         </div>
         <div class="row" data-location-group>
           ${countryField}
@@ -10451,7 +10530,7 @@ function shopProductsTab(store, products) {
       <div class="seller-card-head"><h3>Товары внутри карточек</h3></div>
       ${sortedStoreProducts(store, true).map((product) => `
         <div class="seller-card-head"><h3>${esc(product.title)}</h3><span>${(product.positions || []).reduce((sum, p) => sum + Number(p.stock || 0), 0)} шт.</span></div>
-        ${(product.positions || []).map((position) => `<div class="seller-source"><span>${esc(position.title)} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span><strong><button class="ghost-button danger" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить</button></strong></div>`).join("") || `<p>Товаров внутри карточки пока нет.</p>`}
+        ${(product.positions || []).map((position) => `<div class="seller-source"><span>${esc(position.title)} · ${positionSaleMode(position) === "preorder" ? "Предзаказ" : "Готовый"} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span><strong><button class="ghost-button danger" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить</button></strong></div>`).join("") || `<p>Товаров внутри карточки пока нет.</p>`}
       `).join("")}
     </section>
   `;
@@ -11065,6 +11144,7 @@ function bindShopPanelActions(store, activeTab) {
         priceUsd,
         weight: String(data.get("weight") || "").trim(),
         deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
+        saleMode: String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready",
         country: String(data.get("country") || shopDefaultCountry(store)),
         city: String(data.get("city") || shopDefaultCity(store)),
         district: String(data.get("district") || "").trim(),
@@ -11115,6 +11195,7 @@ function bindShopPanelActions(store, activeTab) {
         position.priceUsd = Number(data.get("priceUsd") || 0);
         position.weight = String(data.get("weight") || "").trim();
         position.deliveryType = String(data.get("deliveryType") || "").trim() || "Товар";
+        position.saleMode = String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready";
         position.country = String(data.get("country") || shopDefaultCountry(store));
         position.city = String(data.get("city") || shopDefaultCity(store));
         position.district = String(data.get("district") || "").trim();

@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-09-v133";
+const cerberBuildVersion = "marketplace-stability-2026-08-09-v134";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3507,6 +3507,7 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
       city: String(position?.city || "chisinau"),
       district: String(position?.district || "").trim(),
       deliveryType: String(position?.deliveryType || "Товар").trim(),
+      saleMode: String(position?.saleMode || position?.productMode || position?.orderMode || position?.status || "ready").toLowerCase() === "preorder" ? "preorder" : "ready",
       weight: String(position?.weight ?? "").trim(),
       stock: Math.max(0, Number(position?.stock || 0)),
       status: String(position?.status || "ready")
