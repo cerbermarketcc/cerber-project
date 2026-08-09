@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-09-v136";
+const cerberBuildVersion = "marketplace-stability-2026-08-09-v137";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -7799,6 +7799,13 @@ function adminNormalizeStorePlacements(input, fallback = "stores") {
   return Array.from(new Set(result.length ? result : ["stores"]));
 }
 
+function adminNormalizePlacementPosition(value, fallback = 1) {
+  const position = Number(value);
+  if (Number.isFinite(position) && position > 0) return Math.floor(position);
+  const fallbackPosition = Number(fallback);
+  return Number.isFinite(fallbackPosition) && fallbackPosition > 0 ? Math.floor(fallbackPosition) : 1;
+}
+
 function storePlacementFlags(placements = []) {
   const list = Array.isArray(placements) ? placements : [];
   return {
@@ -7871,9 +7878,27 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   if (body.is_top === true && !placements.includes("TOP 10")) placements.unshift("TOP 10");
   if (body.isNew === true && !placements.includes("NEW")) placements.push("NEW");
   if (body.isFeatured === true && !placements.includes("TOP")) placements.push("TOP");
+  if (!placements.includes("stores")) placements.push("stores");
   flags = storePlacementFlags(placements);
-  const position = Math.max(0, Number(body.homepagePosition ?? body.position ?? existing?.homepagePosition ?? 0));
-  const topPosition = Math.max(0, Number(body.top_position ?? body.topPosition ?? existing?.top_position ?? position));
+  const legacyPosition = body.homepagePosition
+    ?? body.position
+    ?? body.catalogPosition
+    ?? body.catalog_position
+    ?? existing?.homepagePosition
+    ?? existing?.position
+    ?? 1;
+  const topPosition = adminNormalizePlacementPosition(
+    body.topPosition ?? body.top_position,
+    existing?.topPosition ?? existing?.top_position ?? legacyPosition
+  );
+  const newPosition = adminNormalizePlacementPosition(
+    body.newPosition ?? body.new_position,
+    existing?.newPosition ?? existing?.new_position ?? legacyPosition
+  );
+  const catalogPosition = adminNormalizePlacementPosition(
+    body.catalogPosition ?? body.catalog_position ?? body.storesPosition ?? body.stores_position,
+    existing?.catalogPosition ?? existing?.catalog_position ?? existing?.storesPosition ?? existing?.stores_position ?? legacyPosition
+  );
   const image = sellerImagePatch(existing?.image || existing?.avatar, body.image || body.avatar) || "assets/cerber-emblem.png";
   const cover = sellerImagePatch(existing?.cover || existing?.banner, body.cover || body.banner) || image || "assets/market-banner.png";
   const gallery = Array.isArray(body.gallery)
@@ -7909,10 +7934,16 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
     isNew: flags.isNew,
     placement,
     placements,
-    homepagePosition: position,
-    position,
+    homepagePosition: catalogPosition,
+    position: catalogPosition,
     top_position: topPosition,
     topPosition,
+    new_position: newPosition,
+    newPosition,
+    catalog_position: catalogPosition,
+    catalogPosition,
+    stores_position: catalogPosition,
+    storesPosition: catalogPosition,
     domains: Array.isArray(body.domains) ? body.domains : (Array.isArray(existing?.domains) ? existing.domains : ["*"]),
     domain_id: body.domain_id || existing?.domain_id || "*",
     countries,
@@ -8760,6 +8791,9 @@ function adminBuildOverview(data) {
       registeredAt: store.createdAt || null,
       commissionPercent: Number(store.commissionPercent ?? state.ownerSettings?.platformCommissionPercent ?? 0),
       homepagePosition: Number(store.homepagePosition || 0),
+      topPosition: Number(store.topPosition || store.top_position || store.position || store.homepagePosition || 1),
+      newPosition: Number(store.newPosition || store.new_position || store.position || store.homepagePosition || 1),
+      catalogPosition: Number(store.catalogPosition || store.catalog_position || store.storesPosition || store.stores_position || store.position || store.homepagePosition || 1),
       autoReleaseHours: Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24),
       short: store.short || "",
       description: store.description || "",

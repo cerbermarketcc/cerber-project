@@ -2998,21 +2998,37 @@ function sortProductsForFilters(products = [], filters = catalogFilters()) {
   return ordered.sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
 }
 
-function sortStoresForFilters(stores = [], filters = catalogFilters()) {
+function storePlacementPosition(store = {}, placement = "stores") {
+  const candidates = placement === "TOP 10"
+    ? [store.topPosition, store.top_position, store.position, store.homepagePosition]
+    : placement === "NEW"
+      ? [store.newPosition, store.new_position, store.position, store.homepagePosition]
+      : [store.catalogPosition, store.catalog_position, store.storesPosition, store.stores_position, store.position, store.homepagePosition];
+  const position = candidates.map(Number).find((value) => Number.isFinite(value) && value > 0);
+  return Math.floor(position || 9999);
+}
+
+function compareStorePlacementPosition(a, b, placement = "stores") {
+  return storePlacementPosition(a, placement) - storePlacementPosition(b, placement)
+    || Number(a.createdAt || 0) - Number(b.createdAt || 0)
+    || String(a.name || a.id || "").localeCompare(String(b.name || b.id || ""));
+}
+
+function sortStoresForFilters(stores = [], filters = catalogFilters(), placement = "stores") {
   const ordered = stores.slice();
   if (filters.sort === "priceAsc") {
-    return ordered.sort((a, b) => storeMinPrice(a, filters) - storeMinPrice(b, filters) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+    return ordered.sort((a, b) => storeMinPrice(a, filters) - storeMinPrice(b, filters) || compareStorePlacementPosition(a, b, placement));
   }
   if (filters.sort === "priceDesc") {
-    return ordered.sort((a, b) => storeMinPrice(b, filters) - storeMinPrice(a, filters) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+    return ordered.sort((a, b) => storeMinPrice(b, filters) - storeMinPrice(a, filters) || compareStorePlacementPosition(a, b, placement));
   }
-  return ordered.sort((a, b) => Number(b.isTop || 0) - Number(a.isTop || 0) || Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+  return ordered.sort((a, b) => compareStorePlacementPosition(a, b, placement));
 }
 
 function filteredStores(filters = catalogFilters()) {
   const query = searchText(filters.query);
   return sortStoresForFilters((db.stores || []).filter((store) => {
-    if (!storeIsVisible(store) && !isAdmin()) return false;
+    if (!storeIsActive(store) && !isAdmin()) return false;
     const products = (Array.isArray(store.products) ? store.products : [])
       .filter((product) => product.status !== "disabled");
     if (!storeLocationMatches(store, filters)) return false;
@@ -3036,23 +3052,22 @@ function storeHasExplicitPlacements(store = {}) {
 
 function storeInPlacement(store, placement) {
   const placements = storePlacementValues(store);
-  if (placement === "TOP 10") return placements.some((value) => value === "TOP 10" || value === "TOP10") || store.isTop === true || store.is_top === true || Number(store.top_position || store.topPosition || 0) > 0;
+  if (placement === "TOP 10") {
+    if (placements.some((value) => value === "TOP 10" || value === "TOP10") || store.isTop === true || store.is_top === true) return true;
+    return !storeHasExplicitPlacements(store) && Number(store.top_position || store.topPosition || 0) > 0;
+  }
   if (placement === "TOP") return placements.includes("TOP") || store.isFeatured === true;
   if (placement === "NEW") return placements.includes("NEW") || store.isNew === true || store.is_new === true;
-  if (placement === "stores") {
-    if (!storeIsVisible(store)) return false;
-    if (storeHasExplicitPlacements(store)) return placements.includes("STORES") || store.visibleInCatalog !== false;
-    return store.visibleInCatalog !== false;
-  }
+  if (placement === "stores") return storeIsActive(store);
   return false;
 }
 
 function publicStores() {
-  return (db.stores || []).filter((store) => storeIsVisible(store));
+  return (db.stores || []).filter((store) => storeIsActive(store));
 }
 
-function sortStoresByPosition(stores) {
-  return stores.slice().sort((a, b) => Number(a.position || a.homepagePosition || 9999) - Number(b.position || b.homepagePosition || 9999));
+function sortStoresByPosition(stores, placement = "stores") {
+  return stores.slice().sort((a, b) => compareStorePlacementPosition(a, b, placement));
 }
 
 function visibleStores(topOnly = false, filters = catalogFilters()) {
@@ -3061,14 +3076,14 @@ function visibleStores(topOnly = false, filters = catalogFilters()) {
     if (!allowedIds.has(store.id)) return false;
     if (topOnly) return storeInPlacement(store, "TOP 10");
     return storeInPlacement(store, "stores");
-  }), filters);
+  }), filters, topOnly ? "TOP 10" : "stores");
 }
 
 function homeStores(tab = "all", filters = catalogFilters()) {
   const stores = filteredStores(filters);
-  if (tab === "top") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "TOP 10")), filters);
-  if (tab === "new") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "NEW")), filters);
-  return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "stores")), filters);
+  if (tab === "top") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "TOP 10")), filters, "TOP 10");
+  if (tab === "new") return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "NEW")), filters, "NEW");
+  return sortStoresForFilters(stores.filter((store) => storeInPlacement(store, "stores")), filters, "stores");
 }
 
 function userBalance(login = db.currentUser) {

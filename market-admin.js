@@ -654,6 +654,55 @@ function adminStoreRowFromPayload(store = {}, panel = {}) {
   };
 }
 
+function adminStorePlacements(store = {}) {
+  const placements = Array.isArray(store.placements) && store.placements.length
+    ? store.placements.slice()
+    : [
+      ...(store.placement ? [store.placement] : []),
+      ...(store.isTop ? ["TOP 10"] : []),
+      ...(store.isFeatured ? ["TOP"] : []),
+      ...(store.isNew ? ["NEW"] : [])
+    ];
+  if (!placements.includes("stores")) placements.push("stores");
+  return Array.from(new Set(placements));
+}
+
+function adminPlacementPosition(store = {}, placement = "stores", fallback = 1) {
+  const values = placement === "TOP 10"
+    ? [store.topPosition, store.top_position, store.position, store.homepagePosition]
+    : placement === "NEW"
+      ? [store.newPosition, store.new_position, store.position, store.homepagePosition]
+      : [store.catalogPosition, store.catalog_position, store.storesPosition, store.stores_position, store.position, store.homepagePosition];
+  const value = values.map(Number).find((item) => Number.isFinite(item) && item > 0);
+  return Math.floor(value || fallback || 1);
+}
+
+function nextAdminPlacementPosition(placement = "stores") {
+  const positions = (data?.stores || [])
+    .filter((store) => placement === "stores" || adminStorePlacements(store).includes(placement))
+    .map((store) => adminPlacementPosition(store, placement, 0));
+  return Math.max(0, ...positions) + 1;
+}
+
+function storePlacementPositionControls(placements = [], store = {}) {
+  const row = ({ key, checkbox, placement, title, field, always = false }) => {
+    const checked = always || placements.includes(placement);
+    return `<div class="placement-position-row" data-placement-position-row="${key}">
+      ${always
+        ? `<strong class="placement-position-title">${title}</strong>`
+        : `<label class="placement-position-toggle"><input name="${checkbox}" type="checkbox" data-placement-position-toggle="${key}" ${checked ? "checked" : ""}> ${title}</label>`}
+      <label class="field placement-position-field ${checked ? "" : "is-hidden"}" data-placement-position-field="${key}">Позиция в разделе
+        <input name="${field}" type="number" min="1" step="1" value="${esc(adminPlacementPosition(store, placement, 1))}" ${checked ? "" : "disabled"}>
+      </label>
+    </div>`;
+  };
+  return `<div class="placement-position-list">
+    ${row({ key: "stores", placement: "stores", title: "Все магазины", field: "catalogPosition", always: true })}
+    ${row({ key: "top10", checkbox: "placement_TOP10", placement: "TOP 10", title: "TOP 10", field: "topPosition" })}
+    ${row({ key: "new", checkbox: "placement_NEW", placement: "NEW", title: "Новые", field: "newPosition" })}
+  </div>`;
+}
+
 function renderSection() {
   if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
@@ -731,29 +780,28 @@ function periodTable() {
 }
 
 function renderStores() {
-  const rows = filterRows(data.stores, ["id", "name", "ownerLogin", "status"]);
+  const rows = filterRows(data.stores, ["id", "name", "ownerLogin", "status"])
+    .slice()
+    .sort((a, b) => adminPlacementPosition(a, "stores") - adminPlacementPosition(b, "stores"));
   const createPanelOpen = window.innerWidth > 720 ? "open" : "";
+  const createPositions = {
+    catalogPosition: nextAdminPlacementPosition("stores"),
+    topPosition: nextAdminPlacementPosition("TOP 10"),
+    newPosition: nextAdminPlacementPosition("NEW")
+  };
   return `
     <details class="split-card admin-create-panel" ${createPanelOpen}>
       <summary><span><strong>Создать магазин</strong><small>Основное, доступы, размещение</small></span><b>+</b></summary>
       <form data-create-store-form>
         <label class="field">Фото магазина файлом<input name="imageFile" type="file" accept="image/*"></label>
         <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
-        <div class="checks">
-          <label><input name="placement_TOP10" type="checkbox" checked> TOP 10</label>
-          <label><input name="placement_TOP" type="checkbox"> TOP</label>
-          <label><input name="placement_NEW" type="checkbox"> NEW</label>
-          <label><input name="placement_stores" type="checkbox" checked> Раздел Магазины</label>
-        </div>
+        ${storePlacementPositionControls(["stores"], createPositions)}
         <div class="row">
           <label class="field">Название магазина<input name="name" required></label>
           <label class="field">Логин владельца<input name="ownerLogin" required></label>
         </div>
         <div class="row">
           <label class="field">Пароль панели продавца<input name="adminPassword" required></label>
-          <label class="field">Позиция<input name="position" type="number" min="1" step="1" value="1"></label>
-        </div>
-        <div class="row">
           <label class="field">Процент владельца сайта с продаж<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="3"></label>
         </div>
         <label class="field">Описание магазина<textarea name="description"></textarea></label>
@@ -768,7 +816,15 @@ function renderStores() {
     </details>
     <section class="split admin-manage-split">
       <article class="table-card"><table><thead><tr><th>Магазин</th><th>ID</th><th>Статус</th><th>Продажи</th><th>Доход магазина</th><th>Комиссия владельца</th><th>Клиенты</th><th>Товары</th><th>Диспуты</th><th>Дата</th></tr></thead><tbody>
-        ${rows.map((s) => `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`).join("")}
+        ${rows.map((s) => {
+          const placements = adminStorePlacements(s);
+          const positions = [
+            `Все #${adminPlacementPosition(s, "stores")}`,
+            placements.includes("TOP 10") ? `TOP 10 #${adminPlacementPosition(s, "TOP 10")}` : "",
+            placements.includes("NEW") ? `Новые #${adminPlacementPosition(s, "NEW")}` : ""
+          ].filter(Boolean).join(" · ");
+          return `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}<br>${esc(positions)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`;
+        }).join("")}
       </tbody></table></article>
       <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления статусом, комиссией, позицией, автозакрытием и монетами.</p></article>
     </section>
@@ -784,15 +840,7 @@ function storeDetail(id) {
   const grossRevenue = Number(store.grossRevenue || 0);
   const storeRevenue = Number(store.revenue || 0);
   const ownerCommission = Number(store.commission || 0);
-  const placements = Array.isArray(store.placements) && store.placements.length
-    ? store.placements
-    : [
-      ...(store.placement ? [store.placement] : []),
-      ...(store.isTop ? ["TOP 10"] : []),
-      ...(store.isFeatured ? ["TOP"] : []),
-      ...(store.isNew ? ["NEW"] : []),
-      ...(store.visibleInCatalog !== false ? ["stores"] : [])
-    ];
+  const placements = adminStorePlacements(store);
   return `
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(store.panel?.password || store.adminPassword || "")}</strong></p>
@@ -802,12 +850,7 @@ function storeDetail(id) {
       <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
       <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
       ${Array.isArray(store.gallery) && store.gallery.length ? `<div class="admin-gallery">${store.gallery.slice(0, 12).map((image) => `<img src="${esc(image)}" alt="">`).join("")}</div>` : ""}
-      <div class="checks">
-        <label><input name="placement_TOP10" type="checkbox" ${placements.includes("TOP 10") ? "checked" : ""}> TOP 10</label>
-        <label><input name="placement_TOP" type="checkbox" ${placements.includes("TOP") ? "checked" : ""}> TOP</label>
-        <label><input name="placement_NEW" type="checkbox" ${placements.includes("NEW") ? "checked" : ""}> NEW</label>
-        <label><input name="placement_stores" type="checkbox" ${placements.includes("stores") || placements.includes("STORES") ? "checked" : ""}> Раздел Магазины</label>
-      </div>
+      ${storePlacementPositionControls(placements, store)}
       <label class="field">Название<input name="name" value="${esc(store.name || "")}"></label>
       <label class="field">Описание<textarea name="description">${esc(store.description || "")}</textarea></label>
       <div class="row">
@@ -816,9 +859,6 @@ function storeDetail(id) {
       </div>
       <div class="row">
         <label class="field">Комиссия 0-20%<input name="commissionPercent" type="number" min="0" max="20" step="0.1" value="${esc(store.commissionPercent)}"></label>
-        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(store.position || store.homepagePosition || 0)}"></label>
-      </div>
-      <div class="row">
         <label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours || 24)}"></label>
       </div>
       <label class="field">Пароль панели продавца<input name="adminPassword" placeholder="оставить пустым, если не менять"></label>
@@ -1565,7 +1605,22 @@ function renderMirrorBots() {
   <article class="table-card"><table><thead><tr><th>ID</th><th>Создал</th><th>TG username</th><th>Telegram ID</th><th>Chat ID</th><th>Бот</th><th>Создано</th><th>Активность</th><th>Польз.</th><th>Webhook</th><th>Статус</th><th>Управление</th></tr></thead><tbody>${rows.map((b) => `<tr data-bot-select="${esc(b.id)}"><td>${esc(b.id || "-")}</td><td>${esc(b.createdByLogin || b.creatorLogin || b.loginKey || b.login || "-")}</td><td>${esc(b.createdByTelegram || b.creatorTelegram || (b.username ? `@${b.username}` : "-"))}</td><td>${esc(b.createdByTelegramId || b.ownerTelegramId || "-")}</td><td>${esc(b.chatId || "-")}</td><td>${esc(b.displayName || (b.botUsername ? `@${b.botUsername}` : b.botName || "-"))}</td><td>${fmtDate(b.createdAt)}</td><td>${fmtDate(b.lastActivityAt || b.updatedAt)}</td><td>${Number(b.usersCount || 0)}</td><td>${b.webhookOk ? "ok" : "error"}</td><td>${esc(statusLabel(b))}</td><td><button class="ghost" data-bot-action="${b.active ? "disable" : "enable"}" data-bot-id="${esc(b.id)}">${b.active ? "Отключить" : "Включить"}</button> <button class="ghost" data-bot-action="restartWebhook" data-bot-id="${esc(b.id)}">Webhook</button> <button class="ghost" data-bot-action="checkApi" data-bot-id="${esc(b.id)}">Проверить</button> <button class="ghost danger" data-bot-action="delete" data-bot-id="${esc(b.id)}">Удалить</button></td></tr>`).join("")}</tbody></table></article>${detail}`;
 }
 
+function bindPlacementPositionControls(scope = root) {
+  scope.querySelectorAll("[data-placement-position-toggle]").forEach((toggle) => {
+    const row = toggle.closest("[data-placement-position-row]");
+    const field = row?.querySelector("[data-placement-position-field]");
+    const input = field?.querySelector("input");
+    const sync = () => {
+      field?.classList.toggle("is-hidden", !toggle.checked);
+      if (input) input.disabled = !toggle.checked;
+    };
+    toggle.addEventListener("change", sync);
+    sync();
+  });
+}
+
 function bindActions() {
+  bindPlacementPositionControls();
   root.querySelector("[data-exchanger-create-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -1664,11 +1719,9 @@ function bindActions() {
     const countries = [];
     if (fd.get("region_moldova")) countries.push("moldova");
     if (fd.get("region_transnistria")) countries.push("transnistria");
-    const placements = [];
+    const placements = ["stores"];
     if (fd.get("placement_TOP10")) placements.push("TOP 10");
-    if (fd.get("placement_TOP")) placements.push("TOP");
     if (fd.get("placement_NEW")) placements.push("NEW");
-    if (fd.get("placement_stores")) placements.push("stores");
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
     const endSubmit = beginAdminFormSubmit(form, "Создаю...");
     if (!endSubmit) return;
@@ -1688,7 +1741,10 @@ function bindActions() {
           description: fd.get("description"),
           placement: placements[0] || "stores",
           placements,
-          position: Number(fd.get("position")),
+          position: Number(fd.get("catalogPosition") || 1),
+          catalogPosition: Number(fd.get("catalogPosition") || 1),
+          topPosition: fd.get("placement_TOP10") ? Number(fd.get("topPosition") || 1) : undefined,
+          newPosition: fd.get("placement_NEW") ? Number(fd.get("newPosition") || 1) : undefined,
           commissionPercent: Number(fd.get("commissionPercent") || 0),
           countries,
           enabledCoins
@@ -1733,22 +1789,21 @@ function bindActions() {
     event.preventDefault();
     if (form.dataset.submitting === "1") return;
     const fd = new FormData(form);
+    const existingStore = data.stores.find((item) => item.id === form.dataset.storeForm) || {};
     const enabledCoins = Object.fromEntries(coins.map((coin) => [coin, Boolean(fd.get(`coin_${coin}`))]));
     const countries = [];
     if (fd.get("region_moldova")) countries.push("moldova");
     if (fd.get("region_transnistria")) countries.push("transnistria");
-    const placements = [];
+    const placements = ["stores"];
     if (fd.get("placement_TOP10")) placements.push("TOP 10");
-    if (fd.get("placement_TOP")) placements.push("TOP");
     if (fd.get("placement_NEW")) placements.push("NEW");
-    if (fd.get("placement_stores")) placements.push("stores");
+    if (adminStorePlacements(existingStore).includes("TOP")) placements.push("TOP");
     const endSubmit = beginAdminFormSubmit(form, "Сохраняю...");
     if (!endSubmit) return;
     try {
       const image = await formImageValue(fd, "imageFile");
       const cover = await formImageValue(fd, "coverFile");
       const gallery = await formImageValues(fd, "galleryFiles", 12);
-      const existingStore = data.stores.find((item) => item.id === form.dataset.storeForm) || {};
       const payload = await api(`/api/admin/stores/${encodeURIComponent(form.dataset.storeForm)}`, {
         method: "PATCH",
         timeoutMs: ADMIN_UPLOAD_TIMEOUT_MS,
@@ -1762,9 +1817,12 @@ function bindActions() {
           status: fd.get("status"),
           placement: placements[0] || "stores",
           placements,
-          position: Number(fd.get("position")),
+          position: Number(fd.get("catalogPosition") || 1),
+          catalogPosition: Number(fd.get("catalogPosition") || 1),
+          topPosition: fd.get("placement_TOP10") ? Number(fd.get("topPosition") || 1) : undefined,
+          newPosition: fd.get("placement_NEW") ? Number(fd.get("newPosition") || 1) : undefined,
           commissionPercent: Number(fd.get("commissionPercent")),
-          homepagePosition: Number(fd.get("position") || fd.get("homepagePosition")),
+          homepagePosition: Number(fd.get("catalogPosition") || 1),
           autoReleaseHours: Number(fd.get("autoReleaseHours")),
           adminPassword: fd.get("adminPassword") || undefined,
           countries,

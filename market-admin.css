@@ -519,6 +519,48 @@ tr:hover td {
   color: var(--muted);
 }
 
+.placement-position-list {
+  margin: 14px 0;
+  border-block: 1px solid var(--line);
+}
+
+.placement-position-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(180px, 1fr);
+  gap: 14px;
+  align-items: center;
+  min-height: 74px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.placement-position-row:last-child {
+  border-bottom: 0;
+}
+
+.placement-position-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.placement-position-toggle input {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+}
+
+.placement-position-title {
+  color: var(--ink);
+}
+
+.placement-position-field {
+  margin: 0;
+}
+
 .notice {
   color: var(--red);
 }
@@ -1137,6 +1179,12 @@ tr:hover td {
     min-height: 44px;
     line-height: 1.25;
     background: rgba(255, 255, 255, 0.035);
+  }
+
+  .placement-position-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 10px 0;
   }
 
   .checks input[type="checkbox"] {
