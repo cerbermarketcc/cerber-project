@@ -649,6 +649,37 @@ async function ensureAdminSecurity(options = {}) {
   return state;
 }
 
+async function verifyMarketAdminCredentials(login = "", password = "", adminSecurity = {}) {
+  const storedLogin = String(adminSecurity.login || "admin");
+  const storedPasswordOk = adminSecurity.passwordHash
+    ? await bcrypt.compare(String(password || ""), adminSecurity.passwordHash)
+    : Boolean(adminSecurity.plainPassword) && secretValuesMatch(password, adminSecurity.plainPassword);
+  if (loginKey(login) === loginKey(storedLogin) && storedPasswordOk) {
+    return { ok: true, login: storedLogin, source: "stored" };
+  }
+
+  // Render credentials remain a recovery path if Supabase contains an older password hash.
+  const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin");
+  const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
+  const configuredOk = Boolean(configuredPassword)
+    && loginKey(login) === loginKey(configuredLogin)
+    && secretValuesMatch(password, configuredPassword);
+  return {
+    ok: configuredOk,
+    login: configuredOk ? configuredLogin : storedLogin,
+    source: configuredOk ? "configured_recovery" : "none"
+  };
+}
+
+async function verifyMarketAdminPassword(password = "", adminSecurity = {}) {
+  const storedPasswordOk = adminSecurity.passwordHash
+    ? await bcrypt.compare(String(password || ""), adminSecurity.passwordHash)
+    : Boolean(adminSecurity.plainPassword) && secretValuesMatch(password, adminSecurity.plainPassword);
+  if (storedPasswordOk) return true;
+  const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
+  return Boolean(configuredPassword) && secretValuesMatch(password, configuredPassword);
+}
+
 async function appendAdminLog(action, actor = "admin", details = {}) {
   const entry = {
     id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -4254,18 +4285,15 @@ app.post("/api/admin/login", async (req, res, next) => {
     requireDb();
     assertAdminRateLimit(req, login);
     const state = await ensureAdminSecurity();
-    const expectedLogin = state.adminSecurity?.login || "admin";
     const password = String(req.body.password || "");
-    const passwordOk = state.adminSecurity?.passwordHash
-      ? await bcrypt.compare(password, state.adminSecurity.passwordHash)
-      : password === String(state.adminSecurity?.plainPassword || "");
-    const ok = loginKey(login) === loginKey(expectedLogin) && passwordOk;
-    markAdminLoginAttempt(req, login, ok);
-    appendAdminLog(ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
-      ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || ""
+    const credentials = await verifyMarketAdminCredentials(login, password, state.adminSecurity);
+    markAdminLoginAttempt(req, login, credentials.ok);
+    appendAdminLog(credentials.ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
+      ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || "",
+      credentialSource: credentials.source
     }).catch((error) => console.error("[admin-login] log failed", { message: error.message }));
-    if (!ok) return res.status(401).json({ error: "Неверный логин или пароль" });
-    res.json({ token: signAdminToken(expectedLogin, "admin"), admin: { login: expectedLogin, role: "admin" } });
+    if (!credentials.ok) return res.status(401).json({ error: "Неверный логин или пароль" });
+    res.json({ token: signAdminToken(credentials.login, "admin"), admin: { login: credentials.login, role: "admin" } });
   } catch (error) {
     next(error);
   }
@@ -5690,9 +5718,7 @@ app.post("/api/admin/password", async (req, res, next) => {
     const state = await ensureAdminSecurity({ fullState: true });
     const currentPassword = String(req.body.currentPassword || "");
     const nextPassword = String(req.body.nextPassword || "");
-    const currentPasswordOk = state.adminSecurity.passwordHash
-      ? await bcrypt.compare(currentPassword, state.adminSecurity.passwordHash)
-      : secretValuesMatch(currentPassword, state.adminSecurity.plainPassword || process.env.MARKET_ADMIN_PASSWORD);
+    const currentPasswordOk = await verifyMarketAdminPassword(currentPassword, state.adminSecurity);
     if (!currentPasswordOk) return res.status(401).json({ error: "Текущий пароль неверный" });
     if (nextPassword.length < 8) return res.status(400).json({ error: "Минимум 8 символов" });
     state.adminSecurity.passwordHash = await bcrypt.hash(nextPassword, 12);
