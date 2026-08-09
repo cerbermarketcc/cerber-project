@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "marketplace-stability-2026-08-09-v138";
+const cerberBuildVersion = "catalog-chat-dark-ui-2026-08-10-v140";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -1076,6 +1076,12 @@ function sellerProductPatch(existing = {}, input = {}) {
   } else if (Array.isArray(existing.images)) {
     item.images = existing.images;
   }
+  item.variants = (Array.isArray(input.variants) ? input.variants : (existing.variants || [])).map((variant, index) => ({
+    id: String(variant?.id || `variant-${item.id || "product"}-${index + 1}`),
+    subtype: String(variant?.subtype || "").trim(),
+    weight: String(variant?.weight ?? "").trim(),
+    priceUsd: Math.max(0, Number(variant?.priceUsd || 0))
+  }));
   return item;
 }
 
@@ -1259,7 +1265,7 @@ async function ensureSeed() {
       const { error } = await supabase.from("app_settings").upsert({
         id: mainSettingsRowId,
         data: {
-      theme: "light",
+      theme: "dark",
       lang: "ru",
       orders: [],
       exchangeCards: defaultExchangeCards,
@@ -1409,7 +1415,7 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
     .map((store) => publicStoreForState(store))
     .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(cleanState, store));
   return {
-    theme: cleanState.theme || "light",
+    theme: "dark",
     lang: cleanState.lang || "ru",
     stores,
     exchangeCards: publicExchangeCardsForState(cleanState.exchangeCards),
@@ -1662,7 +1668,7 @@ async function stateFor(user) {
             stateSnapshotComplete: true,
             catalogsAuthoritative: true,
             currentUser: "",
-            theme: publicCatalog.theme || "light",
+            theme: "dark",
             lang: publicCatalog.lang || "ru",
             users: [],
             stores: catalogStores,
@@ -1774,7 +1780,7 @@ async function stateFor(user) {
           stateSnapshotComplete: publicCatalogComplete,
           catalogsAuthoritative: publicCatalogComplete,
           currentUser: "",
-          theme: settingsData.theme || "light",
+          theme: "dark",
           lang: settingsData.lang || "ru",
           users: [],
           stores: publicStores,
@@ -1981,7 +1987,7 @@ async function stateFor(user) {
         stateSnapshotComplete: true,
         catalogsAuthoritative: true,
         currentUser: user?.login || "",
-        theme: settingsData.theme || "light",
+        theme: "dark",
         lang: settingsData.lang || "ru",
         users: user ? [publicUser(user)] : [],
         stores: visibleStores,
@@ -2317,7 +2323,7 @@ function authStateForUser(user, state = {}) {
       statePartial: true,
       catalogsPartial: true,
       currentUser: login,
-      theme: state.theme || "light",
+      theme: "dark",
       lang: state.lang || "ru",
       users: publicProfile ? [publicProfile] : [],
       stores: visibleStores,
@@ -3528,6 +3534,13 @@ app.put("/api/store-admin/products", async (req, res, next) => {
       updatedAt: Date.now()
     });
     const savedStore = await saveStoreRow(mergedStore, "store-admin products save");
+    const savedProducts = Array.isArray(savedStore.products) ? savedStore.products : [];
+    const inputIds = productsInput.map((product) => String(product?.id || "")).filter(Boolean);
+    if (inputIds.some((id) => !savedProducts.some((product) => String(product?.id || "") === id))) {
+      const error = new Error("Карточки не сохранились полностью. Попробуйте ещё раз.");
+      error.status = 500;
+      throw error;
+    }
     scheduleStorePublication(savedStore, "store-admin products save");
     console.log("[store-admin] products saved", {
       storeId: savedStore.id,
@@ -3559,9 +3572,12 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
     if (!product) return res.status(404).json({ error: "Карточка не найдена" });
     product.positions = positionsInput.map((position) => ({
       id: String(position?.id || `position-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`),
+      variantId: String(position?.variantId || "").trim(),
+      subtype: String(position?.subtype || "").trim(),
       title: String(position?.title || product.title || "Товар").trim(),
       description: String(position?.description || "").trim(),
       deliveryItems: Array.isArray(position?.deliveryItems) ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      delimiter: String(position?.delimiter || "\n"),
       priceUsd: Number(position?.priceUsd || product.priceUsd || 0),
       country: String(position?.country || "moldova"),
       city: String(position?.city || "chisinau"),
@@ -3569,7 +3585,9 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
       deliveryType: String(position?.deliveryType || "Товар").trim(),
       saleMode: String(position?.saleMode || position?.productMode || position?.orderMode || position?.status || "ready").toLowerCase() === "preorder" ? "preorder" : "ready",
       weight: String(position?.weight ?? "").trim(),
-      stock: Math.max(0, Number(position?.stock || 0)),
+      stock: Array.isArray(position?.deliveryItems)
+        ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean).length
+        : Math.max(0, Number(position?.stock || 0)),
       status: String(position?.status || "ready")
     }));
     if (product.positions.length) {
@@ -3906,7 +3924,7 @@ app.get("/api/state", async (_req, res, next) => {
         stateSnapshotComplete: true,
         catalogsAuthoritative: true,
         currentUser: "",
-        theme: "light",
+        theme: "dark",
         lang: "ru",
         users: [],
         stores: [],
@@ -3982,7 +4000,7 @@ app.put("/api/state", async (req, res, next) => {
     };
     const nextSettingsData = {
       ...currentSettingsData,
-      theme: state.theme || "light",
+      theme: "dark",
       lang: state.lang || "ru",
       orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
       exchangeCards: publicExchangeCardsForState(currentSettingsData.exchangeCards),
@@ -4680,7 +4698,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
     );
     if (deleteResult?.error) throw deleteResult.error;
     const emptyCatalog = {
-      theme: state.theme || "light",
+      theme: "dark",
       lang: state.lang || "ru",
       stores: [],
       exchangeCards: [],
@@ -5124,6 +5142,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
     const now = Date.now();
+    const requestKey = disputeRequestKey(req.body.clientRequestId);
     const threadId = dispute.disputeThreadId || `dispute-${dispute.id}-${now}`;
     const publicNumber = order ? ensureDisputeNumber(data.state, dispute) : disputeNumber(dispute);
     dispute.disputeThreadId = threadId;
@@ -5132,7 +5151,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       await saveSettingsState(data.state);
     }
     await upsertPrivateMessage(attachDisputeParticipants({
-      id: `admin-dispute-reply-${id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      id: requestKey ? `admin-dispute-reply-${id}-${requestKey}` : `admin-dispute-reply-${id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: store?.id || dispute.storeId || "",
       storeTag: store?.tag || store?.name || "",
       toLogin: dispute.login || dispute.fromLogin || "",
@@ -7658,6 +7677,127 @@ async function adminLoadMarketplace(options = {}) {
     sessions: sessionsResult?.data || []
   };
 }
+
+function disputeRequestKey(value = "") {
+  return String(value || "").trim().replace(/[^a-z0-9_-]+/gi, "").slice(0, 80);
+}
+
+async function loadPrivateMessageById(id = "") {
+  const { data, error } = await supabase.from("messages").select("data").eq("id", String(id || "")).maybeSingle();
+  if (error) throw error;
+  return data?.data || null;
+}
+
+function editableDisputeMessage(message = {}) {
+  return Boolean(message.id && (message.disputeThreadId || String(message.system || "").includes("dispute")));
+}
+
+async function updateDisputeMessage(id, body, deleted = false) {
+  const message = await loadPrivateMessageById(id);
+  if (!editableDisputeMessage(message)) return null;
+  const next = {
+    ...message,
+    body: deleted ? "" : String(body || "").trim(),
+    attachments: deleted ? [] : (message.attachments || []),
+    deleted: Boolean(deleted),
+    editedAt: Date.now()
+  };
+  await upsertPrivateMessage(next);
+  notifyRealtime(deleted ? "dispute_message_deleted" : "dispute_message_edited", {
+    id: next.id,
+    orderId: next.orderId || "",
+    storeId: next.storeId || ""
+  });
+  return next;
+}
+
+app.patch("/api/messages/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
+    if (!sameLogin(message.fromLogin, user.login)) return res.status(403).json({ error: "Можно изменить только своё сообщение" });
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Введите сообщение" });
+    res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/messages/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
+    if (!sameLogin(message.fromLogin, user.login)) return res.status(403).json({ error: "Можно удалить только своё сообщение" });
+    res.json({ message: await updateDisputeMessage(req.params.id, "", true) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/store-admin/messages/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token?.storeId || !sellerTokenCanAccess(token, "disputes")) return res.status(403).json({ error: "Нет доступа" });
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message) || String(message.storeId || "") !== String(token.storeId)) return res.status(404).json({ error: "Сообщение не найдено" });
+    const store = await loadStoreWithFallback(token.storeId);
+    if (![store?.ownerLogin, store?.id].some((value) => sameLogin(message.fromLogin, value))) return res.status(403).json({ error: "Можно изменить только сообщение магазина" });
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Введите сообщение" });
+    res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/store-admin/messages/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token?.storeId || !sellerTokenCanAccess(token, "disputes")) return res.status(403).json({ error: "Нет доступа" });
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message) || String(message.storeId || "") !== String(token.storeId)) return res.status(404).json({ error: "Сообщение не найдено" });
+    const store = await loadStoreWithFallback(token.storeId);
+    if (![store?.ownerLogin, store?.id].some((value) => sameLogin(message.fromLogin, value))) return res.status(403).json({ error: "Можно удалить только сообщение магазина" });
+    res.json({ message: await updateDisputeMessage(req.params.id, "", true) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/messages/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
+    if (!sameLogin(message.fromLogin, admin.login) && !String(message.system || "").startsWith("admin-dispute")) return res.status(403).json({ error: "Можно изменить только своё сообщение" });
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Введите сообщение" });
+    res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/messages/:id", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
+    if (!sameLogin(message.fromLogin, admin.login) && !String(message.system || "").startsWith("admin-dispute")) return res.status(403).json({ error: "Можно удалить только своё сообщение" });
+    res.json({ message: await updateDisputeMessage(req.params.id, "", true) });
+  } catch (error) {
+    next(error);
+  }
+});
 
 function adminMoney(value) {
   return Number(value || 0) || 0;
@@ -11337,6 +11477,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = found.store || await loadStoreWithFallback(order.storeId);
     const now = Date.now();
+    const requestKey = disputeRequestKey(req.body.clientRequestId);
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
     const replyToLogin = String(req.body.toLogin || "").trim() || store?.ownerLogin || "admin";
@@ -11346,8 +11487,8 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     order.disputeThreadId = threadId;
     order.disputeOpenedAt = order.disputeOpenedAt || now;
     order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
-    await upsertPrivateMessage(attachDisputeParticipants({
-      id: `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+    const replyMessage = attachDisputeParticipants({
+      id: requestKey ? `client-dispute-reply-${order.id}-${loginKey(user.login)}-${requestKey}` : `client-dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: replyToLogin,
@@ -11360,29 +11501,32 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
       system: "product-dispute-reply",
       orderId: order.id,
       disputeThreadId: threadId
-    }, order, store));
-    await notifySiteUser(state, store?.ownerLogin || "admin", {
+    }, order, store);
+    await upsertPrivateMessage(replyMessage);
+    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
+    res.json({ order, message: replyMessage });
+    Promise.resolve().then(async () => {
+      await notifySiteUser(state, store?.ownerLogin || "admin", {
       id: `notice-client-dispute-reply-store-${order.id}-${now}-${loginKey(store?.ownerLogin || "admin")}`,
       eventType: "dispute_reply",
       orderId: order.id,
       storeId: order.storeId,
       title: "Новое сообщение в диспуте",
       body: `Клиент ${user.login} написал по диспуту #${publicNumber}.`
-    });
-    await notifySiteUser(state, "admin", {
+      });
+      await notifySiteUser(state, "admin", {
       id: `notice-client-dispute-reply-owner-${order.id}-${now}`,
       eventType: "dispute_reply",
       orderId: order.id,
       storeId: order.storeId,
       title: "Новое сообщение в диспуте",
       body: `Клиент ${user.login} написал по диспуту #${publicNumber}, магазин ${store?.name || order.storeName || order.storeId}.`
+      });
+      await syncProductOrderEverywhere(state, order, store);
+      await withTimeout(saveSettingsState(state), "client dispute reply state save", 8000);
+    }).catch((error) => {
+      console.error("[dispute] client reply background save skipped", { orderId: order.id, message: error.message });
     });
-    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
-    await syncProductOrderEverywhere(state, order, store);
-    await withTimeout(saveSettingsState(state), "client dispute reply state save", 8000).catch((error) => {
-      console.error("[dispute] client reply state save skipped", { orderId: order.id, message: error.message });
-    });
-    res.json({ order, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -11451,9 +11595,10 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = await loadStoreWithFallback(token.storeId);
     const now = Date.now();
+    const requestKey = disputeRequestKey(req.body.clientRequestId);
     order.storeOwnerLogin = store?.ownerLogin || order.storeOwnerLogin || "";
-    await upsertPrivateMessage(attachDisputeParticipants({
-      id: `dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
+    const replyMessage = attachDisputeParticipants({
+      id: requestKey ? `dispute-reply-${order.id}-${requestKey}` : `dispute-reply-${order.id}-${now}-${crypto.randomBytes(3).toString("hex")}`,
       storeId: order.storeId,
       storeTag: store?.name || order.storeName || order.storeId,
       toLogin: order.login,
@@ -11466,29 +11611,32 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       system: "product-dispute-reply",
       orderId: order.id,
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
-    }, order, store));
-    await notifySiteUser(state, order.login, {
+    }, order, store);
+    await upsertPrivateMessage(replyMessage);
+    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
+    res.json({ order, message: replyMessage });
+    Promise.resolve().then(async () => {
+      await notifySiteUser(state, order.login, {
       id: `notice-dispute-reply-${order.id}-${now}-${loginKey(order.login)}`,
       eventType: "dispute_reply",
       orderId: order.id,
       storeId: order.storeId,
       title: "Новое сообщение в диспуте",
       body: `Магазин ответил по диспуту заказа ${order.product || order.id}.`
-    });
-    await notifySiteUser(state, "admin", {
+      });
+      await notifySiteUser(state, "admin", {
       id: `notice-store-dispute-reply-owner-${order.id}-${now}`,
       eventType: "dispute_reply",
       orderId: order.id,
       storeId: order.storeId,
       title: "Новое сообщение в диспуте",
       body: `Магазин ${store?.name || order.storeName || order.storeId} ответил по диспуту #${disputeNumber(order)}.`
+      });
+      await syncProductOrderEverywhere(state, order, store);
+      await withTimeout(saveSettingsState(state), "store dispute reply state save", 8000);
+    }).catch((error) => {
+      console.error("[dispute] store reply background save skipped", { orderId: order.id, message: error.message });
     });
-    notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
-    await syncProductOrderEverywhere(state, order, store);
-    await withTimeout(saveSettingsState(state), "store dispute reply state save", 8000).catch((error) => {
-      console.error("[dispute] store reply state save skipped", { orderId: order.id, message: error.message });
-    });
-    res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }

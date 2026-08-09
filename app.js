@@ -138,7 +138,7 @@ let groupWidgetVoiceRecorder = null;
 let groupWidgetVoiceChunks = [];
 let groupWidgetVoiceDraft = null;
 let adminCreationNotice = "";
-let activeHomeTab = "all";
+let activeHomeTab = "top";
 const NEW_STORE_STATS = {
   orders: 0,
   reviews: 0,
@@ -255,7 +255,7 @@ const filterOptions = {
 
 const defaults = {
   currentUser: "",
-  theme: "light",
+  theme: "dark",
   lang: "ru",
   users: [],
   stores: [],
@@ -1352,6 +1352,7 @@ function applyVisualMarketplaceReset(next = {}) {
 }
 
 function normalizeDb(next) {
+  next.theme = "dark";
   if (API_ENABLED) {
     next.users = (Array.isArray(next.users) ? next.users : []).map(clientStorageUser);
     next.stores = (Array.isArray(next.stores) ? next.stores : []).map(clientStorageStore);
@@ -1507,14 +1508,75 @@ function normalizeProduct(product, store = {}) {
   const deliveryItems = Array.isArray(product.deliveryItems)
     ? product.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean)
     : String(product.deliveryItemsText || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const normalizedPositions = Array.isArray(product.positions) ? product.positions.map((position) => {
+    const positionItems = Array.isArray(position.deliveryItems)
+      ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean)
+      : String(position.deliveryItemsText || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    return {
+      id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      variantId: String(position.variantId || "").trim(),
+      subtype: String(position.subtype || "").trim(),
+      title: position.title || position.district || "Позиция",
+      description: position.description || "",
+      deliveryItems: positionItems,
+      delimiter: String(position.delimiter || "\n"),
+      priceUsd: Number(position.priceUsd || priceUsd || 0),
+      country: position.country || "moldova",
+      city: position.city || "chisinau",
+      district: position.district || "",
+      deliveryType: position.deliveryType || "Тайник",
+      weight: String(position.weight ?? "").trim(),
+      stock: positionItems.length || Math.max(0, Number(position.stock || 0)),
+      saleMode: positionSaleMode(position),
+      status: String(position.status || "ready").toLowerCase() === "disabled" ? "disabled" : "ready"
+    };
+  }) : [];
+  const sourceVariants = Array.isArray(product.variants) && product.variants.length
+    ? product.variants
+    : normalizedPositions.length
+      ? normalizedPositions.map((position) => ({
+        id: position.variantId,
+        subtype: position.subtype,
+        weight: position.weight,
+        priceUsd: position.priceUsd
+      }))
+      : [{ subtype: product.subtype || "", weight: product.weight || "", priceUsd }];
+  const variantKeys = new Set();
+  const variants = sourceVariants.map((variant, index) => {
+    const subtype = String(variant.subtype || product.subtype || "").trim();
+    const weight = String(variant.weight ?? "").trim();
+    const variantPrice = Number(variant.priceUsd || priceUsd || 0);
+    const key = `${subtype.toLowerCase()}|${weight.toLowerCase()}|${variantPrice}`;
+    if (variantKeys.has(key)) return null;
+    variantKeys.add(key);
+    return {
+      id: String(variant.id || `variant-${product.id || "product"}-${index + 1}`).trim(),
+      subtype,
+      weight,
+      priceUsd: variantPrice
+    };
+  }).filter(Boolean);
+  normalizedPositions.forEach((position) => {
+    if (position.variantId && variants.some((variant) => variant.id === position.variantId)) return;
+    const matched = variants.find((variant) => (
+      String(variant.subtype || "").toLowerCase() === String(position.subtype || "").toLowerCase()
+      && String(variant.weight || "").toLowerCase() === String(position.weight || "").toLowerCase()
+      && Number(variant.priceUsd || 0) === Number(position.priceUsd || 0)
+    ));
+    position.variantId = matched?.id || variants[0]?.id || "";
+    position.subtype = position.subtype || matched?.subtype || variants[0]?.subtype || "";
+  });
+  const variantPrices = variants.map((variant) => Number(variant.priceUsd || 0)).filter((value) => value > 0);
+  const cardPrice = variantPrices.length ? Math.min(...variantPrices) : priceUsd;
   return {
     ...product,
     id: product.id || `product-${Date.now()}`,
     title: product.title || "Товар",
     category: product.category || "Разное",
     description: product.description || "",
-    priceUsd,
-    price: product.price || (priceUsd ? `от ${priceUsd}$` : "0 $"),
+    subtype: String(product.subtype || variants[0]?.subtype || "").trim(),
+    priceUsd: cardPrice,
+    price: cardPrice ? `от ${cardPrice}$` : "0 $",
     image: product.image || store.image || fallbackImage,
     images: Array.isArray(product.images) && product.images.length ? product.images.slice(0, 5) : [product.image || store.image || fallbackImage],
     rating: Number(product.rating || 5),
@@ -1522,28 +1584,37 @@ function normalizeProduct(product, store = {}) {
     purchases: Number(product.purchases || 0),
     sellerManaged: Boolean(product.sellerManaged),
     deliveryItems,
-    positions: Array.isArray(product.positions) ? product.positions.map((position) => {
-      const positionItems = Array.isArray(position.deliveryItems)
-        ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean)
-        : String(position.deliveryItemsText || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-      return {
-        id: position.id || `position-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        title: position.title || position.district || "Позиция",
-        description: position.description || "",
-        deliveryItems: positionItems,
-        priceUsd: Number(position.priceUsd || priceUsd || 0),
-        country: position.country || "moldova",
-        city: position.city || "chisinau",
-        district: position.district || "",
-        deliveryType: position.deliveryType || "Курьер",
-        weight: String(position.weight ?? "").trim(),
-        stock: positionItems.length || deliveryItems.length || Number(position.stock || 0),
-        saleMode: positionSaleMode(position),
-        status: String(position.status || "ready").toLowerCase() === "disabled" ? "disabled" : "ready"
-      };
-    }) : [],
+    variants,
+    positions: normalizedPositions,
     reviewsList: Array.isArray(product.reviewsList) ? product.reviewsList : []
   };
+}
+
+function normalizedShopKey(value = "") {
+  return String(value || "").trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
+}
+
+function productVariants(product = {}) {
+  return Array.isArray(product.variants) ? product.variants : [];
+}
+
+function productVariantLabel(product = {}, variant = {}) {
+  const name = [product.title, variant.subtype, variant.weight]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" · ");
+  return `${name} · ${Number(variant.priceUsd || product.priceUsd || 0).toFixed(2)} $`;
+}
+
+function shopVariantRef(product = {}, variant = {}) {
+  return `${product.id}::${variant.id}`;
+}
+
+function shopVariantFromRef(store = {}, value = "") {
+  const [productId, variantId] = String(value || "").split("::");
+  const product = (store.products || []).find((item) => item.id === productId);
+  const variant = productVariants(product).find((item) => item.id === variantId);
+  return { product, variant };
 }
 
 function normalizeExchangeCard(card) {
@@ -2503,6 +2574,12 @@ function messageReactionPickerHtml(msg, scope) {
       ${isGroupModerator() ? `<button type="button" data-group-delete="${esc(msg.id)}">Удалить у всех</button>` : ""}
     </div>
   ` : "";
+  const privateActions = scope === "private" && sameLogin(msg.fromLogin, db.currentUser) && editableClientDisputeMessage(msg) ? `
+    <div class="message-action-menu">
+      <button type="button" data-dispute-message-edit="${esc(msg.id)}">Редактировать</button>
+      <button type="button" data-dispute-message-delete="${esc(msg.id)}">Удалить</button>
+    </div>
+  ` : "";
   return `
     <div class="message-reaction-picker" data-reaction-picker-for="${esc(msg.id)}" hidden>
       <div class="message-reaction-grid">
@@ -2512,7 +2589,7 @@ function messageReactionPickerHtml(msg, scope) {
           </button>
         `).join("")}
       </div>
-      ${groupActions}
+      ${groupActions}${privateActions}
     </div>
   `;
 }
@@ -2634,6 +2711,10 @@ async function persistSellerAdminStore() {
   }
 }
 
+function editableClientDisputeMessage(message = {}) {
+  return Boolean(!message.deleted && (message.disputeThreadId || String(message.system || "").includes("dispute")));
+}
+
 async function persistSellerAdminProducts(store, token = sellerAdminApiSessionToken()) {
   if (!API_ENABLED || !token || !store?.id) throw new Error("Войдите в Shop Admin заново");
   return apiFetch("/api/store-admin/products", {
@@ -2746,7 +2827,7 @@ function sellerAdminHashId() {
 
 function hashRoute() {
   const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
-  const routes = new Set(["admin", "owner", "seller", "wallet", "catalog", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
+  const routes = new Set(["admin", "owner", "seller", "wallet", "catalog", "products", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
   return routes.has(hash) ? hash : "";
 }
 
@@ -3830,10 +3911,18 @@ function supportRecipients() {
 }
 
 function layout(content) {
-  document.body.dataset.theme = db.theme;
+  db.theme = "dark";
+  document.body.dataset.theme = "dark";
   const ltcBalance = userLtcBalance();
   const ltcUsd = userLtcUsdBalance();
   const pendingOrders = pendingOrdersCount();
+  const mobileNavItems = [
+    ["wallet", "wallet", "Пополнить"],
+    ["home", "home", "Маркет"],
+    ["products", "stores", "Товары"],
+    ["orders", "orders", "Заказы"],
+    ["messages", "messages", "Чаты"]
+  ];
   root.innerHTML = `
     <main class="app">
       <header class="topbar">
@@ -3843,33 +3932,39 @@ function layout(content) {
           <span>${ltcUsd.toFixed(2)} $</span>
           <img class="avatar" src="assets/user-avatar.png" alt="">
         </button>
+        <button class="topbar-menu" data-menu aria-label="Открыть меню" title="Открыть меню"><span></span><span></span><span></span></button>
       </header>
       ${content}
     </main>
-    <section class="quick-actions" aria-label="Quick actions">
-      <button class="quick-action quick-support" data-route="support" aria-label="Support" title="Support">${navIcon("support")}</button>
-      <button class="quick-action menu" data-menu aria-label="Menu" title="Menu"><span></span><span></span><span></span></button>
-    </section>
-    <section class="dock">
-      <button class="theme-toggle" data-theme-toggle>
-        <span>${db.theme === "dark" ? tr("themeDark") : tr("themeLight")}</span>
-        <span class="switch ${db.theme === "dark" ? "dark" : ""}"><i>${db.theme === "dark" ? "☾" : "☀"}</i></span>
-      </button>
-      <div class="language">
-        <span>${tr("language")}</span>
-        <div>
-          ${["ru", "md", "en"].map((lang) => `<button class="${db.lang === lang ? "active" : ""}" data-lang="${lang}">${lang === "en" ? "ENG" : lang.toUpperCase()}</button>`).join("")}
-        </div>
-      </div>
-    </section>
+    <nav class="mobile-bottom-nav" aria-label="Основная навигация">
+      ${mobileNavItems.map(([nextRoute, icon, label]) => `
+        <button class="${route === nextRoute ? "active" : ""}" data-route="${nextRoute}">
+          ${navIcon(icon)}<span>${label}</span>${nextRoute === "orders" ? menuCountBadge(pendingOrders) : ""}
+        </button>
+      `).join("")}
+    </nav>
     <div class="nav-pop" data-nav-pop>
-      <div class="nav-card">
-        ${navButton("home", "Главная", `data-route="home"`)}
-        ${navButton("stores", "Магазины", `data-route="catalog"`)}
-        ${navButton("orders", "Заказы", `data-route="orders"`, menuCountBadge(pendingOrders))}
-        <button class="nav-icon ${route === "messages" ? "active" : ""}" aria-label="${tr("messages")}" title="${tr("messages")}" data-route="messages">${navIcon("messages")}<i></i></button>
-        ${navButton("filters", "Фильтры", `data-filters`)}
-        <button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button>
+      <div class="nav-card buyer-sidebar">
+        <div class="buyer-sidebar-head"><img src="assets/cerber-emblem.png" alt=""><strong>CERBER</strong><button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button></div>
+        <div class="buyer-sidebar-primary">
+          ${accountMenuButton("wallet", "Пополнить", `data-route="wallet"`)}
+          ${accountMenuButton("home", "Маркет", `data-route="home"`)}
+          ${accountMenuButton("stores", "Товары", `data-route="products"`)}
+          ${accountMenuButton("orders", "Заказы", `data-route="orders"`, menuCountBadge(pendingOrders))}
+          ${accountMenuButton("messages", tr("messages"), `data-route="messages"`)}
+        </div>
+        <div class="buyer-sidebar-more">
+          ${accountMenuButton("home", "Магазины", `data-route="catalog"`)}
+          ${accountMenuButton("exchange", "Обменники", `data-route="exchange"`)}
+          ${accountMenuButton("messages", groupRoomLabel(), `data-route="group-chat"`)}
+          ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
+          ${accountMenuButton("referrals", "Рефералы", `data-route="referrals"`)}
+          ${accountMenuButton("rules", "Правила", `data-rules`)}
+          <div class="buyer-sidebar-language language">
+            <span>${tr("language")}</span>
+            <div>${["ru", "md", "en"].map((lang) => `<button class="${db.lang === lang ? "active" : ""}" data-lang="${lang}">${lang === "en" ? "ENG" : lang.toUpperCase()}</button>`).join("")}</div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="account-pop" data-account-pop>
@@ -4108,7 +4203,7 @@ function mountTurnstile(force = false) {
   try {
     turnstileWidgetId = window.turnstile.render("#turnstile-widget", {
       sitekey: TURNSTILE_SITE_KEY,
-      theme: db.theme === "dark" ? "dark" : "light",
+      theme: "dark",
       appearance: "always",
       retry: "auto",
       "retry-interval": 8000,
@@ -4284,8 +4379,10 @@ async function submitAuthDraft(authDraft, captcha) {
 function renderHome() {
   route = "home";
   const filters = catalogFilters();
-  const stores = homeStores(activeHomeTab);
-  const cards = stores.map((store) => storeCard(store)).join("");
+  const stores = activeHomeTab === "exchange" ? [] : homeStores(activeHomeTab);
+  const cards = activeHomeTab === "exchange"
+    ? exchangeCatalogHtml(visibleExchangers(), db.exchangeCards.filter((card) => card.active !== false), "")
+    : stores.map((store) => storeCard(store)).join("");
   layout(`
     <section class="feed home-mirrors-first">
       ${officialMirrorsView()}
@@ -4295,9 +4392,9 @@ function renderHome() {
       <label class="search"><b>⌕</b><input data-search value="${esc(filters.query || "")}" placeholder="${tr("search")}"></label>
       <button class="filter-inline-button" data-filters>Фильтры</button>
       <div class="tabs">
-        <button class="tab ${activeHomeTab === "all" ? "active" : ""}" data-home-tab="all">${tr("all")}</button>
         <button class="tab ${activeHomeTab === "top" ? "active" : ""}" data-home-tab="top">${tr("top")}</button>
         <button class="tab ${activeHomeTab === "new" ? "active" : ""}" data-home-tab="new">${tr("new")}</button>
+        <button class="tab ${activeHomeTab === "exchange" ? "active" : ""}" data-home-tab="exchange">Обменники</button>
       </div>
     </section>
     <section class="feed home-feed">
@@ -4314,10 +4411,12 @@ function renderHome() {
   document.querySelector("[data-search]").oninput = (event) => {
     db.filters = { ...catalogFilters(), query: event.target.value };
     saveDb({ localOnly: true, silentLocalStorageError: true });
-    document.querySelector("[data-feed]").innerHTML = homeStores(activeHomeTab)
-      .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
-    bindStoreCards();
+    document.querySelector("[data-feed]").innerHTML = activeHomeTab === "exchange"
+      ? exchangeCatalogHtml(visibleExchangers(), db.exchangeCards.filter((card) => card.active !== false), "")
+      : homeStores(activeHomeTab).map((store) => storeCard(store)).join("");
+    activeHomeTab === "exchange" ? bindExchangeCatalogCards() : bindStoreCards();
   };
+  if (activeHomeTab === "exchange") bindExchangeCatalogCards();
 }
 
 function topTitleView() {
@@ -4335,19 +4434,10 @@ function mirrorRow(url) {
 
 function officialMirrorsView() {
   return `
-    <details class="official-mirrors">
-      <summary>
-        <span>Официальные зеркала</span>
-        <small>${esc(officialOnionMirrors[0])}</small>
-        <b>Ещё</b>
-      </summary>
-      <div class="mirror-list">
-        <h3>TOR</h3>
-        ${officialOnionMirrors.map(mirrorRow).join("")}
-        <h3>Clear domains</h3>
-        ${officialClearDomains.map(mirrorRow).join("")}
-      </div>
-    </details>
+    <section class="official-mirrors official-mirrors-compact">
+      <strong>Официальные зеркала</strong>
+      <div class="official-domain-list">${officialClearDomains.map((domain) => `<button data-copy="${esc(domain)}" title="Скопировать">${esc(domain)}</button>`).join("")}</div>
+    </section>
   `;
 }
 
@@ -4606,25 +4696,41 @@ function showProductOrder(orderId) {
 async function sendClientDisputeReply(event) {
   event.preventDefault();
   const form = event.currentTarget;
+  if (form.dataset.submitting === "1") return;
+  form.dataset.submitting = "1";
+  const submit = form.querySelector('button[type="submit"], .group-send-button');
+  if (submit) submit.disabled = true;
   const orderId = form.dataset.clientDisputeReply;
   const fd = new FormData(form);
   const body = String(fd.get("body") || "").trim();
   const file = fd.get("attachment");
   const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
-  if (!body && !attachments.length) return;
+  if (!body && !attachments.length) {
+    form.dataset.submitting = "";
+    if (submit) submit.disabled = false;
+    return;
+  }
+  const clientRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   if (API_ENABLED && hasApiSession()) {
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/reply`, {
         method: "POST",
         timeoutMs: 15000,
-        body: JSON.stringify({ body, attachments })
+        body: JSON.stringify({ body, attachments, clientRequestId })
       });
       applyRemoteState(payload);
+      applyEditedDisputeMessage(payload.message);
+      if (payload.order) {
+        const index = (db.orders || []).findIndex((item) => item.id === payload.order.id);
+        if (index >= 0) db.orders[index] = { ...db.orders[index], ...payload.order };
+      }
       showToast("Сообщение отправлено");
       showProductOrder(orderId);
       return;
     } catch (error) {
       showToast(error.message || "Не удалось отправить сообщение");
+      form.dataset.submitting = "";
+      if (submit) submit.disabled = false;
       return;
     }
   }
@@ -4872,24 +4978,66 @@ function storeCard(store) {
   const storeShort = localizedValue(store, "short");
   const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "md" ? "Oprit" : "Остановлен";
   const isStopped = storeIsStopped(store);
+  const products = sortedStoreProducts(store);
+  const stock = products.reduce((sum, product) => sum + productStockSummary(product).stock, 0);
   return `
     <article class="shop-card ${isStopped ? "is-stopped" : ""}">
       <button class="shop-click" ${isStopped ? "disabled" : `data-store="${esc(store.id)}"`}>
         <div class="shop-inner">
+          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
           <div class="shop-head">
             <div>
               <div class="shop-title"><h2>${esc(storeName)}</h2><span class="verify">✓</span></div>
               ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
               <p class="desc">${esc(storeShort)}</p>
+              <p class="store-card-stock">${products.length} товаров · ${stock} шт. в наличии</p>
             </div>
-            <span class="shop-message-icon" aria-hidden="true">${navIcon("messages")}</span>
           </div>
-          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
           ${marketplaceMetricsView(store.rating, store.reviews, "Магазин активен")}
         </div>
       </button>
+      ${!isStopped ? `<div class="store-card-actions"><button class="ghost-button" data-chat="${esc(store.id)}">Открыть чат</button><button class="primary" data-store-buy="${esc(store.id)}">Купить</button></div>` : ""}
     </article>
   `;
+}
+
+function renderProductsCatalog() {
+  route = "products";
+  const filters = catalogFilters();
+  const allProducts = publicStores().flatMap((store) => sortedStoreProducts(store)
+    .map((product) => ({ product, store })));
+  let rows = allProducts.filter(({ product, store }) => productMatchesFilters(product, store, filters));
+  let fallbackUsed = false;
+  if (!rows.length && locationFilterActive(filters)) {
+    const withoutLocation = { ...filters, country: "", city: "", district: "" };
+    rows = allProducts.filter(({ product, store }) => productMatchesFilters(product, store, withoutLocation))
+      .sort((a, b) => Number(b.product.rating || 0) - Number(a.product.rating || 0));
+    fallbackUsed = rows.length > 0;
+  }
+  layout(`
+    <section class="hero products-catalog-hero">
+      <h1>Товары</h1>
+      <label class="search"><b>⌕</b><input data-product-search value="${esc(filters.query || "")}" placeholder="Поиск товара"></label>
+      <button class="filter-inline-button" data-filters>Фильтры</button>
+      <p class="catalog-selection">${esc(filters.category || "Все товары")} · ${esc(currentLocationFilterLabel())}</p>
+      ${fallbackUsed ? `<p class="catalog-fallback">В выбранном районе товара нет. Показаны лучшие варианты в других районах.</p>` : ""}
+    </section>
+    <section class="feed product-catalog-grid" data-product-feed>
+      ${rows.map(({ product, store }) => productCard(product, store)).join("") || `<article class="panel empty-state"><p>Товаров по этим фильтрам пока нет.</p></article>`}
+    </section>
+  `);
+  document.querySelector("[data-product-search]")?.addEventListener("input", (event) => {
+    db.filters = { ...catalogFilters(), query: event.target.value };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    renderProductsCatalog();
+    requestAnimationFrame(() => {
+      const input = document.querySelector("[data-product-search]");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  });
 }
 
 function marketplaceMetricsView(rating = 5, reviews = 0, statusLabel = "Доступно") {
@@ -5024,7 +5172,7 @@ function productStockSummary(product = {}) {
 function productCard(product, store) {
   const summary = productStockSummary(product);
   const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
-  const productTitle = localizedValue(product, "title");
+  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
   return `
@@ -5036,7 +5184,7 @@ function productCard(product, store) {
         <p>${esc(productCategory)}</p>
         <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
-        ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
+        <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
         ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
         </div>
       </button>
@@ -5049,7 +5197,7 @@ function productCardView(product, store) {
   const ltcAmount = usdToLtc(minPrice);
   const summary = productStockSummary(product);
   const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
-  const productTitle = localizedValue(product, "title");
+  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
   return `
@@ -5061,7 +5209,7 @@ function productCardView(product, store) {
           <p class="desc">${esc(productCategory)}</p>
           <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
-          ${summary.positions.length ? `<p>${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}</p>` : ""}
+          <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
           ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
         </div>
       </button>
@@ -5133,7 +5281,7 @@ function renderProductView(storeId, productId) {
   ].filter(Boolean))].slice(0, 5);
   const galleryImages = images.length ? images : [fallbackImage];
   const storeName = localizedValue(store, "name");
-  const productTitle = localizedValue(product, "title");
+  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
   const productCategory = localizedValue(product, "category");
   const productDescription = localizedValue(product, "description");
   layout(`
@@ -6130,7 +6278,8 @@ async function syncLocalPrivateDisputeMessages(peer = activePrivateLogin) {
         body: JSON.stringify({
           body: String(message.body || message.text || "").trim(),
           attachments: Array.isArray(message.attachments) ? message.attachments : [],
-          toLogin: peer
+          toLogin: peer,
+          clientRequestId: messageId
         })
       });
       syncedIds.add(messageId);
@@ -6165,7 +6314,8 @@ function privateMessageView(msg) {
           <span>${esc(msg.date)}</span>
         </div>
         ${msg.subject ? `<strong>${esc(msg.subject)}</strong>` : ""}
-        ${msg.body ? `<p>${esc(msg.body || "").replace(/\n/g, "<br>")}</p>` : ""}
+        ${msg.deleted ? `<p class="deleted-message">Сообщение удалено</p>` : (msg.body ? `<p>${esc(msg.body || "").replace(/\n/g, "<br>")}</p>` : "")}
+        ${msg.editedAt && !msg.deleted ? `<small class="edited-message">изменено</small>` : ""}
         ${msg.stickerUrl ? `<img class="chat-sticker" src="${esc(msg.stickerUrl)}" alt="">` : ""}
         ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
         ${likes.length ? `<button class="group-like-badge" data-private-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
@@ -6231,11 +6381,16 @@ async function togglePrivateVoiceRecord(event) {
 
 async function handlePrivateMessageSend(event) {
   event.preventDefault();
+  const form = event.currentTarget;
+  if (form.dataset.submitting === "1") return;
   if (!activePrivateLogin) return;
-  const data = new FormData(event.currentTarget);
+  const data = new FormData(form);
   const body = String(data.get("body") || "").trim();
   const file = data.get("attachment");
   if (!body && (!file || !file.size) && !privateVoiceDraft) return;
+  form.dataset.submitting = "1";
+  const submit = form.querySelector('button[type="submit"], .group-send-button');
+  if (submit) submit.disabled = true;
   const attachments = file && file.size ? [{
     name: file.name,
     type: file.type,
@@ -6245,18 +6400,26 @@ async function handlePrivateMessageSend(event) {
   const sessionReady = API_ENABLED ? await ensureApiSession() : false;
   if (disputeOrder && sessionReady) {
     try {
+      const clientRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(disputeOrder.id)}/dispute/reply`, {
         method: "POST",
         timeoutMs: 15000,
-        body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin })
+        body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin, clientRequestId })
       });
       applyRemoteState(payload);
+      applyEditedDisputeMessage(payload.message);
+      if (payload.order) {
+        const index = (db.orders || []).findIndex((item) => item.id === payload.order.id);
+        if (index >= 0) db.orders[index] = { ...db.orders[index], ...payload.order };
+      }
       privateVoiceDraft = null;
       showToast("Сообщение отправлено");
       renderMessages();
       return;
     } catch (error) {
       showToast(error.message || "Не удалось отправить сообщение в диспут");
+      form.dataset.submitting = "";
+      if (submit) submit.disabled = false;
       return;
     }
   }
@@ -6274,6 +6437,8 @@ async function handlePrivateMessageSend(event) {
       return;
     } catch (error) {
       showToast(error.message || "Не удалось отправить сообщение");
+      form.dataset.submitting = "";
+      if (submit) submit.disabled = false;
       return;
     }
   }
@@ -6373,6 +6538,60 @@ function bindMessageReactionPickers(scope) {
       toggleMessageReaction(scope, button.dataset[`${scope}ReactionMessage`], button.dataset[`${scope}Reaction`]);
     };
   });
+  if (scope === "private") {
+    document.querySelectorAll("[data-dispute-message-edit]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        editClientDisputeMessage(button.dataset.disputeMessageEdit);
+      };
+    });
+    document.querySelectorAll("[data-dispute-message-delete]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        deleteClientDisputeMessage(button.dataset.disputeMessageDelete);
+      };
+    });
+  }
+}
+
+function applyEditedDisputeMessage(message = {}) {
+  const index = (db.messages || []).findIndex((item) => item.id === message.id);
+  if (index >= 0) db.messages[index] = { ...db.messages[index], ...message };
+  else if (message.id) db.messages.unshift(message);
+  saveDb({ localOnly: true, silentLocalStorageError: true });
+}
+
+async function editClientDisputeMessage(messageId) {
+  const message = (db.messages || []).find((item) => item.id === messageId);
+  if (!message || !editableClientDisputeMessage(message)) return;
+  const body = prompt("Редактировать сообщение", message.body || "");
+  if (body === null || !String(body).trim()) return;
+  try {
+    const payload = await apiFetch(`/api/messages/${encodeURIComponent(messageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ body: String(body).trim() })
+    });
+    applyEditedDisputeMessage(payload.message);
+    const order = (db.orders || []).find((item) => item.id === message.orderId);
+    order ? showProductOrder(order.id) : renderMessages();
+    showToast("Сообщение изменено");
+  } catch (error) {
+    showToast(error.message || "Не удалось изменить сообщение");
+  }
+}
+
+async function deleteClientDisputeMessage(messageId) {
+  const message = (db.messages || []).find((item) => item.id === messageId);
+  if (!message || !confirm("Удалить сообщение?")) return;
+  try {
+    const payload = await apiFetch(`/api/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+    applyEditedDisputeMessage(payload.message);
+    const order = (db.orders || []).find((item) => item.id === message.orderId);
+    order ? showProductOrder(order.id) : renderMessages();
+    showToast("Сообщение удалено");
+  } catch (error) {
+    showToast(error.message || "Не удалось удалить сообщение");
+  }
 }
 
 function isGroupModerator(login = db.currentUser) {
@@ -10057,7 +10276,6 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             <h2>Dashboard</h2>
             <p>Панель магазина: статистика, заявки, склад, клиенты и связь.</p>
           </div>
-          <a class="primary link-button" href="#seller-tools">Управлять товарами</a>
         </section>
 
         <section class="seller-dashboard-stats">
@@ -10136,7 +10354,6 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         </section>
       </div>
     </article>
-    <span id="seller-tools"></span>
   `;
 }
 
@@ -10326,6 +10543,18 @@ function shopDefaultCity(store) {
   return (store.cities || [])[0] || Object.keys(filterOptions.countries[country]?.cities || filterOptions.countries.moldova.cities)[0] || "chisinau";
 }
 
+const SHOP_DELIVERY_TYPES = ["Дворы", "Лес", "Прикоп", "Закоп", "Магнит", "Тайник", "Камень", "Пластилин"];
+
+function shopDeliveryTypeOptions(selected = "Тайник") {
+  return SHOP_DELIVERY_TYPES.map((type) => `<option value="${esc(type)}" ${type === selected ? "selected" : ""}>${esc(type)}</option>`).join("");
+}
+
+function shopVariantOptions(store = {}) {
+  return sortedStoreProducts(store, true).flatMap((product) => productVariants(product).map((variant) => (
+    `<option value="${esc(shopVariantRef(product, variant))}">${esc(productVariantLabel(product, variant))}</option>`
+  ))).join("");
+}
+
 function shopProfileTab(store) {
   return `
     <section class="seller-dashboard-hero"><div><h2>Профиль</h2><p>Публичная страница магазина, баннер, аватар, название и описание.</p></div></section>
@@ -10351,36 +10580,60 @@ function shopProfileTab(store) {
 
 function shopCardsTab(store, products) {
   return `
-    <section class="seller-dashboard-hero"><div><h2>Карточки</h2><p>Карточка открывает отдельную страницу товара или категории.</p></div></section>
+    <section class="seller-dashboard-hero"><div><h2>Карточки</h2><p>Одна карточка объединяет подтип, фасовки, цены и весь остаток товара.</p></div></section>
     <section class="seller-dashboard-card seller-wide-card">
       <form class="form" data-shop-card-form>
         <div class="row">
-         <label class="field">Название товара<select name="title" required>${productCategorySelectOptions()}</select></label>
-<label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="" placeholder="Цена товара" required></label>
+          <label class="field">Название товара<select name="title" required>${productCategorySelectOptions()}</select></label>
+          <label class="field">Подтип товара<input name="subtype" placeholder="Белая, жёлтая, зелёная" required></label>
         </div>
-        <label class="field">Описание<textarea name="description"></textarea></label>
+        <label class="field">Описание карточки<textarea name="description" placeholder="Описание, которое увидит покупатель"></textarea></label>
         <div class="row">
-          <label class="field">Главная аватарка<input name="mainImage" type="file" accept="image/*"></label>
+          <label class="field">Фасовка<input name="weight" placeholder="0.5 г" required></label>
+          <label class="field">Цена, USD<input name="priceUsd" type="number" min="0.01" step="0.01" placeholder="21" required></label>
+        </div>
+        <div class="row">
+          <label class="field">Главная фотография (обязательно для новой карточки)<input name="mainImage" type="file" accept="image/*"></label>
           <label class="field">Дополнительно до 4 фото<input name="images" type="file" accept="image/*" multiple></label>
         </div>
         <div class="row">
           <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${products.length + 1}"></label>
           <label class="field">Статус<select name="status"><option value="active">active</option><option value="disabled">disabled</option></select></label>
         </div>
-        <button class="primary">Создать карточку</button>
+        <button class="primary">Сохранить карточку и фасовку</button>
       </form>
     </section>
     <section class="seller-dashboard-card seller-wide-card">
       <div class="seller-card-head"><h3>Список карточек</h3><span>${products.length}</span></div>
       ${sortedStoreProducts(store, true).map((product, index) => `
-        <div class="seller-source">
-          <span>${esc(product.title)} · ${esc(product.status || "active")} · ${Number(product.priceUsd || 0).toFixed(2)} $</span>
-          <strong>
-            <button class="ghost-button" data-shop-card-move="up" data-card-id="${esc(product.id)}" ${index === 0 ? "disabled" : ""}>Вверх</button>
-            <button class="ghost-button" data-shop-card-move="down" data-card-id="${esc(product.id)}" ${index === products.length - 1 ? "disabled" : ""}>Вниз</button>
-            <button class="ghost-button danger" data-shop-card-delete="${esc(product.id)}">Удалить</button>
-          </strong>
-        </div>
+        <details class="seller-source shop-card-editor">
+          <summary>
+            <span>${esc([product.title, product.subtype].filter(Boolean).join(" · "))} · ${productVariants(product).length} фас. · ${productStockSummary(product).stock} шт.</span>
+            <strong>${esc(product.status || "active")}</strong>
+          </summary>
+          <form class="form" data-shop-card-edit data-card-id="${esc(product.id)}">
+            <div class="row">
+              <label class="field">Название<select name="title" required>${productCategorySelectOptions(product.title)}</select></label>
+              <label class="field">Подтип<input name="subtype" value="${esc(product.subtype || "")}" required></label>
+            </div>
+            <label class="field">Описание<textarea name="description">${esc(product.description || "")}</textarea></label>
+            <div class="row">
+              <label class="field">Новая главная фотография<input name="mainImage" type="file" accept="image/*"></label>
+              <label class="field">Новые дополнительные фото<input name="images" type="file" accept="image/*" multiple></label>
+            </div>
+            <div class="row">
+              <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(product.position || index + 1)}"></label>
+              <label class="field">Статус<select name="status"><option value="active" ${product.status !== "disabled" ? "selected" : ""}>active</option><option value="disabled" ${product.status === "disabled" ? "selected" : ""}>disabled</option></select></label>
+            </div>
+            <div class="shop-variant-list">${productVariants(product).map((variant) => `<span>${esc(productVariantLabel(product, variant))}</span>`).join("")}</div>
+            <div class="row shop-card-actions">
+              <button class="primary" type="submit">Сохранить карточку</button>
+              <button class="ghost-button" type="button" data-shop-card-move="up" data-card-id="${esc(product.id)}" ${index === 0 ? "disabled" : ""}>Вверх</button>
+              <button class="ghost-button" type="button" data-shop-card-move="down" data-card-id="${esc(product.id)}" ${index === products.length - 1 ? "disabled" : ""}>Вниз</button>
+              <button class="ghost-button danger" type="button" data-shop-card-delete="${esc(product.id)}">Удалить</button>
+            </div>
+          </form>
+        </details>
       `).join("") || `<p>Карточек пока нет.</p>`}
     </section>
   `;
@@ -10477,7 +10730,7 @@ function shopStorageTab(store, products, stats = {}) {
                   <label class="field">Описание<textarea name="description">${esc(position.description || "")}</textarea></label>
                   <div class="row">
                     <label class="field">Вес<input name="weight" value="${esc(position.weight ?? "")}"></label>
-                    <label class="field">Тип<input name="deliveryType" value="${esc(position.deliveryType || "Товар")}"></label>
+                    <label class="field">Тип товара<select name="deliveryType">${shopDeliveryTypeOptions(position.deliveryType || "Тайник")}</select></label>
                     <label class="field">Формат товара<select name="saleMode">
                       <option value="ready" ${positionSaleMode(position) === "ready" ? "selected" : ""}>Готовый</option>
                       <option value="preorder" ${positionSaleMode(position) === "preorder" ? "selected" : ""}>Предзаказ</option>
@@ -10492,7 +10745,8 @@ function shopStorageTab(store, products, stats = {}) {
                     <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
                     <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, district)}</select></label>
                   </div>
-                  <label class="field">Описание товара для выдачи<textarea name="deliveryItems" placeholder="Каждая новая строка = отдельная единица товара">${esc(deliveryItems)}</textarea></label>
+                  <label class="field">Разделитель адресов<input name="delimiter" value="${esc(position.delimiter === "\n" ? "новая строка" : position.delimiter || "новая строка")}"></label>
+                  <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом">${esc(deliveryItems)}</textarea></label>
                   <div class="row">
                     <button class="primary">Сохранить субтовар</button>
                     <button class="ghost-button danger" type="button" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить субтовар</button>
@@ -10510,7 +10764,6 @@ function shopStorageTab(store, products, stats = {}) {
 }
 
 function shopProductsTab(store, products) {
-  const card = sortedStoreProducts(store, true)[0];
   const country = shopDefaultCountry(store);
   const city = shopDefaultCity(store);
   const allowedCountries = shopAllowedCountries(store);
@@ -10518,18 +10771,12 @@ function shopProductsTab(store, products) {
     ? `<label class="field">Страна<select name="country" data-shop-location-country>${scopedCountrySelectOptions(allowedCountries, country)}</select></label>`
     : `<label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>`;
   return `
-    <section class="seller-dashboard-hero"><div><h2>Товары</h2><p>Товары создаются внутри карточек. Каждая строка выдачи равна одной единице остатка.</p></div></section>
+    <section class="seller-dashboard-hero"><div><h2>Добавить адреса</h2><p>Выберите готовую фасовку. Одинаковые адреса группируются по городу, району и типу выдачи.</p></div></section>
     <section class="seller-dashboard-card seller-wide-card">
       ${products.length ? `<form class="form" data-shop-product-form>
-        <label class="field">Карточка<select name="cardId">${sortedStoreProducts(store, true).map((product) => `<option value="${esc(product.id)}">${esc(product.title)}</option>`).join("")}</select></label>
+        <label class="field">Товар и фасовка<select name="variantRef" required>${shopVariantOptions(store)}</select></label>
         <div class="row">
-        <label class="field">Название<input name="title" value="" placeholder="Название товара" required></label>
-<label class="field">Цена<input name="priceUsd" type="number" min="0" step="0.01" value="" placeholder="Цена товара" required></label>
-        </div>
-        <label class="field">Описание<textarea name="description"></textarea></label>
-        <div class="row">
-          <label class="field">Вес<input name="weight" placeholder="1"></label>
-          <label class="field">Тип<input name="deliveryType" placeholder="Самовывоз / Доставка"></label>
+          <label class="field">Тип товара<select name="deliveryType">${shopDeliveryTypeOptions()}</select></label>
           <label class="field">Формат товара<select name="saleMode"><option value="ready">Готовый</option><option value="preorder">Предзаказ</option></select></label>
         </div>
         <div class="row" data-location-group>
@@ -10537,15 +10784,16 @@ function shopProductsTab(store, products) {
           <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
           <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, "")}</select></label>
         </div>
-        <label class="field">Описание товара для выдачи<textarea name="deliveryItems" placeholder="Каждая новая строка = отдельный товар"></textarea></label>
-        <button class="primary">Добавить товар в карточку</button>
+        <label class="field">Разделитель адресов<input name="delimiter" value="новая строка" placeholder="Например: . или |"></label>
+        <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом" required></textarea></label>
+        <button class="primary">Добавить адреса на склад</button>
       </form>` : `<p>Сначала создайте карточку.</p>`}
     </section>
     <section class="seller-dashboard-card seller-wide-card">
       <div class="seller-card-head"><h3>Товары внутри карточек</h3></div>
       ${sortedStoreProducts(store, true).map((product) => `
-        <div class="seller-card-head"><h3>${esc(product.title)}</h3><span>${(product.positions || []).reduce((sum, p) => sum + Number(p.stock || 0), 0)} шт.</span></div>
-        ${(product.positions || []).map((position) => `<div class="seller-source"><span>${esc(position.title)} · ${positionSaleMode(position) === "preorder" ? "Предзаказ" : "Готовый"} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span><strong><button class="ghost-button danger" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить</button></strong></div>`).join("") || `<p>Товаров внутри карточки пока нет.</p>`}
+        <div class="seller-card-head"><h3>${esc([product.title, product.subtype].filter(Boolean).join(" · "))}</h3><span>${(product.positions || []).reduce((sum, p) => sum + Number(p.stock || 0), 0)} шт.</span></div>
+        ${(product.positions || []).map((position) => `<div class="seller-source"><span>${esc(position.title)} · ${esc(position.deliveryType)} · ${positionSaleMode(position) === "preorder" ? "Предзаказ" : "Готовый"} · ${esc(locationLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span><strong><button class="ghost-button danger" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить группу</button></strong></div>`).join("") || `<p>Нет в наличии — карточка остаётся видимой на сайте.</p>`}
       `).join("")}
     </section>
   `;
@@ -10601,13 +10849,15 @@ function shopDisputeMessageHtml(message, store = null) {
   const from = message.fromLogin || "system";
   const own = sameLogin(from, store?.ownerLogin) || sameLogin(from, store?.id);
   const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-  return `<article class="admin-dispute-message ${own ? "own" : ""}">
+  return `<article class="admin-dispute-message ${own ? "own" : ""}" data-shop-dispute-message="${esc(message.id || "")}">
     <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
     <div class="admin-dispute-bubble">
       <div class="admin-dispute-meta"><strong>${esc(from)}</strong><span>${esc(message.date || new Date(Number(message.createdAt || Date.now())).toLocaleString())}</span></div>
       ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
-      ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
-      ${attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
+      ${message.deleted ? `<p class="deleted-message">Сообщение удалено</p>` : (message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : "")}
+      ${message.editedAt && !message.deleted ? `<small class="edited-message">изменено</small>` : ""}
+      ${!message.deleted && attachments.length ? `<div class="group-attachments">${attachments.map(groupAttachmentView).join("")}</div>` : ""}
+      ${own && !message.deleted ? `<div class="dispute-message-menu" hidden><button type="button" data-shop-message-edit="${esc(message.id)}">Редактировать</button><button type="button" data-shop-message-delete="${esc(message.id)}">Удалить</button></div>` : ""}
     </div>
   </article>`;
 }
@@ -10670,20 +10920,30 @@ function showShopDisputeChatModal(orderId) {
 async function submitShopDisputeReply(form) {
   const token = sellerAdminApiSessionToken();
   if (!token) return showToast("Войдите в Shop Admin заново");
+  const endSubmit = beginShopFormSubmit(form, "Отправляю...");
+  if (!endSubmit) return;
   const fd = new FormData(form);
   const body = String(fd.get("body") || "").trim();
   const file = fd.get("attachment");
   const attachments = file && file.size ? [{ name: file.name, type: file.type, url: await fileToDataUrl(file) }] : [];
-  if (!body && !attachments.length) return;
+  if (!body && !attachments.length) {
+    endSubmit();
+    return;
+  }
   try {
     const disputeId = form.dataset.shopDisputeReply;
     const payload = await apiFetch(`/api/store-admin/disputes/${encodeURIComponent(disputeId)}/reply`, {
       method: "POST",
       timeoutMs: 15000,
       headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ body, attachments })
+      body: JSON.stringify({
+        body,
+        attachments,
+        clientRequestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      })
     });
     applyRemoteState(payload);
+    applyEditedDisputeMessage(payload.message);
     activeShopDisputeId = disputeId;
     showToast("Сообщение отправлено");
     if (document.querySelector("[data-modal].open .shop-dispute-modal")) {
@@ -10694,6 +10954,8 @@ async function submitShopDisputeReply(form) {
     }
   } catch (error) {
     showToast(error.message || "Не удалось отправить сообщение");
+  } finally {
+    endSubmit();
   }
 }
 
@@ -10702,6 +10964,61 @@ function bindShopDisputeModalActions() {
     event.preventDefault();
     await submitShopDisputeReply(event.currentTarget);
   });
+  bindShopDisputeMessageMenus();
+}
+
+function bindShopDisputeMessageMenus() {
+  document.querySelectorAll("[data-shop-dispute-message]").forEach((message) => {
+    let holdTimer = null;
+    const open = (event) => {
+      event?.preventDefault?.();
+      document.querySelectorAll(".dispute-message-menu").forEach((menu) => { menu.hidden = true; });
+      const menu = message.querySelector(".dispute-message-menu");
+      if (menu) menu.hidden = false;
+    };
+    message.addEventListener("contextmenu", open);
+    message.addEventListener("touchstart", () => { holdTimer = setTimeout(open, 520); }, { passive: true });
+    ["touchend", "touchmove", "touchcancel"].forEach((name) => message.addEventListener(name, () => clearTimeout(holdTimer), { passive: true }));
+  });
+  document.querySelectorAll("[data-shop-message-edit]").forEach((button) => button.onclick = () => editShopDisputeMessage(button.dataset.shopMessageEdit));
+  document.querySelectorAll("[data-shop-message-delete]").forEach((button) => button.onclick = () => deleteShopDisputeMessage(button.dataset.shopMessageDelete));
+}
+
+async function mutateShopDisputeMessage(messageId, method, body = "") {
+  const token = sellerAdminApiSessionToken();
+  const payload = await apiFetch(`/api/store-admin/messages/${encodeURIComponent(messageId)}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}` },
+    ...(method === "PATCH" ? { body: JSON.stringify({ body }) } : {})
+  });
+  applyEditedDisputeMessage(payload.message);
+  await refreshShopPanelState(true).catch(() => false);
+  const disputeId = payload.message?.orderId || activeShopDisputeId;
+  activeShopDisputeId = disputeId;
+  renderShopPanel("disputes");
+  requestAnimationFrame(() => showShopDisputeChatModal(disputeId));
+}
+
+async function editShopDisputeMessage(messageId) {
+  const message = (db.messages || []).find((item) => item.id === messageId);
+  const body = prompt("Редактировать сообщение", message?.body || "");
+  if (body === null || !String(body).trim()) return;
+  try {
+    await mutateShopDisputeMessage(messageId, "PATCH", String(body).trim());
+    showToast("Сообщение изменено");
+  } catch (error) {
+    showToast(error.message || "Не удалось изменить сообщение");
+  }
+}
+
+async function deleteShopDisputeMessage(messageId) {
+  if (!confirm("Удалить сообщение?")) return;
+  try {
+    await mutateShopDisputeMessage(messageId, "DELETE");
+    showToast("Сообщение удалено");
+  } catch (error) {
+    showToast(error.message || "Не удалось удалить сообщение");
+  }
 }
 function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
   const rows = (Array.isArray(financeRows) ? financeRows : []).filter((row) => row && typeof row === "object");
@@ -11031,6 +11348,58 @@ function shopLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
+function shopSplitDeliveryItems(value, delimiter = "новая строка") {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const separator = String(delimiter || "").trim();
+  if (!separator || normalizedShopKey(separator) === "новая строка") return shopLines(text);
+  return text.split(separator).map((item) => item.trim()).filter(Boolean);
+}
+
+async function shopPersistProductsAndRender(store, tab = "cards", successMessage = "Сохранено и опубликовано") {
+  try {
+    const payload = await persistSellerAdminProducts(store);
+    const savedStore = payload?.store;
+    const expectedIds = (store.products || []).map((product) => String(product.id || "")).filter(Boolean);
+    const savedIds = new Set((savedStore?.products || []).map((product) => String(product.id || "")));
+    if (!savedStore || expectedIds.some((id) => !savedIds.has(id))) {
+      throw new Error("Сервер не подтвердил сохранение всех карточек");
+    }
+    applyRemoteState(payload);
+    restoreShopPanelStore(savedStore);
+    shopPanelLastStateRefreshAt = Date.now();
+    showToast(successMessage);
+    renderShopPanel(tab);
+    return savedStore;
+  } catch (error) {
+    await refreshShopPanelState(true).catch(() => false);
+    renderShopPanel(tab);
+    throw error;
+  }
+}
+
+async function shopPersistPositionsAndRender(store, product, tab = "products", successMessage = "Склад обновлён и опубликован") {
+  try {
+    const payload = await persistSellerAdminProductPositions(store, product);
+    const savedProduct = (payload?.store?.products || []).find((item) => item.id === product.id);
+    const expectedIds = (product.positions || []).map((position) => String(position.id || "")).filter(Boolean);
+    const savedIds = new Set((savedProduct?.positions || []).map((position) => String(position.id || "")));
+    if (!savedProduct || expectedIds.some((id) => !savedIds.has(id))) {
+      throw new Error("Сервер не подтвердил сохранение всех адресов");
+    }
+    applyRemoteState(payload);
+    restoreShopPanelStore(payload.store);
+    shopPanelLastStateRefreshAt = Date.now();
+    showToast(successMessage);
+    renderShopPanel(tab);
+    return savedProduct;
+  } catch (error) {
+    await refreshShopPanelState(true).catch(() => false);
+    renderShopPanel(tab);
+    throw error;
+  }
+}
+
 async function shopPersistAndRender(tab = "dashboard") {
   const store = shopPanelStore() || sellerAdminStore();
   const localStore = rememberShopPanelStore(store);
@@ -11095,30 +11464,92 @@ function bindShopPanelActions(store, activeTab) {
       const data = new FormData(form);
       const title = canonicalCatalogCategory(data.get("title"));
       if (!title) return showToast("Выберите название товара из фильтра");
+      const subtype = String(data.get("subtype") || "").trim();
+      const weight = String(data.get("weight") || "").trim();
+      const priceUsd = Number(data.get("priceUsd") || 0);
+      if (!subtype || !weight || priceUsd <= 0) throw new Error("Укажите подтип, фасовку и цену");
+      store.products = Array.isArray(store.products) ? store.products : [];
+      let product = store.products.find((item) => (
+        normalizedShopKey(item.title) === normalizedShopKey(title)
+        && normalizedShopKey(item.subtype) === normalizedShopKey(subtype)
+      ));
       const mainFile = data.get("mainImage");
+      if (!product && (!mainFile || !mainFile.size)) throw new Error("Главная фотография обязательна для новой карточки");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
       const gallery = galleryFiles.length ? await Promise.all(galleryFiles.map(fileToDataUrl)) : [];
-      const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (gallery[0] || store.image || fallbackImage);
-      const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
-      store.products = Array.isArray(store.products) ? store.products : [];
-      store.products.push(normalizeProduct({
-        id: `card-${Date.now()}`,
-        title,
-        category: title,
-        description: String(data.get("description") || "").trim(),
-        priceUsd: Number(data.get("priceUsd") || 0),
-        price: `от ${Number(data.get("priceUsd") || 0)}$`,
-        image: images[0],
-        images,
-        position: Number(data.get("position") || store.products.length + 1),
-        status: String(data.get("status") || "active"),
-        sellerManaged: true,
-        positions: [],
-        reviewsList: []
-      }, store));
-      await shopPersistAndRender("cards");
+      const priorImages = [product?.image, ...(Array.isArray(product?.images) ? product.images : [])].filter(Boolean);
+      const mainImage = mainFile && mainFile.size ? await fileToDataUrl(mainFile) : (product?.image || priorImages[0] || "");
+      const additionalImages = gallery.length
+        ? gallery
+        : priorImages.filter((image) => image !== product?.image && image !== mainImage);
+      const images = [mainImage, ...additionalImages.filter((image) => image !== mainImage)].filter(Boolean).slice(0, 5);
+      if (!product) {
+        product = normalizeProduct({
+          id: `card-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          title,
+          category: title,
+          subtype,
+          description: String(data.get("description") || "").trim(),
+          priceUsd,
+          image: images[0],
+          images,
+          position: Number(data.get("position") || store.products.length + 1),
+          status: String(data.get("status") || "active"),
+          sellerManaged: true,
+          variants: [{ id: `variant-${Date.now()}`, subtype, weight, priceUsd }],
+          positions: [],
+          reviewsList: []
+        }, store);
+        store.products.push(product);
+      } else {
+        product.subtype = subtype;
+        product.description = String(data.get("description") || "").trim() || product.description;
+        product.image = mainImage;
+        product.images = images;
+        product.position = Number(data.get("position") || product.position || 1);
+        product.status = String(data.get("status") || product.status || "active");
+        product.variants = productVariants(product);
+        const variant = product.variants.find((item) => normalizedShopKey(item.weight) === normalizedShopKey(weight));
+        if (variant) {
+          variant.subtype = subtype;
+          variant.priceUsd = priceUsd;
+        } else {
+          product.variants.push({ id: `variant-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, subtype, weight, priceUsd });
+        }
+        product.priceUsd = Math.min(...product.variants.map((item) => Number(item.priceUsd || 0)).filter((value) => value > 0));
+        product.price = `от ${product.priceUsd}$`;
+      }
+      await shopPersistProductsAndRender(store, "cards", product.positions?.length ? "Фасовка добавлена в существующую карточку" : "Карточка сохранена и опубликована");
     });
   });
+
+  document.querySelectorAll("[data-shop-card-edit]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await runShopFormSubmit(form, "Сохраняю...", async () => {
+      const product = (store.products || []).find((item) => item.id === form.dataset.cardId);
+      if (!product) throw new Error("Карточка не найдена");
+      const data = new FormData(form);
+      const title = canonicalCatalogCategory(data.get("title"));
+      const subtype = String(data.get("subtype") || "").trim();
+      if (!title || !subtype) throw new Error("Укажите название и подтип");
+      product.title = title;
+      product.category = title;
+      product.subtype = subtype;
+      product.description = String(data.get("description") || "").trim();
+      product.position = Number(data.get("position") || product.position || 1);
+      product.status = String(data.get("status") || "active");
+      product.variants = productVariants(product).map((variant) => ({ ...variant, subtype }));
+      (product.positions || []).forEach((position) => { position.subtype = subtype; });
+      const mainFile = data.get("mainImage");
+      const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
+      if (mainFile && mainFile.size) product.image = await fileToDataUrl(mainFile);
+      if (galleryFiles.length) {
+        const gallery = await Promise.all(galleryFiles.map(fileToDataUrl));
+        product.images = [product.image || gallery[0], ...gallery.filter((image) => image !== product.image)].slice(0, 5);
+      }
+      await shopPersistProductsAndRender(store, "cards", "Карточка обновлена на сайте");
+    });
+  }));
 
   document.querySelectorAll("[data-shop-card-move]").forEach((button) => button.onclick = async () => {
     const ordered = sortedStoreProducts(store, true);
@@ -11130,13 +11561,13 @@ function bindShopPanelActions(store, activeTab) {
     const currentPosition = Number(current.position || index + 1);
     current.position = Number(other.position || index + delta + 1);
     other.position = currentPosition;
-    await shopPersistAndRender("cards");
+    await shopPersistProductsAndRender(store, "cards", "Позиция карточки обновлена");
   });
 
   document.querySelectorAll("[data-shop-card-delete]").forEach((button) => button.onclick = async () => {
     if (!confirm("Удалить карточку и все товары внутри?")) return;
     store.products = (store.products || []).filter((product) => product.id !== button.dataset.shopCardDelete);
-    await shopPersistAndRender("cards");
+    await shopPersistProductsAndRender(store, "cards", "Карточка удалена");
   });
 
   document.querySelector("[data-shop-product-form]")?.addEventListener("submit", async (event) => {
@@ -11145,35 +11576,52 @@ function bindShopPanelActions(store, activeTab) {
     const form = event.currentTarget;
     await runShopFormSubmit(form, "Добавляю...", async () => {
       const data = new FormData(form);
-      const product = (store.products || []).find((item) => item.id === data.get("cardId"));
-      if (!product) return;
-      const rawDeliveryItems = shopLines(data.get("deliveryItems"));
-      const fallbackDeliveryText = String(data.get("description") || data.get("title") || product.title || "Товар").trim();
-      const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
+      const { product, variant } = shopVariantFromRef(store, data.get("variantRef"));
+      if (!product || !variant) throw new Error("Выберите товар и фасовку");
+      const delimiterInput = String(data.get("delimiter") || "новая строка").trim();
+      const delimiter = normalizedShopKey(delimiterInput) === "новая строка" ? "\n" : delimiterInput;
+      const deliveryItems = shopSplitDeliveryItems(data.get("deliveryItems"), delimiterInput);
+      if (!deliveryItems.length) throw new Error("Добавьте хотя бы один адрес");
       product.positions = Array.isArray(product.positions) ? product.positions : [];
-      const priceUsd = Number(data.get("priceUsd") || product.priceUsd || 0);
-      product.positions.unshift({
-        id: `position-${Date.now()}`,
-        title: String(data.get("title") || product.title || "").trim(),
-        description: String(data.get("description") || "").trim(),
-        priceUsd,
-        weight: String(data.get("weight") || "").trim(),
-        deliveryType: String(data.get("deliveryType") || "").trim() || "Товар",
-        saleMode: String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready",
-        country: String(data.get("country") || shopDefaultCountry(store)),
-        city: String(data.get("city") || shopDefaultCity(store)),
-        district: String(data.get("district") || "").trim(),
-        deliveryItems,
-        stock: Math.max(1, deliveryItems.length),
-        status: "ready"
-      });
-      if (!product.priceUsd) product.priceUsd = priceUsd;
-      if (!product.price) product.price = `от ${Number(product.priceUsd || 0)}$`;
-      const payload = await persistSellerAdminProductPositions(store, product);
-      applyRemoteState(payload);
-      restoreShopPanelStore(payload.store || store);
-      showToast("Товар сохранён и виден на сайте");
-      renderShopPanel("products");
+      const deliveryType = String(data.get("deliveryType") || "Тайник").trim();
+      const saleMode = String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready";
+      const country = String(data.get("country") || shopDefaultCountry(store));
+      const city = String(data.get("city") || shopDefaultCity(store));
+      const district = String(data.get("district") || "").trim();
+      const group = product.positions.find((position) => (
+        position.variantId === variant.id
+        && normalizedShopKey(position.deliveryType) === normalizedShopKey(deliveryType)
+        && positionSaleMode(position) === saleMode
+        && normalizedShopKey(position.country) === normalizedShopKey(country)
+        && normalizedShopKey(position.city) === normalizedShopKey(city)
+        && normalizedShopKey(position.district) === normalizedShopKey(district)
+      ));
+      if (group) {
+        group.deliveryItems = [...(Array.isArray(group.deliveryItems) ? group.deliveryItems : []), ...deliveryItems];
+        group.stock = group.deliveryItems.length;
+        group.delimiter = delimiter;
+        group.status = "ready";
+      } else {
+        product.positions.unshift({
+          id: `position-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          variantId: variant.id,
+          subtype: variant.subtype,
+          title: [product.title, variant.subtype, variant.weight].filter(Boolean).join(" · "),
+          description: product.description || "",
+          priceUsd: Number(variant.priceUsd || product.priceUsd || 0),
+          weight: String(variant.weight || "").trim(),
+          deliveryType,
+          saleMode,
+          country,
+          city,
+          district,
+          delimiter,
+          deliveryItems,
+          stock: deliveryItems.length,
+          status: "ready"
+        });
+      }
+      await shopPersistPositionsAndRender(store, product, "products", group ? "Адреса добавлены в существующую группу" : "Новая группа адресов опубликована");
     });
   });
   document.querySelectorAll("[data-shop-position-delete]").forEach((button) => button.onclick = async () => {
@@ -11202,8 +11650,8 @@ function bindShopPanelActions(store, activeTab) {
         if (!product || !position) return;
 
         const data = new FormData(form);
-        const deliveryItems = shopLines(data.get("deliveryItems"));
-        const stockValue = Number(data.get("stock"));
+        const delimiterInput = String(data.get("delimiter") || "новая строка").trim();
+        const deliveryItems = shopSplitDeliveryItems(data.get("deliveryItems"), delimiterInput);
 
         position.title = String(data.get("title") || product.title || "").trim();
         position.description = String(data.get("description") || "").trim();
@@ -11214,8 +11662,9 @@ function bindShopPanelActions(store, activeTab) {
         position.country = String(data.get("country") || shopDefaultCountry(store));
         position.city = String(data.get("city") || shopDefaultCity(store));
         position.district = String(data.get("district") || "").trim();
+        position.delimiter = normalizedShopKey(delimiterInput) === "новая строка" ? "\n" : delimiterInput;
         position.deliveryItems = deliveryItems;
-        position.stock = Math.max(deliveryItems.length, Number.isFinite(stockValue) ? stockValue : deliveryItems.length);
+        position.stock = deliveryItems.length;
         position.status = String(data.get("status") || position.status || "ready");
 
         const payload = await persistSellerAdminProductPositions(store, product);
@@ -11333,6 +11782,7 @@ function bindShopPanelActions(store, activeTab) {
       await submitShopDisputeReply(form);
     });
   });
+  bindShopDisputeMessageMenus();
   document.querySelector("[data-shop-payout-request]")?.addEventListener("click", openShopPayoutModal);
 }
 
@@ -11784,13 +12234,6 @@ function bindGlobal() {
       }
     };
   });
-  document.querySelector("[data-theme-toggle]").onclick = (event) => {
-    event.stopPropagation();
-    event.currentTarget.blur();
-    db.theme = db.theme === "dark" ? "light" : "dark";
-    saveDb();
-    renderCurrent();
-  };
   document.querySelectorAll("[data-lang]").forEach((button) => {
     button.onclick = (event) => {
       event.stopPropagation();
@@ -11936,12 +12379,17 @@ async function toggleGroupWidgetVoiceRecord(event) {
 
 function bindStoreCards() {
   document.querySelectorAll("[data-store]").forEach((button) => button.onclick = () => renderStore(button.dataset.store, "positions"));
+  document.querySelectorAll("[data-store-buy]").forEach((button) => button.onclick = () => renderStore(button.dataset.storeBuy, "positions"));
 }
 
 function routeTo(next) {
   if (next === "filters") return renderFilters();
   if (next === "rules") return openRulesModal();
   if (next === "messages" && route !== "messages") activePrivateLogin = "";
+  if (next === "products" && route !== "products") {
+    db.filters = { ...catalogFilters(), category: "Альфа (A-PVP)", country: "moldova", city: "chisinau", district: "Центр", query: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+  }
   route = next;
   safeRenderCurrent();
 }
@@ -11955,11 +12403,16 @@ function renderCurrent() {
     return renderSellerAdminLogin(hashStoreId);
   }
   const directRoute = hashRoute();
+  if (directRoute === "products" && route !== "products") {
+    db.filters = { ...catalogFilters(), category: "Альфа (A-PVP)", country: "moldova", city: "chisinau", district: "Центр", query: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+  }
   if (directRoute) route = directRoute;
   if (route === "owner" || route === "admin") return renderLegacyAdminDisabled();
   if (!db.currentUser || !currentUser()) return renderAuth();
   if (route === "home") return renderHome();
   if (route === "catalog") return renderCatalog();
+  if (route === "products") return renderProductsCatalog();
   if (route === "orders") return renderOrders(activeOrdersTab);
   if (route === "messages") return renderMessages();
   if (route === "group-chat") return renderGroupChat();
@@ -11979,7 +12432,7 @@ function renderCurrent() {
 }
 
 function renderFallbackScreen() {
-  document.body.dataset.theme = db.theme || "light";
+  document.body.dataset.theme = "dark";
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">

@@ -1100,7 +1100,7 @@ function adminDisputeMessageHtml(message) {
   const own = role === "owner" || sameLogin(from, "cerber-owner") || sameLogin(from, data.admin?.login || "");
   const attachments = supportAttachmentsHtml(message.attachments || []);
   return `
-    <article class="admin-dispute-message ${own ? "own" : ""}">
+    <article class="admin-dispute-message ${own ? "own" : ""}" data-admin-dispute-message="${esc(message.id || "")}">
       <div class="admin-dispute-avatar">${esc(String(from || "?").slice(0, 1).toUpperCase())}</div>
       <div class="admin-dispute-bubble">
         <div class="admin-dispute-meta">
@@ -1108,8 +1108,10 @@ function adminDisputeMessageHtml(message) {
           <span>${fmtDate(message.createdAt)}</span>
         </div>
         ${message.subject ? `<small>${esc(message.subject)}</small>` : ""}
-        ${message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : ""}
-        ${attachments}
+        ${message.deleted ? `<p class="deleted-message">Сообщение удалено</p>` : (message.body || message.text ? `<p>${esc(message.body || message.text || "").replace(/\n/g, "<br>")}</p>` : "")}
+        ${message.editedAt && !message.deleted ? `<small class="edited-message">изменено</small>` : ""}
+        ${message.deleted ? "" : attachments}
+        ${own && !message.deleted ? `<div class="dispute-message-menu" hidden><button type="button" data-admin-message-edit="${esc(message.id)}">Редактировать</button><button type="button" data-admin-message-delete="${esc(message.id)}">Удалить</button></div>` : ""}
       </div>
     </article>
   `;
@@ -1156,7 +1158,55 @@ function renderDisputePayload(payload, { openChat = false, closeChat = false } =
   if (closeChat) document.querySelector("[data-dispute-modal]")?.remove();
   else if (openChat || document.querySelector("[data-dispute-modal]")) showDisputeChatModal(payload);
   bindActions();
+  bindAdminDisputeMessageMenus();
   bindAdminButtonFeedback(root);
+}
+
+function bindAdminDisputeMessageMenus(scope = document) {
+  scope.querySelectorAll("[data-admin-dispute-message]").forEach((message) => {
+    let holdTimer = null;
+    const open = (event) => {
+      event?.preventDefault?.();
+      scope.querySelectorAll(".dispute-message-menu").forEach((menu) => { menu.hidden = true; });
+      const menu = message.querySelector(".dispute-message-menu");
+      if (menu) menu.hidden = false;
+    };
+    message.addEventListener("contextmenu", open);
+    message.addEventListener("touchstart", () => { holdTimer = setTimeout(open, 520); }, { passive: true });
+    ["touchend", "touchmove", "touchcancel"].forEach((name) => message.addEventListener(name, () => clearTimeout(holdTimer), { passive: true }));
+  });
+  scope.querySelectorAll("[data-admin-message-edit]").forEach((button) => button.onclick = () => editAdminDisputeMessage(button.dataset.adminMessageEdit));
+  scope.querySelectorAll("[data-admin-message-delete]").forEach((button) => button.onclick = () => deleteAdminDisputeMessage(button.dataset.adminMessageDelete));
+}
+
+async function refreshSelectedAdminDispute() {
+  if (!selectedDisputeId) return;
+  const payload = await api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}`);
+  renderDisputePayload(payload, { openChat: Boolean(document.querySelector("[data-dispute-modal]")) });
+}
+
+async function editAdminDisputeMessage(messageId) {
+  const message = (data.messages || []).find((item) => item.id === messageId);
+  const body = prompt("Редактировать сообщение", message?.body || "");
+  if (body === null || !String(body).trim()) return;
+  try {
+    await api(`/api/admin/messages/${encodeURIComponent(messageId)}`, { method: "PATCH", body: JSON.stringify({ body: String(body).trim() }) });
+    await refreshSelectedAdminDispute();
+    toast("Сообщение изменено");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function deleteAdminDisputeMessage(messageId) {
+  if (!confirm("Удалить сообщение?")) return;
+  try {
+    await api(`/api/admin/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+    await refreshSelectedAdminDispute();
+    toast("Сообщение удалено");
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 function disputeDetail(payload) {
@@ -1211,12 +1261,16 @@ function showDisputeChatModal(payload) {
   modal.querySelector("[data-admin-dispute-reply]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    if (form.dataset.submitting === "1") return;
+    form.dataset.submitting = "1";
+    const button = form.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
     const formData = new FormData(form);
     const attachments = await filesToSupportAttachments(form.querySelector('input[type="file"]'));
     try {
       const nextPayload = await api(`/api/admin/disputes/${encodeURIComponent(form.dataset.adminDisputeReply)}/reply`, {
         method: "POST",
-        body: JSON.stringify({ body: formData.get("body"), attachments })
+        body: JSON.stringify({ body: formData.get("body"), attachments, clientRequestId: crypto.randomUUID?.() || `${Date.now()}` })
       });
       renderDisputePayload(nextPayload, { openChat: true });
       toast("Сообщение отправлено");
@@ -1936,19 +1990,25 @@ function bindActions() {
   });
   root.querySelectorAll("[data-admin-dispute-reply]").forEach((form) => form.onsubmit = async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "1") return;
+    form.dataset.submitting = "1";
+    const button = form.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
     try {
       const disputeId = form.dataset.adminDisputeReply;
       const formData = new FormData(form);
       const attachments = await filesToSupportAttachments(form.querySelector('input[type="file"]'));
       const payload = await api(`/api/admin/disputes/${encodeURIComponent(disputeId)}/reply`, {
         method: "POST",
-        body: JSON.stringify({ body: formData.get("body"), attachments })
+        body: JSON.stringify({ body: formData.get("body"), attachments, clientRequestId: crypto.randomUUID?.() || `${Date.now()}` })
       });
       renderDisputePayload(payload, { openChat: Boolean(document.querySelector("[data-dispute-modal]")) });
       toast("Сообщение отправлено клиенту");
       requestAnimationFrame(() => root.querySelector("[data-dispute-detail] textarea")?.focus());
     } catch (error) {
       toast(error.message, true);
+      form.dataset.submitting = "";
+      if (button) button.disabled = false;
     }
   });
   root.querySelectorAll("[data-close-dispute]").forEach((button) => button.onclick = async () => {
@@ -2160,8 +2220,11 @@ function bindActions() {
       renderShell();
     } catch (error) {
       toast(error.message, true);
+      form.dataset.submitting = "";
+      if (button) button.disabled = false;
     }
   });
+  bindAdminDisputeMessageMenus(modal);
   root.querySelector("[data-clear-marketplace]")?.addEventListener("click", async () => {
     if (!confirm("Удалить все магазины и очистить обменники? Admin-пользователь останется.")) return;
     try {
