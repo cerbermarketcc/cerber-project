@@ -468,6 +468,13 @@ tr:hover td {
   margin-bottom: 16px;
 }
 
+.broadcast-channel-help {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: rgba(255, 171, 43, 0.07);
+}
+
 .broadcast-filters {
   margin: 14px 0;
   border-block: 1px solid var(--line);
@@ -491,6 +498,55 @@ tr:hover td {
   padding: 18px;
 }
 
+.broadcast-message-preview {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #202720;
+  padding: 14px;
+}
+
+.broadcast-preview.is-site-preview .broadcast-message-preview {
+  background: #191b18;
+  border-color: var(--line);
+}
+
+.broadcast-message-preview h3 {
+  margin: 0 0 8px;
+}
+
+.broadcast-message-preview p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.broadcast-photo-placeholder {
+  display: grid;
+  min-height: 112px;
+  margin: -14px -14px 14px;
+  place-items: center;
+  color: var(--muted);
+  background: #111410;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.broadcast-preview-button {
+  display: flex;
+  justify-content: center;
+  min-height: 42px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #4a755a;
+  border-radius: 6px;
+  color: #9fddb4;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.broadcast-preview-meta {
+  margin: 12px 0 0;
+}
+
 .broadcast-preview h3,
 .broadcast-preview p {
   overflow-wrap: anywhere;
@@ -501,6 +557,27 @@ tr:hover td {
   align-items: center;
   margin-top: 10px;
   text-decoration: none;
+}
+
+.admin-balance-editor {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(320px, 1.25fr);
+  gap: 18px;
+  margin: 14px 0 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(255, 171, 43, 0.045);
+}
+
+.admin-balance-editor h3 {
+  margin: 6px 0;
+}
+
+.admin-balance-editor form,
+.admin-balance-editor .field:first-child {
+  margin-top: 0;
 }
 
 .broadcast-history {
@@ -862,6 +939,29 @@ tr:hover td {
   margin: 0;
 }
 
+.user-profile-modal .admin-modal-panel {
+  width: min(1080px, 100%);
+}
+
+.admin-user-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.admin-user-modal-body > .user-profile {
+  margin: 0;
+}
+
+.admin-user-modal-body > .user-profile > h2:first-child {
+  display: none;
+}
+
+.user-login-button {
+  font-weight: 900;
+}
+
 .dispute-chat-modal .admin-dispute-chat {
   max-height: none;
   min-height: 320px;
@@ -910,7 +1010,8 @@ tr:hover td {
   .charts,
   .split,
   .row,
-  .broadcast-compose {
+  .broadcast-compose,
+  .admin-balance-editor {
     grid-template-columns: 1fr;
   }
 
@@ -1373,6 +1474,10 @@ tr:hover td {
     max-height: 94vh;
     border-radius: 18px 18px 0 0;
     padding: 14px;
+  }
+
+  .user-profile-modal .admin-modal-panel {
+    height: 94vh;
   }
 
   .admin-modal-head {

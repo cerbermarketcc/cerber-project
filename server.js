@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "owner-health-status-fix-2026-08-10-v144";
+const cerberBuildVersion = "owner-user-wallet-modal-2026-08-10-v146";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -2368,7 +2368,7 @@ function authStateForUser(user, state = {}) {
       referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments.filter((item) => sameLogin(item.referrerLogin, login)) : [],
       referralCodes: key && state.referralCodes?.[key] ? { [key]: state.referralCodes[key] } : {},
       balances: key ? { [key]: Number(state.balances?.[key] || state.balances?.[login] || 0), [login]: Number(state.balances?.[login] || state.balances?.[key] || 0) } : {},
-      ltcBalances: key ? { [key]: Number(state.ltcBalances?.[key] || state.ltcBalances?.[login] || 0), [login]: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0) } : {},
+      ltcBalances: key ? { [key]: stateUserLtcBalance(state, login, key), [login]: stateUserLtcBalance(state, login, key) } : {},
       walletTransactions: [],
       walletDeposits: [],
       walletWithdrawals: [],
@@ -2470,7 +2470,7 @@ async function telegramUserSummary(user) {
       role: user.role,
       registeredAt: user.created_at,
       balanceUsd: Number(state.balances?.[login] || state.balances?.[key] || 0),
-      balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[key] || 0),
+      balanceLtc: stateUserLtcBalance(state, login, key),
       totalPurchases: allPurchases.length,
       totalPurchaseUsd,
       totalDisputes: orderDisputes.length + exchangeDisputes.length,
@@ -4854,8 +4854,9 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     const orders = (data.state.orders || []).filter((order) => sameLogin(order.login, login));
     const deposits = (data.state.walletDeposits || []).filter((deposit) => sameLogin(deposit.login, login));
     const messages = data.messages.filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login));
-    const balanceUsd = adminMoney(data.state.balances?.[login] || data.state.balances?.[user.login_key]);
-    const balanceLtc = adminMoney(data.state.ltcBalances?.[login] || data.state.ltcBalances?.[user.login_key]);
+    const bonusBalanceUsd = adminMoney(data.state.balances?.[login] || data.state.balances?.[user.login_key]);
+    const balanceLtc = stateUserLtcBalance(data.state, user.login, user.login_key);
+    const balanceUsd = litecoinToUsd(balanceLtc);
     const userBots = adminCollectBots(data.state).filter((bot) => (
       sameLogin(bot.loginKey, login) ||
       sameLogin(bot.login, login) ||
@@ -4889,6 +4890,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
       status: data.state.blockedUsers?.[user.login_key] || { blocked: false },
       balanceUsd,
       balanceLtc,
+      bonusBalanceUsd,
       summary: {
         visits: data.messages.filter((message) => sameLogin(message.fromLogin, login)).length,
         totalDeposits: successfulDeposits.reduce((sum, item) => sum + adminMoney(item.amountUsd || item.priceAmount), 0),
@@ -4983,6 +4985,119 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
 
     await appendAdminLog("user_updated", admin.login, { login, role, name: name || "", sellerPanel: Boolean(role === "seller" || storePassword) });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/users/:login/balance", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    requireDb();
+    const requestedLogin = String(req.params.login || "").trim();
+    const key = loginKey(requestedLogin);
+    const { data: user, error: userError } = await supabase.from("profiles").select("login,login_key").eq("login_key", key).maybeSingle();
+    if (userError) throw userError;
+    if (!user) return res.status(404).json({ error: "Пользователь не найден" });
+
+    const action = String(req.body.action || "credit").trim().toLowerCase();
+    const amountUsd = Number(req.body.amountUsd);
+    const reason = String(req.body.reason || "").trim().slice(0, 300);
+    if (!["credit", "debit", "set"].includes(action)) return res.status(400).json({ error: "Неизвестная операция с балансом" });
+    if (!Number.isFinite(amountUsd) || amountUsd < 0 || amountUsd > 1000000 || (action !== "set" && amountUsd <= 0)) {
+      return res.status(400).json({ error: "Укажите сумму от 0.01 до 1 000 000 $" });
+    }
+    if (!reason) return res.status(400).json({ error: "Укажите причину изменения баланса" });
+
+    const requestId = String(req.body.clientRequestId || crypto.randomUUID()).replace(/[^a-z0-9_-]/gi, "").slice(0, 100) || crypto.randomUUID();
+    const transactionId = `admin-balance-${requestId}`;
+    const rate = Number((await loadLitecoinUsdRate()).rate || 0);
+    if (!Number.isFinite(rate) || rate <= 0) return res.status(503).json({ error: "Курс LTC временно недоступен" });
+
+    const state = await loadSettingsState();
+    state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+    const existingTransaction = state.walletTransactions.find((item) => item.id === transactionId);
+    if (existingTransaction) {
+      const existingBalanceLtc = stateUserLtcBalance(state, user.login, user.login_key);
+      return res.json({
+        ok: true,
+        reused: true,
+        balanceLtc: existingBalanceLtc,
+        balanceUsd: existingBalanceLtc * rate,
+        rate,
+        transaction: existingTransaction
+      });
+    }
+
+    const previousLtc = stateUserLtcBalance(state, user.login, user.login_key);
+    const requestedLtc = Number((amountUsd / rate).toFixed(8));
+    let nextLtc = previousLtc;
+    if (action === "credit") nextLtc = previousLtc + requestedLtc;
+    if (action === "debit") {
+      if (requestedLtc > previousLtc + 0.000000001) return res.status(400).json({ error: "На балансе пользователя недостаточно средств" });
+      nextLtc = previousLtc - requestedLtc;
+    }
+    if (action === "set") nextLtc = requestedLtc;
+    nextLtc = Number(Math.max(0, nextLtc).toFixed(8));
+    const deltaLtc = Number((nextLtc - previousLtc).toFixed(8));
+    const deltaUsd = Number((deltaLtc * rate).toFixed(2));
+    setStateUserLtcBalance(state, user.login, nextLtc, user.login_key);
+
+    const now = Date.now();
+    const actionTitles = {
+      credit: "Начисление администратором",
+      debit: "Списание администратором",
+      set: "Корректировка баланса администратором"
+    };
+    const transaction = {
+      id: transactionId,
+      login: user.login,
+      loginKey: user.login_key,
+      type: "admin_adjustment",
+      action,
+      title: actionTitles[action],
+      reason,
+      amountLtc: deltaLtc,
+      amountUsd: deltaUsd,
+      requestedAmountUsd: amountUsd,
+      balanceBeforeLtc: previousLtc,
+      balanceAfterLtc: nextLtc,
+      ltcUsdRate: rate,
+      adjustedBy: admin.login,
+      coinId: "ltc",
+      payCurrency: "ltc",
+      createdAt: now,
+      date: new Date(now).toLocaleString("ru-RU"),
+      status: "completed"
+    };
+    state.walletTransactions.unshift(transaction);
+    pushSiteNotification(state, user.login, {
+      id: `notice-${transactionId}`,
+      eventType: "wallet_balance_adjusted",
+      title: deltaLtc >= 0 ? "Баланс пополнен" : "Баланс изменён",
+      body: `${actionTitles[action]}. Новый баланс: ${(nextLtc * rate).toFixed(2)} $ · ${nextLtc.toFixed(8)} LTC. Причина: ${reason}`
+    });
+    await saveSettingsState(state);
+    await appendAdminLog("user_balance_adjusted", admin.login, {
+      login: user.login,
+      action,
+      requestedAmountUsd: amountUsd,
+      deltaUsd,
+      deltaLtc,
+      balanceAfterLtc: nextLtc,
+      reason,
+      transactionId
+    });
+    res.json({
+      ok: true,
+      balanceLtc: nextLtc,
+      balanceUsd: Number((nextLtc * rate).toFixed(2)),
+      previousBalanceLtc: previousLtc,
+      deltaLtc,
+      deltaUsd,
+      rate,
+      transaction
+    });
   } catch (error) {
     next(error);
   }
@@ -5775,7 +5890,7 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
     const isRejected = ["rejected", "cancelled", "canceled"].includes(nextStatus);
     const wasRejected = ["rejected", "cancelled", "canceled"].includes(prevStatus);
     if (isRejected && !wasRejected && !withdrawal.scope && withdrawal.login && Number(withdrawal.amountLtc || 0) > 0 && !withdrawal.refundedAt) {
-      state.ltcBalances[withdrawal.login] = Number(state.ltcBalances[withdrawal.login] || 0) + Number(withdrawal.amountLtc || 0);
+      setStateUserLtcBalance(state, withdrawal.login, stateUserLtcBalance(state, withdrawal.login) + Number(withdrawal.amountLtc || 0));
       withdrawal.refundedAt = Date.now();
       state.walletTransactions.unshift({
         id: `tx-refund-${withdrawal.id}`,
@@ -5857,14 +5972,18 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
     const market = await adminLoadMarketplace();
     const state = market.state;
     state.broadcasts = Array.isArray(state.broadcasts) ? state.broadcasts : [];
+    const requestedChannel = String(req.body.channel || "telegram").trim().toLowerCase();
+    const channel = ["telegram", "site", "both"].includes(requestedChannel) ? requestedChannel : "telegram";
+    const requestedType = String(req.body.type || "popup").trim().toLowerCase();
+    const type = channel === "telegram" ? "message" : (["popup", "banner", "push"].includes(requestedType) ? requestedType : "popup");
     const broadcast = {
       id: `broadcast-${Date.now()}`,
-      title: String(req.body.title || "Рассылка").trim(),
-      body: String(req.body.body || "").trim(),
-      channel: String(req.body.channel || "site"),
-      type: String(req.body.type || "popup"),
+      title: String(req.body.title || "Рассылка").trim().slice(0, 120),
+      body: String(req.body.body || "").trim().slice(0, 4000),
+      channel,
+      type,
       photoUrl: String(req.body.photoUrl || "").trim(),
-      buttonText: String(req.body.buttonText || "").trim(),
+      buttonText: String(req.body.buttonText || "").trim().slice(0, 64),
       buttonUrl: String(req.body.buttonUrl || "").trim(),
       filters: req.body.filters || {},
       stats: { sent: 0, delivered: 0, clicked: 0, closed: 0, botBlocked: 0, chatDeleted: 0 },
@@ -7858,6 +7977,21 @@ function adminMoney(value) {
   return Number(value || 0) || 0;
 }
 
+function stateUserLtcBalance(state, login, key = loginKey(login)) {
+  const balances = state?.ltcBalances && typeof state.ltcBalances === "object" ? state.ltcBalances : {};
+  const exact = login && Object.prototype.hasOwnProperty.call(balances, login) ? balances[login] : undefined;
+  const normalized = key && Object.prototype.hasOwnProperty.call(balances, key) ? balances[key] : undefined;
+  return Math.max(0, Number(exact ?? normalized ?? 0) || 0);
+}
+
+function setStateUserLtcBalance(state, login, value, key = loginKey(login)) {
+  state.ltcBalances = state.ltcBalances && typeof state.ltcBalances === "object" ? state.ltcBalances : {};
+  const next = Math.max(0, Number(value || 0) || 0);
+  if (login) state.ltcBalances[login] = next;
+  if (key) state.ltcBalances[key] = next;
+  return next;
+}
+
 function adminTimestamp(item) {
   return Number(item.createdAt || item.paidAt || item.completedAt || item.closedAt || Date.parse(item.date || item.created_at || "") || 0);
 }
@@ -8744,7 +8878,7 @@ function adminAudienceUsers({ state, profiles, sessions }, filters = {}) {
     const login = user.login;
     const userOrders = completed.filter((order) => sameLogin(order.login, login));
     const purchaseUsd = userOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
-    const balance = adminMoney(state.balances?.[login] || state.balances?.[key]) + adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[key]);
+    const balance = adminMoney(state.balances?.[login] || state.balances?.[key]) + stateUserLtcBalance(state, login, key);
     const lastPurchase = Math.max(0, ...userOrders.map(adminTimestamp));
 
     if (specific.length && !specific.includes(key) && !specific.includes(loginKey(login))) return false;
@@ -8808,26 +8942,45 @@ async function adminDeliverBroadcast(state, broadcast, profiles, sessions) {
         const reply_markup = broadcast.buttonUrl ? {
           inline_keyboard: [[{ text: broadcast.buttonText || "Открыть", url: broadcast.buttonUrl }]]
         } : undefined;
-        const payload = {
-          chat_id: bot.chatId,
-          text: `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(broadcast.body)}${broadcast.buttonUrl ? `\n\n${botHtml(broadcast.buttonUrl)}` : ""}`,
-          parse_mode: "HTML",
-          disable_web_page_preview: true,
-          ...(reply_markup ? { reply_markup } : {})
-        };
-        const method = broadcast.photoUrl ? "sendPhoto" : "sendMessage";
-        if (broadcast.photoUrl) {
-          payload.photo = broadcast.photoUrl;
-          payload.caption = payload.text;
-          delete payload.text;
-        }
         const tokenForDelivery = bot.token || telegramBotToken;
-        if (broadcast.photoUrl && String(broadcast.photoUrl).startsWith("data:")) {
-          await telegramTokenFormApi(tokenForDelivery, method, payload);
-        } else if (bot.token) {
-          await telegramTokenApi(bot.token, method, payload);
+        let bodyText = String(broadcast.body || "").slice(0, 3800);
+        let messageText = `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(bodyText)}`;
+        while (messageText.length > 4000 && bodyText.length > 100) {
+          bodyText = bodyText.slice(0, Math.floor(bodyText.length * 0.8));
+          messageText = `<b>${botHtml(broadcast.title)}</b>\n\n${botHtml(bodyText)}…`;
+        }
+        const sendTelegram = async (method, payload) => {
+          if (method === "sendPhoto" && String(payload.photo || "").startsWith("data:")) {
+            return telegramTokenFormApi(tokenForDelivery, method, payload);
+          }
+          if (bot.token) return telegramTokenApi(bot.token, method, payload);
+          return telegramApi(method, payload);
+        };
+        if (broadcast.photoUrl) {
+          const captionFits = messageText.length <= 950;
+          await sendTelegram("sendPhoto", {
+            chat_id: bot.chatId,
+            photo: broadcast.photoUrl,
+            ...(captionFits ? { caption: messageText, parse_mode: "HTML" } : {}),
+            ...(captionFits && reply_markup ? { reply_markup } : {})
+          });
+          if (!captionFits) {
+            await sendTelegram("sendMessage", {
+              chat_id: bot.chatId,
+              text: messageText,
+              parse_mode: "HTML",
+              disable_web_page_preview: true,
+              ...(reply_markup ? { reply_markup } : {})
+            });
+          }
         } else {
-          await telegramApi(method, payload);
+          await sendTelegram("sendMessage", {
+            chat_id: bot.chatId,
+            text: messageText,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            ...(reply_markup ? { reply_markup } : {})
+          });
         }
         telegramSent += 1;
       } catch (error) {
@@ -9151,7 +9304,8 @@ function adminBuildOverview(data) {
       purchases: userCompleted.length,
       purchaseUsd: userCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       balance: adminMoney(state.balances?.[login] || state.balances?.[user.login_key]),
-      balanceLtc: adminMoney(state.ltcBalances?.[login] || state.ltcBalances?.[user.login_key]),
+      balanceLtc: stateUserLtcBalance(state, login, user.login_key),
+      walletBalanceUsd: litecoinToUsd(stateUserLtcBalance(state, login, user.login_key)),
       invitedBy,
       invitedCount: invitedUsers.length,
       referralEarned,
@@ -9521,7 +9675,7 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
 
   state.ltcBalances = state.ltcBalances || {};
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-  state.ltcBalances[deposit.login] = Number(state.ltcBalances[deposit.login] || 0) + paidLtc;
+  setStateUserLtcBalance(state, deposit.login, stateUserLtcBalance(state, deposit.login) + paidLtc);
 
   const txId = `tx-${deposit.id}`;
   const existingTx = state.walletTransactions.find((tx) => tx.id === txId);
@@ -9609,7 +9763,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
     const ltcUsdRate = Number((await loadLitecoinUsdRate()).rate || 0);
     const ltcAmount = ltcUsdRate > 0 ? priceUsd / ltcUsdRate : 0;
-    const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
+    const balance = stateUserLtcBalance(state, user.login, user.login_key);
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
     if (balance + 0.00000001 < ltcAmount) return res.status(400).json({ error: "Недостаточно LTC на балансе" });
 
@@ -9653,7 +9807,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
     recordProductOrderLedger(order, state, store);
-    state.ltcBalances[user.login] = Math.max(0, balance - ltcAmount);
+    setStateUserLtcBalance(state, user.login, balance - ltcAmount, user.login_key);
     state.orders.unshift(order);
     state.walletTransactions.unshift({
       id: `tx-${order.id}`,
@@ -9986,7 +10140,7 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
     state.ltcBalances = state.ltcBalances || {};
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-    const balance = Number(state.ltcBalances[user.login] || state.ltcBalances[user.login_key] || 0);
+    const balance = stateUserLtcBalance(state, user.login, user.login_key);
     if (amountLtc > balance) return res.status(400).json({ error: "Недостаточно LTC для вывода" });
 
     const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "user", identity: user.login, amountLtc, address });
@@ -10015,7 +10169,7 @@ app.post("/api/wallet/withdrawals", async (req, res, next) => {
       date: new Date().toLocaleString("ru-RU")
     };
 
-    state.ltcBalances[user.login] = Math.max(0, balance - amountLtc);
+    setStateUserLtcBalance(state, user.login, balance - amountLtc, user.login_key);
     state.walletWithdrawals.unshift(request);
     state.walletTransactions.unshift({
       id: `tx-${request.id}`,
@@ -10707,7 +10861,7 @@ function botUserStats(state, login) {
     purchases: paidOrders.length,
     totalPurchaseUsd: paidOrders.reduce((sum, order) => sum + Number(order.amountUsd || order.priceUsd || 0), 0),
     disputes: orderDisputes.length + exchangeDisputes.length,
-    balanceLtc: Number(state.ltcBalances?.[login] || state.ltcBalances?.[loginKey(login)] || 0),
+    balanceLtc: stateUserLtcBalance(state, login),
     balanceUsd: Number(state.balances?.[login] || state.balances?.[loginKey(login)] || 0),
     totalDepositsUsd: completedDeposits.reduce((sum, tx) => sum + Number(tx.amountUsd || 0), 0),
     orders: productOrders,
