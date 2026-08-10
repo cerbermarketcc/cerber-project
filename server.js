@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "catalog-chat-dark-ui-2026-08-10-v140";
+const cerberBuildVersion = "red-neon-mobile-i18n-2026-08-10-v141";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -61,6 +61,7 @@ let paymentReconcilePromise = null;
 let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
 const withdrawalPayoutJobs = new Set();
 let nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
+const uiTranslationCache = new Map();
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -74,6 +75,35 @@ try {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function translateUiPhrase(value, target) {
+  const source = String(value || "").trim();
+  if (!source || target === "ru") return source;
+  const cacheKey = `${target}\n${source}`;
+  if (uiTranslationCache.has(cacheKey)) return uiTranslationCache.get(cacheKey);
+  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  url.searchParams.set("client", "gtx");
+  url.searchParams.set("sl", "auto");
+  url.searchParams.set("tl", target === "md" ? "ro" : target);
+  url.searchParams.set("dt", "t");
+  url.searchParams.set("q", source);
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", "User-Agent": "CERBER/1.0" },
+    signal: AbortSignal.timeout(9000)
+  });
+  if (!response.ok) throw new Error(`Translation service returned ${response.status}`);
+  const payload = await response.json();
+  const translated = Array.isArray(payload?.[0])
+    ? payload[0].map((part) => Array.isArray(part) ? String(part[0] || "") : "").join("").trim()
+    : "";
+  const result = translated || source;
+  uiTranslationCache.set(cacheKey, result);
+  if (uiTranslationCache.size > 3000) {
+    const oldest = uiTranslationCache.keys().next().value;
+    if (oldest) uiTranslationCache.delete(oldest);
+  }
+  return result;
 }
 
 function requestHeadersToObject(headers = {}) {
@@ -2979,6 +3009,31 @@ app.get("/api/rates/ltc-usd", async (_req, res, next) => {
     const result = await loadLitecoinUsdRate();
     res.setHeader("Cache-Control", "no-store");
     res.json({ rate: result.rate, sources: result.sources.map((item) => item.source), updatedAt: result.updatedAt });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/translate", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "ui-translate", { limit: 80, windowMs: 60 * 1000 });
+    const target = String(req.body?.target || "").toLowerCase();
+    if (!["ru", "md", "en"].includes(target)) return res.status(400).json({ error: "Unsupported language" });
+    const texts = (Array.isArray(req.body?.texts) ? req.body.texts : [])
+      .slice(0, 40)
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    if (!texts.length) return res.json({ translations: [] });
+    if (texts.some((item) => item.length > 1800) || texts.reduce((sum, item) => sum + item.length, 0) > 24000) {
+      return res.status(413).json({ error: "Translation payload is too large" });
+    }
+    const translations = [];
+    for (let index = 0; index < texts.length; index += 6) {
+      const chunk = texts.slice(index, index + 6);
+      const translated = await Promise.all(chunk.map((item) => translateUiPhrase(item, target).catch(() => item)));
+      translations.push(...translated);
+    }
+    res.json({ translations });
   } catch (error) {
     next(error);
   }

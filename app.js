@@ -12,10 +12,13 @@ const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const SHOP_PANEL_STAFF_SESSION_KEY = "cerber_shop_panel_staff_v1";
 const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
+const LANGUAGE_KEY = "cerber_language_v2";
+const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
-const API_ENABLED = location.protocol !== "file:";
+const LOCAL_OFFLINE_PREVIEW = IS_LOCAL_APP_HOST && new URLSearchParams(location.search).has("offline-preview");
+const API_ENABLED = location.protocol !== "file:" && !LOCAL_OFFLINE_PREVIEW;
 const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([PRIMARY_API_ORIGIN, API_ORIGIN].filter(Boolean)));
 const runtimeStorage = new Map();
@@ -87,6 +90,10 @@ let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
 let cmsVisualObserver = null;
+let translationCache = null;
+let translationFlushTimer = null;
+let translationInFlight = false;
+const pendingTranslationRoots = new Set();
 const cmsVisualEditorActive = new URLSearchParams(location.search).has("cms-visual");
 const WALLET_COINS = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
@@ -1055,6 +1062,68 @@ Object.assign(uiPhraseTranslations.en, {
   "Описание": "Description"
 });
 
+Object.assign(uiPhraseTranslations.md, {
+  "Маркет": "Piata",
+  "Чаты": "Chat-uri",
+  "Рефералы": "Recomandari",
+  "Баланс": "Sold",
+  "Личный": "Personal",
+  "Пополнить +": "Alimenteaza +",
+  "Купить LTC": "Cumpara LTC",
+  "Заявки на вывод": "Cereri de retragere",
+  "Заявок нет": "Nu exista cereri",
+  "Обычные выводы LTC появятся здесь.": "Retragerile LTC vor aparea aici.",
+  "Транзакции": "Tranzactii",
+  "Транзакций нет": "Nu exista tranzactii",
+  "Здесь будет отображаться список транзакций": "Lista tranzactiilor va fi afisata aici",
+  "Все": "Toate",
+  "Активные": "Active",
+  "Завершённые": "Finalizate",
+  "Отменённые": "Anulate",
+  "Споры": "Dispute",
+  "Нет заказов": "Nu exista comenzi",
+  "Вы еще не купили ни одного товара": "Nu ati cumparat inca niciun produs",
+  "Поиск товара": "Cauta produs",
+  "Все товары": "Toate produsele",
+  "Товаров по этим фильтрам пока нет.": "Nu exista produse pentru aceste filtre.",
+  "Нет в наличии": "Nu este in stoc",
+  "Открыть меню": "Deschide meniul",
+  "Официальные зеркала": "Oglinzi oficiale",
+  "Магазин активен": "Magazin activ",
+  "Работает сейчас": "Activ acum"
+});
+
+Object.assign(uiPhraseTranslations.en, {
+  "Маркет": "Market",
+  "Чаты": "Chats",
+  "Рефералы": "Referrals",
+  "Баланс": "Balance",
+  "Личный": "Personal",
+  "Пополнить +": "Deposit +",
+  "Купить LTC": "Buy LTC",
+  "Заявки на вывод": "Withdrawal requests",
+  "Заявок нет": "No requests",
+  "Обычные выводы LTC появятся здесь.": "LTC withdrawals will appear here.",
+  "Транзакции": "Transactions",
+  "Транзакций нет": "No transactions",
+  "Здесь будет отображаться список транзакций": "Your transaction history will appear here",
+  "Все": "All",
+  "Активные": "Active",
+  "Завершённые": "Completed",
+  "Отменённые": "Cancelled",
+  "Споры": "Disputes",
+  "Нет заказов": "No orders",
+  "Вы еще не купили ни одного товара": "You have not purchased any products yet",
+  "Поиск товара": "Search products",
+  "Все товары": "All products",
+  "Товаров по этим фильтрам пока нет.": "No products match these filters.",
+  "Нет в наличии": "Out of stock",
+  "Открыть меню": "Open menu",
+  "Официальные зеркала": "Official mirrors",
+  "Магазин активен": "Store active",
+  "Работает сейчас": "Open now"
+});
+
 function translateUiText(value) {
   const lang = currentLang();
   if (lang === "ru" || value == null) return value;
@@ -1078,11 +1147,15 @@ function translateElementAttributes(element) {
 }
 
 function applyLanguageDomTranslations(rootElement = document.body) {
-  if (!rootElement || currentLang() === "ru") return;
+  if (!rootElement) return;
+  const lang = currentLang();
+  document.documentElement.lang = lang === "md" ? "ro" : lang;
+  if (lang === "ru") return;
   const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
       if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
+      if (parent.closest("[data-group-message],[data-private-message],[data-shop-dispute-message],.group-widget-message,.admin-dispute-message")) return NodeFilter.FILTER_REJECT;
       if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
       return node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     }
@@ -1093,10 +1166,149 @@ function applyLanguageDomTranslations(rootElement = document.body) {
     node.nodeValue = translateUiText(node.nodeValue);
   });
   rootElement.querySelectorAll("[placeholder],[title],[aria-label],input[type='button'],input[type='submit'],button[value]").forEach(translateElementAttributes);
+  scheduleDynamicDomTranslations(rootElement);
 }
 
 function currentLang() {
   return ["ru", "md", "en"].includes(String(db.lang || "ru")) ? String(db.lang || "ru") : "ru";
+}
+
+function preferredLanguage() {
+  const stored = storageGet(LANGUAGE_KEY);
+  return ["ru", "md", "en"].includes(stored) ? stored : "";
+}
+
+function rememberLanguage(lang) {
+  const next = ["ru", "md", "en"].includes(String(lang || "")) ? String(lang) : "ru";
+  db.lang = next;
+  storageSet(LANGUAGE_KEY, next);
+  document.documentElement.lang = next === "md" ? "ro" : next;
+}
+
+function translationCacheMap() {
+  if (translationCache) return translationCache;
+  translationCache = new Map();
+  try {
+    const saved = JSON.parse(storageGet(TRANSLATION_CACHE_KEY) || "[]");
+    if (Array.isArray(saved)) saved.slice(-700).forEach((entry) => {
+      if (Array.isArray(entry) && entry.length === 2) translationCache.set(String(entry[0]), String(entry[1]));
+    });
+  } catch {}
+  return translationCache;
+}
+
+function saveTranslationCache() {
+  const entries = [...translationCacheMap().entries()].slice(-700);
+  storageSet(TRANSLATION_CACHE_KEY, JSON.stringify(entries));
+}
+
+function translatedTextWithSpacing(source, translated) {
+  const leading = String(source).match(/^\s*/)?.[0] || "";
+  const trailing = String(source).match(/\s*$/)?.[0] || "";
+  return `${leading}${String(translated || "").trim()}${trailing}`;
+}
+
+function dynamicTranslationTargets(rootElement) {
+  const targets = [];
+  const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
+      if (parent.closest("[data-group-message],[data-private-message],[data-shop-dispute-message],.group-widget-message,.admin-dispute-message")) return NodeFilter.FILTER_REJECT;
+      if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
+      return /[А-Яа-яЁё]/.test(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const source = String(node.nodeValue || "");
+    targets.push({
+      source,
+      connected: () => node.isConnected,
+      current: () => node.nodeValue,
+      apply: (translated) => { node.nodeValue = translatedTextWithSpacing(source, translated); }
+    });
+  }
+  rootElement.querySelectorAll("[placeholder],[title],[aria-label]").forEach((element) => {
+    ["placeholder", "title", "aria-label"].forEach((attribute) => {
+      const source = element.getAttribute(attribute) || "";
+      if (!/[А-Яа-яЁё]/.test(source)) return;
+      targets.push({
+        source,
+        connected: () => element.isConnected,
+        current: () => element.getAttribute(attribute),
+        apply: (translated) => element.setAttribute(attribute, translatedTextWithSpacing(source, translated))
+      });
+    });
+  });
+  return targets;
+}
+
+async function requestDynamicTranslations(texts, lang) {
+  if (!API_ENABLED || !texts.length) return [];
+  const payload = await apiFetch("/api/translate", {
+    method: "POST",
+    timeoutMs: 30000,
+    body: JSON.stringify({ target: lang, texts })
+  });
+  return Array.isArray(payload.translations) ? payload.translations : [];
+}
+
+async function flushDynamicDomTranslations() {
+  if (translationInFlight) {
+    translationFlushTimer = setTimeout(flushDynamicDomTranslations, 120);
+    return;
+  }
+  translationFlushTimer = null;
+  const lang = currentLang();
+  if (lang === "ru") {
+    pendingTranslationRoots.clear();
+    return;
+  }
+  const roots = [...pendingTranslationRoots];
+  pendingTranslationRoots.clear();
+  const targets = roots.flatMap((item) => item?.isConnected === false ? [] : dynamicTranslationTargets(item));
+  if (!targets.length) return;
+  const cache = translationCacheMap();
+  const missing = [];
+  targets.forEach((target) => {
+    const trimmed = target.source.trim();
+    const key = `${lang}\n${trimmed}`;
+    const cached = cache.get(key);
+    if (cached) target.apply(cached);
+    else if (trimmed.length <= 1800 && !missing.includes(trimmed)) missing.push(trimmed);
+  });
+  if (!missing.length) return;
+  translationInFlight = true;
+  try {
+    for (let index = 0; index < missing.length; index += 40) {
+      const chunk = missing.slice(index, index + 40);
+      const translations = await requestDynamicTranslations(chunk, lang);
+      if (currentLang() !== lang) return;
+      chunk.forEach((source, itemIndex) => {
+        const translated = String(translations[itemIndex] || "").trim();
+        if (translated) cache.set(`${lang}\n${source}`, translated);
+      });
+    }
+    saveTranslationCache();
+    targets.forEach((target) => {
+      const source = target.source.trim();
+      const translated = cache.get(`${lang}\n${source}`);
+      if (translated && target.connected() && target.current() === target.source) target.apply(translated);
+    });
+  } catch (error) {
+    console.warn("[i18n] dynamic translation unavailable", error?.message || error);
+  } finally {
+    translationInFlight = false;
+    if (pendingTranslationRoots.size) scheduleDynamicDomTranslations(document.body);
+  }
+}
+
+function scheduleDynamicDomTranslations(rootElement = document.body) {
+  if (!rootElement || currentLang() === "ru") return;
+  pendingTranslationRoots.add(rootElement);
+  clearTimeout(translationFlushTimer);
+  translationFlushTimer = setTimeout(flushDynamicDomTranslations, 80);
 }
 
 function localizedValue(entity = {}, field = "") {
@@ -1288,6 +1500,7 @@ function loadDb() {
       next.currentUser = rememberedUser.login;
     }
     normalizeDb(next);
+    next.lang = preferredLanguage() || (["ru", "md", "en"].includes(next.lang) ? next.lang : "ru");
     if (storageGet(STATS_RESET_KEY) !== "done") {
       resetStoreStats(next);
       storageSet(STATS_RESET_KEY, "done");
@@ -2024,6 +2237,7 @@ function protectIncomingState(incomingState = {}, payload = {}) {
 function applyRemoteState(payload) {
   if (!payload) return;
   const previousCurrentUser = db?.currentUser || "";
+  const rememberedLanguage = preferredLanguage() || currentLang();
   const rememberedFilters = { ...(db?.filters || defaults.filters) };
   const rememberedReferralCodes = { ...(db?.referralCodes || {}) };
   const rememberedGroupMembers = mergeGroupMembers(db?.groupSettings?.members || [], readStoredGroupMembers());
@@ -2032,6 +2246,7 @@ function applyRemoteState(payload) {
   const rememberedOrders = Array.isArray(db?.orders) ? db.orders : [];
   const rememberedUsers = Array.isArray(db?.users) ? db.users : [];
   db = merge(db, protectIncomingState(payload.state || {}, payload));
+  db.lang = rememberedLanguage;
   if (payload.user) db.currentUser = payload.user.login;
   else if (previousCurrentUser && payload.state && !payload.state.currentUser) db.currentUser = previousCurrentUser;
   normalizeDb(db);
@@ -3926,7 +4141,9 @@ function layout(content) {
   root.innerHTML = `
     <main class="app">
       <header class="topbar">
-        <button class="logo-button" data-route="home"><img class="logo" src="assets/logo1-transparent.png" alt="CERBER"></button>
+        <button class="logo-button" data-route="home" aria-label="CERBER Marketplace">
+          <span class="brand-lockup"><img class="logo" src="assets/cerber-neon-emblem.png" alt=""><span><strong>CERBER</strong><small>MARKETPLACE</small></span></span>
+        </button>
         <button class="balance" data-account>
           <strong>${ltcBalance.toFixed(6)} LTC</strong>
           <span>${ltcUsd.toFixed(2)} $</span>
@@ -3945,7 +4162,7 @@ function layout(content) {
     </nav>
     <div class="nav-pop" data-nav-pop>
       <div class="nav-card buyer-sidebar">
-        <div class="buyer-sidebar-head"><img src="assets/cerber-emblem.png" alt=""><strong>CERBER</strong><button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button></div>
+        <div class="buyer-sidebar-head"><img src="assets/cerber-neon-emblem.png" alt=""><strong>CERBER</strong><button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button></div>
         <div class="buyer-sidebar-primary">
           ${accountMenuButton("wallet", "Пополнить", `data-route="wallet"`)}
           ${accountMenuButton("home", "Маркет", `data-route="home"`)}
@@ -4005,11 +4222,11 @@ function renderAuth(message = "") {
   turnstileToken = "";
   authSubmitting = false;
   const authSubmitDisabled = false;
-  document.body.dataset.theme = db.theme;
+  document.body.dataset.theme = "dark";
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
         <h1>${authMode === "login" ? tr("login") : tr("register")}</h1>
         ${message ? `<p class="${message.includes("успеш") || message.includes("success") ? "" : "notice"}">${esc(message)}</p>` : `<p>${tr("adminHint")}</p>`}
         <form class="form" data-auth-form>
@@ -4041,11 +4258,11 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   const store = db.stores.find((item) => item.id === storeId) || db.stores[0];
   if (!store) return renderAuth("Магазин ещё не создан. Добавьте его в общей админке.");
   sellerAdminStoreId = store?.id || storeId;
-  document.body.dataset.theme = db.theme;
+  document.body.dataset.theme = "dark";
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
         <h1>Админка магазина</h1>
         <p>${esc(store?.name || "Магазин")}</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
@@ -4386,6 +4603,9 @@ function renderHome() {
   layout(`
     <section class="feed home-mirrors-first">
       ${officialMirrorsView()}
+    </section>
+    <section class="market-brand-strip" aria-label="CERBER Marketplace">
+      <img src="assets/cerber-neon-marketplace.png" alt="CERBER Marketplace">
     </section>
     <section class="hero">
       <h1>${topTitleView()}</h1>
@@ -5171,7 +5391,6 @@ function productStockSummary(product = {}) {
 
 function productCard(product, store) {
   const summary = productStockSummary(product);
-  const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
   const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
@@ -5185,7 +5404,7 @@ function productCard(product, store) {
         <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
         <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
-        ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
+        <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
         </div>
       </button>
     </article>
@@ -5196,7 +5415,6 @@ function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
   const ltcAmount = usdToLtc(minPrice);
   const summary = productStockSummary(product);
-  const reviewCount = Math.max(Number(product.reviews || 0), productReviewsForView(product, store).length);
   const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
   const productCategory = localizedValue(product, "category");
   const storeName = localizedValue(store, "name");
@@ -5210,7 +5428,7 @@ function productCardView(product, store) {
           <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
           <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
-          ${marketplaceMetricsView(product.rating, reviewCount, "Товар доступен")}
+          <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
         </div>
       </button>
     </article>
@@ -11158,11 +11376,11 @@ function shopPanelLoginStore(login, password) {
 function renderShopPanelLogin(message = "") {
   const storeId = shopPanelHashId() || shopPanelSession();
   const hashStore = db.stores.find((store) => store.id === storeId);
-  document.body.dataset.theme = db.theme;
+  document.body.dataset.theme = "dark";
   root.innerHTML = `
     <main class="auth-wrap shop-panel-login">
       <section class="auth-card">
-        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
         <h1>Shop Admin</h1>
         <p>Панель управления магазином.</p>
         ${hashStore ? `<p>${esc(hashStore.name)}</p>` : ""}
@@ -11305,7 +11523,7 @@ function renderShopPanel(activeTab = "dashboard") {
     return renderShopPanel(fallbackTab);
   }
   const html = sellerDashboardShell(store, false, activeTab);
-  document.body.dataset.theme = db.theme;
+  document.body.dataset.theme = "dark";
   root.innerHTML = `
     <main class="shop-panel-page">
       ${html}
@@ -12238,8 +12456,8 @@ function bindGlobal() {
     button.onclick = (event) => {
       event.stopPropagation();
       event.currentTarget.blur();
-      db.lang = button.dataset.lang;
-      saveDb();
+      rememberLanguage(button.dataset.lang);
+      saveDb({ localOnly: true, silentLocalStorageError: true });
       renderCurrent();
     };
   });

@@ -3,13 +3,13 @@
   "short_name": "CERBER",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f1f2f3",
-  "theme_color": "#111111",
+  "background_color": "#050506",
+  "theme_color": "#050506",
   "orientation": "portrait",
   "icons": [
     {
-      "src": "assets/cerber-emblem.png",
-      "sizes": "512x512",
+      "src": "assets/cerber-neon-emblem.png",
+      "sizes": "1260x1260",
       "type": "image/png",
       "purpose": "any maskable"
     }
