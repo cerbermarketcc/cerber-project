@@ -7920,6 +7920,20 @@ body[data-theme="dark"] select {
   min-height: 248px;
 }
 
+.mega-product-card .product-click {
+  grid-template-columns: minmax(140px, .75fr) minmax(0, 1fr);
+  align-items: stretch;
+  min-height: 220px;
+}
+
+.mega-product-card .product-image {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  aspect-ratio: auto;
+  object-fit: cover;
+}
+
 .product-catalog-grid .product-image {
   width: 100%;
   height: 100%;
@@ -7945,6 +7959,19 @@ body[data-theme="dark"] select {
 
   .product-catalog-grid .product-image {
     min-height: 190px;
+  }
+
+  .mega-product-card .product-click {
+    grid-template-columns: 104px minmax(0, 1fr);
+    min-height: 184px;
+  }
+
+  .mega-product-card .product-image {
+    min-height: 184px;
+  }
+
+  .mega-product-card .product-body {
+    padding: 12px;
   }
 }
 
@@ -7975,4 +8002,309 @@ body[data-theme="dark"] select {
   background: #ef3d35;
   color: #fff;
   box-shadow: 0 8px 18px rgba(222, 45, 37, .24);
+}
+
+/* Final mobile containment layer. */
+html,
+body,
+.app {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.screen,
+.screen > *,
+.panel,
+.store-profile-panel,
+.profile-body,
+.mega-product-screen,
+.mega-product-screen > *,
+.mega-position-card,
+.mega-position-grid,
+.mega-position-grid > *,
+.product-copy,
+.product-mode-tabs,
+.pill-tabs {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-dynamic-translate],
+.profile-short,
+.profile-description,
+.product-description-preview,
+.position-description,
+.modal-content-description,
+.breadcrumbs,
+.product-page-title,
+.product-page-category,
+.mega-position-grid strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.modal-content-description {
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+@media (max-width: 560px) {
+  .screen,
+  .mega-product-screen {
+    width: 100%;
+    overflow: hidden;
+    padding-inline: 12px;
+  }
+
+  .store-profile-panel {
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .profile-cover {
+    width: 100%;
+    max-height: 176px;
+    aspect-ratio: 16 / 7;
+    object-fit: cover;
+  }
+
+  .profile-body {
+    padding: 0 16px 22px;
+  }
+
+  .profile-avatar {
+    width: 96px;
+    height: 96px;
+    margin-top: -48px;
+    margin-bottom: 16px;
+    border-width: 4px;
+  }
+
+  .store-profile-panel .breadcrumbs {
+    margin: 8px 0 14px;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .store-profile-panel .shop-title {
+    align-items: center;
+    gap: 8px;
+  }
+
+  .store-profile-panel .profile-title {
+    margin: 0;
+    font-size: 25px;
+    line-height: 1.15;
+  }
+
+  .profile-short,
+  .profile-description {
+    margin: 10px 0;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .profile-description,
+  .product-description-preview,
+  .position-description {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  .read-button {
+    min-height: 38px;
+    font-size: 13px;
+  }
+
+  .store-profile-panel .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 20px 0;
+    padding-top: 18px;
+  }
+
+  .store-profile-panel .stat {
+    min-height: 0;
+    padding: 0;
+    border-radius: 0;
+    overflow: visible;
+  }
+
+  .store-profile-panel .stat strong {
+    font-size: 27px;
+    line-height: 1.05;
+  }
+
+  .store-profile-panel .stat span {
+    font-size: 13px;
+  }
+
+  .store-profile-panel .rating {
+    margin: 18px 0;
+  }
+
+  .store-profile-panel .rating strong {
+    font-size: 28px;
+  }
+
+  .store-profile-panel .stars {
+    font-size: 24px;
+  }
+
+  .store-profile-panel > .profile-body > .primary {
+    width: 100%;
+    min-height: 46px;
+    font-size: 14px;
+  }
+
+  .store-age {
+    margin: 16px 0;
+    font-size: 12px;
+  }
+
+  .mega-product-screen .breadcrumbs {
+    margin: 8px 0 12px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .mega-product-screen .product-page-title {
+    margin: 8px 0 4px;
+    font-size: 25px;
+    line-height: 1.12;
+  }
+
+  .mega-product-screen .product-page-category {
+    margin: 0 0 12px;
+    font-size: 14px;
+    line-height: 1.35;
+  }
+
+  .mega-gallery,
+  .mega-gallery.single-image {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .mega-gallery-main {
+    max-height: 250px;
+    aspect-ratio: 16 / 10;
+    object-fit: cover;
+  }
+
+  .mega-gallery-side {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mega-gallery-side img {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+  }
+
+  .product-copy {
+    gap: 8px;
+    margin: 14px 0;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .product-copy > p {
+    margin: 0;
+  }
+
+  .product-copy .shop-line {
+    font-size: 14px;
+  }
+
+  .product-copy .price {
+    font-size: 20px;
+  }
+
+  .product-copy .big-stars {
+    flex-wrap: wrap;
+    font-size: 15px;
+  }
+
+  .location-select {
+    min-height: 46px;
+    padding: 0 16px;
+    font-size: 15px;
+  }
+
+  .pill-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+  }
+
+  .pill-tabs button {
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px;
+    font-size: 13px;
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .product-mode-tabs {
+    gap: 6px;
+    margin: 14px 0;
+    font-size: 13px;
+  }
+
+  .product-mode-tabs button {
+    min-height: 42px;
+    padding: 7px 5px;
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .mega-position-card {
+    gap: 10px;
+    width: 100%;
+    padding: 14px;
+    border-radius: 8px;
+  }
+
+  .mega-position-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+  }
+
+  .mega-position-grid p {
+    min-width: 0;
+  }
+
+  .mega-position-grid span {
+    font-size: 11px;
+  }
+
+  .mega-position-grid strong {
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .position-description {
+    margin: 2px 0;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .buy-button {
+    justify-self: end;
+    width: auto;
+    min-width: 124px;
+    max-width: 160px;
+    min-height: 40px;
+    padding: 0 20px;
+    border-radius: 7px;
+    font-size: 13px;
+    box-shadow: 0 8px 18px rgba(218, 38, 31, .22), 0 0 14px rgba(239, 61, 53, .12);
+  }
 }

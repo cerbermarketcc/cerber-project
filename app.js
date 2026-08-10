@@ -1150,22 +1150,23 @@ function applyLanguageDomTranslations(rootElement = document.body) {
   if (!rootElement) return;
   const lang = currentLang();
   document.documentElement.lang = lang === "md" ? "ro" : lang;
-  if (lang === "ru") return;
-  const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const parent = node.parentElement;
-      if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
-      if (parent.closest("[data-group-message],[data-private-message],[data-shop-dispute-message],.group-widget-message,.admin-dispute-message")) return NodeFilter.FILTER_REJECT;
-      if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
-      return node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-    }
-  });
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  nodes.forEach((node) => {
-    node.nodeValue = translateUiText(node.nodeValue);
-  });
-  rootElement.querySelectorAll("[placeholder],[title],[aria-label],input[type='button'],input[type='submit'],button[value]").forEach(translateElementAttributes);
+  if (lang !== "ru") {
+    const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
+        if (parent.closest("[data-group-message],[data-private-message],[data-shop-dispute-message],.group-widget-message,.admin-dispute-message")) return NodeFilter.FILTER_REJECT;
+        if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
+        return node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach((node) => {
+      node.nodeValue = translateUiText(node.nodeValue);
+    });
+    rootElement.querySelectorAll("[placeholder],[title],[aria-label],input[type='button'],input[type='submit'],button[value]").forEach(translateElementAttributes);
+  }
   scheduleDynamicDomTranslations(rootElement);
 }
 
@@ -1208,7 +1209,7 @@ function translatedTextWithSpacing(source, translated) {
   return `${leading}${String(translated || "").trim()}${trailing}`;
 }
 
-function dynamicTranslationTargets(rootElement) {
+function dynamicTranslationTargets(rootElement, lang = currentLang()) {
   const targets = [];
   const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -1216,7 +1217,14 @@ function dynamicTranslationTargets(rootElement) {
       if (!parent || parent.closest("[data-cms-visual-toolbar]")) return NodeFilter.FILTER_REJECT;
       if (parent.closest("[data-group-message],[data-private-message],[data-shop-dispute-message],.group-widget-message,.admin-dispute-message")) return NodeFilter.FILTER_REJECT;
       if (/^(script|style|textarea|option|svg|path)$/i.test(parent.tagName)) return NodeFilter.FILTER_REJECT;
-      return /[А-Яа-яЁё]/.test(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      const source = String(node.nodeValue || "").trim();
+      if (!source) return NodeFilter.FILTER_REJECT;
+      const customContent = Boolean(parent.closest("[data-dynamic-translate]"));
+      if (customContent) {
+        if (lang === "ru" && /[А-Яа-яЁё]/.test(source)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+      return lang !== "ru" && /[А-Яа-яЁё]/.test(source) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     }
   });
   while (walker.nextNode()) {
@@ -1232,7 +1240,9 @@ function dynamicTranslationTargets(rootElement) {
   rootElement.querySelectorAll("[placeholder],[title],[aria-label]").forEach((element) => {
     ["placeholder", "title", "aria-label"].forEach((attribute) => {
       const source = element.getAttribute(attribute) || "";
-      if (!/[А-Яа-яЁё]/.test(source)) return;
+      const customContent = Boolean(element.closest("[data-dynamic-translate]"));
+      if (!customContent && (lang === "ru" || !/[А-Яа-яЁё]/.test(source))) return;
+      if (customContent && lang === "ru" && /[А-Яа-яЁё]/.test(source)) return;
       targets.push({
         source,
         connected: () => element.isConnected,
@@ -1261,13 +1271,9 @@ async function flushDynamicDomTranslations() {
   }
   translationFlushTimer = null;
   const lang = currentLang();
-  if (lang === "ru") {
-    pendingTranslationRoots.clear();
-    return;
-  }
   const roots = [...pendingTranslationRoots];
   pendingTranslationRoots.clear();
-  const targets = roots.flatMap((item) => item?.isConnected === false ? [] : dynamicTranslationTargets(item));
+  const targets = roots.flatMap((item) => item?.isConnected === false ? [] : dynamicTranslationTargets(item, lang));
   if (!targets.length) return;
   const cache = translationCacheMap();
   const missing = [];
@@ -1305,7 +1311,7 @@ async function flushDynamicDomTranslations() {
 }
 
 function scheduleDynamicDomTranslations(rootElement = document.body) {
-  if (!rootElement || currentLang() === "ru") return;
+  if (!rootElement) return;
   pendingTranslationRoots.add(rootElement);
   clearTimeout(translationFlushTimer);
   translationFlushTimer = setTimeout(flushDynamicDomTranslations, 80);
@@ -3974,6 +3980,24 @@ function esc(value) {
   }[char]));
 }
 
+function displayContentText(value) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFD]/g, " ")
+    .replace(/[`\u00B4]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function displayContentPreview(value, limit = 130) {
+  const text = displayContentText(value);
+  const max = Math.max(24, Number(limit) || 130);
+  if (text.length <= max) return { text, truncated: false };
+  const candidate = text.slice(0, max + 1);
+  const boundary = candidate.lastIndexOf(" ");
+  const end = boundary >= Math.floor(max * 0.62) ? boundary : max;
+  return { text: text.slice(0, end).trim(), truncated: true };
+}
+
 function stableDisputeNumber(value = "") {
   const text = String(value || Date.now());
   let hash = 0;
@@ -5340,8 +5364,9 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
   if (!store) return renderCatalog();
   if (storeIsStopped(store) && !isAdmin() && !sameLogin(store.ownerLogin, db.currentUser)) return renderCatalog();
   const storeName = localizedValue(store, "name");
-  const storeShort = localizedValue(store, "short");
-  const storeDescription = localizedValue(store, "description");
+  const storeShort = displayContentText(localizedValue(store, "short"));
+  const storeDescription = displayContentText(localizedValue(store, "description"));
+  const storeDescriptionPreview = displayContentPreview(storeDescription, 150);
   const coverImage = store.cover || store.banner || fallbackImage;
   const avatarImage = store.image || fallbackImage;
   const reviewsList = store.reviewsList || [];
@@ -5357,10 +5382,10 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
           <img class="profile-avatar" src="${esc(avatarImage)}" alt="${esc(storeName)}">
           <p class="breadcrumbs">${tr("stores")} > ${esc(storeName)}</p>
           <div class="shop-title"><h1 class="profile-title">${esc(storeName)}</h1><span class="verify">✓</span></div>
-          <p>${esc(storeShort)}</p>
-          <p class="desc">${esc(storeDescription).slice(0, 130)}...</p>
+          ${storeShort ? `<p class="profile-short" data-dynamic-translate>${esc(storeShort)}</p>` : ""}
+          ${storeDescriptionPreview.text ? `<p class="desc profile-description" data-dynamic-translate>${esc(storeDescriptionPreview.text)}${storeDescriptionPreview.truncated ? "..." : ""}</p>` : ""}
           ${storeGalleryView(store)}
-          <button class="read-button" data-read="${esc(store.id)}">${tr("read")}</button>
+          ${storeDescriptionPreview.truncated ? `<button class="read-button" data-read="${esc(store.id)}">${tr("read")}</button>` : ""}
           <div class="stats">
             <div class="stat"><strong>${esc(store.orders)}</strong><span>${tr("orders")}</span></div>
             <div class="stat"><strong>${esc(store.reviews)}</strong><span>${tr("reviews")}</span></div>
@@ -5391,16 +5416,16 @@ function productStockSummary(product = {}) {
 
 function productCard(product, store) {
   const summary = productStockSummary(product);
-  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
-  const productCategory = localizedValue(product, "category");
+  const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
+  const productCategory = displayContentText(localizedValue(product, "category"));
   const storeName = localizedValue(store, "name");
   return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
         <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
       <div class="product-body">
-        <h3>${esc(productTitle)}</h3>
-        <p>${esc(productCategory)}</p>
+        <h3 data-dynamic-translate>${esc(productTitle)}</h3>
+        <p data-dynamic-translate>${esc(productCategory)}</p>
         <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
         <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
@@ -5415,16 +5440,16 @@ function productCardView(product, store) {
   const minPrice = Number(product.priceUsd || 0);
   const ltcAmount = usdToLtc(minPrice);
   const summary = productStockSummary(product);
-  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
-  const productCategory = localizedValue(product, "category");
+  const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
+  const productCategory = displayContentText(localizedValue(product, "category"));
   const storeName = localizedValue(store, "name");
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
         <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
         <div class="product-body mega-product-body">
-          <h3>${esc(productTitle)}</h3>
-          <p class="desc">${esc(productCategory)}</p>
+          <h3 data-dynamic-translate>${esc(productTitle)}</h3>
+          <p class="desc" data-dynamic-translate>${esc(productCategory)}</p>
           <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
           <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
           <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
@@ -5499,14 +5524,14 @@ function renderProductView(storeId, productId) {
   ].filter(Boolean))].slice(0, 5);
   const galleryImages = images.length ? images : [fallbackImage];
   const storeName = localizedValue(store, "name");
-  const productTitle = [localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · ");
-  const productCategory = localizedValue(product, "category");
-  const productDescription = localizedValue(product, "description");
+  const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
+  const productCategory = displayContentText(localizedValue(product, "category"));
+  const productDescription = displayContentText(localizedValue(product, "description"));
   layout(`
     <section class="screen product-screen mega-product-screen">
       <p class="breadcrumbs">${tr("stores")} &gt; ${esc(storeName)} &gt; ${esc(productTitle)}</p>
-      <h1 class="product-page-title">${esc(productTitle)}</h1>
-      <p class="product-page-category">${esc(productCategory)}</p>
+      <h1 class="product-page-title" data-dynamic-translate>${esc(productTitle)}</h1>
+      <p class="product-page-category" data-dynamic-translate>${esc(productCategory)}</p>
       <div class="mega-gallery ${galleryImages.length === 1 ? "single-image" : ""}">
         <button type="button" class="mega-gallery-button mega-gallery-main-button" data-product-gallery-index="0" aria-label="Открыть главное фото">
           <img class="mega-gallery-main" src="${esc(galleryImages[0])}" alt="${esc(productTitle)}">
@@ -5520,7 +5545,7 @@ function renderProductView(storeId, productId) {
         </div>
       </div>
       <article class="product-copy">
-        ${productDescription ? `<p>${esc(productDescription)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
+        ${productDescription ? `<p class="product-description-preview" data-dynamic-translate>${esc(productDescription)}</p><button class="read-button" data-read-product="${esc(product.id)}">Показать больше</button>` : ""}
         <p class="shop-line"><span>${tr("store")}:</span> <strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
         <p class="price">${Number(product.priceUsd || 0).toFixed(0)}$</p>
         <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(productReviewCount)}</p>
@@ -5550,7 +5575,7 @@ function renderProductView(storeId, productId) {
     </section>
   `);
   document.querySelector("[data-read-product]")?.addEventListener("click", () => {
-    showModal(`<h2>${esc(productTitle)}</h2><p>${esc(productDescription || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+    showModal(`<h2 data-dynamic-translate>${esc(productTitle)}</h2><p class="modal-content-description" data-dynamic-translate>${esc(productDescription || "")}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
   });
   document.querySelectorAll("[data-product-gallery-index]").forEach((button) => {
     button.addEventListener("click", () => openProductGallery(galleryImages, productTitle, button.dataset.productGalleryIndex));
@@ -5579,22 +5604,22 @@ function renderProductView(storeId, productId) {
 function positionCardView(position, product, store) {
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  const positionTitle = localizedValue(position, "title") || localizedValue(product, "title");
-  const positionDescription = localizedValue(position, "description");
-  const deliveryType = localizedValue(position, "deliveryType") || tr("product");
+  const positionTitle = displayContentText(localizedValue(position, "title") || localizedValue(product, "title"));
+  const positionDescription = displayContentText(localizedValue(position, "description"));
+  const deliveryType = displayContentText(localizedValue(position, "deliveryType") || tr("product"));
   return `
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
         <p><span>${tr("quantity")}</span><strong>${esc(position.stock || 0)} ${tr("pieces")}</strong></p>
-        <p><span>${tr("titleLabel")}</span><strong>${esc(positionTitle)}</strong></p>
-        <p><span>${tr("type")}</span><strong>${esc(deliveryType)}</strong></p>
+        <p><span>${tr("titleLabel")}</span><strong data-dynamic-translate>${esc(positionTitle)}</strong></p>
+        <p><span>${tr("type")}</span><strong data-dynamic-translate>${esc(deliveryType)}</strong></p>
         <p><span>Формат</span><strong>${positionSaleMode(position) === "preorder" ? tr("preorder") : tr("ready")}</strong></p>
         <p><span>${tr("weight")}</span><strong>${esc(positionWeightLabel(position))}</strong></p>
         <p><span>${tr("price")}</span><strong>${priceUsd.toFixed(0)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</strong></p>
         <p class="wide"><span>${tr("location")}</span><strong>${esc(locationLabel(position))}</strong></p>
       </div>
-      ${positionDescription ? `<p class="desc">${esc(positionDescription)}</p>` : ""}
+      ${positionDescription ? `<p class="desc position-description" data-dynamic-translate>${esc(positionDescription)}</p>` : ""}
       <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}" ${Number(position.stock || 0) <= 0 ? "disabled" : ""}>${tr("buy")}</button>
     </article>
   `;
@@ -12408,7 +12433,8 @@ function bindGlobal() {
   document.querySelectorAll("[data-read]").forEach((button) => {
     button.onclick = () => {
       const store = db.stores.find((item) => item.id === button.dataset.read);
-      showModal(`<h2>${esc(store.name)}</h2><p>${esc(store.description)}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
+      const description = displayContentText(localizedValue(store, "description"));
+      showModal(`<h2>${esc(store.name)}</h2><p class="modal-content-description" data-dynamic-translate>${esc(description)}</p><button class="primary" data-close-modal>${tr("close")}</button>`);
     };
   });
   document.querySelectorAll("[data-route]").forEach((button) => {
