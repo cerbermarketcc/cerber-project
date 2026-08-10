@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "red-neon-mobile-i18n-2026-08-10-v141";
+const cerberBuildVersion = "owner-admin-modal-fix-2026-08-10-v142";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;

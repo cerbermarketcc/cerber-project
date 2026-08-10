@@ -1158,7 +1158,6 @@ function renderDisputePayload(payload, { openChat = false, closeChat = false } =
   if (closeChat) document.querySelector("[data-dispute-modal]")?.remove();
   else if (openChat || document.querySelector("[data-dispute-modal]")) showDisputeChatModal(payload);
   bindActions();
-  bindAdminDisputeMessageMenus();
   bindAdminButtonFeedback(root);
 }
 
@@ -1278,6 +1277,7 @@ function showDisputeChatModal(payload) {
       toast(error.message, true);
     }
   });
+  bindAdminDisputeMessageMenus(modal);
   requestAnimationFrame(() => {
     const chat = modal.querySelector(".admin-dispute-chat");
     if (chat) chat.scrollTop = chat.scrollHeight;
@@ -2224,7 +2224,7 @@ function bindActions() {
       if (button) button.disabled = false;
     }
   });
-  bindAdminDisputeMessageMenus(modal);
+  bindAdminDisputeMessageMenus(root);
   root.querySelector("[data-clear-marketplace]")?.addEventListener("click", async () => {
     if (!confirm("Удалить все магазины и очистить обменники? Admin-пользователь останется.")) return;
     try {
