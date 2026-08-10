@@ -361,7 +361,17 @@ function adminAuthError(error) {
 async function refreshData(silent = false) {
   if (!token) return false;
   try {
-    data = await api("/api/admin/overview?compact=1", { timeoutMs: silent ? 45000 : 90000 });
+    const healthState = data ? {
+      health: data.health,
+      healthLoading: data.healthLoading,
+      healthDeep: data.healthDeep,
+      healthDeepLoading: data.healthDeepLoading,
+      healthDeepError: data.healthDeepError
+    } : {};
+    data = {
+      ...await api("/api/admin/overview?compact=1", { timeoutMs: silent ? 45000 : 90000 }),
+      ...healthState
+    };
     if (!silent) renderShell();
     else if (adminCanSilentRender()) renderCurrentView({ preserveScroll: true });
     return true;
@@ -1528,6 +1538,7 @@ function renderLogs() {
 }
 
 function healthStatus(value) {
+  if (value === undefined || value === null) return `<span class="status checking">checking</span>`;
   return value ? `<span class="status">ok</span>` : `<span class="status off">fail</span>`;
 }
 
@@ -1536,12 +1547,11 @@ function renderHealth() {
     data.healthLoading = true;
     api("/api/health").then((health) => {
       data.health = health;
-      render();
     }).catch((error) => {
       data.health = { ok: false, error: error.message || "Health error", checks: {} };
-      render();
     }).finally(() => {
       data.healthLoading = false;
+      renderCurrentView({ preserveScroll: true });
     });
   }
   if (data.health && !data.healthDeep && !data.healthDeepLoading) {
@@ -1549,17 +1559,17 @@ function renderHealth() {
     api("/api/health/deep").then((health) => {
       data.health = health;
       data.healthDeep = true;
-      render();
     }).catch((error) => {
       data.healthDeepError = error.message || "Deep health error";
       data.healthDeep = true;
-      render();
     }).finally(() => {
       data.healthDeepLoading = false;
+      renderCurrentView({ preserveScroll: true });
     });
   }
   const health = data.health || { checks: {} };
   const checks = health.checks || {};
+  const healthPending = !data.health;
   const tables = checks.tables || {};
   const tableRows = Object.entries(tables).map(([name, item]) => [
     name,
@@ -1568,10 +1578,10 @@ function renderHealth() {
   ]);
   return `
     <section class="grid">
-      ${statCard("Health", health.ok ? "OK" : "FAIL", health.time || "")}
-      ${statCard("Supabase", checks.supabase?.ok ? "OK" : "FAIL", "database")}
-      ${statCard("NOWPayments", checks.nowpayments?.readyForPayouts ? "READY" : "CHECK", "payments")}
-      ${statCard("Telegram", checks.telegram?.mainBot ? "OK" : "CHECK", "bots")}
+      ${statCard("Health", healthPending ? "CHECKING" : (health.ok ? "OK" : "FAIL"), health.time || "")}
+      ${statCard("Supabase", healthPending ? "CHECKING" : (checks.supabase?.ok ? "OK" : "FAIL"), "database")}
+      ${statCard("NOWPayments", healthPending ? "CHECKING" : (checks.nowpayments?.readyForPayouts ? "READY" : "CHECK"), "payments")}
+      ${statCard("Telegram", healthPending ? "CHECKING" : (checks.telegram?.mainBot ? "OK" : "CHECK"), "bots")}
     </section>
     <section class="split">
       <article class="table-card">
@@ -1584,9 +1594,9 @@ function renderHealth() {
           <tr><td>Telegram main bot</td><td>${healthStatus(checks.telegram?.mainBot)}</td></tr>
           <tr><td>Telegram webhook secret</td><td>${healthStatus(checks.telegram?.webhookSecret)}</td></tr>
           <tr><td>Site notify bot</td><td>${healthStatus(checks.telegram?.siteNotifyBot)}</td></tr>
-          <tr><td>Default CMS admin password</td><td>${healthStatus(!checks.security?.insecureDefaultCmsPassword)}</td></tr>
-          <tr><td>Default owner password</td><td>${healthStatus(!checks.security?.insecureDefaultOwnerPassword)}</td></tr>
-          <tr><td>Default market admin password</td><td>${healthStatus(!checks.security?.insecureDefaultMarketAdminPassword)}</td></tr>
+          <tr><td>Default CMS admin password</td><td>${healthStatus(checks.security ? !checks.security.insecureDefaultCmsPassword : null)}</td></tr>
+          <tr><td>Default owner password</td><td>${healthStatus(checks.security ? !checks.security.insecureDefaultOwnerPassword : null)}</td></tr>
+          <tr><td>Default market admin password</td><td>${healthStatus(checks.security ? !checks.security.insecureDefaultMarketAdminPassword : null)}</td></tr>
         </tbody></table>
       </article>
       <article class="table-card">
