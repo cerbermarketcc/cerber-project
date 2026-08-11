@@ -47,6 +47,7 @@ let shopPanelLastStateRefreshAt = 0;
 let shopPanelFormLockUntil = 0;
 let shopPanelBusyForms = 0;
 let activeShopPanelTab = "dashboard";
+let liveLtcBalanceTimer = null;
 let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
@@ -1668,6 +1669,13 @@ function normalizeDb(next) {
       storeBalanceUsd: Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : undefined,
       storeHeldUsd: Number.isFinite(Number(store.storeHeldUsd)) ? Number(store.storeHeldUsd) : undefined,
       storeAvailableBalanceUsd: Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Number(store.storeAvailableBalanceUsd) : undefined,
+      storeGrossLtc: Number.isFinite(Number(store.storeGrossLtc)) ? Number(store.storeGrossLtc) : undefined,
+      storeCommissionLtc: Number.isFinite(Number(store.storeCommissionLtc)) ? Number(store.storeCommissionLtc) : undefined,
+      storeBalanceLtc: Number.isFinite(Number(store.storeBalanceLtc)) ? Number(store.storeBalanceLtc) : undefined,
+      storeHeldLtc: Number.isFinite(Number(store.storeHeldLtc)) ? Number(store.storeHeldLtc) : undefined,
+      storeAvailableBalanceLtc: Number.isFinite(Number(store.storeAvailableBalanceLtc)) ? Number(store.storeAvailableBalanceLtc) : undefined,
+      storeLtcUsdRate: Number.isFinite(Number(store.storeLtcUsdRate)) ? Number(store.storeLtcUsdRate) : undefined,
+      storeBalanceChart: Array.isArray(store.storeBalanceChart) ? store.storeBalanceChart : [],
       storeFinanceRows: Array.isArray(store.storeFinanceRows) ? store.storeFinanceRows : [],
       reviewsList: Array.isArray(store.reviewsList) ? store.reviewsList : (seed?.reviewsList || [])
     };
@@ -2494,6 +2502,7 @@ function richerShopPanelStore(localStore = null, remoteStore = null) {
 
 function restoreShopPanelStore(store) {
   if (!store?.id) return;
+  if (Number(store.storeLtcUsdRate || 0) > 0) ltcUsdCache = Number(store.storeLtcUsdRate);
   const index = db.stores.findIndex((item) => item.id === store.id);
   if (index >= 0) {
     db.stores[index] = { ...db.stores[index], ...store };
@@ -3448,6 +3457,10 @@ function usdToLtc(amountUsd) {
   return rate > 0 ? Number(amountUsd || 0) / rate : 0;
 }
 
+function ltcToUsd(amountLtc) {
+  return Number(amountLtc || 0) * Number(ltcUsdCache || 0);
+}
+
 function productOrderLtcAmount(order = {}) {
   return Number(
     order.payAmount
@@ -3516,6 +3529,21 @@ function activeWithdrawalUsd(scope = "", storeId = "") {
       return !(item.autoPayoutError && !item.providerPayoutId);
     })
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+}
+
+function activeWithdrawalLtc(scope = "", storeId = "") {
+  return (Array.isArray(db.walletWithdrawals) ? db.walletWithdrawals : [])
+    .filter((item) => {
+      if (scope && item.scope !== scope) return false;
+      if (storeId && item.storeId !== storeId) return false;
+      const status = String(item.status || "pending").toLowerCase();
+      if (["cancelled", "canceled", "rejected", "failed", "payout_failed"].includes(status)) return false;
+      return !(item.autoPayoutError && !item.providerPayoutId);
+    })
+    .reduce((sum, item) => {
+      const amountLtc = Number(item.amountLtc || 0);
+      return sum + (amountLtc > 0 ? amountLtc : usdToLtc(item.amountUsd || 0));
+    }, 0);
 }
 
 function walletWithdrawalStatusText(status = "pending") {
@@ -9218,24 +9246,53 @@ function heldStoreOrders(storeId) {
 }
 
 function storeBalanceUsd(storeId) {
+  return ltcToUsd(storeBalanceLtc(storeId));
+}
+
+function storeBalanceLtc(storeId) {
   const store = storeById(storeId);
-  if (Number.isFinite(Number(store?.storeBalanceUsd))) return Number(store.storeBalanceUsd);
-  return paidStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
+  if (Number.isFinite(Number(store?.storeBalanceLtc))) return Math.max(0, Number(store.storeBalanceLtc));
+  return paidStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetLtc(order, store), 0);
+}
+
+function storeOrderGrossLtc(order = {}) {
+  const settled = Number(order.settlementGrossLtc ?? order.grossAmountLtc);
+  if (settled > 0) return settled;
+  const outcomeCurrency = String(order.providerOutcomeCurrency || order.outcome_currency || order.paymentProviderPayload?.outcome_currency || "").toLowerCase();
+  const outcomeAmount = Number(order.providerOutcomeAmount || order.outcome_amount || order.paymentProviderPayload?.outcome_amount || 0);
+  if (outcomeCurrency === "ltc" && outcomeAmount > 0) return outcomeAmount;
+  const payCurrency = String(order.payCurrency || order.paymentProviderPayload?.pay_currency || order.coinId || "").toLowerCase();
+  const actuallyPaid = Number(order.providerActuallyPaid || order.actually_paid || order.paymentProviderPayload?.actually_paid || 0);
+  if (payCurrency === "ltc" && actuallyPaid > 0) return actuallyPaid;
+  const quoted = Number(order.ltcAmount || order.walletDepositAmountLtc || order.payAmount || order.paymentProviderPayload?.pay_amount || 0);
+  if ((order.paymentProvider === "balance" || payCurrency === "ltc" || String(order.coinId || "").toLowerCase() === "ltc") && quoted > 0) return quoted;
+  return usdToLtc(order.amountUsd || 0);
+}
+
+function storeOrderCommissionLtc(order, store = null) {
+  const fixed = Number(order?.platformCommissionLtc || 0);
+  if (fixed > 0) return fixed;
+  const grossLtc = storeOrderGrossLtc(order);
+  const amountUsd = Number(order?.amountUsd || 0);
+  const commissionUsd = Number(order?.platformCommissionUsd || 0);
+  const ratio = amountUsd > 0 && commissionUsd > 0
+    ? commissionUsd / amountUsd
+    : Number(order?.platformCommissionPercent ?? storeCommissionPercent(store)) / 100;
+  return Math.max(0, grossLtc * Math.min(1, Math.max(0, ratio)));
+}
+
+function storeOrderNetLtc(order, store = null) {
+  const fixed = Number(order?.sellerAmountLtc || 0);
+  if (fixed > 0) return fixed;
+  return Math.max(0, storeOrderGrossLtc(order) - storeOrderCommissionLtc(order, store));
 }
 
 function storeOrderNetUsd(order, store = null) {
-  const amount = Number(order?.amountUsd || 0);
-  const commissionUsd = Number(order?.platformCommissionUsd || 0);
-  const commissionPercent = Number(order?.platformCommissionPercent ?? storeCommissionPercent(store));
-  if (commissionUsd > 0) return Math.max(0, amount - commissionUsd);
-  return Math.max(0, amount - amount * commissionPercent / 100);
+  return ltcToUsd(storeOrderNetLtc(order, store));
 }
 
 function storeOrderCommissionUsd(order, store = null) {
-  const amount = Number(order?.amountUsd || 0);
-  const fixed = Number(order?.platformCommissionUsd || 0);
-  if (fixed > 0) return fixed;
-  return Math.max(0, amount - storeOrderNetUsd(order, store));
+  return ltcToUsd(storeOrderCommissionLtc(order, store));
 }
 
 function ownerPendingCommissionUsd() {
@@ -9279,6 +9336,12 @@ function storeFinanceRows(storeId, store = null) {
       grossUsd: Number(row.grossUsd || 0),
       netUsd: Number(row.netUsd || 0),
       commissionUsd: Number(row.commissionUsd || 0),
+      grossLtc: Number(row.grossLtc || 0),
+      netLtc: Number(row.netLtc || 0),
+      commissionLtc: Number(row.commissionLtc || 0),
+      originalGrossUsd: Number(row.originalGrossUsd || 0),
+      originalNetUsd: Number(row.originalNetUsd || 0),
+      originalCommissionUsd: Number(row.originalCommissionUsd || 0),
       status: row.status || "",
       createdAt: Number(row.createdAt || 0)
     }));
@@ -9292,7 +9355,13 @@ function storeFinanceRows(storeId, store = null) {
       login: order.login || "",
       grossUsd: Number(order.amountUsd || 0),
       netUsd: storeOrderNetUsd(order, store),
-      commissionUsd: Math.max(0, Number(order.amountUsd || 0) - storeOrderNetUsd(order, store)),
+      commissionUsd: storeOrderCommissionUsd(order, store),
+      grossLtc: storeOrderGrossLtc(order),
+      netLtc: storeOrderNetLtc(order, store),
+      commissionLtc: storeOrderCommissionLtc(order, store),
+      originalGrossUsd: Number(order.amountUsd || 0),
+      originalNetUsd: Math.max(0, Number(order.amountUsd || 0) - Number(order.platformCommissionUsd || 0)),
+      originalCommissionUsd: Number(order.platformCommissionUsd || 0),
       status: order.status || "",
       createdAt: Number(order.paidAt || order.createdAt || 0)
     }));
@@ -9303,8 +9372,12 @@ function shopOrderFinanceRows(store) {
 }
 
 function storeHeldUsd(storeId, store = null) {
-  if (Number.isFinite(Number(store?.storeHeldUsd))) return Number(store.storeHeldUsd);
-  return heldStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetUsd(order, store), 0);
+  return ltcToUsd(storeHeldLtc(storeId, store));
+}
+
+function storeHeldLtc(storeId, store = null) {
+  if (Number.isFinite(Number(store?.storeHeldLtc))) return Number(store.storeHeldLtc);
+  return heldStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetLtc(order, store), 0);
 }
 
 function storeMessageRows(store) {
@@ -9321,10 +9394,15 @@ function storeMessageRows(store) {
 }
 
 function storeTodaySalesUsd(storeId) {
+  return ltcToUsd(storeTodaySalesLtc(storeId));
+}
+
+function storeTodaySalesLtc(storeId) {
+  const store = storeById(storeId);
   const today = new Date().toDateString();
   return paidStoreOrders(storeId)
     .filter((order) => new Date(Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)).toDateString() === today)
-    .reduce((sum, order) => sum + Number(order.amountUsd || 0), 0);
+    .reduce((sum, order) => sum + storeOrderNetLtc(order, store), 0);
 }
 
 function marketStats() {
@@ -10440,7 +10518,13 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
   const positions = products.flatMap((product) => product.positions || []);
   const stockTotal = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
   const clients = storeClientRows(store.id);
+  const salesLtc = storeBalanceLtc(store.id);
   const salesUsd = storeBalanceUsd(store.id);
+  const availableLtc = Number.isFinite(Number(store.storeAvailableBalanceLtc))
+    ? Math.max(0, Number(store.storeAvailableBalanceLtc))
+    : Math.max(0, salesLtc - activeWithdrawalLtc("store", store.id));
+  const availableUsd = ltcToUsd(availableLtc);
+  const todaySalesLtc = storeTodaySalesLtc(store.id);
   const todaySalesUsd = storeTodaySalesUsd(store.id);
   const financeRows = storeFinanceRows(store.id, store);
   const messageRows = storeMessageRows(store);
@@ -10478,13 +10562,13 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             </div>
             <div class="seller-dashboard-balance">
               <span>Баланс магазина</span>
-              <strong>${salesUsd.toFixed(2)} $</strong>
-              <small>${usdToLtc(salesUsd).toFixed(8)} LTC</small>
+              <strong>${availableUsd.toFixed(2)} $</strong>
+              <small>${availableLtc.toFixed(8)} LTC</small>
             </div>
             <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
             <button class="ghost-button" data-shop-panel-logout>Выйти</button>
           </header>
-          ${shopPanelTabContent(activeTab, { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal })}
+          ${shopPanelTabContent(activeTab, { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesLtc, salesUsd, availableLtc, availableUsd, todaySalesLtc, todaySalesUsd, stockTotal })}
         </div>
       </article>
     `;
@@ -10507,8 +10591,8 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           </div>
           <div class="seller-dashboard-balance">
             <span>Баланс магазина</span>
-            <strong>${salesUsd.toFixed(2)} $</strong>
-            <small>${usdToLtc(salesUsd).toFixed(8)} LTC</small>
+            <strong>${availableUsd.toFixed(2)} $</strong>
+            <small>${availableLtc.toFixed(8)} LTC</small>
           </div>
           <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
           ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : `<button class="ghost-button" data-shop-panel-logout>Выйти</button>`}
@@ -10523,8 +10607,8 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
 
         <section class="seller-dashboard-stats">
           ${sellerDashStat("Оплачено сегодня", todayOrders.length, "Продажи за день")}
-          ${sellerDashStat("Доход сегодня", `${todaySalesUsd.toFixed(2)} $`, "Зачислено за день")}
-          ${sellerDashStat("Общий доход", `${salesUsd.toFixed(2)} $`, "Баланс магазина")}
+          ${sellerDashStat("Доход сегодня", `${todaySalesUsd.toFixed(2)} $`, `${todaySalesLtc.toFixed(8)} LTC`)}
+          ${sellerDashStat("Доступно", `${availableUsd.toFixed(2)} $`, `${availableLtc.toFixed(8)} LTC`)}
           ${sellerDashStat("Клиентов", clients.length, "Всего покупателей")}
           ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
           ${sellerDashStat("Диспуты", storeDisputes(store.id, store).length, "Открытые обращения")}
@@ -10533,12 +10617,12 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         <section class="seller-dashboard-grid">
           <div class="seller-dashboard-card seller-wide-card">
             <div class="seller-card-head">
-              <h3>Ежемесячный заработок</h3>
-              <span>Последние 30 дней</span>
+              <h3>Стоимость LTC-баланса</h3>
+              <span>Последние 14 дней · 1 LTC = ${Number(ltcUsdCache || 0).toFixed(2)} $</span>
             </div>
-            <strong class="seller-money">${salesUsd.toFixed(2)} $</strong>
+            <strong class="seller-money">${availableUsd.toFixed(2)} $ · ${availableLtc.toFixed(8)} LTC</strong>
             <div class="seller-bars">
-              ${[35, 52, 44, 70, 48, 82, 66, 90, 62, 76, 58, 84].map((value) => `<i style="height:${value}%"></i>`).join("")}
+              ${sellerBalanceBars(store.storeBalanceChart)}
             </div>
           </div>
           <div class="seller-dashboard-card">
@@ -10591,7 +10675,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
               <h3>Последние транзакции</h3>
             </div>
             ${txRows.length ? txRows.map((tx) => `
-              <div class="seller-source"><span>${esc(tx.title || "Операция")}</span><strong>${Number(tx.netUsd || tx.grossUsd || 0).toFixed(2)} $</strong></div>
+                <div class="seller-source"><span>${esc(tx.title || "Операция")}</span><strong>${Number(tx.netUsd || tx.grossUsd || 0).toFixed(2)} $<br><small>${Number(tx.netLtc || tx.grossLtc || 0).toFixed(8)} LTC</small></strong></div>
             `).join("") : `<p>Транзакций пока нет.</p>`}
           </div>
         </section>
@@ -10691,6 +10775,18 @@ function shopPanelNavV2(activeTab = "dashboard") {
   `).join("");
 }
 
+function sellerBalanceBars(chart = []) {
+  const rows = Array.isArray(chart) ? chart.filter((row) => row && typeof row === "object") : [];
+  if (!rows.length) return `<i style="height:4%" title="Нет операций"></i>`;
+  const max = Math.max(0.00000001, ...rows.map((row) => Number(row.valueLtc || 0)));
+  return rows.map((row) => {
+    const valueLtc = Math.max(0, Number(row.valueLtc || 0));
+    const height = valueLtc > 0 ? Math.max(6, Math.round(valueLtc / max * 100)) : 4;
+    const valueUsd = ltcToUsd(valueLtc);
+    return `<i style="height:${height}%" title="${esc(row.label || "")} · ${valueLtc.toFixed(8)} LTC · ${valueUsd.toFixed(2)} $"></i>`;
+  }).join("");
+}
+
 function shopPanelMobileNavigation(activeTab = "dashboard") {
   const options = SHOP_PANEL_TABS
     .filter(([id]) => canAccessShopTab(id))
@@ -10703,14 +10799,14 @@ function shopPanelMobileNavigation(activeTab = "dashboard") {
 }
 
 function shopPanelTabContent(tab, data) {
-  const { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesUsd, todaySalesUsd, stockTotal } = data;
+  const { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesLtc, salesUsd, availableLtc, availableUsd, todaySalesLtc, todaySalesUsd, stockTotal } = data;
   if (tab === "profile") return shopProfileTab(store);
   if (tab === "cards") return shopCardsTab(store, products);
   if (tab === "products") return shopProductsTab(store, products);
   if (tab === "disputes") return shopDisputesTab(store);
   if (tab === "finances") {
     try {
-      return shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows);
+      return shopFinancesTab(store, { salesLtc, salesUsd, availableLtc, availableUsd, todaySalesLtc, todaySalesUsd }, financeRows);
     } catch (error) {
       console.error("[shop-admin] finances render failed", error);
       return shopFinancesFallbackTab(store);
@@ -10737,7 +10833,7 @@ function shopPanelTabContent(tab, data) {
       <section class="seller-dashboard-grid">
         ${sellerDashStat("Название", store.name || "Shop", store.tag || store.id)}
         ${sellerDashStat("Статус", storeStatusLabel(store), "Доступность витрины")}
-        ${sellerDashStat("Оборот", `${salesUsd.toFixed(2)} $`, `${usdToLtc(salesUsd).toFixed(8)} LTC`)}
+        ${sellerDashStat("Доход", `${salesUsd.toFixed(2)} $`, `${salesLtc.toFixed(8)} LTC`)}
         <div class="seller-dashboard-card seller-wide-card">
           <div class="seller-card-head"><h3>Описание магазина</h3></div>
           <p>${esc(store.description || "Описание пока не заполнено.")}</p>
@@ -11263,48 +11359,53 @@ async function deleteShopDisputeMessage(messageId) {
     showToast(error.message || "Не удалось удалить сообщение");
   }
 }
-function shopFinancesTab(store, salesUsd, todaySalesUsd, financeRows) {
+function shopFinancesTab(store, finance = {}, financeRows) {
   const rows = (Array.isArray(financeRows) ? financeRows : []).filter((row) => row && typeof row === "object");
-  const grossUsd = Number.isFinite(Number(store?.storeGrossUsd)) ? Number(store.storeGrossUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.grossUsd), 0);
-  const commissionUsd = Number.isFinite(Number(store?.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.commissionUsd), 0);
-  const netUsd = Number.isFinite(Number(store?.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : rows.reduce((sum, row) => sum + finiteMoney(row.netUsd), 0);
+  const grossLtc = Number.isFinite(Number(store?.storeGrossLtc)) ? Number(store.storeGrossLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.grossLtc), 0);
+  const commissionLtc = Number.isFinite(Number(store?.storeCommissionLtc)) ? Number(store.storeCommissionLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.commissionLtc), 0);
+  const netLtc = Number.isFinite(Number(store?.storeBalanceLtc)) ? Number(store.storeBalanceLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.netLtc), 0);
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-  const monthlyUsd = rows
+  const monthlyLtc = rows
     .filter((row) => Number(row.createdAt || 0) >= monthStart.getTime() && !["held", "pending", "dispute", "cancelled", "canceled", "rejected"].includes(String(row.status || "").toLowerCase()))
-    .reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
-  const heldUsd = storeHeldUsd(store.id, store);
-  const requestedUsd = activeWithdrawalUsd("store", store.id);
-  const availableUsd = Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Math.max(0, Number(store.storeAvailableBalanceUsd)) : Math.max(0, netUsd - requestedUsd);
+    .reduce((sum, row) => sum + Number(row.netLtc || 0), 0);
+  const heldLtc = storeHeldLtc(store.id, store);
+  const requestedLtc = activeWithdrawalLtc("store", store.id);
+  const availableLtc = Number.isFinite(Number(finance.availableLtc))
+    ? Math.max(0, Number(finance.availableLtc))
+    : Number.isFinite(Number(store.storeAvailableBalanceLtc))
+      ? Math.max(0, Number(store.storeAvailableBalanceLtc))
+      : Math.max(0, netLtc - requestedLtc);
+  const todayLtc = Number(finance.todaySalesLtc || 0);
   const wallet = store.ltcWallet || storeWallets(store).ltc || "";
   const withdrawals = (Array.isArray(db.walletWithdrawals) ? db.walletWithdrawals : [])
     .filter((item) => item && typeof item === "object" && item.scope === "store" && item.storeId === store.id)
     .slice()
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
-  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оборот, баланс и последние операции магазина.</p></div></section>
+  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Фактически полученный LTC и его стоимость по текущему курсу.</p></div></section>
   <section class="seller-dashboard-stats">
-    ${sellerDashStat("Ежемесячный заработок", `${monthlyUsd.toFixed(2)} $`, "за текущий месяц")}
-    ${sellerDashStat("Общий заработок", `${netUsd.toFixed(2)} $`, "не уменьшается после вывода")}
-    ${sellerDashStat("К выводу магазину", `${availableUsd.toFixed(2)} $`, `${usdToLtc(availableUsd).toFixed(8)} LTC`)}
-    ${sellerDashStat("Заморожено в диспутах", `${heldUsd.toFixed(2)} $`, "доступно после закрытия спора")}
-    ${sellerDashStat("Сегодня", `${Number(todaySalesUsd || 0).toFixed(2)} $`, "доход за день")}
-    ${sellerDashStat("Валовый оборот", `${grossUsd.toFixed(2)} $`, "до комиссии")}
-    ${sellerDashStat("Комиссия владельца", `${commissionUsd.toFixed(2)} $`, `${storeCommissionPercent(store)}%`)}
+    ${sellerDashStat("За текущий месяц", `${ltcToUsd(monthlyLtc).toFixed(2)} $`, `${monthlyLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Всего заработано", `${ltcToUsd(netLtc).toFixed(2)} $`, `${netLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("К выводу магазину", `${ltcToUsd(availableLtc).toFixed(2)} $`, `${availableLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Заморожено в диспутах", `${ltcToUsd(heldLtc).toFixed(2)} $`, `${heldLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Сегодня", `${ltcToUsd(todayLtc).toFixed(2)} $`, `${todayLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Валовый оборот", `${ltcToUsd(grossLtc).toFixed(2)} $`, `${grossLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Комиссия владельца", `${ltcToUsd(commissionLtc).toFixed(2)} $`, `${commissionLtc.toFixed(8)} LTC · ${storeCommissionPercent(store)}%`)}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Вывести средства</h3><span>доступно каждый день</span></div>
-    <p class="desc">Доступно к выводу: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong>. Общий и месячный заработок остаются в статистике после вывода.</p>
+    <p class="desc">Доступно: <strong>${availableLtc.toFixed(8)} LTC</strong> · сейчас примерно <strong>${ltcToUsd(availableLtc).toFixed(2)} $</strong>. Курс: 1 LTC = ${Number(ltcUsdCache || 0).toFixed(2)} $.</p>
     <p class="desc">LTC кошелек: <strong>${esc(wallet || "не сохранен")}</strong></p>
     <button class="primary" data-shop-payout-request="${esc(store.id)}">Вывести средства</button>
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${rows.length}</span></div>
-    ${rows.length ? rows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title || "Операция")} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}</span><strong>${finiteMoney(tx.netUsd).toFixed(2)} $</strong></div>`).join("") : `<p>Операций пока нет.</p>`}
+    ${rows.length ? rows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title || "Операция")} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}${tx.originalNetUsd ? `<br><small>Цена продажи: ${finiteMoney(tx.originalNetUsd).toFixed(2)} $</small>` : ""}</span><strong>${finiteMoney(tx.netLtc).toFixed(8)} LTC<br><small>сейчас ${ltcToUsd(tx.netLtc).toFixed(2)} $</small></strong></div>`).join("") : `<p>Операций пока нет.</p>`}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>
-    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small>${item.payoutFailureMessage ? `<br><small>${esc(item.payoutFailureMessage)}</small>` : ""}</span><strong>${finiteMoney(item.amountUsd).toFixed(2)} $<br><small>${finiteMoney(item.amountLtc).toFixed(6)} LTC</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
+    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small>${item.payoutFailureMessage ? `<br><small>${esc(item.payoutFailureMessage)}</small>` : ""}</span><strong>${finiteMoney(item.amountLtc).toFixed(8)} LTC<br><small>${finiteMoney(item.amountUsd).toFixed(2)} $ на момент заявки</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
   </section>`;
 }
 
@@ -11319,12 +11420,12 @@ function shopFinanceDate(value) {
 }
 
 function shopFinancesFallbackTab(store = {}) {
-  const availableUsd = Math.max(0, finiteMoney(store.storeAvailableBalanceUsd ?? store.storeBalanceUsd));
+  const availableLtc = Math.max(0, finiteMoney(store.storeAvailableBalanceLtc ?? store.storeBalanceLtc));
   const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
   return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Баланс и вывод средств магазина.</p></div></section>
     <section class="seller-dashboard-card seller-wide-card">
-      <div class="seller-card-head"><h3>Доступно к выводу</h3><span>${availableUsd.toFixed(2)} $</span></div>
-      <p class="desc">${usdToLtc(availableUsd).toFixed(8)} LTC</p>
+      <div class="seller-card-head"><h3>Доступно к выводу</h3><span>${availableLtc.toFixed(8)} LTC</span></div>
+      <p class="desc">Сейчас примерно ${ltcToUsd(availableLtc).toFixed(2)} $</p>
       <p class="desc">LTC кошелёк: <strong>${esc(wallet || "не сохранён")}</strong></p>
       <button class="primary" data-shop-payout-request="${esc(store.id || "")}">Вывести средства</button>
     </section>`;
@@ -12029,11 +12130,11 @@ function bindShopPanelActions(store, activeTab) {
   document.querySelector("[data-shop-payout-request]")?.addEventListener("click", openShopPayoutModal);
 }
 
-function shopPayoutAvailableUsd(store) {
-  if (Number.isFinite(Number(store?.storeAvailableBalanceUsd))) return Math.max(0, Number(store.storeAvailableBalanceUsd));
+function shopPayoutAvailableLtc(store) {
+  if (Number.isFinite(Number(store?.storeAvailableBalanceLtc))) return Math.max(0, Number(store.storeAvailableBalanceLtc));
   const financeRows = shopOrderFinanceRows(store);
-  const netUsd = financeRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0);
-  return Math.max(0, netUsd - activeWithdrawalUsd("store", store.id));
+  const netLtc = financeRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0);
+  return Math.max(0, netLtc - activeWithdrawalLtc("store", store.id));
 }
 
 function openShopPayoutModal(event) {
@@ -12041,22 +12142,22 @@ function openShopPayoutModal(event) {
   if (!store || !sellerAdminApiSessionToken()) return showToast("Войдите в Shop Admin заново");
   const wallet = String(store.ltcWallet || storeWallets(store).ltc || "").trim();
   if (!wallet) return showToast("Вы не сохранили ваш LTC кошелек в настройках магазина");
-  const availableUsd = shopPayoutAvailableUsd(store);
-  if (availableUsd <= 0) return showToast("Нет доступного баланса для вывода");
+  const availableLtc = shopPayoutAvailableLtc(store);
+  if (availableLtc <= 0) return showToast("Нет доступного баланса для вывода");
   showModal(`
     <h2>Вывести средства</h2>
-    <p class="desc">Доступно: <strong>${availableUsd.toFixed(2)} $</strong> · <strong>${usdToLtc(availableUsd).toFixed(8)} LTC</strong></p>
+    <p class="desc">Доступно: <strong>${availableLtc.toFixed(8)} LTC</strong> · сейчас примерно <strong>${ltcToUsd(availableLtc).toFixed(2)} $</strong></p>
     <form class="form" data-shop-payout-form>
-      <label class="field">Сумма USD<input name="amountUsd" type="number" min="0.01" step="0.01" max="${esc(availableUsd)}" value="${esc(availableUsd.toFixed(2))}" required></label>
-      <button class="ghost-button" type="button" data-shop-payout-all="${esc(availableUsd.toFixed(2))}">Всё</button>
+      <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.00000001" step="0.00000001" max="${esc(availableLtc.toFixed(8))}" value="${esc(availableLtc.toFixed(8))}" required></label>
+      <button class="ghost-button" type="button" data-shop-payout-all="${esc(availableLtc.toFixed(8))}">Всё</button>
       <label class="field">LTC кошелек для вывода<input name="address" value="${esc(wallet)}" placeholder="ltc1..." required></label>
       <button class="primary">Создать заявку</button>
     </form>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-shop-payout-all]")?.addEventListener("click", (buttonEvent) => {
-    const input = document.querySelector("[data-shop-payout-form] input[name='amountUsd']");
-    if (input) input.value = buttonEvent.currentTarget.dataset.shopPayoutAll || availableUsd.toFixed(2);
+    const input = document.querySelector("[data-shop-payout-form] input[name='amountLtc']");
+    if (input) input.value = buttonEvent.currentTarget.dataset.shopPayoutAll || availableLtc.toFixed(8);
   });
   document.querySelector("[data-shop-payout-form]")?.addEventListener("submit", requestShopPayout);
 }
@@ -12067,9 +12168,10 @@ async function requestShopPayout(event) {
   const token = sellerAdminApiSessionToken();
   if (!store || !token) return showToast("Войдите в Shop Admin заново");
   const data = new FormData(event.currentTarget);
-  const amountUsd = Number(data.get("amountUsd") || 0);
+  const amountLtc = Number(data.get("amountLtc") || 0);
   const address = String(data.get("address") || "").trim();
-  if (amountUsd <= 0) return showToast("Укажите сумму вывода");
+  if (amountLtc <= 0) return showToast("Укажите сумму вывода в LTC");
+  if (amountLtc > shopPayoutAvailableLtc(store) + 0.00000001) return showToast("Сумма больше доступного LTC-баланса");
   if (!address) return showToast("Укажите LTC кошелек");
   const submit = event.currentTarget.querySelector("button.primary");
   setButtonLoading(submit, true, "Создаём заявку");
@@ -12078,7 +12180,7 @@ async function requestShopPayout(event) {
       method: "POST",
       timeoutMs: 30000,
       headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ storeId: store.id, amountUsd, address })
+      body: JSON.stringify({ storeId: store.id, amountLtc, address })
     });
     applyRemoteState(payload);
     document.querySelector("[data-modal]")?.classList.remove("open");
@@ -12725,6 +12827,19 @@ async function initApp() {
     console.error("[init] remote bootstrap failed", error);
   }
   safeRenderCurrent();
+  clearInterval(liveLtcBalanceTimer);
+  liveLtcBalanceTimer = setInterval(async () => {
+    if (!isShopPanelHash() || !sellerAdminApiSessionToken() || !shopPanelCanRefresh()) return;
+    try {
+      await fetchLitecoinUsdRate();
+      const updated = await refreshShopPanelState(true);
+      if (updated && shopPanelCanRefresh() && ["dashboard", "finances", "shop"].includes(activeShopPanelTab)) {
+        renderShopPanel(activeShopPanelTab);
+      }
+    } catch (error) {
+      console.error("[shop-admin] LTC balance refresh failed", error);
+    }
+  }, 60000);
   setTimeout(showPendingSiteBroadcast, 350);
 }
 

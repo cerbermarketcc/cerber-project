@@ -188,6 +188,14 @@ function fmtMoney(value) {
   return `${Number(value || 0).toFixed(2)} $`;
 }
 
+function fmtLtc(value) {
+  return `${Number(value || 0).toFixed(8)} LTC`;
+}
+
+function cryptoValue(usd, ltc) {
+  return `${fmtMoney(usd)}<br><small>${fmtLtc(ltc)}</small>`;
+}
+
 function fmtDate(value) {
   const date = Number(value) ? new Date(Number(value)) : new Date(value || 0);
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("ru-RU");
@@ -732,11 +740,11 @@ function renderDashboard() {
     <section class="grid">
       ${statCard("Продажи", s.totalSales, "закрытые сделки")}
       ${statCard("Оборот", fmtMoney(s.totalTurnover), "всё время")}
-      ${statCard("Комиссия", fmtMoney(s.totalCommission), "доход площадки")}
-      ${statCard("Рефералам", fmtMoney(s.totalReferralRewards || 0), "3% начисления")}
-      ${statCard("Чистая комиссия", fmtMoney(s.ownerNetAfterReferrals || s.totalCommission || 0), "после рефералов")}
-      ${statCard("К выводу владельцу", fmtMoney(s.ownerWithdrawableUsd || 0), "комиссии минус рефералы")}
-      ${statCard("К выводу магазинам", fmtMoney(s.storesWithdrawableUsd || 0), "чистый доход продавцов")}
+      ${statCard("Комиссия", cryptoValue(s.totalCommission, s.totalCommissionLtc), "доход площадки")}
+      ${statCard("Рефералам", cryptoValue(s.totalReferralRewards || 0, s.totalReferralRewardsLtc), "3% начисления")}
+      ${statCard("Чистая комиссия", cryptoValue(s.ownerNetAfterReferrals || 0, s.ownerNetAfterReferralsLtc), "после рефералов")}
+      ${statCard("К выводу владельцу", cryptoValue(s.ownerWithdrawableUsd || 0, s.ownerWithdrawableLtc), "комиссии минус рефералы")}
+      ${statCard("К выводу магазинам", cryptoValue(s.storesWithdrawableUsd || 0, s.storesWithdrawableLtc), "чистый доход продавцов")}
       ${statCard("Новые пользователи", s.newUsers, "за сутки")}
       ${statCard("Всего пользователей", s.totalUsers, `${s.usersWithPurchase} с покупкой`)}
       ${statCard("Диспуты", s.disputes, "открытые")}
@@ -745,11 +753,11 @@ function renderDashboard() {
     </section>
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
-      <p class="muted">Доступно к выводу: <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Комиссия начисляется автоматически с покупок клиентов, вывод отправляется на LTC счет площадки.</p>
+      <p class="muted">Доступно: <strong>${fmtLtc(s.ownerWithdrawableLtc)}</strong> · сейчас примерно <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Курс: 1 LTC = ${fmtMoney(s.ltcUsdRate || 0)}.</p>
       <form data-owner-withdraw-form>
         <div class="row">
-          <label class="field">Сумма USD<input name="amountUsd" type="number" min="0.01" step="0.01" max="${esc(s.ownerWithdrawableUsd || 0)}" value="${esc(Number(s.ownerWithdrawableUsd || 0).toFixed(2))}"></label>
-          <button class="ghost" type="button" data-owner-withdraw-all="${esc(Number(s.ownerWithdrawableUsd || 0).toFixed(2))}">Всё</button>
+          <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.00000001" step="0.00000001" max="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}" value="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}"></label>
+          <button class="ghost" type="button" data-owner-withdraw-all="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}">Всё</button>
         </div>
         <label class="field">LTC кошелек для вывода<input name="address" value="${esc(data.settings?.paymentSettings?.platformLtcWallet || "")}" placeholder="ltc1..." required></label>
         <button class="primary">Вывести средства</button>
@@ -759,6 +767,7 @@ function renderDashboard() {
       ${chartBox("Продажи", "sales")}
       ${chartBox("Регистрации", "registrations")}
       ${chartBox("Доход", "revenue")}
+      ${chartBox("Стоимость LTC-баланса", "balance")}
       ${chartBox("Диспуты", "disputes")}
     </section>
     <article class="table-card">${periodTable()}</article>
@@ -766,12 +775,17 @@ function renderDashboard() {
 }
 
 function chartBox(title, id) {
-  return `<article class="card chart-box"><h3>${title}</h3><canvas data-chart="${id}" width="520" height="180"></canvas></article>`;
+  const rows = data?.charts?.[id] || [];
+  const latest = rows[rows.length - 1] || {};
+  const balanceValue = id === "balance"
+    ? `<p class="muted">Сейчас: <strong>${fmtMoney(latest.value || 0)}</strong> · ${fmtLtc(latest.valueLtc || 0)}</p>`
+    : "";
+  return `<article class="card chart-box"><h3>${title}</h3>${balanceValue}<canvas data-chart="${id}" width="520" height="180"></canvas></article>`;
 }
 
 function periodTable() {
   return `<table><thead><tr><th>Период</th><th>Продажи</th><th>Оборот</th><th>Комиссия</th><th>Новые</th><th>Диспуты</th><th>Активные</th></tr></thead><tbody>
-    ${data.periods.map((p) => `<tr><td>${p.label}</td><td>${p.sales}</td><td>${fmtMoney(p.turnover)}</td><td>${fmtMoney(p.commission)}</td><td>${p.newUsers}</td><td>${p.disputes}</td><td>${p.activeDeals}</td></tr>`).join("")}
+    ${data.periods.map((p) => `<tr><td>${p.label}</td><td>${p.sales}</td><td>${fmtMoney(p.turnover)}</td><td>${fmtMoney(p.commission)}<br><span class="muted">${fmtLtc(p.commissionLtc)}</span></td><td>${p.newUsers}</td><td>${p.disputes}</td><td>${p.activeDeals}</td></tr>`).join("")}
   </tbody></table>`;
 }
 
@@ -819,7 +833,7 @@ function renderStores() {
             placements.includes("TOP 10") ? `TOP 10 #${adminPlacementPosition(s, "TOP 10")}` : "",
             placements.includes("NEW") ? `Новые #${adminPlacementPosition(s, "NEW")}` : ""
           ].filter(Boolean).join(" · ");
-          return `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}<br>${esc(positions)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}</td><td>${fmtMoney(s.commission)}</td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`;
+          return `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}<br>${esc(positions)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}<br><span class="muted">${fmtLtc(s.revenueLtc)}</span></td><td>${fmtMoney(s.commission)}<br><span class="muted">${fmtLtc(s.commissionLtc)}</span></td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`;
         }).join("")}
       </tbody></table></article>
       <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления статусом, комиссией, позицией, автозакрытием и монетами.</p></article>
@@ -842,7 +856,7 @@ function storeDetail(id) {
   return `
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(panelPasswordStatus)}</strong></p>
-    <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)}</strong> · К выводу магазину: <strong>${fmtMoney(storeRevenue)}</strong> · Комиссия владельца: <strong>${fmtMoney(ownerCommission)}</strong></p>
+    <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)} · ${fmtLtc(store.grossRevenueLtc)}</strong><br>К выводу магазину: <strong>${fmtMoney(store.availableUsd ?? storeRevenue)} · ${fmtLtc(store.availableLtc ?? store.revenueLtc)}</strong><br>Комиссия владельца: <strong>${fmtMoney(ownerCommission)} · ${fmtLtc(store.commissionLtc)}</strong></p>
     <form data-store-form="${esc(store.id)}">
       <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
       <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
@@ -1388,8 +1402,8 @@ function renderFinance() {
       <button class="ghost danger" type="button" data-withdrawal-status="${esc(w.id)}" data-status="rejected">Reject</button>
     </div>`;
   };
-  return `<section class="grid">${bucketCard("Successful deposits", buckets.successful)}${bucketCard("Pending", buckets.pending)}${bucketCard("Cancelled", buckets.cancelled)}${bucketCard("Failed", buckets.failed)}${statCard("Referral rewards", fmtMoney(referralTotals.rewardsUsd || 0), `${Number(referralTotals.count || 0)} refs`)}${statCard("From purchases", fmtMoney(referralTotals.productRewardsUsd || 0), "product orders")}</section>
-  <article class="table-card"><h3>Referral rewards</h3><table><thead><tr><th>ID</th><th>Inviter</th><th>Referral</th><th>Base</th><th>Reward</th><th>Source</th><th>Date</th></tr></thead><tbody>${referralPayments.slice(0, 160).map((p) => `<tr><td>${esc(p.id)}</td><td>${esc(p.referrerLogin || "")}</td><td>${esc(p.referralLogin || "")}</td><td>${fmtMoney(p.amount || p.amountUsd || 0)}</td><td>${fmtMoney(p.reward || 0)}</td><td>${esc(p.sourceId || "")}</td><td>${fmtDate(p.createdAt || p.date)}</td></tr>`).join("")}</tbody></table></article>
+  return `<section class="grid">${bucketCard("Successful deposits", buckets.successful)}${bucketCard("Pending", buckets.pending)}${bucketCard("Cancelled", buckets.cancelled)}${bucketCard("Failed", buckets.failed)}${statCard("Referral rewards", cryptoValue(referralTotals.rewardsUsd || 0, referralTotals.rewardsLtc), `${Number(referralTotals.count || 0)} refs`)}${statCard("From purchases", cryptoValue(referralTotals.productRewardsUsd || 0, referralTotals.productRewardsLtc), "product orders")}</section>
+  <article class="table-card"><h3>Referral rewards</h3><table><thead><tr><th>ID</th><th>Inviter</th><th>Referral</th><th>Base</th><th>Reward</th><th>Source</th><th>Date</th></tr></thead><tbody>${referralPayments.slice(0, 160).map((p) => `<tr><td>${esc(p.id)}</td><td>${esc(p.referrerLogin || "")}</td><td>${esc(p.referralLogin || "")}</td><td>${fmtMoney(p.amount || p.amountUsd || 0)}</td><td>${fmtMoney(p.rewardCurrentUsd || p.reward || 0)}<br><span class="muted">${fmtLtc(p.rewardLtc)}</span></td><td>${esc(p.sourceId || "")}</td><td>${fmtDate(p.createdAt || p.date)}</td></tr>`).join("")}</tbody></table></article>
   <article class="table-card"><h3>Deposits</h3><table><thead><tr><th>ID</th><th>Login</th><th>Amount</th><th>Coin</th><th>Status</th><th>Address</th><th>Date</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
   <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(6)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span>${w.payoutFailureMessage || w.autoPayoutError ? `<br><span class="muted">${esc(w.payoutFailureMessage || w.autoPayoutError)}</span>` : ""}</td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
 }
@@ -2205,21 +2219,21 @@ function bindActions() {
     renderShell();
   });
   root.querySelector("[data-owner-withdraw-all]")?.addEventListener("click", (event) => {
-    const input = root.querySelector("[data-owner-withdraw-form] input[name='amountUsd']");
-    if (input) input.value = event.currentTarget.dataset.ownerWithdrawAll || "0.00";
+    const input = root.querySelector("[data-owner-withdraw-form] input[name='amountLtc']");
+    if (input) input.value = event.currentTarget.dataset.ownerWithdrawAll || "0.00000000";
   });
   root.querySelector("[data-owner-withdraw-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const availableUsd = Number(data?.stats?.ownerWithdrawableUsd || 0);
-    if (availableUsd <= 0) return toast("Нет комиссии владельца для вывода", true);
+    const availableLtc = Number(data?.stats?.ownerWithdrawableLtc || 0);
+    if (availableLtc <= 0) return toast("Нет комиссии владельца для вывода", true);
     const form = event.currentTarget;
     const fd = new FormData(form);
-    const amountUsd = Number(fd.get("amountUsd") || 0);
-    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return toast("Укажите сумму вывода", true);
-    if (amountUsd > availableUsd) return toast("Сумма больше доступного баланса", true);
+    const amountLtc = Number(fd.get("amountLtc") || 0);
+    if (!Number.isFinite(amountLtc) || amountLtc <= 0) return toast("Укажите сумму вывода в LTC", true);
+    if (amountLtc > availableLtc + 0.00000001) return toast("Сумма больше доступного LTC-баланса", true);
     const address = String(fd.get("address") || "").trim();
     if (!address) return toast("Укажите LTC кошелек", true);
-    if (!confirm(`Создать заявку на вывод ${amountUsd.toFixed(2)} $ на ${address}?`)) return;
+    if (!confirm(`Создать заявку на вывод ${amountLtc.toFixed(8)} LTC на ${address}?`)) return;
     const button = form.querySelector("button.primary");
     const oldText = button.textContent;
     button.disabled = true;
@@ -2227,7 +2241,7 @@ function bindActions() {
     try {
       data = await api("/api/admin/withdrawals/owner", {
         method: "POST",
-        body: JSON.stringify({ amountUsd, address })
+        body: JSON.stringify({ amountLtc, address })
       });
       toast("Заявка владельца на вывод создана");
       renderShell();

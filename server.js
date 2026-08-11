@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "owner-user-wallet-modal-2026-08-10-v146";
+const cerberBuildVersion = "ltc-ledger-balances-2026-08-11-v148";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -2225,7 +2225,7 @@ function resolvePendingReferralsForLogin(state = {}, referrerLogin = "") {
   return resolved;
 }
 
-function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sourceId = "") {
+function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sourceId = "", amountLtc = 0) {
   const amount = Number(amountUsd || 0);
   if (!referralLogin || amount <= 0) return null;
   state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
@@ -2236,6 +2236,8 @@ function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sour
   const sourceKey = String(sourceId || `manual-${Date.now()}`);
   if (state.referralPayments.some((item) => String(item.sourceId || "") === sourceKey)) return null;
   const reward = Math.round(amount * 0.03 * 100) / 100;
+  const sourceAmountLtc = roundLtc(amountLtc);
+  const rewardLtc = sourceAmountLtc > 0 ? roundLtc(sourceAmountLtc * 0.03) : roundLtc(usdToLitecoin(reward));
   if (reward <= 0) return null;
   referral.deposits = Number(referral.deposits || 0) + amount;
   referral.earned = Number(referral.earned || 0) + reward;
@@ -2250,6 +2252,8 @@ function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sour
     referralLogin,
     amount,
     reward,
+    amountLtc: sourceAmountLtc,
+    rewardLtc,
     date: new Date().toLocaleString("ru-RU"),
     createdAt: Date.now(),
     percent: 3
@@ -2262,7 +2266,8 @@ async function settleProductReferralReward(state = {}, order = {}) {
   if (!order || order.type !== "product") return null;
   const sourceId = `product-order:${order.id}`;
   const amountUsd = adminOrderAmount(order);
-  const payment = applyReferralReward(state, order.login, amountUsd, sourceId);
+  const breakdown = orderLtcBreakdown(order, state, null);
+  const payment = applyReferralReward(state, order.login, amountUsd, sourceId, breakdown.grossLtc);
   if (!payment) return null;
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const txId = `tx-referral-reward-${order.id}`;
@@ -2281,7 +2286,7 @@ async function settleProductReferralReward(state = {}, order = {}) {
       grossUsd: amountUsd,
       percent: payment.percent || 3,
       sourceId,
-      amountLtc: usdToLitecoin(payment.reward || 0),
+      amountLtc: payment.rewardLtc || usdToLitecoin(payment.reward || 0),
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt: Date.now(),
@@ -2702,10 +2707,17 @@ async function stateForStoreAdmin(storeId, token = {}) {
     mergedOrders.filter((order) => String(order.storeId || "") === id),
     storeMessages
   );
+  await loadLitecoinUsdRate().catch(() => ({ rate: cachedLitecoinUsdRate() }));
   const finance = storeLedgerFinance(state, store, storeOrders);
-  const requestedUsd = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
-    .filter((item) => item.scope === "store" && item.storeId === id && withdrawalConsumesBalance(item))
-    .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
+  const requestedLtc = activeWithdrawalLtc(state, "store", id);
+  const availableLtc = roundLtc(Math.max(0, finance.netLtc - requestedLtc));
+  const storeWithdrawals = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
+    .filter((item) => item.scope === "store" && item.storeId === id);
+  const balanceChart = adminLtcBalanceChart(
+    finance.rows.filter((row) => !row.held).map((row) => ({ createdAt: row.createdAt, amountLtc: row.netLtc })),
+    storeWithdrawals.filter(withdrawalConsumesBalance).map((item) => ({ createdAt: item.createdAt, amountLtc: withdrawalAmountLtc(item) })),
+    finance.rate
+  );
   const isStaff = token?.role === "staff";
   const payload = {
     user: null,
@@ -2730,7 +2742,17 @@ async function stateForStoreAdmin(storeId, token = {}) {
     payload.state.stores[0].storeCommissionUsd = finance.commissionUsd;
     payload.state.stores[0].storeBalanceUsd = finance.netUsd;
     payload.state.stores[0].storeHeldUsd = finance.heldUsd;
-    payload.state.stores[0].storeAvailableBalanceUsd = Math.max(0, finance.netUsd - requestedUsd);
+    payload.state.stores[0].storeGrossLtc = finance.grossLtc;
+    payload.state.stores[0].storeCommissionLtc = finance.commissionLtc;
+    payload.state.stores[0].storeBalanceLtc = finance.netLtc;
+    payload.state.stores[0].storeHeldLtc = finance.heldLtc;
+    payload.state.stores[0].storeAvailableBalanceLtc = availableLtc;
+    payload.state.stores[0].storeAvailableBalanceUsd = availableLtc * finance.rate;
+    payload.state.stores[0].storeLtcUsdRate = finance.rate;
+    payload.state.stores[0].storeBalanceChart = balanceChart;
+    payload.state.stores[0].storeOriginalGrossUsd = finance.originalGrossUsd;
+    payload.state.stores[0].storeOriginalCommissionUsd = finance.originalCommissionUsd;
+    payload.state.stores[0].storeOriginalBalanceUsd = finance.originalNetUsd;
   }
   payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
     ? []
@@ -3805,15 +3827,14 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
 
+    await loadLitecoinUsdRate().catch(() => ({ rate: cachedLitecoinUsdRate() }));
     const finance = storeLedgerFinance(state, store, orders.filter((order) => String(order.storeId || "") === storeId));
-    const earnedUsd = finance.netUsd;
-    const requestedUsd = state.walletWithdrawals
-      .filter((item) => item.scope === "store" && item.storeId === storeId && withdrawalConsumesBalance(item))
-      .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
-    const availableUsd = Math.max(0, earnedUsd - requestedUsd);
-    if (availableUsd <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
-    const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
-    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "store", identity: storeId, amountUsd, address });
+    const requestedLtc = activeWithdrawalLtc(state, "store", storeId);
+    const availableLtc = roundLtc(Math.max(0, finance.netLtc - requestedLtc));
+    if (availableLtc <= 0) return res.status(400).json({ error: "Нет доступного дохода для вывода" });
+    const amountLtc = requestedWithdrawalLtc(req.body, availableLtc);
+    const amountUsd = Number((amountLtc * finance.rate).toFixed(2));
+    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "store", identity: storeId, amountLtc, address });
     const existingWithdrawal = findReusableWithdrawal(state, {
       scope: "store",
       storeId,
@@ -3821,8 +3842,8 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       signature: withdrawalRequest.signature
     });
     if (existingWithdrawal) return res.json({ withdrawal: storeAdminWithdrawalForState(existingWithdrawal), reused: true, ...(await stateForStoreAdmin(storeId, sellerToken)) });
-    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
-    if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступного баланса" });
+    if (!Number.isFinite(amountLtc) || amountLtc <= 0) return res.status(400).json({ error: "Укажите сумму вывода в LTC" });
+    if (amountLtc > availableLtc + 0.00000001) return res.status(400).json({ error: "Сумма вывода больше доступного LTC-баланса" });
 
     const request = {
       id: `store-withdraw-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
@@ -3832,7 +3853,8 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       storeName: store.name || store.id,
       login: store.ownerLogin || store.id,
       amountUsd,
-      amountLtc: normalizeNowpaymentsPayoutAmount(usdToLitecoin(amountUsd)),
+      amountLtc: normalizeNowpaymentsPayoutAmount(amountLtc),
+      ltcUsdRateAtRequest: finance.rate,
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -3862,7 +3884,7 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     });
     await saveSettingsState(state);
     scheduleNowpaymentsWithdrawalPayout(request.id);
-    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, address });
+    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, amountLtc: request.amountLtc, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
     res.json({ withdrawal: storeAdminWithdrawalForState(request), ...(await stateForStoreAdmin(storeId, sellerToken)) });
   } catch (error) {
@@ -4404,6 +4426,7 @@ app.post("/api/admin/login", async (req, res, next) => {
 app.get("/api/admin/overview", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
+    await loadLitecoinUsdRate().catch(() => ({ rate: cachedLitecoinUsdRate() }));
     const data = await adminLoadMarketplace({ compact: req.query.compact === "1" });
     res.json({ admin, ...adminBuildOverview(data) });
   } catch (error) {
@@ -5612,6 +5635,10 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const sellerAmountUsd = Number.isFinite(Number(req.body.sellerAmountUsd))
       ? Math.max(0, Number(req.body.sellerAmountUsd))
       : Math.max(0, amountUsd - commissionUsd);
+    const grossLtc = roundLtc(req.body.grossLtc || req.body.amountLtc || usdToLitecoin(amountUsd));
+    const commissionRatio = amountUsd > 0 ? commissionUsd / amountUsd : commissionPercent / 100;
+    const commissionLtc = roundLtc(grossLtc * Math.min(1, Math.max(0, commissionRatio)));
+    const sellerAmountLtc = roundLtc(Math.max(0, grossLtc - commissionLtc));
     const orderId = String(req.body.orderId || `order-repair-${targetLogin || "user"}-${targetStoreId}-${now}`).trim();
     const productTitle = String(req.body.productTitle || req.body.product || "Восстановленный заказ").trim();
     const createdAt = Number(req.body.createdAt || req.body.paidAt || now);
@@ -5637,6 +5664,11 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       commissionUsd,
       platformCommissionUsd: commissionUsd,
       sellerAmountUsd,
+      grossLtc,
+      amountLtc: grossLtc,
+      commissionLtc,
+      platformCommissionLtc: commissionLtc,
+      sellerAmountLtc,
       status: "completed",
       paymentStatus: "paid",
       disputeOpen: false,
@@ -5666,6 +5698,8 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       order,
       storeBalanceUsd: sellerAmountUsd,
       ownerBalanceUsd: commissionUsd,
+      storeBalanceLtc: sellerAmountLtc,
+      ownerBalanceLtc: commissionLtc,
       ledgerMessage: message
     });
     }
@@ -5678,7 +5712,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     );
     const store = storeRow?.data || await loadStoreWithFallback(targetStoreId);
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
-    const state = { orders: [], ownerSettings: {}, walletTransactions: [], storeBalancesUsd: {}, ownerBalanceUsd: 0 };
+    const state = { orders: [], ownerSettings: {}, walletTransactions: [], storeBalancesUsd: {}, storeBalancesLtc: {}, ownerBalanceUsd: 0, ownerBalanceLtc: 0 };
     state.orders = Array.isArray(store.productOrders) ? [...store.productOrders] : [];
     const stores = [store];
     const { data: messageRows } = await withTimeout(
@@ -5723,6 +5757,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     order.repairedAt = Date.now();
 
     applyProductOrderCommission(order, state, store);
+    applyProductOrderLtcSettlement(order, state, store);
     order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
     store.productOrders = Array.isArray(store.productOrders) ? store.productOrders : [];
     const storeOrderIndex = store.productOrders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
@@ -5741,6 +5776,8 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       order,
       storeBalanceUsd: Number(order.sellerAmountUsd || 0),
       ownerBalanceUsd: state.ownerBalanceUsd || 0,
+      storeBalanceLtc: Number(order.sellerAmountLtc || 0),
+      ownerBalanceLtc: Number(order.platformCommissionLtc || 0),
       transactions: (state.walletTransactions || []).filter((tx) => tx.orderId === order.id)
     });
   } catch (error) {
@@ -5813,19 +5850,25 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     assertClientRateLimit(req, "owner-withdrawal", { limit: 5, windowMs: 60 * 1000, identity: admin.login });
     const data = await adminLoadMarketplace();
     const state = data.state;
+    await loadLitecoinUsdRate().catch(() => ({ rate: cachedLitecoinUsdRate() }));
+    const currentRate = cachedLitecoinUsdRate();
     const storeById = new Map(data.stores.map((store) => [store.id, store]));
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const completedOrders = orders.filter((order) => (order.type === "product" || order.storeId) && adminIsPaidProductOrder(order));
-    const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
-    const availableUsd = Math.max(0, totalCommissionUsd - activeWithdrawalUsd(state, "owner"));
-    if (availableUsd <= 0) return res.status(400).json({ error: "Нет комиссии владельца для вывода" });
-    const amountUsd = requestedWithdrawalUsd(req.body, availableUsd);
-    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму вывода" });
-    if (amountUsd > availableUsd + 0.000001) return res.status(400).json({ error: "Сумма вывода больше доступной комиссии" });
+    const totalCommissionLtc = roundLtc(completedOrders.reduce((sum, order) => sum + orderLtcBreakdown(order, state, storeById.get(order.storeId)).commissionLtc, 0));
+    const referralPayments = Array.isArray(state.referralPayments) ? state.referralPayments : [];
+    const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const referralRewardsLtc = roundLtc(referralPayments.reduce((sum, payment) => sum + adminReferralRewardLtc(payment, state, completedOrders, walletDeposits), 0));
+    const availableLtc = roundLtc(Math.max(0, totalCommissionLtc - referralRewardsLtc - activeWithdrawalLtc(state, "owner")));
+    if (availableLtc <= 0) return res.status(400).json({ error: "Нет комиссии владельца для вывода" });
+    const amountLtc = requestedWithdrawalLtc(req.body, availableLtc);
+    const amountUsd = Number((amountLtc * currentRate).toFixed(2));
+    if (!Number.isFinite(amountLtc) || amountLtc <= 0) return res.status(400).json({ error: "Укажите сумму вывода в LTC" });
+    if (amountLtc > availableLtc + 0.00000001) return res.status(400).json({ error: "Сумма вывода больше доступной LTC-комиссии" });
     const address = String(req.body.address || state.paymentSettings?.platformLtcWallet || mainLtcWallet || "").trim();
     if (!isValidLitecoinAddress(address)) return res.status(400).json({ error: "Укажите корректный LTC счет для вывода" });
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
-    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "owner", identity: admin.login, amountUsd, address });
+    const withdrawalRequest = withdrawalRequestFingerprint(req, { scope: "owner", identity: admin.login, amountLtc, address });
     const existingWithdrawal = findReusableWithdrawal(state, {
       scope: "owner",
       login: admin.login,
@@ -5839,7 +5882,8 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       scope: "owner",
       login: admin.login,
       amountUsd,
-      amountLtc: normalizeNowpaymentsPayoutAmount(usdToLitecoin(amountUsd)),
+      amountLtc: normalizeNowpaymentsPayoutAmount(amountLtc),
+      ltcUsdRateAtRequest: currentRate,
       coinId: "ltc",
       payCurrency: "ltc",
       address,
@@ -5860,7 +5904,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     });
     await saveSettingsState(state);
     scheduleNowpaymentsWithdrawalPayout(request.id);
-    await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd, address });
+    await appendAdminLog("owner_withdrawal_requested", admin.login, { amountUsd, amountLtc: request.amountLtc, address });
     notifyRealtime("wallet_withdrawal_created", { id: request.id, scope: "owner" });
     res.json(adminBuildOverview(data));
   } catch (error) {
@@ -7595,6 +7639,13 @@ async function normalizeServerOrders(state = {}) {
           order.platformCommissionPercent = autoCompletedOrder.platformCommissionPercent;
           order.platformCommissionUsd = autoCompletedOrder.platformCommissionUsd;
           order.sellerAmountUsd = autoCompletedOrder.sellerAmountUsd;
+          order.ltcSettlementVersion = autoCompletedOrder.ltcSettlementVersion;
+          order.settlementCurrency = autoCompletedOrder.settlementCurrency;
+          order.settlementGrossLtc = autoCompletedOrder.settlementGrossLtc;
+          order.grossAmountLtc = autoCompletedOrder.grossAmountLtc;
+          order.platformCommissionLtc = autoCompletedOrder.platformCommissionLtc;
+          order.sellerAmountLtc = autoCompletedOrder.sellerAmountLtc;
+          order.ltcUsdRateAtPayment = autoCompletedOrder.ltcUsdRateAtPayment;
         }
         nextOrders.push({
           ...order,
@@ -8005,6 +8056,99 @@ function adminOrderAmount(order) {
   return adminMoney(order.amountUsd || order.priceUsd || order.totalUsd || order.total || order.price);
 }
 
+function roundLtc(value = 0) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(8)) : 0;
+}
+
+function orderProviderValue(order = {}, ...keys) {
+  const payload = order.paymentProviderPayload && typeof order.paymentProviderPayload === "object"
+    ? order.paymentProviderPayload
+    : {};
+  for (const key of keys) {
+    const value = order[key] ?? payload[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function orderActualGrossLtc(order = {}) {
+  const settled = Number(order.settlementGrossLtc ?? order.grossAmountLtc);
+  if (Number.isFinite(settled) && settled > 0) return roundLtc(settled);
+
+  const outcomeCurrency = String(orderProviderValue(order, "providerOutcomeCurrency", "outcome_currency", "outcomeCurrency") || "").toLowerCase();
+  const outcomeAmount = Number(orderProviderValue(order, "providerOutcomeAmount", "outcome_amount", "outcomeAmount") || 0);
+  if (outcomeCurrency === "ltc" && Number.isFinite(outcomeAmount) && outcomeAmount > 0) return roundLtc(outcomeAmount);
+
+  const paymentProvider = String(order.paymentProvider || "").toLowerCase();
+  const payCurrency = String(orderProviderValue(order, "payCurrency", "pay_currency") || order.coinId || "").toLowerCase();
+  const actuallyPaid = Number(orderProviderValue(order, "providerActuallyPaid", "actually_paid", "actuallyPaid") || 0);
+  if (payCurrency === "ltc" && Number.isFinite(actuallyPaid) && actuallyPaid > 0) return roundLtc(actuallyPaid);
+
+  const quotedLtc = Number(orderProviderValue(order, "ltcAmount", "walletDepositAmountLtc", "payAmount", "pay_amount") || 0);
+  if ((paymentProvider === "balance" || payCurrency === "ltc" || String(order.coinId || "").toLowerCase() === "ltc") && Number.isFinite(quotedLtc) && quotedLtc > 0) {
+    return roundLtc(quotedLtc);
+  }
+  return 0;
+}
+
+function orderLtcBreakdown(order = {}, state = {}, store = null) {
+  const amountUsd = adminOrderAmount(order);
+  const commissionUsd = adminPlatformCommission(order, state, store);
+  const commissionRatio = amountUsd > 0
+    ? Math.min(1, Math.max(0, commissionUsd / amountUsd))
+    : Math.min(1, Math.max(0, Number(order.platformCommissionPercent || storeCommissionPercentForOrder(store)) / 100));
+  const transactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const storeTx = transactions.find((tx) => tx.id === `tx-store-sale-${order.id}`);
+  const ownerTx = transactions.find((tx) => tx.id === `tx-owner-commission-${order.id}`);
+  const actualGrossLtc = orderActualGrossLtc(order);
+  const hasSettlement = Number(order.ltcSettlementVersion || 0) >= 1;
+
+  let sellerLtc = hasSettlement ? Number(order.sellerAmountLtc || 0) : 0;
+  let commissionLtc = hasSettlement ? Number(order.platformCommissionLtc || 0) : 0;
+  let grossLtc = hasSettlement ? Number(order.settlementGrossLtc || order.grossAmountLtc || 0) : actualGrossLtc;
+
+  if (!hasSettlement && actualGrossLtc > 0) {
+    commissionLtc = actualGrossLtc * commissionRatio;
+    sellerLtc = actualGrossLtc - commissionLtc;
+  } else if (!hasSettlement) {
+    sellerLtc = Number(storeTx?.amountLtc || 0);
+    commissionLtc = Number(ownerTx?.amountLtc || 0);
+    grossLtc = sellerLtc + commissionLtc;
+  }
+
+  if (!(grossLtc > 0)) grossLtc = amountUsd > 0 ? usdToLitecoin(amountUsd) : 0;
+  if (!(sellerLtc > 0) && !(commissionLtc > 0) && grossLtc > 0) {
+    commissionLtc = grossLtc * commissionRatio;
+    sellerLtc = grossLtc - commissionLtc;
+  } else if (!(sellerLtc > 0) && grossLtc > 0) {
+    sellerLtc = Math.max(0, grossLtc - commissionLtc);
+  } else if (!(commissionLtc > 0) && grossLtc > 0 && commissionRatio > 0) {
+    commissionLtc = Math.min(grossLtc, grossLtc * commissionRatio);
+    sellerLtc = Math.max(0, grossLtc - commissionLtc);
+  }
+
+  return {
+    grossLtc: roundLtc(grossLtc),
+    commissionLtc: roundLtc(commissionLtc),
+    sellerLtc: roundLtc(sellerLtc),
+    rateAtPayment: grossLtc > 0 && amountUsd > 0 ? Number((amountUsd / grossLtc).toFixed(8)) : cachedLitecoinUsdRate()
+  };
+}
+
+function applyProductOrderLtcSettlement(order, state = {}, store = null) {
+  if (!order) return order;
+  const breakdown = orderLtcBreakdown(order, state, store);
+  order.ltcSettlementVersion = 1;
+  order.settlementCurrency = "ltc";
+  order.settlementGrossLtc = breakdown.grossLtc;
+  order.grossAmountLtc = breakdown.grossLtc;
+  order.platformCommissionLtc = breakdown.commissionLtc;
+  order.sellerAmountLtc = breakdown.sellerLtc;
+  order.ltcUsdRateAtPayment = breakdown.rateAtPayment;
+  return order;
+}
+
 function adminIsPaidProductOrder(order) {
   const status = String(order.status || "").toLowerCase();
   return ["completed", "closed", "paid"].includes(status);
@@ -8039,6 +8183,10 @@ function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
   const sellerAmountUsd = Number.isFinite(Number(message.sellerAmountUsd))
     ? Math.max(0, Number(message.sellerAmountUsd))
     : Math.max(0, amountUsd - commissionUsd);
+  const grossLtc = roundLtc(message.grossLtc || message.amountLtc || 0);
+  const commissionRatio = amountUsd > 0 ? commissionUsd / amountUsd : commissionPercent / 100;
+  const commissionLtc = roundLtc(message.platformCommissionLtc || message.commissionLtc || (grossLtc * commissionRatio));
+  const sellerAmountLtc = roundLtc(message.sellerAmountLtc || Math.max(0, grossLtc - commissionLtc));
   const createdAt = Number(message.createdAt || Date.now());
   return {
     id: String(message.orderId || message.id || `order-ledger-${storeId}-${createdAt}`),
@@ -8054,6 +8202,15 @@ function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
     platformCommissionPercent: commissionPercent,
     platformCommissionUsd: commissionUsd,
     sellerAmountUsd,
+    ...(grossLtc > 0 ? {
+      ltcSettlementVersion: 1,
+      settlementCurrency: "ltc",
+      settlementGrossLtc: grossLtc,
+      grossAmountLtc: grossLtc,
+      platformCommissionLtc: commissionLtc,
+      sellerAmountLtc,
+      ltcUsdRateAtPayment: amountUsd / grossLtc
+    } : {}),
     paidAt: createdAt,
     completedAt: Number(message.completedAt || message.closedAt || createdAt),
     closedAt: Number(message.closedAt || message.completedAt || createdAt),
@@ -8065,6 +8222,7 @@ function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
 
 function storeLedgerFinance(state = {}, store = null, orders = []) {
   const storeId = String(store?.id || "");
+  const currentRate = cachedLitecoinUsdRate();
   const orderById = new Map((Array.isArray(orders) ? orders : []).map((order) => [String(order?.id || ""), order]));
   const txs = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
     .filter((tx) => tx.scope === "store" && String(tx.storeId || "") === storeId && String(tx.type || "") === "store_sale");
@@ -8075,14 +8233,30 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
     const orderId = String(tx.orderId || "");
     if (orderId) seenOrderIds.add(orderId);
     const order = orderById.get(orderId) || {};
+    const breakdown = order.id
+      ? orderLtcBreakdown(order, state, store)
+      : {
+          grossLtc: roundLtc(tx.grossLtc || (Number(tx.amountLtc || 0) + Number(tx.commissionLtc || 0))),
+          commissionLtc: roundLtc(tx.commissionLtc || 0),
+          sellerLtc: roundLtc(tx.amountLtc || 0)
+        };
+    const originalGrossUsd = Number(tx.grossUsd || order.amountUsd || tx.amountUsd || 0);
+    const originalCommissionUsd = Number(tx.commissionUsd || adminPlatformCommission(order, state, store) || 0);
+    const originalNetUsd = Number(tx.amountUsd || adminStoreNetAmount(order, state, store) || 0);
     rows.push({
       id: tx.id || `tx-store-sale-${orderId}`,
       orderId,
       login: tx.login || order.login || store?.ownerLogin || storeId,
       title: tx.title || `Sale: ${order.product || orderId}`,
-      grossUsd: Number(tx.grossUsd || order.amountUsd || tx.amountUsd || 0),
-      commissionUsd: Number(tx.commissionUsd || adminPlatformCommission(order, state, store) || 0),
-      netUsd: Number(tx.amountUsd || adminStoreNetAmount(order, state, store) || 0),
+      grossLtc: breakdown.grossLtc,
+      commissionLtc: breakdown.commissionLtc,
+      netLtc: breakdown.sellerLtc,
+      grossUsd: breakdown.grossLtc * currentRate,
+      commissionUsd: breakdown.commissionLtc * currentRate,
+      netUsd: breakdown.sellerLtc * currentRate,
+      originalGrossUsd,
+      originalCommissionUsd,
+      originalNetUsd,
       status: storeOrderHeldForPayout(order) ? "held" : "completed",
       held: storeOrderHeldForPayout(order),
       createdAt: Number(tx.createdAt || order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
@@ -8092,14 +8266,21 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
   (Array.isArray(orders) ? orders : [])
     .filter((order) => String(order.storeId || "") === storeId && adminIsPaidProductOrder(order) && !seenOrderIds.has(String(order.id || "")))
     .forEach((order) => {
+      const breakdown = orderLtcBreakdown(order, state, store);
       rows.push({
         id: `order-ledger-${order.id}`,
         orderId: order.id,
         login: order.login || "",
         title: `Sale: ${order.product || order.id}`,
-        grossUsd: adminOrderAmount(order),
-        commissionUsd: adminPlatformCommission(order, state, store),
-        netUsd: adminStoreNetAmount(order, state, store),
+        grossLtc: breakdown.grossLtc,
+        commissionLtc: breakdown.commissionLtc,
+        netLtc: breakdown.sellerLtc,
+        grossUsd: breakdown.grossLtc * currentRate,
+        commissionUsd: breakdown.commissionLtc * currentRate,
+        netUsd: breakdown.sellerLtc * currentRate,
+        originalGrossUsd: adminOrderAmount(order),
+        originalCommissionUsd: adminPlatformCommission(order, state, store),
+        originalNetUsd: adminStoreNetAmount(order, state, store),
         status: storeOrderHeldForPayout(order) ? "held" : "completed",
         held: storeOrderHeldForPayout(order),
         createdAt: Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
@@ -8109,12 +8290,24 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
   rows.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   const completedRows = rows.filter((row) => !row.held);
   const heldRows = rows.filter((row) => row.held);
+  const grossLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.grossLtc || 0), 0));
+  const commissionLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.commissionLtc || 0), 0));
+  const netLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
+  const heldLtc = roundLtc(heldRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
   return {
     rows,
-    grossUsd: completedRows.reduce((sum, row) => sum + Number(row.grossUsd || 0), 0),
-    commissionUsd: completedRows.reduce((sum, row) => sum + Number(row.commissionUsd || 0), 0),
-    netUsd: completedRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0),
-    heldUsd: heldRows.reduce((sum, row) => sum + Number(row.netUsd || 0), 0)
+    rate: currentRate,
+    grossLtc,
+    commissionLtc,
+    netLtc,
+    heldLtc,
+    grossUsd: grossLtc * currentRate,
+    commissionUsd: commissionLtc * currentRate,
+    netUsd: netLtc * currentRate,
+    heldUsd: heldLtc * currentRate,
+    originalGrossUsd: completedRows.reduce((sum, row) => sum + Number(row.originalGrossUsd || 0), 0),
+    originalCommissionUsd: completedRows.reduce((sum, row) => sum + Number(row.originalCommissionUsd || 0), 0),
+    originalNetUsd: completedRows.reduce((sum, row) => sum + Number(row.originalNetUsd || 0), 0)
   };
 }
 
@@ -8431,6 +8624,23 @@ function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
     .reduce((sum, item) => sum + Number(item.amountUsd || 0), 0);
 }
 
+function withdrawalAmountLtc(withdrawal = {}) {
+  const amountLtc = Number(withdrawal.amountLtc || 0);
+  if (Number.isFinite(amountLtc) && amountLtc > 0) return roundLtc(amountLtc);
+  const amountUsd = Number(withdrawal.amountUsd || 0);
+  return amountUsd > 0 ? roundLtc(usdToLitecoin(amountUsd)) : 0;
+}
+
+function activeWithdrawalLtc(state = {}, scope = "", storeId = "") {
+  return roundLtc((Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [])
+    .filter((item) => {
+      if (scope && item.scope !== scope) return false;
+      if (storeId && item.storeId !== storeId) return false;
+      return withdrawalConsumesBalance(item);
+    })
+    .reduce((sum, item) => sum + withdrawalAmountLtc(item), 0));
+}
+
 function withdrawalConsumesBalance(withdrawal = {}) {
   const status = String(withdrawal.status || "pending").toLowerCase();
   if (["cancelled", "canceled", "rejected", "failed", "payout_failed"].includes(status)) return false;
@@ -8493,6 +8703,16 @@ function requestedWithdrawalUsd(body = {}, availableUsd = 0) {
   return 0;
 }
 
+function requestedWithdrawalLtc(body = {}, availableLtc = 0) {
+  const rawAll = String(body.amountMode || body.amount || "").trim().toLowerCase();
+  if (rawAll === "all" || body.all === true) return roundLtc(availableLtc);
+  const amountLtc = Number(body.amountLtc || 0);
+  if (Number.isFinite(amountLtc) && amountLtc > 0) return roundLtc(amountLtc);
+  const amountUsd = Number(body.amountUsd || 0);
+  if (Number.isFinite(amountUsd) && amountUsd > 0) return roundLtc(usdToLitecoin(amountUsd));
+  return 0;
+}
+
 function applyProductOrderCommission(order, state = {}, store = null) {
   if (!order) return order;
   const amount = adminOrderAmount(order);
@@ -8509,12 +8729,18 @@ function recordProductOrderLedger(order, state = {}, store = null) {
   if (!order || order.type !== "product" || String(order.paymentStatus || "").toLowerCase() !== "paid") return;
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   state.storeBalancesUsd = state.storeBalancesUsd || {};
+  state.storeBalancesLtc = state.storeBalancesLtc || {};
   state.ownerBalanceUsd = Number(state.ownerBalanceUsd || 0);
+  state.ownerBalanceLtc = Number(state.ownerBalanceLtc || 0);
 
   applyProductOrderCommission(order, state, store);
+  applyProductOrderLtcSettlement(order, state, store);
   const amountUsd = adminOrderAmount(order);
   const commissionUsd = Math.max(0, Number(order.platformCommissionUsd || 0));
   const sellerUsd = Math.max(0, Number(order.sellerAmountUsd ?? (amountUsd - commissionUsd)));
+  const grossLtc = roundLtc(order.settlementGrossLtc);
+  const commissionLtc = roundLtc(order.platformCommissionLtc);
+  const sellerLtc = roundLtc(order.sellerAmountLtc);
   const createdAt = Number(order.paidAt || order.createdAt || Date.now());
   const storeId = String(order.storeId || "");
   const storeTxId = `tx-store-sale-${order.id}`;
@@ -8529,7 +8755,10 @@ function recordProductOrderLedger(order, state = {}, store = null) {
     existingStoreTx.amountUsd = sellerUsd;
     existingStoreTx.grossUsd = amountUsd;
     existingStoreTx.commissionUsd = commissionUsd;
-    existingStoreTx.amountLtc = usdToLitecoin(sellerUsd);
+    existingStoreTx.amountLtc = sellerLtc;
+    existingStoreTx.grossLtc = grossLtc;
+    existingStoreTx.commissionLtc = commissionLtc;
+    existingStoreTx.ltcUsdRateAtPayment = order.ltcUsdRateAtPayment;
   } else if (storeId) {
     state.walletTransactions.unshift({
       id: storeTxId,
@@ -8543,7 +8772,10 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       amountUsd: sellerUsd,
       grossUsd: amountUsd,
       commissionUsd,
-      amountLtc: usdToLitecoin(sellerUsd),
+      amountLtc: sellerLtc,
+      grossLtc,
+      commissionLtc,
+      ltcUsdRateAtPayment: order.ltcUsdRateAtPayment,
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt,
@@ -8554,10 +8786,20 @@ function recordProductOrderLedger(order, state = {}, store = null) {
   }
   if (storeId && !storeHeld && !order.storeBalanceReleasedAt) {
     state.storeBalancesUsd[storeId] = Number(state.storeBalancesUsd[storeId] || 0) + sellerUsd;
+    state.storeBalancesLtc[storeId] = roundLtc(Number(state.storeBalancesLtc[storeId] || 0) + sellerLtc);
     order.storeBalanceReleasedAt = Date.now();
   }
 
-  if (commissionUsd > 0 && !state.walletTransactions.some((tx) => tx.id === ownerTxId)) {
+  const existingOwnerTx = state.walletTransactions.find((tx) => tx.id === ownerTxId);
+  if (commissionUsd > 0 && existingOwnerTx) {
+    existingOwnerTx.amountUsd = commissionUsd;
+    existingOwnerTx.grossUsd = amountUsd;
+    existingOwnerTx.commissionPercent = Number(order.platformCommissionPercent || 0);
+    existingOwnerTx.amountLtc = commissionLtc;
+    existingOwnerTx.grossLtc = grossLtc;
+    existingOwnerTx.commissionLtc = commissionLtc;
+    existingOwnerTx.ltcUsdRateAtPayment = order.ltcUsdRateAtPayment;
+  } else if (commissionUsd > 0) {
     state.walletTransactions.unshift({
       id: ownerTxId,
       scope: "owner",
@@ -8570,7 +8812,10 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       amountUsd: commissionUsd,
       grossUsd: amountUsd,
       commissionPercent: Number(order.platformCommissionPercent || 0),
-      amountLtc: usdToLitecoin(commissionUsd),
+      amountLtc: commissionLtc,
+      grossLtc,
+      commissionLtc,
+      ltcUsdRateAtPayment: order.ltcUsdRateAtPayment,
       coinId: "ltc",
       payCurrency: "ltc",
       createdAt,
@@ -8578,6 +8823,7 @@ function recordProductOrderLedger(order, state = {}, store = null) {
       status: "completed"
     });
     state.ownerBalanceUsd += commissionUsd;
+    state.ownerBalanceLtc = roundLtc(state.ownerBalanceLtc + commissionLtc);
   }
   order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
 }
@@ -8666,6 +8912,7 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
   };
 
   applyProductOrderCommission(order, state, store);
+  applyProductOrderLtcSettlement(order, state, store);
   state.orders.unshift(order);
   return { order, created: true };
 }
@@ -8735,6 +8982,48 @@ function adminBucketCharts(source, valueFn = () => 1) {
     if (bucket) bucket.value += valueFn(item);
   });
   return days.map(({ label, value }) => ({ label, value: Number(value.toFixed(2)) }));
+}
+
+function adminLtcBalanceChart(credits = [], debits = [], rate = cachedLitecoinUsdRate()) {
+  const now = Date.now();
+  const days = Array.from({ length: 14 }, (_, index) => {
+    const start = new Date(now - (13 - index) * 24 * 60 * 60 * 1000);
+    start.setHours(0, 0, 0, 0);
+    const end = index === 13 ? now : start.getTime() + 24 * 60 * 60 * 1000 - 1;
+    return { label: start.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }), end };
+  });
+  return days.map(({ label, end }) => {
+    const creditLtc = credits
+      .filter((item) => Number(item.createdAt || 0) <= end)
+      .reduce((sum, item) => sum + Number(item.amountLtc || 0), 0);
+    const debitLtc = debits
+      .filter((item) => Number(item.createdAt || 0) <= end)
+      .reduce((sum, item) => sum + Number(item.amountLtc || 0), 0);
+    const valueLtc = roundLtc(Math.max(0, creditLtc - debitLtc));
+    return { label, valueLtc, value: Number((valueLtc * rate).toFixed(2)) };
+  });
+}
+
+function adminReferralRewardLtc(payment = {}, state = {}, orders = [], deposits = []) {
+  const recorded = Number(payment.rewardLtc || 0);
+  if (Number.isFinite(recorded) && recorded > 0) return roundLtc(recorded);
+  const sourceId = String(payment.sourceId || "");
+  const ledger = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .find((tx) => String(tx.sourceId || "") === sourceId && String(tx.type || "") === "referral_reward");
+  const ledgerLtc = Number(ledger?.amountLtc || 0);
+  if (Number.isFinite(ledgerLtc) && ledgerLtc > 0) return roundLtc(ledgerLtc);
+  if (sourceId.startsWith("product-order:")) {
+    const orderId = sourceId.slice("product-order:".length);
+    const order = (Array.isArray(orders) ? orders : []).find((item) => String(item.id || "") === orderId);
+    if (order) return roundLtc(orderLtcBreakdown(order, state, null).grossLtc * Number(payment.percent || 3) / 100);
+  }
+  if (sourceId.startsWith("wallet-deposit:")) {
+    const depositId = sourceId.slice("wallet-deposit:".length);
+    const deposit = (Array.isArray(deposits) ? deposits : []).find((item) => String(item.id || "") === depositId);
+    const depositLtc = Number(deposit?.amountLtc || deposit?.payAmount || 0);
+    if (depositLtc > 0) return roundLtc(depositLtc * Number(payment.percent || 3) / 100);
+  }
+  return roundLtc(usdToLitecoin(payment.reward || payment.amountUsd || 0));
 }
 
 function adminCollectBots(state) {
@@ -9204,11 +9493,22 @@ function adminBuildOverview(data) {
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
   const completedOrders = productOrders.filter(adminIsPaidProductOrder);
-  const totalCommissionUsd = completedOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
-  const totalStoresNetUsd = completedOrders.reduce((sum, order) => sum + adminStoreNetAmount(order, state, storeById.get(order.storeId)), 0);
-  const totalReferralRewardsUsd = referralPayments.reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0);
-  const ownerRequestedUsd = activeWithdrawalUsd(state, "owner");
-  const storesRequestedUsd = activeWithdrawalUsd(state, "store");
+  const currentLtcUsdRate = cachedLitecoinUsdRate();
+  const orderLtcById = new Map(completedOrders.map((order) => [
+    String(order.id || ""),
+    orderLtcBreakdown(order, state, storeById.get(order.storeId))
+  ]));
+  const totalCommissionLtc = roundLtc(completedOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
+  const totalStoresNetLtc = roundLtc(completedOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
+  const totalCommissionUsd = totalCommissionLtc * currentLtcUsdRate;
+  const totalStoresNetUsd = totalStoresNetLtc * currentLtcUsdRate;
+  const totalReferralRewardsLtc = roundLtc(referralPayments.reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits), 0));
+  const totalReferralRewardsUsd = totalReferralRewardsLtc * currentLtcUsdRate;
+  const ownerRequestedLtc = activeWithdrawalLtc(state, "owner");
+  const storesRequestedLtc = activeWithdrawalLtc(state, "store");
+  const ownerNetLtc = roundLtc(Math.max(0, totalCommissionLtc - totalReferralRewardsLtc));
+  const ownerWithdrawableLtc = roundLtc(Math.max(0, ownerNetLtc - ownerRequestedLtc));
+  const storesWithdrawableLtc = roundLtc(Math.max(0, totalStoresNetLtc - storesRequestedLtc));
   const activeOrders = productOrders.filter((order) => {
     const status = String(order.status || "").toLowerCase();
     return ["active", "pending_payment", "processing"].includes(status) || order.disputeOpen || status === "dispute";
@@ -9226,13 +9526,15 @@ function adminBuildOverview(data) {
     const periodUsers = profiles.filter((user) => Date.parse(user.created_at) >= period.from);
     const periodDisputes = disputes.filter((item) => adminWithin(item, period.from));
     const turnover = periodOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0);
-    const commission = periodOrders.reduce((sum, order) => sum + adminPlatformCommission(order, state, storeById.get(order.storeId)), 0);
+    const commissionLtc = roundLtc(periodOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
+    const commission = commissionLtc * currentLtcUsdRate;
     return {
       id: period.id,
       label: period.label,
       sales: periodOrders.length,
       turnover,
       commission,
+      commissionLtc,
       newUsers: periodUsers.length,
       disputes: periodDisputes.length,
       activeDeals: activeOrders.filter((order) => adminWithin(order, period.from)).length,
@@ -9245,9 +9547,14 @@ function adminBuildOverview(data) {
     const storeCompleted = storeOrders.filter(adminIsPaidProductOrder);
     const storeDisputes = storeOrders.filter(orderHasDisputeHistory);
     const clients = new Set(storeOrders.map((order) => loginKey(order.login)).filter(Boolean));
-    const grossRevenue = storeCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0);
-    const commission = storeCompleted.reduce((sum, order) => sum + adminPlatformCommission(order, state, store), 0);
-    const revenue = storeCompleted.reduce((sum, order) => sum + adminStoreNetAmount(order, state, store), 0);
+    const grossRevenueLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.grossLtc || 0), 0));
+    const commissionLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
+    const revenueLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
+    const requestedLtc = activeWithdrawalLtc(state, "store", store.id);
+    const availableLtc = roundLtc(Math.max(0, revenueLtc - requestedLtc));
+    const grossRevenue = grossRevenueLtc * currentLtcUsdRate;
+    const commission = commissionLtc * currentLtcUsdRate;
+    const revenue = revenueLtc * currentLtcUsdRate;
     return {
       id: store.id,
       name: store.name || store.tag || store.id,
@@ -9255,8 +9562,13 @@ function adminBuildOverview(data) {
       ownerLogin: store.ownerLogin || "",
       sales: storeCompleted.length,
       grossRevenue,
+      grossRevenueLtc,
       revenue,
+      revenueLtc,
       commission,
+      commissionLtc,
+      availableLtc,
+      availableUsd: availableLtc * currentLtcUsdRate,
       clients: clients.size,
       products: Array.isArray(store.products) ? store.products.length : 0,
       disputes: storeDisputes.length,
@@ -9317,16 +9629,36 @@ function adminBuildOverview(data) {
   });
 
   const mirrorBotUsers = adminCollectMirrorBots(state);
+  const ownerBalanceCredits = completedOrders.map((order) => ({
+    createdAt: adminTimestamp(order),
+    amountLtc: Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0)
+  }));
+  const ownerBalanceDebits = [
+    ...referralPayments.map((payment) => ({
+      createdAt: adminTimestamp(payment),
+      amountLtc: adminReferralRewardLtc(payment, state, completedOrders, walletDeposits)
+    })),
+    ...walletWithdrawals.filter((item) => item.scope === "owner" && withdrawalConsumesBalance(item)).map((item) => ({
+      createdAt: adminTimestamp(item),
+      amountLtc: withdrawalAmountLtc(item)
+    }))
+  ];
 
   return {
     stats: {
       totalSales: completedOrders.length,
       totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       totalCommission: totalCommissionUsd,
+      totalCommissionLtc,
       totalReferralRewards: totalReferralRewardsUsd,
-      ownerNetAfterReferrals: Math.max(0, totalCommissionUsd - totalReferralRewardsUsd),
-      ownerWithdrawableUsd: Math.max(0, totalCommissionUsd - totalReferralRewardsUsd - ownerRequestedUsd),
-      storesWithdrawableUsd: Math.max(0, totalStoresNetUsd - storesRequestedUsd),
+      totalReferralRewardsLtc,
+      ownerNetAfterReferrals: ownerNetLtc * currentLtcUsdRate,
+      ownerNetAfterReferralsLtc: ownerNetLtc,
+      ownerWithdrawableUsd: ownerWithdrawableLtc * currentLtcUsdRate,
+      ownerWithdrawableLtc,
+      storesWithdrawableUsd: storesWithdrawableLtc * currentLtcUsdRate,
+      storesWithdrawableLtc,
+      ltcUsdRate: currentLtcUsdRate,
       newUsers: periods.find((period) => period.id === "day")?.newUsers || 0,
       totalUsers: profiles.length,
       usersWithPurchase: buyers.size,
@@ -9342,6 +9674,7 @@ function adminBuildOverview(data) {
       sales: adminBucketCharts(completedOrders),
       registrations: adminBucketCharts(profiles.map((user) => ({ createdAt: Date.parse(user.created_at) }))),
       revenue: adminBucketCharts(completedOrders, adminOrderAmount),
+      balance: adminLtcBalanceChart(ownerBalanceCredits, ownerBalanceDebits, currentLtcUsdRate),
       disputes: adminBucketCharts(disputes),
       activity: adminBucketCharts(sessions.map((session) => ({ createdAt: Date.parse(session.created_at) })))
     },
@@ -9355,12 +9688,19 @@ function adminBuildOverview(data) {
       walletTransactions,
       walletWithdrawals,
       referrals,
-      referralPayments,
+      referralPayments: referralPayments.map((item) => ({
+        ...item,
+        rewardLtc: adminReferralRewardLtc(item, state, completedOrders, walletDeposits),
+        rewardCurrentUsd: adminReferralRewardLtc(item, state, completedOrders, walletDeposits) * currentLtcUsdRate
+      })),
       referralTotals: {
         count: referrals.length,
         rewardsUsd: totalReferralRewardsUsd,
-        productRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("product-order:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0),
-        depositRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("wallet-deposit:")).reduce((sum, item) => sum + adminMoney(item.reward || item.amountUsd), 0)
+        rewardsLtc: totalReferralRewardsLtc,
+        productRewardsLtc: roundLtc(referralPayments.filter((item) => String(item.sourceId || "").startsWith("product-order:")).reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits), 0)),
+        depositRewardsLtc: roundLtc(referralPayments.filter((item) => String(item.sourceId || "").startsWith("wallet-deposit:")).reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits), 0)),
+        productRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("product-order:")).reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits) * currentLtcUsdRate, 0),
+        depositRewardsUsd: referralPayments.filter((item) => String(item.sourceId || "").startsWith("wallet-deposit:")).reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits) * currentLtcUsdRate, 0)
       },
       balances: state.balances || {},
       ltcBalances: state.ltcBalances || {},
@@ -9501,12 +9841,17 @@ async function completeProductOrder(order, state, providerPayload = {}) {
     }
   }
   order.paymentProviderPayload = providerPayload;
+  order.providerActuallyPaid = Number(providerPayload.actually_paid ?? order.providerActuallyPaid ?? 0);
+  order.providerOutcomeAmount = Number(providerPayload.outcome_amount ?? order.providerOutcomeAmount ?? 0);
+  order.providerOutcomeCurrency = String(providerPayload.outcome_currency ?? order.providerOutcomeCurrency ?? "").toLowerCase();
+  order.payCurrency = String(providerPayload.pay_currency ?? order.payCurrency ?? order.coinId ?? "ltc").toLowerCase();
 
   if (order.storeId) {
     const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
     const store = row?.data;
     if (store) {
       applyProductOrderCommission(order, state, store);
+      applyProductOrderLtcSettlement(order, state, store);
       recordProductOrderLedger(order, state, store);
       if (!wasAlreadyPaid) {
         store.orders = Number(store.orders || 0) + 1;
@@ -9563,10 +9908,12 @@ async function completeProductOrder(order, state, providerPayload = {}) {
       }
     } else {
       applyProductOrderCommission(order, state, null);
+      applyProductOrderLtcSettlement(order, state, null);
       recordProductOrderLedger(order, state, null);
     }
   } else {
     applyProductOrderCommission(order, state, null);
+    applyProductOrderLtcSettlement(order, state, null);
     recordProductOrderLedger(order, state, null);
   }
 
@@ -9710,7 +10057,7 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     title: "Баланс пополнен",
     body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено.`
   });
-  const referralPayment = applyReferralReward(state, deposit.login, paidUsd, `wallet-deposit:${deposit.id}`);
+  const referralPayment = applyReferralReward(state, deposit.login, paidUsd, `wallet-deposit:${deposit.id}`, paidLtc);
   if (referralPayment) {
     await notifySiteUser(state, referralPayment.referrerLogin, {
       id: `notice-referral-reward-${referralPayment.id}-${loginKey(referralPayment.referrerLogin)}`,
@@ -9806,6 +10153,8 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     };
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
+    applyProductOrderLtcSettlement(order, state, store);
+    applyProductOrderLtcSettlement(order, state, store);
     recordProductOrderLedger(order, state, store);
     setStateUserLtcBalance(state, user.login, balance - ltcAmount, user.login_key);
     state.orders.unshift(order);
