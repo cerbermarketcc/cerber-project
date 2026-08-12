@@ -434,7 +434,7 @@ function connectRealtime() {
     const api = new URL(API_ORIGIN);
     const protocol = api.protocol === "https:" ? "wss:" : "ws:";
     realtimeSocket?.close();
-    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime?token=${encodeURIComponent(token)}`);
+    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime`, ["cerber-admin", token]);
     realtimeSocket.onmessage = () => refreshData(true);
     realtimeSocket.onclose = () => {
       if (token) setTimeout(connectRealtime, 5000);
@@ -452,6 +452,7 @@ function renderLogin(message = "") {
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
         <label class="field">Логин<input name="login" value="admin" autocomplete="username" required></label>
         <label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+        <label class="field">Код 2FA<input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="обязательный код" required></label>
         <button class="primary">Войти</button>
       </form>
     </section>
@@ -466,7 +467,7 @@ function renderLogin(message = "") {
     try {
       const payload = await api("/api/admin/login", {
         method: "POST",
-        body: JSON.stringify({ login: form.get("login"), password: form.get("password") })
+        body: JSON.stringify({ login: form.get("login"), password: form.get("password"), totp: form.get("totp") })
       });
       token = payload.token;
       adminStorageSet(TOKEN_KEY, token);

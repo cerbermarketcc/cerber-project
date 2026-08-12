@@ -95,7 +95,7 @@ const PARTIAL_STATE_OBJECT_KEYS = [
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 // The legacy in-app admin is disabled; privileged access is server-authenticated.
-const ADMIN_PANEL_PASSWORD = "";
+const ADMIN_PANEL_PASSWORD = "legacy-admin-disabled";
 let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
@@ -104,7 +104,7 @@ let translationCache = null;
 let translationFlushTimer = null;
 let translationInFlight = false;
 const pendingTranslationRoots = new Set();
-const cmsVisualEditorActive = new URLSearchParams(location.search).has("cms-visual");
+const cmsVisualEditorActive = false;
 const WALLET_COINS = [
   { id: "ltc", payCurrency: "ltc", symbol: "LTC", name: "Litecoin", network: "LTC", accent: "#345d9d", base: true },
   { id: "usdt_trc20", payCurrency: "usdttrc20", symbol: "USDT", name: "USDT TRC-20", network: "TRC-20", accent: "#26a17b" },
@@ -455,6 +455,7 @@ if (API_ENABLED) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(clientStorageSnapshot(db)));
     localStorage.setItem(AUTH_KEY, JSON.stringify({ currentUser: db.currentUser, users: (db.users || []).map(clientStorageUser) }));
+    localStorage.removeItem(API_TOKEN_KEY);
     localStorage.removeItem("cerber_text_admin_password");
     localStorage.removeItem(OWNER_ACCESS_PASSWORD_KEY);
     localStorage.removeItem(ADMIN_ACCESS_KEY);
@@ -1426,7 +1427,7 @@ function mountCmsVisualEditor() {
   toolbar.className = "cms-visual-toolbar";
   toolbar.dataset.cmsVisualToolbar = "true";
   toolbar.innerHTML = `
-    <strong>Textolite mode</strong>
+    <strong>Text Admin</strong>
     <input type="password" placeholder="Пароль админки" data-cms-password>
     <button type="button" data-cms-save>Сохранить</button>
     <a href="/">Выйти</a>
@@ -1472,7 +1473,7 @@ function mountCmsVisualEditor() {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          "x-admin-password": adminPassword
+          "Authorization": `Bearer ${sessionStorageGet("cerber_text_admin_token") || ""}`
         },
         body: JSON.stringify({ texts: cmsTextOverrides })
       });
@@ -2109,12 +2110,15 @@ function storageRemove(key) {
 }
 
 function apiSessionToken() {
-  return runtimeApiToken || storageGet(API_TOKEN_KEY);
+  try {
+    localStorage.removeItem(API_TOKEN_KEY);
+  } catch {}
+  return runtimeApiToken || sessionStorageGet(API_TOKEN_KEY);
 }
 
 function rememberApiToken(token = "") {
   runtimeApiToken = String(token || "");
-  if (runtimeApiToken) storageSet(API_TOKEN_KEY, runtimeApiToken);
+  if (runtimeApiToken) sessionStorageSet(API_TOKEN_KEY, runtimeApiToken);
   else storageRemove(API_TOKEN_KEY);
 }
 
@@ -3092,11 +3096,7 @@ async function ensureApiSession() {
 }
 
 function isAdmin() {
-  try {
-    return currentUser()?.role === "admin" || storageGet(ADMIN_ACCESS_KEY) === "ok";
-  } catch {
-    return currentUser()?.role === "admin";
-  }
+  return !API_ENABLED && currentUser()?.role === "admin";
 }
 
 function sellerAdminHashId() {
@@ -6994,7 +6994,7 @@ async function deleteClientDisputeMessage(messageId) {
 }
 
 function isGroupModerator(login = db.currentUser) {
-  return isAdmin() || ["cerber", "cerberm"].some((item) => sameLogin(item, login));
+  return isAdmin();
 }
 
 function groupMuteUntil(login = db.currentUser) {
@@ -10159,7 +10159,7 @@ async function handleOwnerCreateStore(event) {
     try {
       const payload = await apiFetch("/api/owner/stores", {
         method: "POST",
-        headers: { "x-owner-password": storageGet(OWNER_ACCESS_PASSWORD_KEY) || "" },
+        headers: {},
         body: JSON.stringify(store)
       });
       const savedStore = payload.store || store;
@@ -10398,7 +10398,7 @@ function renderAdmin() {
     <section class="screen">
       <article class="panel">
         <h2>${tr("admin")}</h2>
-        <p><a href="/?cms-visual=1">Textolite mode: edit texts on the site</a></p>
+        <p><a href="/text-admin.html">Text Admin</a></p>
         <p><a href="/text-admin.html">Text Admin: edit text list</a></p>
         <form class="form" data-store-form>
           <div class="row">

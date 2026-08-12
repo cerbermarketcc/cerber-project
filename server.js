@@ -15,8 +15,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "private-chat-security-2026-08-12-v154";
+const cerberBuildVersion = "incident-lockdown-2026-08-12-v155";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
+const incidentSessionResetId = "security-incident-2026-08-12-v1";
+const securityTokenVersion = "incident-2026-08-12-v1";
+const securityTokenEpochMs = Math.max(1786549638180, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -41,6 +44,8 @@ const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
+const siteNotifyWebhookSecret = process.env.SITE_NOTIFY_WEBHOOK_SECRET || telegramWebhookSecret;
+const proverkaWebhookSecret = process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret;
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const paymentReconcileIntervalMs = 15 * 1000;
@@ -268,7 +273,7 @@ const publicStoresSelect = [
 ].join(",");
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const adminLoginAttempts = new Map();
-const adminTokenTtlMs = 12 * 60 * 60 * 1000;
+const adminTokenTtlMs = 2 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
 let publicRealtimeServer = null;
 let seedReady = false;
@@ -301,9 +306,6 @@ const allowedCorsOrigins = new Set([
   "https://www.cerber.love",
   "https://cerber.vip",
   "https://www.cerber.vip",
-  "http://u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
-  "http://ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
-  "http://ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion",
   ...configuredAllowedOrigins
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
@@ -354,6 +356,11 @@ function adminPublicBot(bot = {}) {
     hasToken: Boolean(publicBot.hasToken || token),
     tokenMasked: publicBot.tokenMasked || maskSecret(token)
   };
+}
+
+function secretFingerprint(value = "") {
+  const secret = String(process.env.IP_HASH_SECRET || process.env.ADMIN_JWT_SECRET || runtimeAdminSecret);
+  return crypto.createHmac("sha256", secret).update(String(value || "")).digest("hex").slice(0, 24);
 }
 
 async function hashPanelPassword(password = "") {
@@ -410,19 +417,22 @@ function storeSecretsSnapshot(store = {}) {
 app.use((req, res, next) => {
   const origin = String(req.headers.origin || "");
   const allowedOrigin = origin && isAllowedCorsOrigin(origin);
+  if (origin && !allowedOrigin && req.path.startsWith("/api/")) {
+    return res.status(403).json({ error: "Origin is not allowed" });
+  }
   if (allowedOrigin) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-admin-password, x-owner-password, x-telegram-bot-api-secret-token");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-telegram-bot-api-secret-token");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
   res.setHeader("Origin-Agent-Cluster", "?1");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
   res.setHeader("Content-Security-Policy", cspDirectives);
   if (req.secure || String(req.headers["x-forwarded-proto"] || "").includes("https")) {
@@ -450,6 +460,16 @@ app.use((req, res, next) => {
 });
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "20mb" }));
+app.use("/api", (req, _res, next) => {
+  try {
+    if (!/\/(?:webhook|ipn)(?:\/|$)/i.test(req.path)) {
+      assertClientRateLimit(req, "api-global", { limit: 240, windowMs: 60 * 1000 });
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
   if (/^\/(?:server\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini|md|sql|ya?ml|lock)$/i.test(pathname)) {
@@ -477,48 +497,38 @@ function secretValuesMatch(actualValue, expectedValue) {
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-function verifyConfiguredPassword(actualValue, expectedValue, label) {
-  if (!String(expectedValue || "")) {
-    const error = new Error(`${label} is not configured`);
+function requireTelegramWebhookSecret(req, secret = "", label = "Telegram webhook") {
+  if (!String(secret || "")) {
+    const error = new Error(`${label} secret is not configured`);
     error.status = 503;
     throw error;
   }
-  if (!secretValuesMatch(actualValue, expectedValue)) {
-    const error = new Error("Bad admin password");
+  if (!secretValuesMatch(req.headers["x-telegram-bot-api-secret-token"], secret)) {
+    const error = new Error("Bad Telegram secret");
     error.status = 401;
     throw error;
   }
 }
 
 function verifyCmsAdmin(req) {
-  verifyConfiguredPassword(
-    req.headers["x-admin-password"] || req.body?.password,
-    process.env.ADMIN_PASSWORD,
-    "ADMIN_PASSWORD"
-  );
-}
-
-function verifyOwnerPanel(req) {
-  verifyConfiguredPassword(
-    req.headers["x-owner-password"] || req.body?.ownerPassword,
-    process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD,
-    "OWNER_PANEL_PASSWORD"
-  );
+  return requireAdmin(req);
 }
 
 function requestSource(req) {
+  const ip = clientIp(req);
+  const userAgent = String(req.headers["user-agent"] || "");
   return {
     origin: String(req.headers.origin || ""),
-    referer: String(req.headers.referer || ""),
     host: String(req.headers.host || ""),
-    ip: String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+    ipHash: secretFingerprint(ip),
+    userAgentHash: secretFingerprint(userAgent)
   };
 }
 
 function sessionSource(req) {
   return {
-    ip: clientIp(req).slice(0, 120),
-    user_agent: String(req.headers["user-agent"] || "").slice(0, 500)
+    ip: `sha256:${secretFingerprint(clientIp(req))}`,
+    user_agent: `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`
   };
 }
 
@@ -561,11 +571,27 @@ async function passwordMatchesProfile(profile, password) {
 const runtimeAdminSecret = crypto.randomBytes(32).toString("hex");
 
 function adminSecret() {
-  return process.env.ADMIN_JWT_SECRET || supabaseServiceKey || runtimeAdminSecret;
+  const configured = String(process.env.ADMIN_JWT_SECRET || "");
+  if (configured.length < 32) {
+    const error = new Error("ADMIN_JWT_SECRET must contain at least 32 characters");
+    error.status = 503;
+    throw error;
+  }
+  return crypto.createHmac("sha256", configured).update(`admin:${securityTokenVersion}`).digest("hex");
 }
 
-function signAdminToken(login, role = "admin") {
-  const payload = Buffer.from(JSON.stringify({ login, role, createdAt: Date.now() })).toString("base64url");
+function requestDeviceHash(req = {}) {
+  return secretFingerprint(String(req.headers?.["user-agent"] || ""));
+}
+
+function signAdminToken(login, role = "admin", req = {}) {
+  const payload = Buffer.from(JSON.stringify({
+    login,
+    role,
+    tokenVersion: securityTokenVersion,
+    deviceHash: requestDeviceHash(req),
+    createdAt: Date.now()
+  })).toString("base64url");
   const signature = crypto.createHmac("sha256", adminSecret()).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
@@ -580,7 +606,10 @@ function verifyAdminToken(req) {
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (Date.now() - Number(data.createdAt || 0) > adminTokenTtlMs) return null;
+    const createdAt = Number(data.createdAt || 0);
+    if (data.tokenVersion !== securityTokenVersion || createdAt < securityTokenEpochMs) return null;
+    if (Date.now() - createdAt > adminTokenTtlMs) return null;
+    if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
     return data;
   } catch {
     return null;
@@ -654,61 +683,17 @@ function markAdminLoginAttempt(req, login, ok) {
 }
 
 async function ensureAdminSecurity(options = {}) {
-  const fullState = Boolean(options.fullState);
-  const fallbackLogin = process.env.MARKET_ADMIN_LOGIN || "admin";
-  const fallbackPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
-  const { data: settings } = await withTimeout(
-    supabase.from("app_settings").select(fullState ? "data" : "adminSecurity:data->adminSecurity").eq("id", mainSettingsRowId).maybeSingle(),
-    "admin security settings query",
-    3000
-  ).catch((error) => {
-    console.error("[admin-login] settings skipped", { message: error.message });
-    return { data: null };
-  });
-  const canPersistSecurity = fullState && Boolean(settings?.data);
-  const state = fullState ? (settings?.data || {}) : { adminSecurity: settings?.adminSecurity || {} };
-  state.adminSecurity = state.adminSecurity || {};
-  if (!state.adminSecurity.passwordHash) {
-    if (!fallbackPassword) {
-      const error = new Error("MARKET_ADMIN_PASSWORD is not configured");
-      error.status = 503;
-      throw error;
-    }
-    state.adminSecurity.login = state.adminSecurity.login || fallbackLogin;
-    state.adminSecurity.plainPassword = fallbackPassword;
-    if (canPersistSecurity) bcrypt.hash(fallbackPassword, 12).then((passwordHash) => {
-      const nextState = {
-        ...state,
-        adminSecurity: {
-          ...state.adminSecurity,
-          passwordHash
-        }
-      };
-      delete nextState.adminSecurity.plainPassword;
-      return Promise.all([
-        withTimeout(
-          supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: nextState }, { onConflict: "id" }),
-          "admin security save",
-          8000
-        ),
-        saveSettingsBackupState(nextState)
-      ]);
-    }).catch((error) => console.error("[admin-login] security save skipped", { message: error.message }));
-    delete state.adminSecurity.passwordHash;
+  const login = String(process.env.MARKET_ADMIN_LOGIN || "admin").trim();
+  const password = String(process.env.MARKET_ADMIN_PASSWORD || "");
+  if (!login || !password) {
+    const error = new Error("MARKET_ADMIN_LOGIN and MARKET_ADMIN_PASSWORD must be configured in Render");
+    error.status = 503;
+    throw error;
   }
-  return state;
+  return { adminSecurity: { login } };
 }
 
 async function verifyMarketAdminCredentials(login = "", password = "", adminSecurity = {}) {
-  const storedLogin = String(adminSecurity.login || "admin");
-  const storedPasswordOk = adminSecurity.passwordHash
-    ? await bcrypt.compare(String(password || ""), adminSecurity.passwordHash)
-    : Boolean(adminSecurity.plainPassword) && secretValuesMatch(password, adminSecurity.plainPassword);
-  if (loginKey(login) === loginKey(storedLogin) && storedPasswordOk) {
-    return { ok: true, login: storedLogin, source: "stored" };
-  }
-
-  // Render credentials remain a recovery path if Supabase contains an older password hash.
   const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin");
   const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
   const configuredOk = Boolean(configuredPassword)
@@ -716,18 +701,21 @@ async function verifyMarketAdminCredentials(login = "", password = "", adminSecu
     && secretValuesMatch(password, configuredPassword);
   return {
     ok: configuredOk,
-    login: configuredOk ? configuredLogin : storedLogin,
-    source: configuredOk ? "configured_recovery" : "none"
+    login: configuredLogin,
+    source: configuredOk ? "configured" : "none"
   };
 }
 
-async function verifyMarketAdminPassword(password = "", adminSecurity = {}) {
-  const storedPasswordOk = adminSecurity.passwordHash
-    ? await bcrypt.compare(String(password || ""), adminSecurity.passwordHash)
-    : Boolean(adminSecurity.plainPassword) && secretValuesMatch(password, adminSecurity.plainPassword);
-  if (storedPasswordOk) return true;
-  const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
-  return Boolean(configuredPassword) && secretValuesMatch(password, configuredPassword);
+function verifyAdminTotp(value = "") {
+  const secret = String(process.env.ADMIN_TOTP_SECRET || "").trim();
+  if (!secret) {
+    const error = new Error("ADMIN_TOTP_SECRET must be configured before owner access is enabled");
+    error.status = 503;
+    throw error;
+  }
+  const supplied = String(value || "").replace(/\D/g, "");
+  if (supplied.length !== 6) return false;
+  return [-30000, 0, 30000].some((offset) => secretValuesMatch(supplied, totpCode(secret, Date.now() + offset)));
 }
 
 async function appendAdminLog(action, actor = "admin", details = {}) {
@@ -947,7 +935,23 @@ function sanitizeStateForVisualReset(state = {}) {
   return next;
 }
 
-function publicProductForState(product = {}, store = {}) {
+function stripPrivateInventory(item = {}) {
+  const next = { ...item };
+  const deliveryCount = Array.isArray(next.deliveryItems) ? next.deliveryItems.length : 0;
+  next.stock = Math.max(0, Number(next.stock || 0), deliveryCount);
+  [
+    "deliveryItems",
+    "deliveryItemsText",
+    "issuedItems",
+    "stockItems",
+    "addresses",
+    "addressList",
+    "reservedDescription"
+  ].forEach((key) => delete next[key]);
+  return next;
+}
+
+function publicProductForState(product = {}, store = {}, options = {}) {
   const item = { ...product };
   const images = Array.isArray(item.images) ? item.images : [];
   if (images.length) item.image = item.image || images[0] || store.image || "";
@@ -958,6 +962,31 @@ function publicProductForState(product = {}, store = {}) {
   item.gallery = Array.isArray(item.gallery)
     ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 8)
     : [];
+  if (options.includePrivate) return item;
+  item.positions = Array.isArray(item.positions) ? item.positions.map(stripPrivateInventory) : [];
+  return stripPrivateInventory(item);
+}
+
+function publicOrderForUser(order = {}) {
+  const item = { ...order };
+  const status = String(item.status || "").toLowerCase();
+  const paymentStatus = String(item.paymentStatus || "").toLowerCase();
+  const paid = ["paid", "finished"].includes(paymentStatus)
+    || ["active", "paid", "completed", "closed", "dispute"].includes(status);
+  [
+    "sellerWallet",
+    "platformCommissionUsd",
+    "platformCommissionLtc",
+    "sellerAmountLtc",
+    "grossAmountLtc",
+    "settlementGrossLtc",
+    "ltcUsdRateAtPayment",
+    "ltcSettlementVersion"
+  ].forEach((key) => delete item[key]);
+  if (!paid) {
+    delete item.reservedDescription;
+    delete item.reservedStock;
+  }
   return item;
 }
 
@@ -1107,6 +1136,7 @@ function stripStoreSecretsForState(item = {}, options = {}) {
 }
 
 function publicStoreForState(store = {}, options = {}) {
+  const includePrivate = Boolean(options.includePrivate || options.includeStaff);
   const item = { ...store };
   item.image = publicImageForState(item.image || item.avatar, "assets/cerber-emblem.png");
   item.cover = publicImageForState(item.cover || item.banner || item.image, "assets/market-banner.png");
@@ -1115,7 +1145,27 @@ function publicStoreForState(store = {}, options = {}) {
   item.gallery = Array.isArray(item.gallery)
     ? item.gallery.map((image) => publicImageForState(image, "assets/cerber-emblem.png")).slice(0, 12)
     : [];
-  item.products = Array.isArray(item.products) ? item.products.map((product) => publicProductForState(product, item)) : [];
+  item.products = Array.isArray(item.products) ? item.products.map((product) => publicProductForState(product, item, { includePrivate })) : [];
+  if (!includePrivate) {
+    [
+      "wallets",
+      "ltcWallet",
+      "productOrders",
+      "orders",
+      "storeFinanceRows",
+      "storeBalanceChart",
+      "storeGrossUsd",
+      "storeCommissionUsd",
+      "storeBalanceUsd",
+      "storeHeldUsd",
+      "storeGrossLtc",
+      "storeCommissionLtc",
+      "storeBalanceLtc",
+      "storeHeldLtc",
+      "storeAvailableBalanceLtc",
+      "storeAvailableBalanceUsd"
+    ].forEach((key) => delete item[key]);
+  }
   return stripStoreSecretsForState(item, options);
 }
 
@@ -1250,7 +1300,13 @@ async function verifyCaptcha(token, req) {
 }
 
 function captchaSecret() {
-  return process.env.ADMIN_JWT_SECRET || process.env.SELLER_ADMIN_JWT_SECRET || supabaseServiceKey || "cerber-local-captcha";
+  const configured = String(process.env.CAPTCHA_SECRET || process.env.ADMIN_JWT_SECRET || "");
+  if (configured.length < 32) {
+    const error = new Error("CAPTCHA_SECRET or ADMIN_JWT_SECRET must contain at least 32 characters");
+    error.status = 503;
+    throw error;
+  }
+  return crypto.createHmac("sha256", configured).update(`captcha:${securityTokenVersion}`).digest("hex");
 }
 
 function signInternalCaptcha(payload) {
@@ -1312,9 +1368,7 @@ async function ensureSeed() {
     if (adminError) throw adminError;
 
     if (!existingAdmin) {
-      const adminPassword = String(process.env.ADMIN_PASSWORD || "");
-      if (!adminPassword) throw new Error("ADMIN_PASSWORD is required to seed the admin profile");
-      const adminHash = await bcrypt.hash(adminPassword, 12);
+      const adminHash = await bcrypt.hash(crypto.randomBytes(48).toString("base64url"), 12);
       const { error } = await supabase.from("profiles").upsert([
         { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
       ], { onConflict: "login_key" });
@@ -2010,7 +2064,7 @@ async function stateFor(user) {
         sameUser(order.fromLogin) ||
         sameUser(order.toLogin) ||
         sameUser(order.ownerLogin)
-      ))
+      )).map(publicOrderForUser)
       : [];
     const userExchangeRequests = user
       ? (settingsData.exchangeRequests || []).filter((request) => (
@@ -2071,8 +2125,11 @@ async function stateFor(user) {
         exchangeCards: visibleExchangeCards,
         exchangers: publicExchangersForState(settingsData.exchangers || [], allMessages),
         exchangeRequests: userExchangeRequests,
-        groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
-        groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
+        groupMessages: user && Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
+        groupSettings: user ? normalizeGroupSettings(settingsData.groupSettings || {}) : normalizeGroupSettings({
+          title: settingsData.groupSettings?.title,
+          pinnedMessageId: settingsData.groupSettings?.pinnedMessageId
+        }),
         referrals: userReferrals,
         referralPayments: userReferralPayments,
         referralCodes: userReferralCodes,
@@ -2117,17 +2174,19 @@ async function userFromRequest(req) {
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
   const { data: session, error: sessionError } = await withTimeout(
-    supabase.from("sessions").select("login_key,created_at").eq("token", token).maybeSingle(),
+    supabase.from("sessions").select("login_key,created_at,user_agent").eq("token", token).maybeSingle(),
     "session token query",
     8000
   );
   if (sessionError) throw sessionError;
   if (!session) return null;
   const createdAt = Date.parse(session.created_at || "");
-  if (Number.isFinite(createdAt) && Date.now() - createdAt > userSessionTtlMs) {
+  if (!Number.isFinite(createdAt) || createdAt < securityTokenEpochMs || Date.now() - createdAt > userSessionTtlMs) {
     supabase.from("sessions").delete().eq("token", token).then(() => {}).catch(() => {});
     return null;
   }
+  const expectedUserAgent = `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`;
+  if (session.user_agent && !secretValuesMatch(session.user_agent, expectedUserAgent)) return null;
   const { data: user, error: userError } = await withTimeout(
     supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle(),
     "session profile query",
@@ -2659,12 +2718,25 @@ async function addTelegramGroupMessage(user, payload = {}) {
 }
 
 function sellerAdminSecret() {
-  return supabaseServiceKey || process.env.SELLER_ADMIN_SECRET || "cerber-local-seller-admin";
+  const configured = String(process.env.SELLER_ADMIN_SECRET || process.env.ADMIN_JWT_SECRET || "");
+  if (configured.length < 32) {
+    const error = new Error("SELLER_ADMIN_SECRET or ADMIN_JWT_SECRET must contain at least 32 characters");
+    error.status = 503;
+    throw error;
+  }
+  return crypto.createHmac("sha256", configured).update(`seller:${securityTokenVersion}`).digest("hex");
 }
 
-function signSellerAdminToken(storeId, meta = {}) {
+function signSellerAdminToken(storeId, meta = {}, req = {}) {
   const now = Date.now();
-  const payload = Buffer.from(JSON.stringify({ storeId, ...meta, createdAt: now, expiresAt: now + 7 * 24 * 60 * 60 * 1000 })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    storeId,
+    ...meta,
+    tokenVersion: securityTokenVersion,
+    deviceHash: requestDeviceHash(req),
+    createdAt: now,
+    expiresAt: now + 12 * 60 * 60 * 1000
+  })).toString("base64url");
   const signature = crypto.createHmac("sha256", sellerAdminSecret()).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
@@ -2850,6 +2922,9 @@ function verifySellerAdminToken(req) {
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const createdAt = Number(data.createdAt || 0);
+    if (data.tokenVersion !== securityTokenVersion || createdAt < securityTokenEpochMs) return null;
+    if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
     if (data.expiresAt && Date.now() > Number(data.expiresAt)) return null;
     return data;
   } catch {
@@ -2873,6 +2948,8 @@ app.post("/api/auth/register", async (req, res, next) => {
     const password = String(req.body.password || "");
     const name = String(req.body.name || login).trim();
     if (!login || !password) return res.status(400).json({ error: "Введите логин и пароль" });
+    if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(login)) return res.status(400).json({ error: "Логин: 3-40 символов, только буквы, цифры, точка, _ и -" });
+    if (password.length < 10 || password.length > 128) return res.status(400).json({ error: "Пароль должен содержать от 10 до 128 символов" });
 
     const key = loginKey(login);
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
@@ -2884,6 +2961,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     );
     if (existingError) throw existingError;
     if (existing) {
+      if (String(existing.role || "user").toLowerCase() !== "user") return res.status(403).json({ error: "Служебный аккаунт недоступен через публичный вход" });
       if (await passwordMatchesProfile(existing, password)) {
         const state = await loadAuthSettingsState("register recovery settings");
         if (adminIsUserBlocked(state, existing.login)) {
@@ -2957,6 +3035,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
+    if (String(user.role || "user").toLowerCase() !== "user") return res.status(403).json({ error: "Служебный аккаунт недоступен через публичный вход" });
     const state = await loadAuthSettingsState("login settings");
     if (adminIsUserBlocked(state, user.login)) {
       return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
@@ -2984,64 +3063,8 @@ app.post("/api/auth/login", async (req, res, next) => {
   }
 });
 
-app.post("/api/auth/restore-session", async (req, res, next) => {
-  try {
-    requireDb();
-    assertClientRateLimit(req, "auth-restore-session", { limit: 6, windowMs: 10 * 60 * 1000, identity: req.body.login });
-    await ensureSeed();
-    const key = loginKey(req.body.login);
-    const password = String(req.body.password || "");
-    const { data: user, error: userError } = await withTimeout(
-      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
-      "restore session profile query",
-      8000
-    );
-    if (userError) throw userError;
-    if (!user || !(await passwordMatchesProfile(user, password))) {
-      return res.status(401).json({ error: "Нужно войти заново" });
-    }
-    const state = await loadAuthSettingsState("restore session settings");
-    if (adminIsUserBlocked(state, user.login)) {
-      return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
-    }
-    const token = await createUserSession(req, user.login_key);
-    appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
-      console.error("[auth] restore session log failed", { login: user.login, message: error.message });
-    });
-    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/telegram/login", async (req, res, next) => {
-  try {
-    requireDb();
-    assertClientRateLimit(req, "telegram-login", { limit: 10, windowMs: 10 * 60 * 1000, identity: req.body.login });
-    await ensureSeed();
-    const key = loginKey(req.body.login);
-    const password = String(req.body.password || "");
-    const { data: user, error: userError } = await withTimeout(
-      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
-      "telegram login profile query",
-      8000
-    );
-    if (userError) throw userError;
-    if (!user || !(await passwordMatchesProfile(user, password))) {
-      return res.status(401).json({ error: "Неверный логин или пароль" });
-    }
-    const state = await loadSettingsState();
-    if (adminIsUserBlocked(state, user.login)) {
-      return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
-    }
-    const token = await createUserSession(req, user.login_key);
-    appendAdminLog("telegram_user_login", user.login, { login: user.login, ...requestSource(req) }).catch((error) => {
-      console.error("[auth] telegram login log failed", { login: user.login, message: error.message });
-    });
-    res.json({ token, user: publicUser(user), summary: await telegramUserSummary(user) });
-  } catch (error) {
-    next(error);
-  }
+app.post(["/api/auth/restore-session", "/api/telegram/login"], (_req, res) => {
+  res.status(410).json({ error: "Этот способ входа отключён. Используйте защищённую форму входа на сайте." });
 });
 
 app.get("/api/telegram/wallet/address", async (req, res, next) => {
@@ -3173,12 +3196,11 @@ function baseHealthPayload(startedAt = Date.now()) {
         siteNotifyBot: Boolean(siteNotifyBotToken)
       },
       security: {
-        cmsAdminPasswordEnv: Boolean(process.env.ADMIN_PASSWORD),
-        ownerPasswordEnv: Boolean(process.env.OWNER_PANEL_PASSWORD || process.env.ADMIN_PASSWORD),
         marketAdminPasswordEnv: Boolean(process.env.MARKET_ADMIN_PASSWORD),
-        adminJwtSecretEnv: Boolean(process.env.ADMIN_JWT_SECRET || supabaseServiceKey),
-        insecureDefaultCmsPassword: !process.env.ADMIN_PASSWORD,
-        insecureDefaultOwnerPassword: !process.env.OWNER_PANEL_PASSWORD && !process.env.ADMIN_PASSWORD,
+        adminJwtSecretEnv: String(process.env.ADMIN_JWT_SECRET || "").length >= 32,
+        adminTotpEnabled: Boolean(process.env.ADMIN_TOTP_SECRET),
+        telegramWebhookSecret: Boolean(telegramWebhookSecret),
+        sessionEpoch: new Date(securityTokenEpochMs).toISOString(),
         insecureDefaultMarketAdminPassword: !process.env.MARKET_ADMIN_PASSWORD
       },
       tables: {},
@@ -3205,12 +3227,12 @@ app.get("/api/health", async (_req, res) => {
     health.checks.supabase = { ...health.checks.supabase, ...supabasePing };
     health.ok = Boolean(supabasePing.ok);
     health.durationMs = Date.now() - startedAt;
-    res.status(200).json(health);
+    res.status(200).json({ ok: health.ok, build: cerberBuildVersion, time: health.time });
   } catch (error) {
     health.ok = false;
     health.error = String(error.message || error);
     health.durationMs = Date.now() - startedAt;
-    res.status(200).json(health);
+    res.status(200).json({ ok: false, build: cerberBuildVersion, time: health.time });
   }
 });
 
@@ -3575,6 +3597,9 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     if (!store) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
+    if (store.credentialVersion !== securityTokenVersion) {
+      return res.status(423).json({ error: "После инцидента пароль магазина должен быть заменён владельцем сайта." });
+    }
     const ownerLoginOk = !login || loginKey(store?.ownerLogin) === loginKey(login) || loginKey(store?.id) === loginKey(login);
     const ownerAuth = ownerLoginOk
       ? await verifyStoreOwnerCredentials(store, password)
@@ -3587,7 +3612,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       appendAdminLog("store_admin_login", authenticatedStore.ownerLogin || authenticatedStore.id, { storeId: authenticatedStore.id, role: "owner", credentialSource: ownerAuth.source, ...requestSource(req) }).catch((error) => {
         console.error("[store-admin] owner login log failed", { storeId: authenticatedStore.id, message: error.message });
       });
-      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken), store: publicStoreForState(authenticatedStore, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
+      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken, req), store: publicStoreForState(authenticatedStore, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
@@ -3601,7 +3626,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       console.error("[store-admin] staff login log failed", { storeId: store.id, staffLogin: staff.login, message: error.message });
     });
     res.json({
-      token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }),
+      token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }, req),
       store: publicStoreForState(store, { includeStaff: true }),
       staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
       ...(await stateForStoreAdmin(store.id, { role: "staff", staffLogin: staff.login, permissions }))
@@ -3647,6 +3672,9 @@ app.put("/api/store-admin/store", async (req, res, next) => {
     }
     const allowedStoreInput = sellerStoreInputForToken(existing, store, token);
     const nextPanelPassword = token.role === "staff" ? "" : String(allowedStoreInput.adminPassword || "").trim();
+    if (nextPanelPassword && (nextPanelPassword.length < 10 || nextPanelPassword.length > 128)) {
+      return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
+    }
     const nextPanelPasswordHash = nextPanelPassword ? await hashPanelPassword(nextPanelPassword) : "";
     const mergedStore = await normalizeStoreSecrets(
       sellerStorePatch(existing, allowedStoreInput),
@@ -4267,8 +4295,7 @@ function sanitizeGroupMessagePayload(payload = {}) {
 }
 
 function isGroupModeratorUser(user = {}) {
-  return String(user.role || "").toLowerCase() === "admin"
-    || ["cerber", "cerberm"].some((login) => sameLogin(login, user.login));
+  return String(user.role || "").toLowerCase() === "admin";
 }
 
 function toggleLoginValue(values = [], login = "") {
@@ -4610,18 +4637,21 @@ app.patch("/api/private-messages/:id/reaction", async (req, res, next) => {
 app.post("/api/admin/login", async (req, res, next) => {
   const login = String(req.body.login || "").trim();
   try {
-    requireDb();
     assertAdminRateLimit(req, login);
     const state = await ensureAdminSecurity();
     const password = String(req.body.password || "");
     const credentials = await verifyMarketAdminCredentials(login, password, state.adminSecurity);
-    markAdminLoginAttempt(req, login, credentials.ok);
-    appendAdminLog(credentials.ok ? "admin_login_success" : "admin_login_failed", login || "unknown", {
-      ip: req.headers["cf-connecting-ip"] || req.socket.remoteAddress || "",
+    const authenticated = credentials.ok && verifyAdminTotp(req.body.totp);
+    markAdminLoginAttempt(req, login, authenticated);
+    appendAdminLog(authenticated ? "admin_login_success" : "admin_login_failed", login || "unknown", {
+      ...requestSource(req),
       credentialSource: credentials.source
     }).catch((error) => console.error("[admin-login] log failed", { message: error.message }));
-    if (!credentials.ok) return res.status(401).json({ error: "Неверный логин или пароль" });
-    res.json({ token: signAdminToken(credentials.login, "admin"), admin: { login: credentials.login, role: "admin" } });
+    if (!authenticated) {
+      await delay(600);
+      return res.status(401).json({ error: "Неверные данные входа или код 2FA" });
+    }
+    res.json({ token: signAdminToken(credentials.login, "admin", req), admin: { login: credentials.login, role: "admin" } });
   } catch (error) {
     next(error);
   }
@@ -5039,33 +5069,7 @@ app.delete("/api/admin/public-stores-cache", async (req, res, next) => {
 
 app.post("/api/owner/stores", async (req, res, next) => {
   try {
-    requireDb();
-    verifyOwnerPanel(req);
-    const store = adminBuildStoreFromBody(req.body || {});
-    const panelPassword = String(req.body?.adminPassword || store.adminPassword || "").trim();
-    if (!store.name || !store.ownerLogin || !panelPassword) {
-      return res.status(400).json({ error: "Укажите название, логин владельца и пароль панели магазина" });
-    }
-    const panelPasswordHash = await hashPanelPassword(panelPassword);
-    const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
-    const savedStore = await saveStoreRow(protectedStore, "owner store save");
-    await withTimeout(
-      adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
-      "owner seller profile sync",
-      10000
-    ).catch((error) => {
-      console.error("[owner-store] seller profile sync deferred", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, message: error.message });
-    });
-    scheduleStorePublication(savedStore, "owner store save");
-    notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "owner-panel" });
-    res.json({ store: publicStoreForState(savedStore, { includeStaff: true }), panel: adminStorePanelLinks(savedStore, panelPassword), verifiedSaved: true, verifiedReadBack: true });
-    Promise.resolve().then(async () => {
-      await clearDeletedStoreTombstone(savedStore.id);
-      await appendAdminLog("owner_store_created", "owner-panel", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
-      console.log("[owner-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin });
-    }).catch((error) => {
-      console.error("[owner-store] post-create task failed", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, error: error.message });
-    });
+    res.status(410).json({ error: "Старая панель владельца отключена. Используйте /market-admin" });
   } catch (error) {
     next(error);
   }
@@ -5622,6 +5626,9 @@ app.post("/api/admin/stores", async (req, res, next) => {
     if (!requestedStore.name || !requestedStore.ownerLogin || !panelPassword) {
       return res.status(400).json({ error: "Укажите название магазина, логин владельца и пароль панели" });
     }
+    if (panelPassword.length < 10 || panelPassword.length > 128) {
+      return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
+    }
     const { data: existing, error: existingError } = await withTimeout(
       supabase.from("stores").select("id,data").eq("id", requestedStore.id).maybeSingle(),
       "admin store duplicate check",
@@ -5636,6 +5643,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     const store = recovered ? adminBuildStoreFromBody(req.body || {}, existing.data) : requestedStore;
     const panelPasswordHash = await hashPanelPassword(panelPassword);
     const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
+    protectedStore.credentialVersion = securityTokenVersion;
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
     await withTimeout(
       adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
@@ -5667,8 +5675,12 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = adminBuildStoreFromBody(req.body || {}, row.data);
     const panelPassword = String(req.body?.adminPassword || "").trim();
+    if (panelPassword && (panelPassword.length < 10 || panelPassword.length > 128)) {
+      return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
+    }
     const panelPasswordHash = panelPassword ? await hashPanelPassword(panelPassword) : "";
     const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
+    if (panelPassword) protectedStore.credentialVersion = securityTokenVersion;
     const savedStore = await saveStoreRow(protectedStore, "admin store update");
     const canonicalPanelPasswordHash = panelPasswordHash || String(savedStore.adminPasswordHash || "").trim();
     if (savedStore.ownerLogin && canonicalPanelPasswordHash) {
@@ -5840,7 +5852,7 @@ app.post("/api/admin/orders/recover", async (req, res, next) => {
 
 app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
   try {
-    verifyCmsAdmin(req);
+    requireAdmin(req);
     requireDb();
     const targetLogin = loginKey(req.body.login || "");
     const targetStoreId = String(req.body.storeId || "").trim();
@@ -6215,18 +6227,8 @@ app.delete("/api/admin/logs", async (req, res, next) => {
 
 app.post("/api/admin/password", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
-    const state = await ensureAdminSecurity({ fullState: true });
-    const currentPassword = String(req.body.currentPassword || "");
-    const nextPassword = String(req.body.nextPassword || "");
-    const currentPasswordOk = await verifyMarketAdminPassword(currentPassword, state.adminSecurity);
-    if (!currentPasswordOk) return res.status(401).json({ error: "Текущий пароль неверный" });
-    if (nextPassword.length < 8) return res.status(400).json({ error: "Минимум 8 символов" });
-    state.adminSecurity.passwordHash = await bcrypt.hash(nextPassword, 12);
-    delete state.adminSecurity.plainPassword;
-    await saveSettingsState(state);
-    await appendAdminLog("admin_password_changed", admin.login);
-    res.json({ ok: true });
+    requireAdmin(req);
+    res.status(410).json({ error: "Пароль владельца меняется только в защищённых переменных Render" });
   } catch (error) {
     next(error);
   }
@@ -6350,11 +6352,12 @@ app.patch("/api/admin/bots", async (req, res, next) => {
         mirror.status = mirror.active ? "active" : "disabled";
       } else if (action === "restartWebhook") {
         if (!mirror.token) return res.status(400).json({ error: "У зеркала нет токена" });
+        if (!telegramWebhookSecret) return res.status(503).json({ error: "TELEGRAM_WEBHOOK_SECRET не настроен" });
         mirror.webhookId = mirror.webhookId || mirrorWebhookId(mirror.token);
         mirror.webhookUrl = mirror.webhookUrl || mirrorWebhookUrl(mirror.token);
         await telegramTokenApi(mirror.token, "setWebhook", {
           url: mirror.webhookUrl,
-          ...(telegramWebhookSecret ? { secret_token: telegramWebhookSecret } : {})
+          secret_token: telegramWebhookSecret
         });
         const webhook = await telegramTokenApi(mirror.token, "getWebhookInfo");
         mirror.webhookOk = Boolean(webhook?.result?.url);
@@ -7559,6 +7562,27 @@ async function clearAdminAuditLogsOnce() {
   await clearAdminAuditLogs(state);
   console.log("[admin-log] owner-requested audit reset completed", { resetId: adminAuditResetId });
   return true;
+}
+
+async function revokeCompromisedSessionsOnce() {
+  if (!supabase) return false;
+  const cutoff = new Date(securityTokenEpochMs).toISOString();
+  const { error } = await supabase.from("sessions").delete().lt("created_at", cutoff);
+  if (error) throw error;
+  console.warn("[security] sessions issued before incident cutoff were revoked", {
+    resetId: incidentSessionResetId,
+    cutoff
+  });
+  return true;
+}
+
+function publicAuditLog(entry = {}) {
+  const details = entry.details && typeof entry.details === "object" ? { ...entry.details } : {};
+  delete details.ip;
+  delete details.userAgent;
+  delete details.user_agent;
+  delete details.referer;
+  return { ...entry, details };
 }
 
 async function loadMirrorTableData(table = "", limit = 1000) {
@@ -10105,7 +10129,7 @@ function adminBuildOverview(data) {
       createdToday: mirrorBotUsers.filter((bot) => adminTimestamp(bot) >= Date.now() - 24 * 60 * 60 * 1000).length,
       items: mirrorBotUsers
     },
-    logs: Array.isArray(state.adminLogs) ? state.adminLogs : [],
+    logs: Array.isArray(state.adminLogs) ? state.adminLogs.map(publicAuditLog) : [],
     messages
   };
 }
@@ -10656,7 +10680,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     }
     await saveSettingsState(state);
     notifyRealtime("order_paid", { orderId: order.id, storeId });
-    res.json({ order, ...(await stateFor(user)) });
+    res.json({ order: publicOrderForUser(order), ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -10784,7 +10808,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     await saveOwnerStoreFallback(store);
     await saveSettingsState(state);
     notifyRealtime("order_created", { orderId: order.id, storeId });
-    res.json({ order, paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
+    res.json({ order: publicOrderForUser(order), paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -11278,11 +11302,11 @@ function botMirrorCreatedKeyboard(mirror = {}) {
 function botMirrorHelpText() {
   return [
     "<b>Создание зеркала CERBER</b>",
-    "1. Привяжите аккаунт сайта:",
-    "<code>/login ваш_логин ваш_пароль</code>",
-    "2. Создайте нового бота в @BotFather.",
-    "3. Скопируйте API token.",
-    "4. Отправьте сюда команду:",
+    "Вход паролем через Telegram отключён для защиты аккаунтов.",
+    "Создание новых зеркал временно доступно только для уже привязанных аккаунтов.",
+    "1. Создайте нового бота в @BotFather.",
+    "2. Скопируйте API token.",
+    "3. Отправьте сюда команду:",
     "<code>/mirror 123456:ABCDEF...</code>",
     "",
     "После сохранения откройте созданного бота. В зеркале будет полное меню сайта, а рассылки владельца будут приходить туда."
@@ -11386,6 +11410,7 @@ async function telegramApi(method, payload = {}, tokenOverride = "") {
 
 async function telegramEnsureWebhook() {
   if (!telegramBotToken) return null;
+  if (!telegramWebhookSecret) throw new Error("TELEGRAM_WEBHOOK_SECRET is required");
   await telegramApi("setMyCommands", {
     commands: [
       { command: "start", description: "Открыть меню CERBER Links" },
@@ -11397,7 +11422,7 @@ async function telegramEnsureWebhook() {
     url: mainTelegramWebhookUrl(),
     allowed_updates: ["message", "callback_query"]
   };
-  if (telegramWebhookSecret) payload.secret_token = telegramWebhookSecret;
+  payload.secret_token = telegramWebhookSecret;
   await telegramApi("setWebhook", payload);
   const [me, webhook] = await Promise.all([
     telegramApi("getMe").catch((error) => ({ ok: false, error: String(error.message || error) })),
@@ -11455,10 +11480,8 @@ function siteNotifyHelpText() {
   return [
     "<b>Бот уведомлений CERBER</b>",
     "",
-    "Войдите в аккаунт сайта:",
-    "<code>/login ваш_логин ваш_пароль</code>",
-    "",
-    "После входа бот будет писать сюда, когда на сайте появится новое личное сообщение.",
+    "Вход логином и паролем через Telegram отключён для защиты аккаунта.",
+    "Уже привязанные аккаунты продолжат получать уведомления.",
     "",
     "Команды:",
     "/status - проверить привязку",
@@ -11467,37 +11490,7 @@ function siteNotifyHelpText() {
 }
 
 async function siteNotifyHandleLogin(state, chatId, telegramUser, text) {
-  const parts = String(text || "").trim().split(/\s+/);
-  if (parts.length < 3) {
-    await siteNotifySendMessage(chatId, "Формат входа:\n<code>/login логин пароль</code>");
-    return;
-  }
-  const key = loginKey(parts[1]);
-  const password = parts.slice(2).join(" ");
-  const { data: user, error: userError } = await withTimeout(
-    supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
-    "site notification bot login profile query",
-    8000
-  );
-  if (userError) throw userError;
-  if (!user || !(await passwordMatchesProfile(user, password))) {
-    await siteNotifySendMessage(chatId, "Неверный логин или пароль.");
-    return;
-  }
-  const botState = initSiteNotifyBotState(state);
-  botState.users[String(chatId)] = {
-    chatId: String(chatId),
-    telegramId: String(telegramUser?.id || chatId),
-    username: String(telegramUser?.username || ""),
-    firstName: String(telegramUser?.first_name || ""),
-    lastName: String(telegramUser?.last_name || ""),
-    login: user.login,
-    loginKey: user.login_key,
-    enabled: true,
-    linkedAt: Date.now(),
-    updatedAt: Date.now()
-  };
-  await siteNotifySendMessage(chatId, `Вход выполнен: <b>${botHtml(user.login)}</b>.\nТеперь сюда будут приходить уведомления о новых сообщениях на сайте.`);
+  await siteNotifySendMessage(chatId, "Вход паролем через Telegram отключён. Никогда не отправляйте пароль сайта в чат или боту.");
 }
 
 async function siteNotifyHandleMessage(state, message) {
@@ -11518,14 +11511,14 @@ async function siteNotifyHandleMessage(state, message) {
   }
   if (text === "/logout") {
     delete botState.users[chatKey];
-    await siteNotifySendMessage(chatId, "Уведомления отключены. Чтобы включить снова, отправьте /login логин пароль.");
+    await siteNotifySendMessage(chatId, "Уведомления отключены. Повторная безопасная привязка будет доступна на сайте.");
     return;
   }
   if (text === "/status") {
     if (linked?.enabled && linked.login) {
       await siteNotifySendMessage(chatId, `Уведомления включены для аккаунта <b>${botHtml(linked.login)}</b>.`);
     } else {
-      await siteNotifySendMessage(chatId, "Аккаунт не привязан.\nОтправьте: <code>/login логин пароль</code>");
+      await siteNotifySendMessage(chatId, "Аккаунт не привязан. Не отправляйте пароль сайта в Telegram.");
     }
     return;
   }
@@ -11534,9 +11527,9 @@ async function siteNotifyHandleMessage(state, message) {
 
 async function siteNotifyEnsureWebhook() {
   if (!siteNotifyBotToken) return;
+  if (!siteNotifyWebhookSecret) throw new Error("SITE_NOTIFY_WEBHOOK_SECRET or TELEGRAM_WEBHOOK_SECRET is required");
   await siteNotifyBotApi("setMyCommands", {
     commands: [
-      { command: "login", description: "Войти в аккаунт сайта" },
       { command: "status", description: "Проверить привязку" },
       { command: "logout", description: "Отключить уведомления" },
       { command: "help", description: "Помощь" }
@@ -11544,7 +11537,7 @@ async function siteNotifyEnsureWebhook() {
   }).catch((error) => console.error("Site notify setMyCommands error", error));
   await siteNotifyBotApi("setWebhook", {
     url: siteNotifyWebhookUrl(),
-    ...(telegramWebhookSecret ? { secret_token: telegramWebhookSecret } : {})
+    secret_token: siteNotifyWebhookSecret
   }).catch((error) => console.error("Site notify setWebhook error", error));
 }
 
@@ -11703,10 +11696,8 @@ function botUserStats(state, login) {
 function botNeedLoginText() {
   return [
     "<b>Аккаунт не привязан</b>",
-    "Напишите в этот чат:",
-    "<code>/login ваш_логин ваш_пароль</code>",
-    "",
-    "После привязки откроются профиль, кошелек, заказы и сообщения."
+    "Вход паролем через Telegram отключён.",
+    "Никогда не отправляйте пароль сайта в сообщениях или ботам."
   ].join("\n");
 }
 
@@ -11775,32 +11766,7 @@ async function botMessagesText(user) {
 }
 
 async function handleBotLogin(state, chatId, text) {
-  const chat = telegramChatState(state, chatId);
-  if (!chat.verified) {
-    await botShowCaptcha(state, chatId, "Сначала пройдите проверку.");
-    return;
-  }
-  const parts = text.trim().split(/\s+/);
-  if (parts.length < 3) {
-    await botSendMessage(state, chatId, "Формат входа:\n<code>/login логин пароль</code>", botMainKeyboard());
-    return;
-  }
-  const key = loginKey(parts[1]);
-  const password = parts.slice(2).join(" ");
-  const { data: user, error: userError } = await withTimeout(
-    supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
-    "telegram bot login profile query",
-    8000
-  );
-  if (userError) throw userError;
-  if (!user || !(await passwordMatchesProfile(user, password))) {
-    await botSendMessage(state, chatId, "Неверный логин или пароль.", botMainKeyboard());
-    return;
-  }
-  chat.login = user.login;
-  chat.loginKey = user.login_key;
-  chat.linkedAt = Date.now();
-  await botSendMessage(state, chatId, `Аккаунт <b>${botHtml(user.login)}</b> привязан.`, botMainKeyboard());
+  await botSendMessage(state, chatId, "Вход паролем через Telegram отключён. Никогда не отправляйте пароль сайта в чат или боту.", botMainKeyboard());
 }
 
 async function handleBotDepositAmount(state, chatId, text) {
@@ -11940,9 +11906,12 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     await botSendMessage(state, chatId, [
       "Сначала привяжите аккаунт сайта, чтобы зеркало попало в админ-панель и получало рассылки.",
       "",
-      "Формат:",
-      "<code>/login ваш_логин ваш_пароль</code>"
+      "Вход паролем через Telegram отключён. Не отправляйте пароль сайта ботам."
     ].join("\n"), botMirrorOnlyKeyboard());
+    return true;
+  }
+  if (!telegramWebhookSecret) {
+    await botSendMessage(state, chatId, "Подключение зеркал временно отключено: серверный секрет Telegram не настроен.", botMirrorOnlyKeyboard());
     return true;
   }
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
@@ -11979,7 +11948,7 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     mirror.lastTelegramError = "";
     await telegramTokenApi(token, "setWebhook", {
       url: mirror.webhookUrl,
-      ...(telegramWebhookSecret ? { secret_token: telegramWebhookSecret } : {})
+      secret_token: telegramWebhookSecret
     });
     const webhookInfo = await telegramTokenApi(token, "getWebhookInfo");
     mirror.webhookOk = Boolean(webhookInfo?.result?.url);
@@ -12242,35 +12211,18 @@ function syncMirrorUserFromTelegramChat(state, mirror, chatId, telegramUser = {}
 }
 
 app.get("/api/telegram/webhook", async (_req, res) => {
-  const webhookInfo = await telegramEnsureWebhook().catch((error) => ({
-    ok: false,
-    error: String(error.message || error)
-  }));
-  res.json({
-    ok: true,
-    version: cerberBuildVersion,
-    configured: Boolean(telegramBotToken),
-    webhook: mainTelegramWebhookUrl(),
-    telegram: webhookInfo
-  });
+  res.status(404).json({ error: "Not found" });
 });
 
 app.get("/api/site-notify-bot/webhook", async (_req, res) => {
-  await siteNotifyEnsureWebhook().catch(() => {});
-  res.json({
-    ok: true,
-    configured: Boolean(siteNotifyBotToken),
-    webhook: siteNotifyWebhookUrl()
-  });
+  res.status(404).json({ error: "Not found" });
 });
 
 app.post("/api/site-notify-bot/webhook", async (req, res, next) => {
   try {
+    requireTelegramWebhookSecret(req, siteNotifyWebhookSecret, "Site notify webhook");
     requireDb();
     if (!siteNotifyBotToken) return res.status(500).json({ error: "SITE_NOTIFY_BOT_TOKEN is not configured" });
-    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
-      return res.status(401).json({ error: "Bad Telegram secret" });
-    }
     const state = await loadSettingsState();
     if (req.body?.message) await siteNotifyHandleMessage(state, req.body.message);
     await saveSettingsState(state);
@@ -12282,11 +12234,9 @@ app.post("/api/site-notify-bot/webhook", async (req, res, next) => {
 
 app.post("/api/telegram/webhook", async (req, res, next) => {
   try {
+    requireTelegramWebhookSecret(req, telegramWebhookSecret, "Telegram webhook");
     requireDb();
     if (!telegramBotToken) return res.status(500).json({ error: "TELEGRAM_BOT_TOKEN не настроен" });
-    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
-      return res.status(401).json({ error: "Bad Telegram secret" });
-    }
     const state = await loadSettingsState();
     if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
     else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
@@ -12299,10 +12249,8 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
 
 app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
   try {
+    requireTelegramWebhookSecret(req, telegramWebhookSecret, "Telegram mirror webhook");
     requireDb();
-    if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
-      return res.status(401).json({ error: "Bad Telegram secret" });
-    }
     const state = await loadSettingsState();
     const mirror = findMirrorBotByWebhookId(state, req.params.webhookId);
     if (!mirror?.token || mirror.blocked) return res.status(404).json({ error: "Mirror bot not found" });
@@ -12382,7 +12330,7 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
     });
     await saveSettingsState({ ...state, orders });
     notifyRealtime("order_completed", { orderId: order.id, storeId: order.storeId });
-    res.json({ order, ...(await stateFor(user)) });
+    res.json({ order: publicOrderForUser(order), ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -12434,7 +12382,7 @@ app.post("/api/orders/:id/review", async (req, res, next) => {
     await saveOwnerStoreFallback(store);
     await saveSettingsState({ ...state, orders });
     notifyRealtime("order_review_created", { orderId: order.id, storeId: order.storeId });
-    res.json({ review, order, ...(await stateFor(user)) });
+    res.json({ review, order: publicOrderForUser(order), ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -12499,7 +12447,7 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
       disputeThreadId: threadId
     }, order, store));
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId });
-    res.json({ order, disputePeer: store.ownerLogin || "admin", disputeNumber: publicNumber, ...(await stateFor(user)) });
+    res.json({ order: publicOrderForUser(order), disputePeer: store.ownerLogin || "admin", disputeNumber: publicNumber, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -12548,7 +12496,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     }, order, store);
     await upsertPrivateMessage(replyMessage);
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId, threadId });
-    res.json({ order, message: replyMessage });
+    res.json({ order: publicOrderForUser(order), message: replyMessage });
     Promise.resolve().then(async () => {
       await notifySiteUser(state, store?.ownerLogin || "admin", {
       id: `notice-client-dispute-reply-store-${order.id}-${now}-${loginKey(store?.ownerLogin || "admin")}`,
@@ -13451,6 +13399,17 @@ async function proverkaEnsureCommands() {
   });
 }
 
+async function proverkaEnsureWebhook() {
+  if (!proverkaBotToken) return;
+  if (!proverkaWebhookSecret) throw new Error("PROVERKA_WEBHOOK_SECRET or TELEGRAM_WEBHOOK_SECRET is required");
+  await proverkaEnsureCommands();
+  await proverkaTelegramApi("setWebhook", {
+    url: `${publicBaseUrl}/api/proverka-bot/webhook`,
+    secret_token: proverkaWebhookSecret,
+    allowed_updates: ["message"]
+  });
+}
+
 function proverkaStartTimer(chatId, minutes, replyToMessageId) {
   const key = String(chatId);
   const oldTimer = proverkaTimers.get(key);
@@ -13699,15 +13658,12 @@ async function handleProverkaMessage(state, message) {
 }
 
 app.get("/api/proverka-bot/webhook", (_req, res) => {
-  res.json({
-    ok: true,
-    configured: Boolean(proverkaBotToken),
-    webhook: `${publicBaseUrl}/api/proverka-bot/webhook`
-  });
+  res.status(404).json({ error: "Not found" });
 });
 
 app.post("/api/proverka-bot/webhook", async (req, res, next) => {
   try {
+    requireTelegramWebhookSecret(req, proverkaWebhookSecret, "Proverka webhook");
     requireDb();
     if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
     if (req.body?.message) {
@@ -13724,16 +13680,18 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
     res.json({ ok: true });
   } catch (error) {
     console.error("Proverka webhook error", error);
-    res.json({ ok: true });
+    next(error);
   }
 });
 
 
 app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.sendFile(path.join(__dirname, "text-admin.html"));
 });
 
 app.get(["/market-admin", "/market-admin.html"], (_req, res) => {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.sendFile(path.join(__dirname, "market-admin.html"));
 });
 
@@ -13757,10 +13715,12 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", error));
   clearAdminAuditLogsOnce().catch((error) => console.error("Admin audit reset error", error));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", error));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
+  proverkaEnsureWebhook().catch((error) => console.error("Proverka webhook setup error", error));
   setTimeout(() => {
     migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", error));
   }, 1500);
@@ -13784,9 +13744,9 @@ withdrawalPayoutTimer.unref?.();
 
 adminRealtimeServer = new WebSocketServer({ noServer: true });
 adminRealtimeServer.on("connection", (socket, req) => {
-  const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
-  const token = url.searchParams.get("token") || "";
-  const admin = verifyAdminToken({ headers: { authorization: `Bearer ${token}` } });
+  const protocols = String(req.headers["sec-websocket-protocol"] || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const token = protocols.find((item) => item !== "cerber-admin") || "";
+  const admin = verifyAdminToken({ headers: { authorization: `Bearer ${token}`, "user-agent": req.headers["user-agent"] || "" } });
   if (!admin) {
     socket.close(1008, "Unauthorized");
     return;

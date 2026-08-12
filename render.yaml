@@ -15,9 +15,13 @@ services:
         sync: false
       - key: ADMIN_JWT_SECRET
         sync: false
-      - key: ADMIN_PASSWORD
+      - key: SELLER_ADMIN_SECRET
         sync: false
-      - key: OWNER_PANEL_PASSWORD
+      - key: CAPTCHA_SECRET
+        sync: false
+      - key: IP_HASH_SECRET
+        sync: false
+      - key: ADMIN_TOTP_SECRET
         sync: false
       - key: MARKET_ADMIN_LOGIN
         sync: false
@@ -53,7 +57,11 @@ services:
         sync: false
       - key: PROVERKA_BOT_TOKEN
         sync: false
+      - key: PROVERKA_WEBHOOK_SECRET
+        sync: false
       - key: SITE_NOTIFY_BOT_TOKEN
+        sync: false
+      - key: SITE_NOTIFY_WEBHOOK_SECRET
         sync: false
       - key: PUBLIC_BASE_URL
         value: "https://cerber.to"

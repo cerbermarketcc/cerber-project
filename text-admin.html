@@ -14,7 +14,7 @@
           <h1>Text Admin</h1>
         </div>
         <div class="top-actions">
-          <a class="site-link" href="/?cms-visual=1">Визуальный редактор</a>
+          <a class="site-link" href="/market-admin.html">Основная админка</a>
           <a class="site-link secondary" href="/">Открыть сайт</a>
         </div>
       </section>
@@ -23,8 +23,16 @@
         <h2>Вход</h2>
         <form data-login-form>
           <label>
-            Пароль админки
+            Логин
+            <input name="login" autocomplete="username" value="admin" required>
+          </label>
+          <label>
+            Пароль
             <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <label>
+            Код 2FA
+            <input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="обязательный код" required>
           </label>
           <button type="submit">Войти</button>
         </form>
@@ -50,6 +58,6 @@
         <div class="grid" data-fields></div>
       </section>
     </main>
-    <script src="text-admin.js"></script>
+    <script src="text-admin.js?v=2"></script>
   </body>
 </html>

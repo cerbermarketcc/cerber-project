@@ -10,7 +10,7 @@ const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const API_ORIGIN = location.protocol === "file:" ? PRIMARY_API_ORIGIN : location.origin;
 
-let adminPassword = sessionStorage.getItem("cerber_text_admin_password") || "";
+let adminToken = sessionStorage.getItem("cerber_text_admin_token") || "";
 let baseTexts = {};
 let savedTexts = {};
 
@@ -99,7 +99,7 @@ async function saveTexts() {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "x-admin-password": adminPassword
+        "Authorization": `Bearer ${adminToken}`
       },
       body: JSON.stringify({ texts: savedTexts })
     });
@@ -108,6 +108,12 @@ async function saveTexts() {
     savedTexts = payload.texts || {};
     setStatus("Сохранено. Обновите сайт, чтобы увидеть новые тексты.");
   } catch (error) {
+    if (/session|required|unauthorized/i.test(String(error.message || ""))) {
+      sessionStorage.removeItem("cerber_text_admin_token");
+      adminToken = "";
+      loginPanel.hidden = false;
+      editorPanel.hidden = true;
+    }
     setStatus(error.message || "Не удалось сохранить");
   } finally {
     saveButton.disabled = false;
@@ -134,8 +140,19 @@ async function openEditor() {
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  adminPassword = new FormData(loginForm).get("password");
-  sessionStorage.setItem("cerber_text_admin_password", adminPassword);
+  const form = new FormData(loginForm);
+  const response = await fetch(`${API_ORIGIN}/api/admin/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: form.get("login"), password: form.get("password"), totp: form.get("totp") })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.token) {
+    loginPanel.querySelector("h2").textContent = payload.error || "Не удалось войти";
+    return;
+  }
+  adminToken = payload.token;
+  sessionStorage.setItem("cerber_text_admin_token", adminToken);
   await openEditor();
 });
 
@@ -149,4 +166,4 @@ searchInput.addEventListener("input", () => {
 });
 saveButton.addEventListener("click", saveTexts);
 
-if (adminPassword) openEditor();
+if (adminToken) openEditor();

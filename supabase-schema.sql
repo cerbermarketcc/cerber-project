@@ -150,3 +150,33 @@ create table if not exists audit_logs (
 create index if not exists audit_logs_action_idx on audit_logs(action);
 create index if not exists audit_logs_actor_idx on audit_logs(actor);
 create index if not exists audit_logs_created_at_idx on audit_logs(created_at);
+
+-- The browser never connects to database tables directly. All access goes through
+-- the server with the service-role key, so public Supabase roles must have no table access.
+do $$
+declare
+  table_name text;
+begin
+  foreach table_name in array array[
+    'profiles',
+    'sessions',
+    'stores',
+    'messages',
+    'app_settings',
+    'orders',
+    'wallet_deposits',
+    'wallet_withdrawals',
+    'ledger_entries',
+    'payment_ipn_events',
+    'audit_logs'
+  ]
+  loop
+    execute format('alter table public.%I enable row level security', table_name);
+    execute format('revoke all privileges on table public.%I from anon, authenticated', table_name);
+  end loop;
+end
+$$;
+
+alter default privileges in schema public revoke all on tables from anon, authenticated;
+alter default privileges in schema public revoke all on sequences from anon, authenticated;
+revoke usage on schema public from anon, authenticated;
