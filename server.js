@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "private-chat-security-2026-08-12-v153";
+const cerberBuildVersion = "private-chat-security-2026-08-12-v154";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -3214,10 +3214,11 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-app.get("/api/health/deep", async (_req, res) => {
+app.get("/api/health/deep", async (req, res, next) => {
   const startedAt = Date.now();
   const health = baseHealthPayload(startedAt);
   try {
+    requireAdmin(req);
     health.checks.supabase = await timedDbCheck("deep health supabase ping", async () => {
       if (!supabase) return { configured: false };
       const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
@@ -3280,6 +3281,9 @@ app.get("/api/health/deep", async (_req, res) => {
     health.durationMs = Date.now() - startedAt;
     res.status(health.ok ? 200 : 503).json(health);
   } catch (error) {
+    if (Number(error.status || 0) === 401 || Number(error.status || 0) === 403) {
+      return next(error);
+    }
     health.ok = false;
     health.error = String(error.message || error);
     health.durationMs = Date.now() - startedAt;
