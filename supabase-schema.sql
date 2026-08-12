@@ -172,11 +172,21 @@ begin
   ]
   loop
     execute format('alter table public.%I enable row level security', table_name);
-    execute format('revoke all privileges on table public.%I from anon, authenticated', table_name);
+    execute format('alter table public.%I force row level security', table_name);
+    execute format('revoke all privileges on table public.%I from public, anon, authenticated', table_name);
   end loop;
 end
 $$;
 
-alter default privileges in schema public revoke all on tables from anon, authenticated;
-alter default privileges in schema public revoke all on sequences from anon, authenticated;
-revoke usage on schema public from anon, authenticated;
+revoke all privileges on all tables in schema public from public, anon, authenticated;
+revoke all privileges on all sequences in schema public from public, anon, authenticated;
+revoke execute on all functions in schema public from public, anon, authenticated;
+alter default privileges in schema public revoke all on tables from public, anon, authenticated;
+alter default privileges in schema public revoke all on sequences from public, anon, authenticated;
+alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
+revoke all privileges on schema public from public, anon, authenticated;
+grant usage on schema public to service_role;
+grant all privileges on all tables in schema public to service_role;
+grant all privileges on all sequences in schema public to service_role;
+grant execute on all functions in schema public to service_role;
+revoke insert, update, delete on table storage.objects from public, anon, authenticated;

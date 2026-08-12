@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "node --check server.js && node --check app.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:security": "node scripts/security-smoke.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.3",

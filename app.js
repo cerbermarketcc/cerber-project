@@ -5,8 +5,6 @@ const AUTH_KEY = "cerber_auth_v1";
 const API_TOKEN_KEY = "cerber_api_token_v1";
 const SELLER_ADMIN_KEY = "cerber_seller_admin_v1";
 const SELLER_ADMIN_API_TOKEN_KEY = "cerber_seller_admin_token_v1";
-const ADMIN_ACCESS_KEY = "cerber_admin_access_v1";
-const OWNER_ACCESS_PASSWORD_KEY = "cerber_owner_access_password_v1";
 const STATS_RESET_KEY = "cerber_stats_reset_2026_05_28";
 const SHOP_PANEL_SESSION_KEY = "cerber_shop_panel_session_v1";
 const SHOP_PANEL_STAFF_SESSION_KEY = "cerber_shop_panel_staff_v1";
@@ -14,6 +12,7 @@ const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
+const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v156";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -27,6 +26,37 @@ if ("serviceWorker" in navigator) {
     registrations.forEach((registration) => registration.unregister());
   }).catch(() => {});
 }
+
+try {
+  if (localStorage.getItem(INCIDENT_BROWSER_RESET_KEY) !== "done") {
+    [
+      STORE_KEY,
+      LEGACY_STORE_KEY,
+      SESSION_KEY,
+      AUTH_KEY,
+      API_TOKEN_KEY,
+      SELLER_ADMIN_KEY,
+      SELLER_ADMIN_API_TOKEN_KEY,
+      SHOP_PANEL_SESSION_KEY,
+      SHOP_PANEL_STAFF_SESSION_KEY,
+      GROUP_MEMBERS_KEY,
+      DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY,
+      TRANSLATION_CACHE_KEY,
+      "cerber_owner_access_password_v1",
+      "cerber_admin_access_v1",
+      "cerber_text_admin_password"
+    ].forEach((key) => localStorage.removeItem(key));
+    [
+      API_TOKEN_KEY,
+      SELLER_ADMIN_KEY,
+      SELLER_ADMIN_API_TOKEN_KEY,
+      SHOP_PANEL_SESSION_KEY,
+      SHOP_PANEL_STAFF_SESSION_KEY
+    ].forEach((key) => sessionStorage.removeItem(key));
+    localStorage.setItem(INCIDENT_BROWSER_RESET_KEY, "done");
+  }
+  globalThis.caches?.keys?.().then((keys) => Promise.all(keys.map((key) => globalThis.caches.delete(key)))).catch(() => {});
+} catch {}
 
 const runtimeStorage = new Map();
 let runtimeApiToken = "";
@@ -94,8 +124,6 @@ const PARTIAL_STATE_OBJECT_KEYS = [
 
 const fallbackImage = "assets/cerber-emblem.png";
 const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
-// The legacy in-app admin is disabled; privileged access is server-authenticated.
-const ADMIN_PANEL_PASSWORD = "legacy-admin-disabled";
 let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
@@ -345,7 +373,6 @@ function marketologSeedStore() {
     id: "marketolog",
     tag: "@marketolog",
     ownerLogin: "marketolog",
-    adminPassword: "marketolog",
     isTop: true,
     countries: ["moldova"],
     cities: ["chisinau"],
@@ -396,7 +423,6 @@ function testSellerSeedStore() {
     id: "test",
     tag: "@test",
     ownerLogin: "test",
-    adminPassword: "test1",
     isTop: false,
     isFeatured: false,
     isNew: true,
@@ -457,8 +483,6 @@ if (API_ENABLED) {
     localStorage.setItem(AUTH_KEY, JSON.stringify({ currentUser: db.currentUser, users: (db.users || []).map(clientStorageUser) }));
     localStorage.removeItem(API_TOKEN_KEY);
     localStorage.removeItem("cerber_text_admin_password");
-    localStorage.removeItem(OWNER_ACCESS_PASSWORD_KEY);
-    localStorage.removeItem(ADMIN_ACCESS_KEY);
     localStorage.removeItem(SELLER_ADMIN_API_TOKEN_KEY);
   } catch {}
 }
@@ -1437,7 +1461,6 @@ function mountCmsVisualEditor() {
 
   const status = toolbar.querySelector("[data-cms-status]");
   const password = toolbar.querySelector("[data-cms-password]");
-  password.value = sessionStorageGet("cerber_text_admin_password") || "";
   const setStatus = (message) => status.textContent = message;
 
   document.addEventListener("click", (event) => {
@@ -1456,8 +1479,6 @@ function mountCmsVisualEditor() {
   }, true);
 
   toolbar.querySelector("[data-cms-save]").onclick = async () => {
-    const adminPassword = password.value.trim();
-    sessionStorageSet("cerber_text_admin_password", adminPassword);
     document.querySelectorAll("[data-cms-original-text]").forEach((element) => {
       const next = cmsNormalizeText(element.textContent);
       const original = element.dataset.cmsOriginalText;
@@ -2123,7 +2144,7 @@ function rememberApiToken(token = "") {
 }
 
 function sellerAdminApiSessionToken() {
-  return runtimeSellerAdminApiToken || storageGet(SELLER_ADMIN_API_TOKEN_KEY);
+  return runtimeSellerAdminApiToken || sessionStorageGet(SELLER_ADMIN_API_TOKEN_KEY);
 }
 
 function rememberSellerAdminApiToken(token = "") {
@@ -9675,29 +9696,7 @@ function storeRisk(store) {
 }
 
 function renderOwnerAccess() {
-  route = "owner";
-  layout(`
-    <section class="screen">
-      <article class="panel">
-        <h2>Панель владельца</h2>
-        <p>Введите общий пароль владельца, чтобы открыть управление маркетом.</p>
-        <form class="form" data-owner-access-form>
-          <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
-          <button class="primary">Войти</button>
-        </form>
-      </article>
-    </section>
-  `);
-  document.querySelector("[data-owner-access-form]").onsubmit = (event) => {
-    event.preventDefault();
-    const password = new FormData(event.currentTarget).get("password");
-    if (password !== ADMIN_PANEL_PASSWORD) return showToast("Неверный пароль");
-    try {
-      sessionStorageSet(ADMIN_ACCESS_KEY, "ok");
-      sessionStorageSet(OWNER_ACCESS_PASSWORD_KEY, password);
-    } catch {}
-    renderOwnerPanel();
-  };
+  return renderLegacyAdminDisabled();
 }
 
 function ownerStatCard(label, value) {
@@ -10365,34 +10364,7 @@ function handleStoreApplicationCreate(event) {
 }
 
 function renderAdmin() {
-  if (!isAdmin()) {
-    route = "admin";
-    layout(`
-      <section class="screen">
-        <article class="panel">
-          <h2>Общая админка</h2>
-          <p>Введите пароль общей админки сайта.</p>
-          <form class="form" data-admin-access-form>
-            <label class="field">Пароль<input name="password" type="password" required autocomplete="current-password"></label>
-            <button class="primary">Войти в админку</button>
-          </form>
-        </article>
-      </section>
-    `);
-    document.querySelector("[data-admin-access-form]").onsubmit = (event) => {
-      event.preventDefault();
-      const password = new FormData(event.currentTarget).get("password");
-      if (password !== ADMIN_PANEL_PASSWORD) {
-        showToast("Неверный пароль админки");
-        return;
-      }
-      try {
-        sessionStorageSet(ADMIN_ACCESS_KEY, "ok");
-      } catch {}
-      renderAdmin();
-    };
-    return;
-  }
+  return renderLegacyAdminDisabled();
   route = "admin";
   layout(`
     <section class="screen">
@@ -12742,7 +12714,13 @@ function showPendingSiteBroadcast() {
   document.querySelector("[data-broadcast-click]")?.addEventListener("click", async () => {
     notification.clickedAt = Date.now();
     await trackSiteBroadcast(notification, "clicked");
-    if (notification.buttonUrl) window.open(notification.buttonUrl, "_blank", "noopener");
+    if (notification.buttonUrl) {
+      try {
+        const target = new URL(notification.buttonUrl, location.origin);
+        const trustedHosts = new Set([location.hostname, "cerber.to", "www.cerber.to", "cerber.love", "www.cerber.love", "cerber.vip", "www.cerber.vip", "cerber-project.onrender.com"]);
+        if (target.protocol === "https:" && trustedHosts.has(target.hostname)) window.open(target.href, "_blank", "noopener,noreferrer");
+      } catch {}
+    }
     document.querySelector("[data-modal]")?.classList.remove("open");
   });
   document.querySelector("[data-broadcast-close]")?.addEventListener("click", async () => {

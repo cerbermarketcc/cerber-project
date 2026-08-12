@@ -998,7 +998,8 @@ function userDetail(payload) {
     </section>
     <form data-user-form="${esc(u.login)}">
       <div class="row"><label class="field">Имя пользователя<input name="name" value="${esc(u.name || "")}" maxlength="120"></label><label class="field">Роль<select name="role">${["admin", "moderator", "seller", "user"].map((role) => `<option value="${role}" ${u.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></label></div>
-      <label class="field">Пароль магазина<input name="storePassword" placeholder="задать для роли Магазин"></label>
+      <label class="field">Новый пароль клиента<input name="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять"></label>
+      <label class="field">Пароль магазина<input name="storePassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="задать для роли Магазин"></label>
       <label class="field">Причина блокировки<input name="blockReason" value="${esc(payload.status?.reason || "Ваш аккаунт заблокирован")}"></label>
       <p><button class="primary">Сохранить пользователя</button> <button class="ghost danger" type="button" data-block-user="${esc(u.login)}">Заблокировать</button> <button class="ghost" type="button" data-unblock-user="${esc(u.login)}">Разблокировать</button></p>
     </form>
@@ -1419,7 +1420,7 @@ function renderSettings() {
     <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
     <label class="field">Platform LTC wallet<input name="platformLtcWallet" value="${esc(payment.platformLtcWallet || "")}" placeholder="ltc1..."></label>
     <button class="primary">Сохранить настройки</button>
-  </form><hr><form data-password-form><h3>Сменить пароль админки</h3><div class="row"><label class="field">Текущий пароль<input name="currentPassword" type="password"></label><label class="field">Новый пароль<input name="nextPassword" type="password"></label></div><button class="ghost">Сменить пароль</button></form><hr><div><h3>Очистка маркетплейса</h3><p class="muted">Удаляет все магазины и очищает обменники, заявки магазинов и старые owner-кэши. Admin-пользователи не удаляются.</p><button class="ghost danger" type="button" data-clear-marketplace>Очистить магазины и обменники</button></div></article>`;
+  </form></article>`;
 }
 
 function renderMiscLegacy() {
@@ -1587,7 +1588,7 @@ function renderLogs() {
     mirror_bot_checkApi: "Проверка API зеркала",
     mirror_bot_delete: "Зеркало удалено"
   }[action] || action);
-  return `<div class="actions"><button class="ghost danger" type="button" data-clear-logs>Очистить логи</button></div><article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
+  return `<article class="table-card"><table><thead><tr><th>Дата</th><th>Категория</th><th>Админ</th><th>Действие</th><th>Детали</th></tr></thead><tbody>${rows.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${esc(String(log.action || "").split("_")[0])}</td><td>${esc(log.actor)}</td><td>${esc(label(log.action))}</td><td>${esc(JSON.stringify(log.details || {}))}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function healthStatus(value) {
@@ -1992,7 +1993,7 @@ function bindActions() {
     try {
       data = await api(`/api/admin/users/${encodeURIComponent(form.dataset.userForm)}`, {
         method: "PATCH",
-        body: JSON.stringify({ name: fd.get("name"), role: fd.get("role"), storePassword: fd.get("storePassword") })
+        body: JSON.stringify({ name: fd.get("name"), role: fd.get("role"), newPassword: fd.get("newPassword"), storePassword: fd.get("storePassword") })
       });
       toast("Пользователь сохранен");
       renderCurrentView({ preserveScroll: true });
@@ -2330,39 +2331,7 @@ function bindActions() {
       }
     };
   });
-  root.querySelector("[data-password-form]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      await api("/api/admin/password", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
-      event.currentTarget.reset();
-      toast("Пароль обновлен");
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
-  root.querySelector("[data-clear-logs]")?.addEventListener("click", async () => {
-    if (!confirm("Очистить весь журнал действий? Это не затронет пользователей, магазины, заказы и платежи.")) return;
-    try {
-      data = await api("/api/admin/logs", { method: "DELETE" });
-      toast("Логи очищены");
-      renderShell();
-    } catch (error) {
-      toast(error.message, true);
-      form.dataset.submitting = "";
-      if (button) button.disabled = false;
-    }
-  });
   bindAdminDisputeMessageMenus(root);
-  root.querySelector("[data-clear-marketplace]")?.addEventListener("click", async () => {
-    if (!confirm("Удалить все магазины и очистить обменники? Admin-пользователь останется.")) return;
-    try {
-      data = await api("/api/admin/marketplace-data", { method: "DELETE" });
-      toast("Магазины и обменники очищены");
-      renderShell();
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
 }
 
 function drawCharts() {

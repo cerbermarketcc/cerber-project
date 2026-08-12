@@ -5,15 +5,17 @@ services:
     plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start
-    healthCheckPath: /
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "22"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: ADMIN_JWT_SECRET
+        sync: false
+      - key: DATA_ENCRYPTION_KEY
         sync: false
       - key: SELLER_ADMIN_SECRET
         sync: false
@@ -33,6 +35,8 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         value: "https://cerber-project.onrender.com,https://cerber.to,https://www.cerber.to,https://cerber.love,https://www.cerber.love,https://cerber.vip,https://www.cerber.vip"
+      - key: ALLOWED_HOSTS
+        value: "cerber-project.onrender.com,cerber-project,cerber.to,www.cerber.to,cerber.love,www.cerber.love,cerber.vip,www.cerber.vip"
       - key: USER_SESSION_TTL_HOURS
         value: "336"
       - key: NOWPAYMENTS_API_KEY
@@ -44,6 +48,8 @@ services:
       - key: NOWPAYMENTS_LTC_WALLET
         sync: false
       - key: NOWPAYMENTS_PAYOUTS_ENABLED
+        sync: false
+      - key: INCIDENT_PAYOUT_UNLOCK
         sync: false
       - key: NOWPAYMENTS_EMAIL
         sync: false

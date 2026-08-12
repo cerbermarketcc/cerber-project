@@ -13,13 +13,14 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "incident-lockdown-2026-08-12-v155";
+const cerberBuildVersion = "incident-lockdown-2026-08-12-v156";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
-const securityTokenEpochMs = Math.max(1786549638180, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
+const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -32,7 +33,9 @@ const userSessionTtlMs = Math.max(1, Number.isFinite(configuredSessionTtlHours) 
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
-const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED || "").toLowerCase() === "true";
+const incidentPayoutUnlockVersion = "reviewed-2026-08-12-v1";
+const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED || "").toLowerCase() === "true"
+  && secretValuesMatch(process.env.INCIDENT_PAYOUT_UNLOCK, incidentPayoutUnlockVersion);
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
@@ -227,7 +230,6 @@ const publicStateSettingsSelect = [
   "theme:data->theme",
   "lang:data->lang",
   "publicStoresCache:data->publicStoresCache",
-  "ownerStores:data->ownerStores",
   "exchangeCards:data->exchangeCards",
   "exchangers:data->exchangers",
   "groupSettings:data->groupSettings",
@@ -258,6 +260,11 @@ const publicStoresSelect = [
   "name:data->name",
   "short:data->short",
   "description:data->description",
+  "image:data->image",
+  "avatar:data->avatar",
+  "cover:data->cover",
+  "banner:data->banner",
+  "gallery:data->gallery",
   "countries:data->countries",
   "cities:data->cities",
   "districts:data->districts",
@@ -267,7 +274,13 @@ const publicStoresSelect = [
   "isFeatured:data->isFeatured",
   "isNew:data->isNew",
   "visibleInCatalog:data->visibleInCatalog",
-  "orders:data->orders",
+  "placement:data->placement",
+  "placements:data->placements",
+  "position:data->position",
+  "homepagePosition:data->homepagePosition",
+  "topPosition:data->topPosition",
+  "newPosition:data->newPosition",
+  "catalogPosition:data->catalogPosition",
   "reviews:data->reviews",
   "rating:data->rating"
 ].join(",");
@@ -308,7 +321,23 @@ const allowedCorsOrigins = new Set([
   "https://www.cerber.vip",
   ...configuredAllowedOrigins
 ]);
+const configuredAllowedHosts = String(process.env.ALLOWED_HOSTS || "")
+  .split(",")
+  .map((host) => host.trim().toLowerCase())
+  .filter(Boolean);
+const allowedRequestHosts = new Set([
+  "cerber-project.onrender.com",
+  "cerber-project",
+  "cerber.to",
+  "www.cerber.to",
+  "cerber.love",
+  "www.cerber.love",
+  "cerber.vip",
+  "www.cerber.vip",
+  ...configuredAllowedHosts
+]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+const localHostPattern = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const clientRateLimits = new Map();
 const usedInternalCaptchas = new Map();
 const allowedInlineImageTypes = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
@@ -323,6 +352,13 @@ const allowedInlineAttachmentTypes = new Set([
   "video/mp4",
   "video/quicktime"
 ]);
+const trustedMediaOrigins = new Set([
+  ...allowedCorsOrigins
+]);
+try {
+  if (supabaseUrl) trustedMediaOrigins.add(new URL(supabaseUrl).origin);
+} catch {}
+const trustedMediaSources = [...trustedMediaOrigins].join(" ");
 const cspDirectives = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -331,8 +367,8 @@ const cspDirectives = [
   "script-src 'self' 'sha256-LwGlgkSkxEiHHxfPSdxkT4YhGBqvP2mu6Q2ULIIysjU=' https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: blob: https:",
-  "media-src 'self' data: blob: https:",
+  `img-src 'self' data: blob: ${trustedMediaSources}`,
+  `media-src 'self' data: blob: ${trustedMediaSources}`,
   "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://api.coingecko.com https://challenges.cloudflare.com wss://cerber-project.onrender.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip https://api.telegram.org",
   "frame-src https://challenges.cloudflare.com",
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
@@ -340,6 +376,12 @@ const cspDirectives = [
 
 function isAllowedCorsOrigin(origin = "") {
   return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin);
+}
+
+function isAllowedRequestHost(host = "") {
+  const value = String(host || "").trim().toLowerCase();
+  const hostname = value.replace(/:\d+$/, "");
+  return allowedRequestHosts.has(hostname) || localHostPattern.test(value);
 }
 
 function maskSecret(value = "") {
@@ -415,6 +457,9 @@ function storeSecretsSnapshot(store = {}) {
 }
 
 app.use((req, res, next) => {
+  if (!isAllowedRequestHost(req.headers.host)) {
+    return res.status(421).send("Misdirected Request");
+  }
   const origin = String(req.headers.origin || "");
   const allowedOrigin = origin && isAllowedCorsOrigin(origin);
   if (origin && !allowedOrigin && req.path.startsWith("/api/")) {
@@ -459,20 +504,46 @@ app.use((req, res, next) => {
   next();
 });
 app.use(compression({ threshold: 1024 }));
-app.use(express.json({ limit: "20mb" }));
-app.use("/api", (req, _res, next) => {
+const smallApiJsonParser = express.json({ limit: "256kb" });
+const webhookApiJsonParser = express.json({ limit: "2mb" });
+const mediaApiJsonParser = express.json({ limit: "20mb" });
+app.use("/api", (req, res, next) => {
   try {
-    if (!/\/(?:webhook|ipn)(?:\/|$)/i.test(req.path)) {
-      assertClientRateLimit(req, "api-global", { limit: 240, windowMs: 60 * 1000 });
+    const contentLength = Math.max(0, Number(req.headers["content-length"] || 0) || 0);
+    const hasBearerToken = /^Bearer\s+\S+/i.test(String(req.headers.authorization || ""));
+    const isProviderWebhook = /\/(?:webhook|ipn)(?:\/|$)/i.test(req.path);
+    const isMediaRoute = /^\/(?:store-admin(?:\/|$)|private-messages(?:\/|$)|group\/messages(?:\/|$)|support-tickets(?:\/|$)|orders\/[^/]+\/dispute\/reply(?:\/|$)|admin\/(?:stores|broadcasts|bots|exchangers)(?:\/|$))/i.test(req.path);
+    const maxBodyBytes = isProviderWebhook
+      ? 2 * 1024 * 1024
+      : hasBearerToken && isMediaRoute
+        ? 20 * 1024 * 1024
+        : 256 * 1024;
+    if (contentLength > maxBodyBytes) {
+      return res.status(413).json({ error: "Request body is too large" });
     }
+    req.apiBodyLimitTier = isProviderWebhook ? "webhook" : maxBodyBytes > 256 * 1024 ? "media" : "small";
+    assertClientRateLimit(req, isProviderWebhook ? "api-webhook" : "api-global", {
+      limit: isProviderWebhook ? 120 : 180,
+      windowMs: 60 * 1000
+    });
     next();
   } catch (error) {
     next(error);
   }
 });
 app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/")) return smallApiJsonParser(req, res, next);
+  if (req.apiBodyLimitTier === "webhook") return webhookApiJsonParser(req, res, next);
+  if (req.apiBodyLimitTier === "media") return mediaApiJsonParser(req, res, next);
+  return smallApiJsonParser(req, res, next);
+});
+app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
-  if (/^\/(?:server\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini|md|sql|ya?ml|lock)$/i.test(pathname)) {
+  if (
+    /^\/(?:\.git|\.github|\.codex|node_modules|scripts)(?:\/|$)/i.test(pathname) ||
+    /^\/(?:server\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) ||
+    /\.(?:php|ini|md|sql|ya?ml|lock)$/i.test(pathname)
+  ) {
     return res.status(404).send("Not found");
   }
   next();
@@ -536,11 +607,12 @@ async function createUserSession(req, loginKeyValue = "") {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const token = crypto.randomBytes(32).toString("hex");
-    const row = { token, login_key: loginKeyValue, ...sessionSource(req) };
+    const tokenDigest = sessionTokenDigest(token);
+    const row = { token: tokenDigest, login_key: loginKeyValue, ...sessionSource(req) };
     let { error } = await supabase.from("sessions").insert(row);
     if (error && /ip|user_agent|schema cache|column/i.test(String(error.message || ""))) {
       console.warn("[auth] session source columns unavailable, retrying minimal session", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
-      ({ error } = await supabase.from("sessions").insert({ token, login_key: loginKeyValue }));
+      ({ error } = await supabase.from("sessions").insert({ token: tokenDigest, login_key: loginKeyValue }));
     }
     if (!error) return token;
     lastError = error;
@@ -578,6 +650,61 @@ function adminSecret() {
     throw error;
   }
   return crypto.createHmac("sha256", configured).update(`admin:${securityTokenVersion}`).digest("hex");
+}
+
+function dataEncryptionKey() {
+  const configured = String(process.env.DATA_ENCRYPTION_KEY || "");
+  if (configured && configured.length < 32) {
+    const error = new Error("DATA_ENCRYPTION_KEY must contain at least 32 characters");
+    error.status = 503;
+    throw error;
+  }
+  return crypto.createHash("sha256").update(configured || adminSecret()).digest();
+}
+
+function encryptStoredSecret(value = "") {
+  const plain = String(value || "");
+  if (!plain || plain.startsWith("enc:v1:")) return plain;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", dataEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  return ["enc", "v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), encrypted.toString("base64url")].join(":");
+}
+
+function decryptStoredSecret(value = "") {
+  const stored = String(value || "");
+  if (!stored || !stored.startsWith("enc:v1:")) return stored;
+  const parts = stored.split(":");
+  if (parts.length !== 5) return "";
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", dataEncryptionKey(), Buffer.from(parts[2], "base64url"));
+    decipher.setAuthTag(Buffer.from(parts[3], "base64url"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(parts[4], "base64url")),
+      decipher.final()
+    ]).toString("utf8");
+  } catch (error) {
+    console.error("[security] stored secret could not be decrypted", { message: error.message });
+    return "";
+  }
+}
+
+function settingsStateForStorage(state = {}) {
+  return {
+    ...state,
+    mirrorBots: Array.isArray(state.mirrorBots)
+      ? state.mirrorBots.map((bot) => ({ ...bot, token: encryptStoredSecret(bot?.token) }))
+      : []
+  };
+}
+
+function settingsStateForRuntime(state = {}) {
+  return {
+    ...state,
+    mirrorBots: Array.isArray(state.mirrorBots)
+      ? state.mirrorBots.map((bot) => ({ ...bot, token: decryptStoredSecret(bot?.token) }))
+      : []
+  };
 }
 
 function requestDeviceHash(req = {}) {
@@ -627,11 +754,15 @@ function requireAdmin(req) {
 }
 
 function adminClientKey(req, login = "") {
-  return `${req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local"}:${loginKey(login)}`;
+  return `${clientIp(req)}:${loginKey(login)}`;
 }
 
 function clientIp(req) {
-  return String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local").split(",")[0].trim();
+  return String(req.ip || req.socket?.remoteAddress || "local").trim();
+}
+
+function sessionTokenDigest(token = "") {
+  return crypto.createHmac("sha256", adminSecret()).update(`session:${String(token || "")}`).digest("hex");
 }
 
 function assertClientRateLimit(req, scope, { limit = 30, windowMs = 60 * 1000, identity = "" } = {}) {
@@ -810,6 +941,23 @@ function publicUser(row) {
   return row ? { login: row.login, name: row.name, role: row.role } : null;
 }
 
+function publicStoreApplicationForUser(application = {}) {
+  return {
+    id: String(application.id || ""),
+    status: String(application.status || "pending"),
+    createdAt: application.createdAt || application.created_at || 0,
+    updatedAt: application.updatedAt || application.updated_at || 0,
+    applicantLogin: String(application.applicantLogin || ""),
+    ownerLogin: String(application.ownerLogin || ""),
+    name: String(application.name || ""),
+    tag: String(application.tag || ""),
+    short: String(application.short || ""),
+    description: String(application.description || ""),
+    country: String(application.country || ""),
+    cities: Array.isArray(application.cities) ? application.cities.map(String).slice(0, 100) : []
+  };
+}
+
 function sameLogin(a, b) {
   return loginKey(a) === loginKey(b);
 }
@@ -909,6 +1057,13 @@ function sanitizeStoresForVisualReset(stores = []) {
   return (Array.isArray(stores) ? stores : []).filter(isMarketplaceRecordAfterVisualReset);
 }
 
+function sanitizePublicStoresForState(stores = [], state = {}) {
+  const cleanState = sanitizeStateForVisualReset(state || {});
+  return sanitizeStoresForVisualReset(stores)
+    .map((store) => publicStoreForState(store))
+    .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(cleanState, store));
+}
+
 function sanitizeMessagesForVisualReset(messages = []) {
   return (Array.isArray(messages) ? messages : []).filter(marketplaceMessageAfterVisualReset);
 }
@@ -929,9 +1084,6 @@ function sanitizeStateForVisualReset(state = {}) {
   next.referralPayments = (Array.isArray(next.referralPayments) ? next.referralPayments : []).filter(isMarketplaceRecordAfterVisualReset);
   next.siteNotifications = (Array.isArray(next.siteNotifications) ? next.siteNotifications : []).filter(isMarketplaceRecordAfterVisualReset);
   next.nowpaymentsIpnEvents = (Array.isArray(next.nowpaymentsIpnEvents) ? next.nowpaymentsIpnEvents : []).filter(isMarketplaceRecordAfterVisualReset);
-  next.deletedStoreIds = [];
-  next.balances = {};
-  next.ltcBalances = {};
   return next;
 }
 
@@ -969,6 +1121,14 @@ function publicProductForState(product = {}, store = {}, options = {}) {
 
 function publicOrderForUser(order = {}) {
   const item = { ...order };
+  const providerPayload = item.paymentProviderPayload && typeof item.paymentProviderPayload === "object"
+    ? item.paymentProviderPayload
+    : {};
+  item.payAmount = Number(item.payAmount || providerPayload.pay_amount || providerPayload.payAmount || 0);
+  item.payCurrency = String(item.payCurrency || providerPayload.pay_currency || providerPayload.payCurrency || item.coinId || "");
+  item.providerActuallyPaid = Number(item.providerActuallyPaid || providerPayload.actually_paid || 0);
+  item.providerOutcomeAmount = Number(item.providerOutcomeAmount || providerPayload.outcome_amount || 0);
+  item.providerOutcomeCurrency = String(item.providerOutcomeCurrency || providerPayload.outcome_currency || "");
   const status = String(item.status || "").toLowerCase();
   const paymentStatus = String(item.paymentStatus || "").toLowerCase();
   const paid = ["paid", "finished"].includes(paymentStatus)
@@ -981,7 +1141,13 @@ function publicOrderForUser(order = {}) {
     "grossAmountLtc",
     "settlementGrossLtc",
     "ltcUsdRateAtPayment",
-    "ltcSettlementVersion"
+    "ltcSettlementVersion",
+    "paymentProviderPayload",
+    "providerStatusPayload",
+    "providerPayload",
+    "requestSignature",
+    "idempotencyKey",
+    "nowpaymentsPublicKey"
   ].forEach((key) => delete item[key]);
   if (!paid) {
     delete item.reservedDescription;
@@ -998,8 +1164,30 @@ function isBrokenImageValue(value = "") {
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
   if (isBrokenImageValue(image)) return fallback;
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image) && image.length > maxDataImageLength) return fallback;
-  return image;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image)) return image.length <= maxDataImageLength ? image : fallback;
+  if (trustedContentUrl(image)) return image;
+  if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(image)) return image.replace(/^\//, "");
+  return fallback;
+}
+
+function trustedContentUrl(value = "", options = {}) {
+  const source = String(value || "").trim();
+  if (!source) return "";
+  if (source.startsWith("/") && !source.startsWith("//")) return source;
+  let url;
+  try {
+    url = new URL(source);
+  } catch {
+    return "";
+  }
+  if (url.protocol !== "https:" || url.username || url.password) return "";
+  const host = url.hostname.toLowerCase();
+  const trustedHosts = new Set([...allowedRequestHosts].map((item) => String(item).split(":")[0]));
+  try {
+    if (supabaseUrl) trustedHosts.add(new URL(supabaseUrl).hostname.toLowerCase());
+  } catch {}
+  if (options.allowTelegram) trustedHosts.add("api.telegram.org");
+  return trustedHosts.has(host) ? url.toString() : "";
 }
 
 function inlineImagePayload(value = "") {
@@ -1136,7 +1324,7 @@ function stripStoreSecretsForState(item = {}, options = {}) {
 }
 
 function publicStoreForState(store = {}, options = {}) {
-  const includePrivate = Boolean(options.includePrivate || options.includeStaff);
+  const includePrivate = Boolean(options.includePrivate);
   const item = { ...store };
   item.image = publicImageForState(item.image || item.avatar, "assets/cerber-emblem.png");
   item.cover = publicImageForState(item.cover || item.banner || item.image, "assets/market-banner.png");
@@ -1254,9 +1442,7 @@ async function verifyCaptcha(token, req) {
   const form = new URLSearchParams();
   form.set("secret", turnstileSecretKey);
   form.set("response", token);
-  const remoteIp = String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "")
-    .split(",")[0]
-    .trim();
+  const remoteIp = clientIp(req);
   if (remoteIp) form.set("remoteip", remoteIp);
 
   let response;
@@ -1515,7 +1701,31 @@ function stateHasDurableContent(state = {}) {
 
 function publicExchangeCardsForState(exchangeCards = null) {
   const source = Array.isArray(exchangeCards) && exchangeCards.length ? exchangeCards : defaultExchangeCards;
-  return source.filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")));
+  return source
+    .filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")))
+    .map((card) => ({
+      id: String(card.id || ""),
+      name: String(card.name || card.title || ""),
+      title: String(card.title || card.name || ""),
+      description: String(card.description || ""),
+      image: publicImageForState(card.image, "assets/cerber-emblem.png"),
+      regions: Array.isArray(card.regions) ? card.regions.map(String).slice(0, 20) : [],
+      exchangeRate: Math.max(0, Number(card.exchangeRate || 0)),
+      cashoutRate: Math.max(0, Number(card.cashoutRate || 0)),
+      ltcUsd: Math.max(0, Number(card.ltcUsd || 0)),
+      countries: Array.isArray(card.countries) ? card.countries.map(String).slice(0, 50) : [],
+      cities: Array.isArray(card.cities) ? card.cities.map(String).slice(0, 100) : [],
+      districts: Array.isArray(card.districts) ? card.districts.map(String).slice(0, 200) : [],
+      ltcWallet: String(card.ltcWallet || "").trim(),
+      requisites: Array.isArray(card.requisites)
+        ? card.requisites.map((item) => ({
+          method: String(item?.method || ""),
+          value: String(item?.value || "").trim(),
+          active: item?.active !== false
+        })).filter((item) => item.method)
+        : [],
+      active: card.active !== false
+    }));
 }
 
 function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
@@ -1525,9 +1735,7 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
       ? state.publicStoresCache
       : (Array.isArray(state.ownerStores) ? state.ownerStores : []));
   const cleanState = sanitizeStateForVisualReset(state);
-  const stores = sanitizeStoresForVisualReset(sourceStores)
-    .map((store) => publicStoreForState(store))
-    .filter((store) => store && store.id !== "skboy" && !storeDeletedByState(cleanState, store));
+  const stores = sanitizePublicStoresForState(sourceStores, cleanState);
   return {
     theme: "dark",
     lang: cleanState.lang || "ru",
@@ -1565,7 +1773,9 @@ function mergePublicCatalogSnapshots(primary = {}, backup = {}) {
 async function loadPublicCatalogSnapshot() {
   if (!supabase) return null;
   if (catalogHasContent(publicCatalogMemorySnapshot) && Date.now() - publicCatalogMemorySnapshotAt < 30 * 1000) {
-    return cloneJson(publicCatalogMemorySnapshot);
+    const memoryCatalog = cloneJson(publicCatalogMemorySnapshot);
+    memoryCatalog.stores = sanitizePublicStoresForState(memoryCatalog.stores, memoryCatalog);
+    return memoryCatalog;
   }
   const memorySnapshot = catalogHasContent(publicCatalogMemorySnapshot)
     ? { ...cloneJson(publicCatalogMemorySnapshot), restoredFromMemory: true }
@@ -1588,7 +1798,10 @@ async function loadPublicCatalogSnapshot() {
   ]);
   const fallbackCatalog = mergePublicCatalogSnapshots(backup || {}, memorySnapshot || {});
   const merged = mergePublicCatalogSnapshots(primary || {}, fallbackCatalog);
+  merged.stores = sanitizePublicStoresForState(merged.stores, merged);
   if (catalogHasContent(merged)) {
+    merged.exchangeCards = publicExchangeCardsForState(merged.exchangeCards);
+    merged.exchangers = publicExchangersForState(merged.exchangers || []);
     const restoredFromBackup = Boolean(
       backup && (
         ((!Array.isArray(primary?.stores) || !primary.stores.length) && arrayHasItems(backup.stores)) ||
@@ -1610,10 +1823,14 @@ async function loadPublicCatalogSnapshot() {
     }
     return restoredFromBackup ? { ...merged, restoredFromBackup: true } : merged;
   }
-  if (memorySnapshot) return memorySnapshot;
+  if (memorySnapshot) {
+    memorySnapshot.exchangeCards = publicExchangeCardsForState(memorySnapshot.exchangeCards);
+    memorySnapshot.exchangers = publicExchangersForState(memorySnapshot.exchangers || []);
+    return memorySnapshot;
+  }
   if (Array.isArray(publicStoresMemoryCache) && publicStoresMemoryCache.length) {
     return {
-      stores: publicStoresMemoryCache.map((store) => ({ ...store })),
+      stores: sanitizePublicStoresForState(publicStoresMemoryCache),
       exchangeCards: [],
       exchangers: [],
       restoredFromStoreMemory: true
@@ -1671,7 +1888,13 @@ function compactStoreData(row = {}) {
     isFeatured: row.isFeatured,
     isNew: row.isNew,
     visibleInCatalog: row.visibleInCatalog,
-    orders: row.orders,
+    placement: row.placement,
+    placements: row.placements,
+    position: row.position,
+    homepagePosition: row.homepagePosition,
+    topPosition: row.topPosition,
+    newPosition: row.newPosition,
+    catalogPosition: row.catalogPosition,
     reviews: row.reviews,
     rating: row.rating,
     products: row.products,
@@ -1685,13 +1908,17 @@ function publicStoresFromRows(rows = [], settingsData = {}) {
     mergeStoreSources(settingsData.publicStoresCache || [], settingsData.stores || [])
   );
   return (Array.isArray(rows) ? rows : [])
-    .map((row) => publicStoreForState(hydrateStoreRow(row, fallbackStores)))
+    .map((row) => {
+      const compact = compactStoreData(row);
+      const fallback = fallbackStores.find((store) => String(store?.id || "") === String(compact.id || "")) || {};
+      return publicStoreForState({ ...fallback, ...compact });
+    })
     .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
 }
 
 async function loadPublicStoresFromDb(settingsData = {}, label = "public stores db query", timeoutMs = 5000) {
   const result = await withTimeout(
-    supabase.from("stores").select("id,data,created_at,updated_at").order("created_at", { ascending: true }).limit(500),
+    supabase.from("stores").select(publicStoresSelect).order("created_at", { ascending: true }).limit(500),
     label,
     timeoutMs
   );
@@ -1708,7 +1935,7 @@ async function refreshPublicCatalogFromStoreRows(settingsData = {}, label = "pub
 
 function rememberPublicStoresCache(stores = []) {
   if (!Array.isArray(stores)) return;
-  publicStoresMemoryCache = stores.map((store) => ({ ...store }));
+  publicStoresMemoryCache = sanitizePublicStoresForState(stores).map((store) => ({ ...store }));
   publicStoresMemoryCacheAt = Date.now();
 }
 
@@ -1767,9 +1994,9 @@ async function stateFor(user) {
           console.error("[stateFor] public catalog fresh stores skipped", { message: error.message });
           return null;
         });
-        const catalogStores = sanitizeStoresForVisualReset(Array.isArray(freshStores)
+        const catalogStores = sanitizePublicStoresForState(Array.isArray(freshStores)
           ? freshStores
-          : (publicCatalog.stores || []));
+          : (publicCatalog.stores || []), publicCatalog);
         rememberPublicStoresCache(catalogStores);
         if (Array.isArray(freshStores)) {
           savePublicCatalogSnapshot({ ...publicCatalog, publicStoresCache: catalogStores }, catalogStores).catch((error) => {
@@ -1830,7 +2057,7 @@ async function stateFor(user) {
           return { data: { data: {} }, error: null };
         }),
         withTimeout(
-          supabase.from("stores").select("id,data,created_at,updated_at").limit(100),
+          supabase.from("stores").select(publicStoresSelect).limit(100),
           "public stores fallback query",
           5000
         ).catch((error) => {
@@ -1841,24 +2068,11 @@ async function stateFor(user) {
       const [settingsResult, storesResult] = await fallbackPublicStatePromise;
       if (settingsResult.error) throw settingsResult.error;
       let settingsData = compactSettingsData(settingsResult.data || {});
-      if (!stateHasDurableContent(settingsData)) {
-        const backupState = await loadSettingsBackupState();
-        if (stateHasDurableContent(backupState)) {
-          settingsData = { ...settingsData, ...backupState };
-          console.warn("[stateFor] public state restored from backup", {
-            publicStoresCache: settingsData.publicStoresCache?.length || 0,
-            exchangers: settingsData.exchangers?.length || 0,
-            exchangeCards: settingsData.exchangeCards?.length || 0
-          });
-        }
-      }
       settingsData = sanitizeStateForVisualReset(settingsData);
-      let publicStores = Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [];
-      if (!publicStores.length && Array.isArray(settingsData.ownerStores) && settingsData.ownerStores.length) {
-        publicStores = settingsData.ownerStores
-          .map((store) => publicStoreForState(store))
-          .filter((store) => store && store.id !== "skboy" && !/СЃРѕР»[РµС‘]РЅС‹Р№ РјР°Р»СЊС‡РёРє/i.test(String(store.name || "")) && !storeDeletedByState(settingsData, store));
-      }
+      let publicStores = sanitizePublicStoresForState(
+        Array.isArray(settingsData.publicStoresCache) ? settingsData.publicStoresCache : [],
+        settingsData
+      );
       if (publicStores.length) rememberPublicStoresCache(publicStores);
       const storesQuerySucceeded = Array.isArray(storesResult?.data);
       const storeRows = storesQuerySucceeded ? storesResult.data : [];
@@ -1873,7 +2087,7 @@ async function stateFor(user) {
         }
       }
       if (!storesQuerySucceeded && !publicStores.length && publicStoresMemoryCache.length) {
-        publicStores = sanitizeStoresForVisualReset(publicStoresMemoryCache).map((store) => ({ ...store }));
+        publicStores = sanitizePublicStoresForState(publicStoresMemoryCache, settingsData);
       }
       if (!storesQuerySucceeded && !publicStores.length) {
         refreshPublicStoresCacheInBackground(settingsData);
@@ -1990,7 +2204,7 @@ async function stateFor(user) {
         });
       }
     }
-    settingsData = sanitizeStateForVisualReset(settingsData);
+    settingsData = settingsStateForRuntime(sanitizeStateForVisualReset(settingsData));
     if (user?.login) {
       const beforeCode = settingsData.referralCodes?.[loginKey(user.login)] || "";
       const ensuredCode = ensureReferralCodeForState(settingsData, user.login);
@@ -2056,7 +2270,7 @@ async function stateFor(user) {
         sameUser(message.login) ||
         sameUser(message.recipientLogin) ||
         (Array.isArray(message.disputeParticipants) && message.disputeParticipants.some((item) => loginKey(item) === userKey))
-      ))
+      )).map(publicPrivateMessage)
       : [];
     const userOrders = user
       ? orders.filter((order) => (
@@ -2107,7 +2321,9 @@ async function stateFor(user) {
       ? (Array.isArray(settingsData.userFilters) ? settingsData.userFilters : []).filter((item) => sameUser(item.login))
       : [];
     const userStoreApplications = user
-      ? (Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : []).filter((item) => sameUser(item.applicantLogin) || sameUser(item.ownerLogin))
+      ? (Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [])
+        .filter((item) => sameUser(item.applicantLogin) || sameUser(item.ownerLogin))
+        .map(publicStoreApplicationForUser)
       : [];
 
     return {
@@ -2125,11 +2341,8 @@ async function stateFor(user) {
         exchangeCards: visibleExchangeCards,
         exchangers: publicExchangersForState(settingsData.exchangers || [], allMessages),
         exchangeRequests: userExchangeRequests,
-        groupMessages: user && Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
-        groupSettings: user ? normalizeGroupSettings(settingsData.groupSettings || {}) : normalizeGroupSettings({
-          title: settingsData.groupSettings?.title,
-          pinnedMessageId: settingsData.groupSettings?.pinnedMessageId
-        }),
+        groupMessages: user && Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages.map(publicGroupMessage) : [],
+        groupSettings: publicGroupSettings(settingsData.groupSettings || {}),
         referrals: userReferrals,
         referralPayments: userReferralPayments,
         referralCodes: userReferralCodes,
@@ -2145,8 +2358,8 @@ async function stateFor(user) {
           blocked: 0,
           items: []
         },
-        siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)) : [],
-        broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
+        siteNotifications: Array.isArray(settingsData.siteNotifications) && user ? settingsData.siteNotifications.filter((item) => sameLogin(item.login, user.login)).map(publicSiteNotification) : [],
+        broadcasts: [],
         supportSettings: { recipients: [] },
         supportTickets: userSupportTickets,
         userFilters,
@@ -2173,8 +2386,9 @@ async function userFromRequest(req) {
   requireDb();
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
+  const tokenDigest = sessionTokenDigest(token);
   const { data: session, error: sessionError } = await withTimeout(
-    supabase.from("sessions").select("login_key,created_at,user_agent").eq("token", token).maybeSingle(),
+    supabase.from("sessions").select("login_key,created_at,user_agent").eq("token", tokenDigest).maybeSingle(),
     "session token query",
     8000
   );
@@ -2182,7 +2396,7 @@ async function userFromRequest(req) {
   if (!session) return null;
   const createdAt = Date.parse(session.created_at || "");
   if (!Number.isFinite(createdAt) || createdAt < securityTokenEpochMs || Date.now() - createdAt > userSessionTtlMs) {
-    supabase.from("sessions").delete().eq("token", token).then(() => {}).catch(() => {});
+    supabase.from("sessions").delete().eq("token", tokenDigest).then(() => {}).catch(() => {});
     return null;
   }
   const expectedUserAgent = `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`;
@@ -2241,13 +2455,75 @@ function attachDisputeParticipants(message = {}, order = {}, store = null) {
 }
 
 function publicGroupMessage(message) {
+  const stickerUrl = cleanMessageReactionUrl(message.stickerUrl, { group: true });
+  const emojiUrls = (Array.isArray(message.emojiUrls) ? message.emojiUrls : [])
+    .map((url) => cleanMessageReactionUrl(url, { group: true }))
+    .filter(Boolean)
+    .slice(0, 8);
   return {
     id: message.id,
     fromLogin: message.fromLogin,
+    room: groupRoomKey(message.room),
     body: message.body || "",
-    attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    attachments: publicMessageAttachments(message.attachments),
+    emojiUrls,
+    stickerUrl,
+    likes: Array.isArray(message.likes) ? message.likes : [],
+    reactions: message.reactions && typeof message.reactions === "object" ? message.reactions : {},
+    deleted: Boolean(message.deleted),
+    editedAt: Number(message.editedAt || 0),
     createdAt: message.createdAt || 0,
     date: message.date || ""
+  };
+}
+
+function publicPrivateMessage(message = {}) {
+  const stickerUrl = cleanMessageReactionUrl(message.stickerUrl);
+  const emojiUrls = (Array.isArray(message.emojiUrls) ? message.emojiUrls : [])
+    .map((url) => cleanMessageReactionUrl(url))
+    .filter(Boolean)
+    .slice(0, 8);
+  return {
+    id: message.id,
+    fromLogin: message.fromLogin || "",
+    toLogin: message.toLogin || "",
+    subject: message.subject || "",
+    body: message.body || message.text || "",
+    storeId: message.storeId || "",
+    storeTag: message.storeTag || "",
+    orderId: message.orderId || "",
+    exchangeRequestId: message.exchangeRequestId || "",
+    disputeThreadId: message.disputeThreadId || "",
+    system: message.system || "",
+    attachments: publicMessageAttachments(message.attachments),
+    emojiUrls,
+    stickerUrl,
+    likes: Array.isArray(message.likes) ? message.likes : [],
+    reactions: message.reactions && typeof message.reactions === "object" ? message.reactions : {},
+    deleted: Boolean(message.deleted),
+    editedAt: Number(message.editedAt || 0),
+    createdAt: Number(message.createdAt || 0),
+    date: message.date || ""
+  };
+}
+
+function publicMessageAttachments(attachments = []) {
+  return (Array.isArray(attachments) ? attachments : []).slice(0, 4).map((file, index) => {
+    const url = cleanAttachmentUrl(file?.url);
+    if (!url) return null;
+    return {
+      name: String(file?.name || `file-${index + 1}`).slice(0, 120),
+      type: String(file?.type || "application/octet-stream").slice(0, 80),
+      url
+    };
+  }).filter(Boolean);
+}
+
+function publicSiteNotification(notification = {}) {
+  return {
+    ...notification,
+    photoUrl: publicImageForState(notification.photoUrl || "", ""),
+    buttonUrl: trustedContentUrl(notification.buttonUrl || "")
   };
 }
 
@@ -2479,8 +2755,10 @@ function authStateForUser(user, state = {}) {
   const storesSource = Array.isArray(state.publicStoresCache) && state.publicStoresCache.length
     ? state.publicStoresCache
     : (Array.isArray(state.ownerStores) ? state.ownerStores.map(publicStoreForState) : []);
-  const visibleStores = storesSource.filter((store) => store.id !== "skboy" && !/сол[её]ный мальчик/i.test(String(store.name || "")) && !storeDeletedByState(state, store));
+  const visibleStores = sanitizePublicStoresForState(storesSource, state)
+    .filter((store) => !/сол[её]ный мальчик/i.test(String(store.name || "")));
   const visibleExchangeCards = publicExchangeCardsForState(state.exchangeCards);
+  const ownBlock = key && state.blockedUsers?.[key] ? { [key]: state.blockedUsers[key] } : {};
   return {
     user: publicProfile,
     state: {
@@ -2496,8 +2774,8 @@ function authStateForUser(user, state = {}) {
       exchangeCards: visibleExchangeCards,
       exchangers: publicExchangersForState(state.exchangers || []),
       exchangeRequests: [],
-      groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages : [],
-      groupSettings: normalizeGroupSettings(state.groupSettings || {}),
+      groupMessages: Array.isArray(state.groupMessages) ? state.groupMessages.map(publicGroupMessage) : [],
+      groupSettings: publicGroupSettings(state.groupSettings || {}),
       referrals: Array.isArray(state.referrals) ? state.referrals.filter((item) => sameLogin(item.referrerLogin, login) || sameLogin(item.login, login)) : [],
       referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments.filter((item) => sameLogin(item.referrerLogin, login)) : [],
       referralCodes: key && state.referralCodes?.[key] ? { [key]: state.referralCodes[key] } : {},
@@ -2507,13 +2785,13 @@ function authStateForUser(user, state = {}) {
       walletDeposits: [],
       walletWithdrawals: [],
       siteNotifications: [],
-      broadcasts: Array.isArray(state.broadcasts) ? state.broadcasts : [],
+      broadcasts: [],
       supportSettings: { recipients: [] },
       supportTickets: [],
-      userFilters: Array.isArray(state.userFilters) ? state.userFilters : [],
-      blockedUsers: state.blockedUsers || {},
-      ownerSettings: state.ownerSettings || {},
-      paymentSettings: state.paymentSettings || {},
+      userFilters: Array.isArray(state.userFilters) ? state.userFilters.filter((item) => sameLogin(item.login, login)) : [],
+      blockedUsers: ownBlock,
+      ownerSettings: {},
+      paymentSettings: {},
       referralPeriod: state.referralPeriod || {},
       filters: state.filters || {}
     }
@@ -2747,6 +3025,13 @@ function sellerTokenCanAccess(token = {}, ...permissions) {
   return permissions.some((permission) => allowed.includes(permission));
 }
 
+function storeForAdminState(store = {}, token = {}) {
+  return publicStoreForState(store, {
+    includeStaff: true,
+    includePrivate: token?.role !== "staff" || sellerTokenCanAccess(token, "storage")
+  });
+}
+
 function sellerForbidden(res) {
   return res.status(403).json({ error: "Нет доступа к этому разделу админки магазина" });
 }
@@ -2867,7 +3152,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
       statePartial: true,
       catalogsPartial: true,
       currentUser: "",
-      stores: store ? [publicStoreForState(store, { includeStaff: true })] : [],
+      stores: store ? [storeForAdminState(store, token)] : [],
       orders: [],
       messages: [],
       walletWithdrawals: [],
@@ -2877,8 +3162,12 @@ async function stateForStoreAdmin(storeId, token = {}) {
       ownerSettings: {}
     }
   };
-  if (payload.state.stores[0]) {
+  const canSeeOrders = !isStaff || sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes");
+  const canSeeFinances = !isStaff || sellerTokenCanAccess(token, "finances");
+  if (payload.state.stores[0] && canSeeOrders) {
     payload.state.stores[0].productOrders = storeOrders;
+  }
+  if (payload.state.stores[0] && canSeeFinances) {
     payload.state.stores[0].storeFinanceRows = finance.rows;
     payload.state.stores[0].storeGrossUsd = finance.grossUsd;
     payload.state.stores[0].storeCommissionUsd = finance.commissionUsd;
@@ -2896,7 +3185,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
     payload.state.stores[0].storeOriginalCommissionUsd = finance.originalCommissionUsd;
     payload.state.stores[0].storeOriginalBalanceUsd = finance.originalNetUsd;
   }
-  payload.state.orders = isStaff && !sellerTokenCanAccess(token, "orders", "clients", "finances", "disputes")
+  payload.state.orders = isStaff && !canSeeOrders
     ? []
     : isStaff && sellerTokenCanAccess(token, "disputes") && !sellerTokenCanAccess(token, "orders", "clients", "finances")
       ? storeOrders.filter(orderHasDisputeHistory)
@@ -2907,7 +3196,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
       .filter((item) => item.storeId === id)
       .map(storeAdminWithdrawalForState)
     : [];
-  const responseStore = payload.state.stores[0] || (store ? publicStoreForState(store, { includeStaff: true }) : null);
+  const responseStore = payload.state.stores[0] || (store ? storeForAdminState(store, token) : null);
   payload.state.stores = [];
   return { ...payload, store: responseStore };
 }
@@ -3214,26 +3503,8 @@ function baseHealthPayload(startedAt = Date.now()) {
   };
 }
 
-app.get("/api/health", async (_req, res) => {
-  const startedAt = Date.now();
-  const health = baseHealthPayload(startedAt);
-  try {
-    const supabasePing = await timedDbCheck("health supabase ping", async () => {
-      if (!supabase) return { configured: false };
-      const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
-      if (error) throw error;
-      return { configured: true, mainSettings: Boolean(data) };
-    }, 10000);
-    health.checks.supabase = { ...health.checks.supabase, ...supabasePing };
-    health.ok = Boolean(supabasePing.ok);
-    health.durationMs = Date.now() - startedAt;
-    res.status(200).json({ ok: health.ok, build: cerberBuildVersion, time: health.time });
-  } catch (error) {
-    health.ok = false;
-    health.error = String(error.message || error);
-    health.durationMs = Date.now() - startedAt;
-    res.status(200).json({ ok: false, build: cerberBuildVersion, time: health.time });
-  }
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, build: cerberBuildVersion, time: new Date().toISOString() });
 });
 
 app.get("/api/health/deep", async (req, res, next) => {
@@ -3612,7 +3883,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       appendAdminLog("store_admin_login", authenticatedStore.ownerLogin || authenticatedStore.id, { storeId: authenticatedStore.id, role: "owner", credentialSource: ownerAuth.source, ...requestSource(req) }).catch((error) => {
         console.error("[store-admin] owner login log failed", { storeId: authenticatedStore.id, message: error.message });
       });
-      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken, req), store: publicStoreForState(authenticatedStore, { includeStaff: true }), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
+      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken, req), store: storeForAdminState(authenticatedStore, ownerToken), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
@@ -3627,7 +3898,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     });
     res.json({
       token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }, req),
-      store: publicStoreForState(store, { includeStaff: true }),
+      store: storeForAdminState(store, { role: "staff", permissions }),
       staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
       ...(await stateForStoreAdmin(store.id, { role: "staff", staffLogin: staff.login, permissions }))
     });
@@ -3650,7 +3921,7 @@ app.get("/api/store-admin/state", async (req, res, next) => {
       if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
-    res.json({ store: publicStoreForState(store, { includeStaff: true }), ...(await stateForStoreAdmin(token.storeId, token)) });
+    res.json({ store: storeForAdminState(store, token), ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }
@@ -3705,7 +3976,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       productTitles: Array.isArray(savedStore.products) ? savedStore.products.map((product) => product.title).slice(0, 10) : []
     });
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin" });
-    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
+    res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
     next(error);
   }
@@ -3749,7 +4020,7 @@ app.put("/api/store-admin/products", async (req, res, next) => {
         : 0
     });
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-products" });
-    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
+    res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
     next(error);
   }
@@ -3805,7 +4076,7 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
     scheduleStorePublication(savedStore, "store-admin positions save");
     console.log("[store-admin] positions saved", { storeId: savedStore.id, productId: product.id, positions: savedPositions.length });
     notifyRealtime("store_updated", { storeId: savedStore.id, productId: product.id, source: "store-admin-positions" });
-    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }) });
+    res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
     next(error);
   }
@@ -3892,7 +4163,7 @@ app.post("/api/auth/logout", async (req, res, next) => {
   try {
     requireDb();
     const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    if (token) await supabase.from("sessions").delete().eq("token", token);
+    if (token) await supabase.from("sessions").delete().eq("token", sessionTokenDigest(token));
     res.setHeader("Clear-Site-Data", '"cache"');
     res.json({ ok: true });
   } catch (error) {
@@ -4220,7 +4491,7 @@ app.get("/api/group/messages", async (req, res, next) => {
     const groupMessages = (Array.isArray(state.groupMessages) ? state.groupMessages : [])
       .filter((message) => groupRoomKey(message.room) === room)
       .slice(-500);
-    res.json({ room, groupSettings, groupMessages });
+    res.json({ room, groupSettings: publicGroupSettings(groupSettings), groupMessages: groupMessages.map(publicGroupMessage) });
   } catch (error) {
     next(error);
   }
@@ -4250,7 +4521,7 @@ app.post("/api/group/presence", async (req, res, next) => {
     const onlineCount = Object.entries(groupSettings.presence)
       .filter(([key, value]) => String(key).toLowerCase().startsWith(`${room}:`) && now - Number(value || 0) < 60 * 1000)
       .length;
-    res.json({ ok: true, room, onlineCount, groupSettings });
+    res.json({ ok: true, room, onlineCount, groupSettings: publicGroupSettings(groupSettings) });
   } catch (error) {
     next(error);
   }
@@ -4342,7 +4613,7 @@ app.post("/api/group/messages", async (req, res, next) => {
       return normalizeGroupSettings(state.groupSettings || {});
     });
     notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
-    res.json({ ok: true, message, groupSettings });
+    res.json({ ok: true, message: publicGroupMessage(message), groupSettings: publicGroupSettings(groupSettings) });
   } catch (error) {
     next(error);
   }
@@ -4393,7 +4664,7 @@ app.patch("/api/group/messages/:id", async (req, res, next) => {
       return { message: target, groupSettings: normalizeGroupSettings(state.groupSettings || {}) };
     });
     notifyRealtime("group_message_updated");
-    res.json({ ok: true, message, groupSettings });
+    res.json({ ok: true, message: publicGroupMessage(message), groupSettings: publicGroupSettings(groupSettings) });
   } catch (error) {
     next(error);
   }
@@ -4414,7 +4685,7 @@ app.patch("/api/group/settings", async (req, res, next) => {
       return state.groupSettings;
     });
     notifyRealtime("group_settings_updated");
-    res.json({ ok: true, groupSettings });
+    res.json({ ok: true, groupSettings: publicGroupSettings(groupSettings) });
   } catch (error) {
     next(error);
   }
@@ -4525,8 +4796,9 @@ app.get("/api/profiles/:login", async (req, res, next) => {
 function privateMessageVisibleToUser(message = {}, user = {}) {
   const key = loginKey(user.login || user.login_key);
   if (!key) return false;
-  return [message.fromLogin, message.toLogin, message.login, message.recipientLogin]
-    .some((value) => loginKey(value) === key) ||
+  const addressed = Boolean(message.toLogin || message.recipientLogin || message.disputeThreadId || message.orderId || message.exchangeRequestId);
+  return (addressed && [message.fromLogin, message.toLogin, message.login, message.recipientLogin]
+    .some((value) => loginKey(value) === key)) ||
     (Array.isArray(message.disputeParticipants) && message.disputeParticipants.some((value) => loginKey(value) === key));
 }
 
@@ -4545,7 +4817,7 @@ app.get("/api/private-messages", async (req, res, next) => {
     const messages = sanitizeMessagesForVisualReset((data || []).map((row) => ({
       ...(row.data || {}),
       createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0
-    }))).filter((message) => privateMessageVisibleToUser(message, user));
+    }))).filter((message) => privateMessageVisibleToUser(message, user)).map(publicPrivateMessage);
     res.json({ messages });
   } catch (error) {
     next(error);
@@ -4598,7 +4870,7 @@ app.post("/api/private-messages", async (req, res, next) => {
     await upsertPrivateMessage(message);
     if (savedReview && state) await saveSettingsState(state);
     notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: linkedExchanger?.id || "", reviewId: savedReview?.id || "" });
-    res.json({ ok: true, peerLogin: recipient.login, message });
+    res.json({ ok: true, peerLogin: recipient.login, message: publicPrivateMessage(message) });
   } catch (error) {
     next(error);
   }
@@ -4628,7 +4900,7 @@ app.patch("/api/private-messages/:id/reaction", async (req, res, next) => {
     }
     await upsertPrivateMessage(message, { notify: false });
     notifyRealtime("private_message_updated");
-    res.json({ ok: true, message });
+    res.json({ ok: true, message: publicPrivateMessage(message) });
   } catch (error) {
     next(error);
   }
@@ -4954,6 +5226,8 @@ app.post("/api/admin/support-tickets/:id/close", async (req, res, next) => {
 app.delete("/api/admin/marketplace-data", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
+    await appendAdminLog("marketplace_bulk_clear_blocked", admin.login, {});
+    return res.status(403).json({ error: "Массовое удаление отключено после инцидента безопасности" });
     requireDb();
     const state = await loadSettingsState();
     const { data: storeRows, error: storesLoadError } = await withTimeout(
@@ -5162,11 +5436,30 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
     const admin = requireAdmin(req);
     const login = req.params.login;
     const key = loginKey(login);
-    const { role, name, storePassword, blocked, blockReason } = req.body || {};
+    const { role, name, storePassword, newPassword, blocked, blockReason } = req.body || {};
+    const { data: existingProfile, error: profileError } = await supabase.from("profiles").select("login,login_key,role").eq("login_key", key).maybeSingle();
+    if (profileError) throw profileError;
+    if (!existingProfile) return res.status(404).json({ error: "Пользователь не найден" });
     const updates = {};
     if (role) updates.role = String(role);
     if (name) updates.name = String(name).trim();
+    const nextUserPassword = String(newPassword || "");
+    if (nextUserPassword) {
+      if (nextUserPassword.length < 10 || nextUserPassword.length > 128) {
+        return res.status(400).json({ error: "Новый пароль пользователя должен содержать от 10 до 128 символов" });
+      }
+      const nextRole = String(role || existingProfile.role || "user").toLowerCase();
+      if (nextRole !== "user") {
+        return res.status(400).json({ error: "Пароль служебного аккаунта меняется через настройки соответствующей панели" });
+      }
+      updates.password_hash = await bcrypt.hash(nextUserPassword, 12);
+    }
     if (Object.keys(updates).length) await supabase.from("profiles").update(updates).eq("login_key", key);
+    if (nextUserPassword) {
+      const { error: revokeError } = await supabase.from("sessions").delete().eq("login_key", key);
+      if (revokeError) throw revokeError;
+      await appendAdminLog("user_password_reset", admin.login, { login });
+    }
 
     const state = await loadSettingsState();
     state.blockedUsers = state.blockedUsers || {};
@@ -5214,6 +5507,9 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       };
       store.ownerLogin = login;
       const panelPassword = String(storePassword || "").trim();
+      if (panelPassword && (panelPassword.length < 10 || panelPassword.length > 128)) {
+        return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
+      }
       const existingPasswordHash = String(store.adminPasswordHash || "").trim();
       const legacyPassword = String(store.adminPassword || "").trim();
       if (!row && !panelPassword) {
@@ -5228,6 +5524,10 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       await adminEnsureSellerProfile(login, "", login, { passwordHash: panelPasswordHash });
       store.adminPassword = "";
       const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
+      if (panelPassword) {
+        protectedStore.credentialVersion = securityTokenVersion;
+        protectedStore.staff = [];
+      }
       const savedStore = await saveStoreRow(protectedStore, "admin seller store save");
       await saveOwnerStoreFallback(savedStore);
     }
@@ -5467,7 +5767,7 @@ app.post("/api/admin/disputes/test", async (req, res, next) => {
     await appendAdminLog("test_dispute_created", admin.login, { disputeId: order.id, disputeNumber: publicNumber, login: cleanLogin, storeId: store.id });
     notifyRealtime("dispute_opened", { orderId: order.id, storeId: order.storeId, threadId, testDispute: true });
     const overview = adminBuildOverview(await adminLoadMarketplace());
-    res.json({ dispute: order, order, request: null, store: publicStoreForState(store, { includeStaff: true }), clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [sharedMessage], overview });
+    res.json({ dispute: order, order, request: null, store: publicStoreForState(store), clientLogin: cleanLogin, storeLogin: store.ownerLogin || "", amount: adminOrderAmount(order), disputeNumber: publicNumber, messages: [sharedMessage], overview });
   } catch (error) {
     next(error);
   }
@@ -5491,7 +5791,7 @@ app.get("/api/admin/disputes/:id", async (req, res, next) => {
       message.orderId === id ||
       message.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute, order, request, store: publicStoreForState(store, { includeStaff: true }), clientLogin, storeLogin, amount: adminOrderAmount(dispute), disputeNumber: disputeNumber(dispute), messages });
+    res.json({ dispute, order, request, store: publicStoreForState(store), clientLogin, storeLogin, amount: adminOrderAmount(dispute), disputeNumber: disputeNumber(dispute), messages });
   } catch (error) {
     next(error);
   }
@@ -5540,7 +5840,7 @@ app.post("/api/admin/disputes/:id/join", async (req, res, next) => {
       item.orderId === id ||
       item.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store, { includeStaff: true }), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
   } catch (error) {
     next(error);
   }
@@ -5612,7 +5912,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
       item.orderId === id ||
       item.subject?.includes(id)
     )).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)).slice(-160);
-    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store, { includeStaff: true }), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
+    res.json({ dispute: nextDispute, order: nextOrder, request: nextRequest, store: publicStoreForState(store), clientLogin: nextDispute.login || nextDispute.fromLogin || "", storeLogin: store?.ownerLogin || nextDispute.toLogin || "", amount: adminOrderAmount(nextDispute), disputeNumber: publicNumber, messages });
   } catch (error) {
     next(error);
   }
@@ -5644,6 +5944,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     const panelPasswordHash = await hashPanelPassword(panelPassword);
     const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
     protectedStore.credentialVersion = securityTokenVersion;
+    protectedStore.staff = [];
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
     await withTimeout(
       adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
@@ -5662,7 +5963,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     });
     console.log(recovered ? "[admin-store] create recovered" : "[admin-store] created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, panelUrl: panel.shopPanelUrl });
     notifyRealtime("store_created", { storeId: savedStore.id, ownerLogin: savedStore.ownerLogin, source: "market-admin" });
-    res.json({ ok: true, recovered, store: publicStoreForState(savedStore, { includeStaff: true }), panel });
+    res.json({ ok: true, recovered, store: publicStoreForState(savedStore), panel });
   } catch (error) {
     next(error);
   }
@@ -5680,7 +5981,10 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     }
     const panelPasswordHash = panelPassword ? await hashPanelPassword(panelPassword) : "";
     const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
-    if (panelPassword) protectedStore.credentialVersion = securityTokenVersion;
+    if (panelPassword) {
+      protectedStore.credentialVersion = securityTokenVersion;
+      protectedStore.staff = [];
+    }
     const savedStore = await saveStoreRow(protectedStore, "admin store update");
     const canonicalPanelPasswordHash = panelPasswordHash || String(savedStore.adminPasswordHash || "").trim();
     if (savedStore.ownerLogin && canonicalPanelPasswordHash) {
@@ -5701,7 +6005,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
     });
     console.log("[admin-store] updated", { storeId: savedStore.id, fields: Object.keys(req.body || {}) });
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "market-admin" });
-    res.json({ ok: true, store: publicStoreForState(savedStore, { includeStaff: true }), panel: adminStorePanelLinks(savedStore, panelPassword) });
+    res.json({ ok: true, store: publicStoreForState(savedStore), panel: adminStorePanelLinks(savedStore, panelPassword) });
   } catch (error) {
     next(error);
   }
@@ -6037,7 +6341,7 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
     await appendAdminLog("product_updated", admin.login, { storeId: store.id, productId: product.id });
     console.log("[product] updated", { storeId: store.id, productId: product.id });
     notifyRealtime("product_updated", { storeId: store.id, productId: product.id });
-    res.json({ store: publicStoreForState(store, { includeStaff: true }) });
+    res.json({ store: publicStoreForState(store) });
   } catch (error) {
     next(error);
   }
@@ -6057,7 +6361,7 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
     await appendAdminLog("product_deleted", admin.login, { storeId: store.id, productId: req.params.productId });
     console.log("[product] deleted", { storeId: store.id, productId: req.params.productId });
     notifyRealtime("product_deleted", { storeId: store.id, productId: req.params.productId });
-    res.json({ store: publicStoreForState(store, { includeStaff: true }) });
+    res.json({ store: publicStoreForState(store) });
   } catch (error) {
     next(error);
   }
@@ -6217,9 +6521,9 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
 
 app.delete("/api/admin/logs", async (req, res, next) => {
   try {
-    requireAdmin(req);
-    await clearAdminAuditLogs();
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    const admin = requireAdmin(req);
+    await appendAdminLog("audit_log_clear_blocked", admin.login, {});
+    res.status(403).json({ error: "Удаление журнала безопасности отключено" });
   } catch (error) {
     next(error);
   }
@@ -6250,7 +6554,7 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
       body: String(req.body.body || "").trim().slice(0, 4000),
       channel,
       type,
-      photoUrl: String(req.body.photoUrl || "").trim(),
+      photoUrl: publicImageForState(req.body.photoUrl || "", ""),
       buttonText: String(req.body.buttonText || "").trim().slice(0, 64),
       buttonUrl: String(req.body.buttonUrl || "").trim(),
       filters: req.body.filters || {},
@@ -6259,9 +6563,10 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
       createdBy: admin.login
     };
     if (!broadcast.title || !broadcast.body) return res.status(400).json({ error: "Укажите заголовок и текст рассылки" });
-    if (broadcast.buttonUrl && !/^https?:\/\//i.test(broadcast.buttonUrl)) {
-      return res.status(400).json({ error: "Ссылка кнопки должна начинаться с http:// или https://" });
+    if (broadcast.buttonUrl && !trustedContentUrl(broadcast.buttonUrl)) {
+      return res.status(400).json({ error: "Ссылка кнопки должна вести на официальный домен CERBER" });
     }
+    if (broadcast.buttonUrl) broadcast.buttonUrl = trustedContentUrl(broadcast.buttonUrl);
     if (inlineImagePayload(broadcast.photoUrl)) {
       broadcast.photoUrl = await externalizeInlineImage(broadcast.photoUrl, `broadcasts/${broadcast.id}`).catch((error) => {
         console.error("[broadcast] photo upload failed; using inline fallback", { broadcastId: broadcast.id, message: error.message });
@@ -7011,7 +7316,7 @@ function cleanAttachmentUrl(value = "") {
     if (!allowedInlineAttachmentTypes.has(mime)) return "";
     return url;
   }
-  if (/^https:\/\/[^\s"'<>]+$/i.test(url)) return url;
+  if (trustedContentUrl(url)) return trustedContentUrl(url);
   if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(url)) return url.replace(/^\//, "");
   return "";
 }
@@ -7136,7 +7441,7 @@ function preserveExistingStateCollections(next, currentData = {}, incomingState 
 async function loadSettingsBackupState() {
   if (!supabase) return {};
   if (settingsBackupMemorySnapshot && Date.now() - settingsBackupMemoryAt < settingsBackupCacheMs) {
-    return cloneJson(settingsBackupMemorySnapshot);
+    return settingsStateForRuntime(cloneJson(settingsBackupMemorySnapshot));
   }
   const result = await withTimeout(
     supabase.from("app_settings").select("data").eq("id", mainSettingsBackupRowId).maybeSingle(),
@@ -7151,7 +7456,7 @@ async function loadSettingsBackupState() {
     settingsBackupMemorySnapshot = cloneJson(state);
     settingsBackupMemoryAt = Date.now();
   }
-  return stateHasDurableContent(state) ? state : {};
+  return stateHasDurableContent(state) ? settingsStateForRuntime(state) : {};
 }
 
 async function saveSettingsBackupState(state = {}) {
@@ -7277,13 +7582,14 @@ async function saveSettingsStateNow(state, options = {}) {
   next.walletTransactions = allowEmptyKeys.has("walletTransactions")
     ? (Array.isArray(state?.walletTransactions) ? state.walletTransactions : [])
     : mergeDurableFinanceRecords(currentData.walletTransactions, state?.walletTransactions);
+  const storedNext = settingsStateForStorage(next);
   const { error: settingsSaveError } = await withTimeout(
-    supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" }),
+    supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: storedNext }, { onConflict: "id" }),
     "settings save",
     12000
   );
   if (settingsSaveError) throw settingsSaveError;
-  const backupSave = saveSettingsBackupState(next);
+  const backupSave = saveSettingsBackupState(storedNext);
   if (options.deferSideEffects) {
     backupSave.catch((error) => {
       console.error("[settings-backup] deferred save failed", { message: error.message });
@@ -8042,7 +8348,7 @@ async function loadSettingsState() {
   state.siteNotifyBot = state.siteNotifyBot || { users: {}, sentMessages: {} };
   state.siteNotifyBot.users = state.siteNotifyBot.users || {};
   state.siteNotifyBot.sentMessages = state.siteNotifyBot.sentMessages || {};
-  state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+  state = settingsStateForRuntime(state);
   state.supportSettings = normalizeSupportSettings(state.supportSettings);
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
   await mergeFinanceMirrorIntoState(state);
@@ -8075,7 +8381,7 @@ function supportTicketPublic(ticket = {}) {
     id: ticket.id,
     subject: ticket.subject,
     body: ticket.body,
-    attachments: Array.isArray(ticket.attachments) ? ticket.attachments : [],
+    attachments: publicMessageAttachments(ticket.attachments),
     fromLogin: ticket.fromLogin,
     recipientLogin: ticket.recipientLogin,
     recipientTitle: ticket.recipientTitle,
@@ -8088,7 +8394,7 @@ function supportTicketPublic(ticket = {}) {
       id: reply.id,
       fromLogin: reply.fromLogin,
       body: reply.body || "",
-      attachments: Array.isArray(reply.attachments) ? reply.attachments : [],
+      attachments: publicMessageAttachments(reply.attachments),
       createdAt: reply.createdAt || 0
     })) : []
   };
@@ -8238,6 +8544,7 @@ async function adminLoadMarketplace(options = {}) {
     state.referralPeriod = state.referralPeriod || publicCatalog.referralPeriod || {};
     state.filters = state.filters || publicCatalog.filters || {};
   }
+  state = settingsStateForRuntime(state);
   state = sanitizeStateForVisualReset(state);
   state.adminLogs = mergeById(
     mergeById(adminLogMemory, auditLogs),
@@ -9041,6 +9348,25 @@ function withdrawalConsumesBalance(withdrawal = {}) {
   if (["cancelled", "canceled", "rejected", "failed", "payout_failed"].includes(status)) return false;
   if (withdrawal.autoPayoutError && !withdrawal.providerPayoutId) return false;
   return true;
+}
+
+function adminDepositForState(deposit = {}) {
+  const {
+    paymentProviderPayload,
+    providerStatusPayload,
+    providerPayload,
+    requestSignature,
+    idempotencyKey,
+    ...safeDeposit
+  } = deposit || {};
+  return safeDeposit;
+}
+
+function adminOrderForState(order = {}) {
+  const safeOrder = publicOrderForUser(order);
+  if (order.reservedDescription) safeOrder.reservedDescription = order.reservedDescription;
+  if (order.reservedStock) safeOrder.reservedStock = order.reservedStock;
+  return safeOrder;
 }
 
 function storeAdminWithdrawalForState(withdrawal = {}) {
@@ -10077,12 +10403,12 @@ function adminBuildOverview(data) {
     stores: storeRows,
     exchangers: adminExchangersForState(state.exchangers || [], profiles),
     users: userRows,
-    deals: [...productOrders, ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
-    disputes,
+    deals: [...productOrders.map(adminOrderForState), ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
+    disputes: disputes.map((item) => item.storeId || item.type === "product" ? adminOrderForState(item) : item),
     finances: {
-      walletDeposits,
+      walletDeposits: walletDeposits.map(adminDepositForState),
       walletTransactions,
-      walletWithdrawals,
+      walletWithdrawals: walletWithdrawals.map(storeAdminWithdrawalForState),
       referrals,
       referralPayments: referralPayments.map((item) => ({
         ...item,
@@ -10101,10 +10427,10 @@ function adminBuildOverview(data) {
       balances: state.balances || {},
       ltcBalances: state.ltcBalances || {},
       depositsByStatus: {
-        successful: walletDeposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase())),
-        pending: walletDeposits.filter((item) => ["waiting", "processing", "pending"].includes(String(item.status || "").toLowerCase())),
-        cancelled: walletDeposits.filter((item) => ["cancelled", "canceled", "expired"].includes(String(item.status || "").toLowerCase())),
-        failed: walletDeposits.filter((item) => ["failed", "error"].includes(String(item.status || "").toLowerCase()))
+        successful: walletDeposits.filter((item) => ["completed", "paid", "finished"].includes(String(item.status || "").toLowerCase())).map(adminDepositForState),
+        pending: walletDeposits.filter((item) => ["waiting", "processing", "pending"].includes(String(item.status || "").toLowerCase())).map(adminDepositForState),
+        cancelled: walletDeposits.filter((item) => ["cancelled", "canceled", "expired"].includes(String(item.status || "").toLowerCase())).map(adminDepositForState),
+        failed: walletDeposits.filter((item) => ["failed", "error"].includes(String(item.status || "").toLowerCase())).map(adminDepositForState)
       }
     },
     settings: {
@@ -13716,7 +14042,6 @@ app.use((error, _req, res, _next) => {
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
   revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", error));
-  clearAdminAuditLogsOnce().catch((error) => console.error("Admin audit reset error", error));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", error));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
