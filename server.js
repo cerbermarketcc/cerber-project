@@ -16,8 +16,7 @@ const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "incident-lockdown-2026-08-12-v156";
-const adminAuditResetId = "owner-request-2026-08-09-v1";
+const cerberBuildVersion = "incident-lockdown-2026-08-12-v157";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -340,6 +339,7 @@ const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$
 const localHostPattern = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const clientRateLimits = new Map();
 const usedInternalCaptchas = new Map();
+const internalCaptchaChallenges = new Map();
 const allowedInlineImageTypes = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
 const allowedInlineAttachmentTypes = new Set([
   ...allowedInlineImageTypes,
@@ -1427,7 +1427,7 @@ async function timedDbCheck(label, run, timeoutMs = 5000) {
 }
 
 async function verifyCaptcha(token, req) {
-  if (verifyInternalCaptcha(token)) return;
+  if (verifyInternalCaptcha(token, req)) return;
   if (!turnstileEnabled) {
     const error = new Error("Проверка устарела или введена неверно. Обновите её и попробуйте снова.");
     error.status = 400;
@@ -1499,11 +1499,28 @@ function signInternalCaptcha(payload) {
   return crypto.createHmac("sha256", captchaSecret()).update(payload).digest("base64url");
 }
 
-function createInternalCaptcha() {
+function internalCaptchaFingerprint(req = {}) {
+  return secretFingerprint(`${clientIp(req)}\n${String(req.headers?.["user-agent"] || "")}`);
+}
+
+function pruneInternalCaptchas(now = Date.now()) {
+  for (const [key, expiry] of usedInternalCaptchas) {
+    if (now > Number(expiry || 0)) usedInternalCaptchas.delete(key);
+  }
+  for (const [key, challenge] of internalCaptchaChallenges) {
+    if (now > Number(challenge?.expiresAt || 0)) internalCaptchaChallenges.delete(key);
+  }
+}
+
+function createInternalCaptcha(req = {}) {
   const a = 2 + crypto.randomInt(8);
   const b = 2 + crypto.randomInt(8);
   const expiresAt = Date.now() + internalCaptchaTtlMs;
-  const payload = Buffer.from(JSON.stringify({ a, b, answer: a + b, expiresAt }), "utf8").toString("base64url");
+  const id = crypto.randomBytes(24).toString("base64url");
+  const clientFingerprint = internalCaptchaFingerprint(req);
+  const payload = Buffer.from(JSON.stringify({ id, clientFingerprint, expiresAt }), "utf8").toString("base64url");
+  internalCaptchaChallenges.set(id, { answer: a + b, clientFingerprint, expiresAt });
+  if (internalCaptchaChallenges.size > 5000 || usedInternalCaptchas.size > 5000) pruneInternalCaptchas();
   return {
     question: `${a} + ${b} = ?`,
     token: `${payload}.${signInternalCaptcha(payload)}`,
@@ -1511,7 +1528,7 @@ function createInternalCaptcha() {
   };
 }
 
-function verifyInternalCaptcha(value = "") {
+function verifyInternalCaptcha(value = "", req = {}) {
   const raw = String(value || "").trim();
   if (!raw.startsWith("cerber-internal:")) return false;
   const rest = raw.slice("cerber-internal:".length);
@@ -1529,13 +1546,20 @@ function verifyInternalCaptcha(value = "") {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
     const expiresAt = Number(data.expiresAt || 0);
     const fingerprint = crypto.createHash("sha256").update(token).digest("hex");
-    if (Date.now() > expiresAt || Number(data.answer) !== answer || usedInternalCaptchas.has(fingerprint)) return false;
+    const challenge = internalCaptchaChallenges.get(String(data.id || ""));
+    internalCaptchaChallenges.delete(String(data.id || ""));
+    const currentFingerprint = internalCaptchaFingerprint(req);
+    if (
+      !challenge ||
+      Date.now() > expiresAt ||
+      expiresAt !== Number(challenge.expiresAt || 0) ||
+      !secretValuesMatch(data.clientFingerprint, challenge.clientFingerprint) ||
+      !secretValuesMatch(currentFingerprint, challenge.clientFingerprint) ||
+      Number(challenge.answer) !== answer ||
+      usedInternalCaptchas.has(fingerprint)
+    ) return false;
     usedInternalCaptchas.set(fingerprint, expiresAt);
-    if (usedInternalCaptchas.size > 5000) {
-      for (const [key, expiry] of usedInternalCaptchas) {
-        if (Date.now() > Number(expiry || 0)) usedInternalCaptchas.delete(key);
-      }
-    }
+    if (usedInternalCaptchas.size > 5000) pruneInternalCaptchas();
     return true;
   } catch {
     return false;
@@ -3223,7 +3247,7 @@ function verifySellerAdminToken(req) {
 
 app.get("/api/auth/captcha", (req, res) => {
   assertClientRateLimit(req, "auth-captcha", { limit: 30, windowMs: 60 * 1000 });
-  res.json(createInternalCaptcha());
+  res.json(createInternalCaptcha(req));
 });
 
 app.post("/api/auth/register", async (req, res, next) => {
@@ -7840,34 +7864,6 @@ async function loadAuditLogs(limit = 500) {
     details: row.details || {},
     createdAt: Date.parse(row.created_at) || 0
   }));
-}
-
-async function clearAdminAuditLogs(state = null) {
-  requireDb();
-  const nextState = state || await loadSettingsState();
-  nextState.adminLogs = [];
-  adminLogMemory = [];
-  if (!disabledMirrorTables.has("audit_logs")) {
-    const { error } = await supabase.from("audit_logs").delete().not("id", "is", null);
-    if (error) {
-      if (mirrorTableUnavailable(error)) disabledMirrorTables.add("audit_logs");
-      else throw error;
-    }
-  }
-  await saveSettingsState(nextState, { allowEmptyKeys: ["adminLogs"] });
-  return nextState;
-}
-
-async function clearAdminAuditLogsOnce() {
-  if (!supabase) return false;
-  const state = await loadSettingsState();
-  state.maintenance = state.maintenance && typeof state.maintenance === "object" ? state.maintenance : {};
-  if (state.maintenance.adminAuditResetId === adminAuditResetId) return false;
-  state.maintenance.adminAuditResetId = adminAuditResetId;
-  state.maintenance.adminAuditResetAt = Date.now();
-  await clearAdminAuditLogs(state);
-  console.log("[admin-log] owner-requested audit reset completed", { resetId: adminAuditResetId });
-  return true;
 }
 
 async function revokeCompromisedSessionsOnce() {

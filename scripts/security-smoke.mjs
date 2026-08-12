@@ -66,6 +66,13 @@ const health = await request({ path: "/api/health" });
 const stateResponse = await request({ path: "/api/state" });
 const statePayload = JSON.parse(stateResponse.text || "{}");
 const state = statePayload.state || {};
+const captchaResponse = await request({ path: "/api/auth/captcha" });
+const captcha = JSON.parse(captchaResponse.text || "{}");
+const captchaPayload = String(captcha.token || "").split(".")[0] || "";
+let decodedCaptcha = {};
+try {
+  decodedCaptcha = JSON.parse(Buffer.from(captchaPayload, "base64url").toString("utf8"));
+} catch {}
 const checks = [
   ["health endpoint", health.status === 200, `${health.status} ${JSON.parse(health.text || "{}").build || ""}`],
   ["anonymous state", stateResponse.status === 200, stateResponse.status],
@@ -73,6 +80,8 @@ const checks = [
   ["anonymous orders hidden", Array.isArray(state.orders) && state.orders.length === 0, state.orders?.length],
   ["anonymous messages hidden", Array.isArray(state.messages) && state.messages.length === 0, state.messages?.length],
   ["anonymous deposits hidden", Array.isArray(state.walletDeposits) && state.walletDeposits.length === 0, state.walletDeposits?.length],
+  ["captcha challenge issued", captchaResponse.status === 200 && Boolean(captcha.question && captcha.token), captchaResponse.status],
+  ["captcha answer not exposed in token", !("answer" in decodedCaptcha) && Boolean(decodedCaptcha.id), Object.keys(decodedCaptcha).join(",")],
   ["server source blocked", (await request({ path: "/server.js" })).status === 404, "expected 404"],
   ["node_modules blocked", (await request({ path: "/node_modules/express/index.js" })).status === 404, "expected 404"],
   ["unapproved Host blocked", (await request({ path: "/api/health", headers: { Host: "evil.example" } })).status === 421, "expected 421"],

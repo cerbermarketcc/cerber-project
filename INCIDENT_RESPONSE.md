@@ -8,7 +8,7 @@
 4. Rotate `MARKET_ADMIN_PASSWORD`, `ADMIN_TOTP_SECRET`, `ADMIN_JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `SELLER_ADMIN_SECRET`, `IP_HASH_SECRET`, and `CAPTCHA_SECRET` in Render.
 5. Rotate NOWPayments API, IPN, payout credentials, email password, and payout 2FA secret. Keep payouts disabled until a controlled test succeeds.
 6. Revoke and recreate all Telegram bot tokens and webhook secrets.
-7. Force a clean Render deploy and confirm `/api/health` reports `incident-lockdown-2026-08-12-v156`.
+7. Force a clean Render deploy and confirm `/api/health` reports `incident-lockdown-2026-08-12-v157`.
 8. Reset every shop panel password from the owner panel. Existing shop credentials and staff sessions are intentionally rejected by this build.
 
 Automatic payouts are fail-closed during incident recovery. After credentials are rotated and a controlled payout succeeds, set `INCIDENT_PAYOUT_UNLOCK=reviewed-2026-08-12-v1` in Render. Until then, withdrawal requests remain recorded but cannot send funds.
