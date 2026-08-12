@@ -3,7 +3,7 @@ services:
     name: cerber-project
     env: node
     plan: free
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /
     envVars:
@@ -30,7 +30,7 @@ services:
       - key: ALLOWED_ORIGINS
         value: "https://cerber-project.onrender.com,https://cerber.to,https://www.cerber.to,https://cerber.love,https://www.cerber.love,https://cerber.vip,https://www.cerber.vip"
       - key: USER_SESSION_TTL_HOURS
-        value: "72"
+        value: "336"
       - key: NOWPAYMENTS_API_KEY
         sync: false
       - key: NOWPAYMENTS_IPN_SECRET

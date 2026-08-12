@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "wallet-deposit-credit-recovery-2026-08-12-v149";
+const cerberBuildVersion = "private-chat-security-2026-08-12-v153";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -24,7 +24,8 @@ const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const internalCaptchaTtlMs = 10 * 60 * 1000;
-const userSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
+const configuredSessionTtlHours = Number(process.env.USER_SESSION_TTL_HOURS || 336);
+const userSessionTtlMs = Math.max(1, Number.isFinite(configuredSessionTtlHours) ? configuredSessionTtlHours : 336) * 60 * 60 * 1000;
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -63,6 +64,7 @@ let settingsSaveChain = Promise.resolve();
 const withdrawalPayoutJobs = new Set();
 let nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
 const uiTranslationCache = new Map();
+let blockedUsersCache = { expiresAt: 0, value: {} };
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -308,12 +310,23 @@ const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$
 const clientRateLimits = new Map();
 const usedInternalCaptchas = new Map();
 const allowedInlineImageTypes = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
+const allowedInlineAttachmentTypes = new Set([
+  ...allowedInlineImageTypes,
+  "audio/webm",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/wav",
+  "video/webm",
+  "video/mp4",
+  "video/quicktime"
+]);
 const cspDirectives = [
   "default-src 'self'",
   "base-uri 'self'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
+  "script-src 'self' 'sha256-LwGlgkSkxEiHHxfPSdxkT4YhGBqvP2mu6Q2ULIIysjU=' https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: blob: https:",
@@ -408,6 +421,7 @@ app.use((req, res, next) => {
   res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
   res.setHeader("Origin-Agent-Cluster", "?1");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
   res.setHeader("Content-Security-Policy", cspDirectives);
@@ -438,7 +452,7 @@ app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "20mb" }));
 app.use((req, res, next) => {
   const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
-  if (/^\/(?:server\.js|package(?:-lock)?\.json|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini)$/i.test(pathname)) {
+  if (/^\/(?:server\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) || /\.(?:php|ini|md|sql|ya?ml|lock)$/i.test(pathname)) {
     return res.status(404).send("Not found");
   }
   next();
@@ -744,7 +758,9 @@ function notifyAdminRealtime(type = "update", details = {}) {
 
 function notifyPublicRealtime(type = "state_updated", details = {}) {
   if (!publicRealtimeServer) return;
-  const payload = JSON.stringify({ type, details, createdAt: Date.now() });
+  // Public clients only need the event type to decide what to refresh. Keep
+  // account, order and message metadata on the authenticated admin channel.
+  const payload = JSON.stringify({ type, details: {}, createdAt: Date.now() });
   publicRealtimeServer.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) client.send(payload);
   });
@@ -787,6 +803,19 @@ function normalizeGroupSettings(settings = {}) {
     if (key && !normalized.members.some((item) => groupMemberEntryKey(item) === key)) normalized.members.push(key);
   });
   return normalized;
+}
+
+function publicGroupSettings(settings = {}) {
+  const normalized = normalizeGroupSettings(settings);
+  return {
+    title: normalized.title,
+    pinnedMessageId: "",
+    mutedUntil: {},
+    rollTimers: [],
+    members: [],
+    presence: {},
+    widgetSeenAt: {}
+  };
 }
 
 function publicUser(row) {
@@ -1451,7 +1480,7 @@ function buildPublicCatalogSnapshot(state = {}, storesSource = null) {
     stores,
     exchangeCards: publicExchangeCardsForState(cleanState.exchangeCards),
     exchangers: publicExchangersForState(cleanState.exchangers || []),
-    groupSettings: normalizeGroupSettings(cleanState.groupSettings || {}),
+    groupSettings: publicGroupSettings(cleanState.groupSettings || {}),
     referralPeriod: cleanState.referralPeriod || {},
     filters: cleanState.filters || {},
     updatedAt: Date.now()
@@ -1709,7 +1738,7 @@ async function stateFor(user) {
             exchangers: publicExchangersForState(publicCatalog.exchangers || []),
             exchangeRequests: [],
             groupMessages: [],
-            groupSettings: normalizeGroupSettings(publicCatalog.groupSettings || {}),
+            groupSettings: publicGroupSettings(publicCatalog.groupSettings || {}),
             referrals: [],
             referralPayments: [],
             referralCodes: {},
@@ -1821,7 +1850,7 @@ async function stateFor(user) {
           exchangers: visibleExchangers,
           exchangeRequests: [],
           groupMessages: [],
-          groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
+          groupSettings: publicGroupSettings(settingsData.groupSettings || {}),
           referrals: [],
           referralPayments: [],
           referralCodes: {},
@@ -2011,6 +2040,21 @@ async function stateFor(user) {
     const userSupportTickets = Array.isArray(settingsData.supportTickets) && user
       ? settingsData.supportTickets.filter((ticket) => sameUser(ticket.fromLogin) || sameUser(ticket.recipientLogin)).map(supportTicketPublic)
       : [];
+    const userReferrals = user
+      ? (Array.isArray(settingsData.referrals) ? settingsData.referrals : []).filter((item) => sameUser(item.login) || sameUser(item.referrerLogin))
+      : [];
+    const userReferralPayments = user
+      ? (Array.isArray(settingsData.referralPayments) ? settingsData.referralPayments : []).filter((item) => sameUser(item.login) || sameUser(item.referrerLogin))
+      : [];
+    const userReferralCodes = user && settingsData.referralCodes?.[userKey]
+      ? { [userKey]: settingsData.referralCodes[userKey] }
+      : {};
+    const userFilters = user
+      ? (Array.isArray(settingsData.userFilters) ? settingsData.userFilters : []).filter((item) => sameUser(item.login))
+      : [];
+    const userStoreApplications = user
+      ? (Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : []).filter((item) => sameUser(item.applicantLogin) || sameUser(item.ownerLogin))
+      : [];
 
     return {
       user: publicUser(user),
@@ -2029,9 +2073,9 @@ async function stateFor(user) {
         exchangeRequests: userExchangeRequests,
         groupMessages: Array.isArray(settingsData.groupMessages) ? settingsData.groupMessages : [],
         groupSettings: normalizeGroupSettings(settingsData.groupSettings || {}),
-        referrals: settingsData.referrals || [],
-        referralPayments: settingsData.referralPayments || [],
-        referralCodes: settingsData.referralCodes || {},
+        referrals: userReferrals,
+        referralPayments: userReferralPayments,
+        referralCodes: userReferralCodes,
         balances: userBalances,
         ltcBalances: userLtcBalances,
         walletTransactions: userWalletTransactions,
@@ -2048,9 +2092,9 @@ async function stateFor(user) {
         broadcasts: Array.isArray(settingsData.broadcasts) ? settingsData.broadcasts : [],
         supportSettings: { recipients: [] },
         supportTickets: userSupportTickets,
-        userFilters: Array.isArray(settingsData.userFilters) ? settingsData.userFilters : [],
-        blockedUsers: settingsData.blockedUsers || {},
-        storeApplications: Array.isArray(settingsData.storeApplications) ? settingsData.storeApplications : [],
+        userFilters,
+        blockedUsers: {},
+        storeApplications: userStoreApplications,
         ownerSettings: {},
         paymentSettings: {},
         referralPeriod: settingsData.referralPeriod || {},
@@ -2072,19 +2116,44 @@ async function userFromRequest(req) {
   requireDb();
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
-  const { data: session } = await supabase.from("sessions").select("login_key,created_at").eq("token", token).maybeSingle();
+  const { data: session, error: sessionError } = await withTimeout(
+    supabase.from("sessions").select("login_key,created_at").eq("token", token).maybeSingle(),
+    "session token query",
+    8000
+  );
+  if (sessionError) throw sessionError;
   if (!session) return null;
   const createdAt = Date.parse(session.created_at || "");
   if (Number.isFinite(createdAt) && Date.now() - createdAt > userSessionTtlMs) {
     supabase.from("sessions").delete().eq("token", token).then(() => {}).catch(() => {});
     return null;
   }
-  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle();
-  if (user) {
-    const state = await loadSettingsState();
-    if (adminIsUserBlocked(state, user.login)) return null;
-  }
+  const { data: user, error: userError } = await withTimeout(
+    supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle(),
+    "session profile query",
+    8000
+  );
+  if (userError) throw userError;
+  if (user && await isLoginBlocked(user.login)) return null;
   return user || null;
+}
+
+async function isLoginBlocked(login = "") {
+  const key = loginKey(login);
+  if (!key) return false;
+  if (Date.now() >= blockedUsersCache.expiresAt) {
+    const { data, error } = await withTimeout(
+      supabase.from("app_settings").select("blockedUsers:data->blockedUsers").eq("id", mainSettingsRowId).maybeSingle(),
+      "blocked users query",
+      4000
+    );
+    if (error) throw error;
+    blockedUsersCache = {
+      expiresAt: Date.now() + 5000,
+      value: data?.blockedUsers && typeof data.blockedUsers === "object" ? data.blockedUsers : {}
+    };
+  }
+  return Boolean(blockedUsersCache.value?.[key]?.blocked);
 }
 
 function privatePeer(message, login) {
@@ -2808,7 +2877,12 @@ app.post("/api/auth/register", async (req, res, next) => {
     const key = loginKey(login);
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
     const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
-    const { data: existing } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    const { data: existing, error: existingError } = await withTimeout(
+      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+      "register profile query",
+      8000
+    );
+    if (existingError) throw existingError;
     if (existing) {
       if (await passwordMatchesProfile(existing, password)) {
         const state = await loadAuthSettingsState("register recovery settings");
@@ -2874,7 +2948,12 @@ app.post("/api/auth/login", async (req, res, next) => {
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
-    const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    const { data: user, error: userError } = await withTimeout(
+      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+      "login profile query",
+      8000
+    );
+    if (userError) throw userError;
     if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
@@ -2912,7 +2991,12 @@ app.post("/api/auth/restore-session", async (req, res, next) => {
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
-    const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    const { data: user, error: userError } = await withTimeout(
+      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+      "restore session profile query",
+      8000
+    );
+    if (userError) throw userError;
     if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Нужно войти заново" });
     }
@@ -2937,7 +3021,12 @@ app.post("/api/telegram/login", async (req, res, next) => {
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
-    const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+    const { data: user, error: userError } = await withTimeout(
+      supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+      "telegram login profile query",
+      8000
+    );
+    if (userError) throw userError;
     if (!user || !(await passwordMatchesProfile(user, password))) {
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
@@ -4043,103 +4132,10 @@ app.put("/api/state", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-
-    const state = req.body.state || {};
-    const currentSettingsData = await loadSettingsState();
-    const currentGroupSettings = normalizeGroupSettings(currentSettingsData.groupSettings || {});
-    const incomingGroupSettings = normalizeGroupSettings(state.groupSettings || {});
-    const mergedGroupMessages = [
-      ...(Array.isArray(currentSettingsData.groupMessages) ? currentSettingsData.groupMessages : []),
-      ...(Array.isArray(state.groupMessages) ? state.groupMessages : [])
-    ].reduce((items, message) => {
-      if (!message?.id) return items;
-      message.room = groupRoomKey(message.room);
-      const index = items.findIndex((item) => String(item?.id || "") === String(message.id));
-      if (index >= 0) items[index] = { ...items[index], ...message };
-      else items.push(message);
-      return items;
-    }, []).sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
-    const mergedGroupMembers = [
-      ...(Array.isArray(currentGroupSettings.members) ? currentGroupSettings.members : []),
-      ...(Array.isArray(incomingGroupSettings.members) ? incomingGroupSettings.members : [])
-    ].reduce((items, login) => {
-      const cleanLogin = groupMemberEntryKey(login);
-      if (cleanLogin && !items.some((item) => groupMemberEntryKey(item) === cleanLogin)) items.push(cleanLogin);
-      return items;
-    }, []);
-    const mergedGroupSettings = {
-      ...currentGroupSettings,
-      ...incomingGroupSettings,
-      members: mergedGroupMembers,
-      presence: {
-        ...(currentGroupSettings.presence || {}),
-        ...(incomingGroupSettings.presence || {})
-      }
-    };
-    const nextSettingsData = {
-      ...currentSettingsData,
-      theme: "dark",
-      lang: state.lang || "ru",
-      orders: Array.isArray(currentSettingsData.orders) ? currentSettingsData.orders : [],
-      exchangeCards: publicExchangeCardsForState(currentSettingsData.exchangeCards),
-      exchangers: Array.isArray(currentSettingsData.exchangers) ? currentSettingsData.exchangers : [],
-      exchangeRequests: currentSettingsData.exchangeRequests || [],
-      groupMessages: mergedGroupMessages,
-      groupSettings: mergedGroupSettings,
-      referrals: Array.isArray(state.referrals) ? state.referrals : [],
-      referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments : [],
-      referralCodes: state.referralCodes || {},
-      balances: currentSettingsData.balances || {},
-      ltcBalances: currentSettingsData.ltcBalances || {},
-      walletTransactions: Array.isArray(currentSettingsData.walletTransactions) ? currentSettingsData.walletTransactions : [],
-      walletDeposits: Array.isArray(currentSettingsData.walletDeposits) ? currentSettingsData.walletDeposits : [],
-      walletWithdrawals: Array.isArray(currentSettingsData.walletWithdrawals) ? currentSettingsData.walletWithdrawals : [],
-      telegramBot: currentSettingsData.telegramBot || { users: {}, sentMessages: {} },
-      mirrorBots: currentSettingsData.mirrorBots || [],
-      siteNotifications: currentSettingsData.siteNotifications || [],
-      broadcasts: currentSettingsData.broadcasts || [],
-      userFilters: currentSettingsData.userFilters || [],
-      blockedUsers: currentSettingsData.blockedUsers || {},
-      storeApplications: Array.isArray(currentSettingsData.storeApplications) ? currentSettingsData.storeApplications : [],
-      ownerSettings: currentSettingsData.ownerSettings || {},
-      paymentSettings: currentSettingsData.paymentSettings || {},
-      referralPeriod: state.referralPeriod || {},
-      filters: state.filters || {}
-    };
-    await saveSettingsState(nextSettingsData);
-
-    if (Array.isArray(state.exchangeCards)) {
-      for (const card of state.exchangeCards) {
-        const ownerKey = loginKey(card.ownerLogin);
-        if (ownerKey) {
-          const { data: owner } = await supabase.from("profiles").select("login_key").eq("login_key", ownerKey).maybeSingle();
-          if (!owner) {
-            await supabase.from("profiles").insert({
-              login: card.ownerLogin,
-              login_key: ownerKey,
-              password_hash: await bcrypt.hash("123", 12),
-              name: card.ownerLogin,
-              role: "seller"
-            });
-          }
-        }
-      }
-    }
-
-    if (Array.isArray(state.messages)) {
-      for (const message of state.messages) {
-        await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
-      }
-    }
-
-    console.log("[state] saved", {
-      user: user.login,
-      ignoredStores: Array.isArray(state.stores) ? state.stores.length : 0,
-      ignoredOrders: Array.isArray(state.orders) ? state.orders.length : 0,
-      mirrorBots: (currentSettingsData.mirrorBots || []).length
-    });
-    notifyRealtime("state_updated", { source: "api-state", user: user.login });
-    res.json(await stateFor(user));
+    assertClientRateLimit(req, "state-preferences", { limit: 30, windowMs: 60 * 1000, identity: user.login });
+    // Marketplace data is written only through dedicated, permission-checked routes.
+    // Keeping this legacy endpoint read-only prevents forged messages, balances and roles.
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -4151,24 +4147,48 @@ app.post("/api/group/join", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const room = groupRoomKey(req.body?.room);
+    const { groupSettings, groupMessages } = await mutateSettingsState((state) => {
+      const settings = normalizeGroupSettings(state.groupSettings || {});
+      const members = Array.isArray(settings.members) ? settings.members : [];
+      const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
+      if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) {
+        members.push(memberKey);
+      }
+      const now = Date.now();
+      settings.members = members;
+      settings.presence = settings.presence || {};
+      settings.presence[memberKey] = now;
+      Object.entries(settings.presence).forEach(([key, value]) => {
+        if (now - Number(value || 0) > 5 * 60 * 1000) delete settings.presence[key];
+      });
+      state.groupSettings = settings;
+      return {
+        groupSettings: settings,
+        groupMessages: (Array.isArray(state.groupMessages) ? state.groupMessages : [])
+          .filter((message) => groupRoomKey(message.room) === room)
+          .slice(-500)
+      };
+    });
+    notifyRealtime("group_member_joined", { login: user.login, room });
+    res.json({ ok: true, room, groupSettings, groupMessages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/group/messages", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "group-messages-read", { limit: 90, windowMs: 60 * 1000, identity: user.login });
+    const room = groupRoomKey(req.query.room);
     const state = await loadSettingsState();
     const groupSettings = normalizeGroupSettings(state.groupSettings || {});
-    const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
-    const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
-    if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) {
-      members.push(memberKey);
-    }
-    const now = Date.now();
-    groupSettings.members = members;
-    groupSettings.presence = groupSettings.presence || {};
-    groupSettings.presence[memberKey] = now;
-    Object.entries(groupSettings.presence).forEach(([key, value]) => {
-      if (now - Number(value || 0) > 5 * 60 * 1000) delete groupSettings.presence[key];
-    });
-    state.groupSettings = groupSettings;
-    await saveSettingsState(state);
-    notifyRealtime("group_member_joined", { login: user.login, room });
-    res.json(await stateFor(user));
+    const groupMessages = (Array.isArray(state.groupMessages) ? state.groupMessages : [])
+      .filter((message) => groupRoomKey(message.room) === room)
+      .slice(-500);
+    res.json({ room, groupSettings, groupMessages });
   } catch (error) {
     next(error);
   }
@@ -4180,20 +4200,21 @@ app.post("/api/group/presence", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const room = groupRoomKey(req.body?.room);
-    const state = await loadSettingsState();
-    const groupSettings = normalizeGroupSettings(state.groupSettings || {});
-    const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
-    const members = Array.isArray(groupSettings.members) ? groupSettings.members : [];
-    if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) members.push(memberKey);
     const now = Date.now();
-    groupSettings.members = members;
-    groupSettings.presence = groupSettings.presence || {};
-    groupSettings.presence[memberKey] = now;
-    Object.entries(groupSettings.presence).forEach(([key, value]) => {
-      if (now - Number(value || 0) > 5 * 60 * 1000) delete groupSettings.presence[key];
+    const groupSettings = await mutateSettingsState((state) => {
+      const settings = normalizeGroupSettings(state.groupSettings || {});
+      const memberKey = groupMemberEntryKey(`${room}:${user.login}`);
+      const members = Array.isArray(settings.members) ? settings.members : [];
+      if (memberKey && !members.some((item) => groupMemberEntryKey(item) === memberKey)) members.push(memberKey);
+      settings.members = members;
+      settings.presence = settings.presence || {};
+      settings.presence[memberKey] = now;
+      Object.entries(settings.presence).forEach(([key, value]) => {
+        if (now - Number(value || 0) > 5 * 60 * 1000) delete settings.presence[key];
+      });
+      state.groupSettings = settings;
+      return settings;
     });
-    state.groupSettings = groupSettings;
-    await saveSettingsState(state);
     const onlineCount = Object.entries(groupSettings.presence)
       .filter(([key, value]) => String(key).toLowerCase().startsWith(`${room}:`) && now - Number(value || 0) < 60 * 1000)
       .length;
@@ -4204,12 +4225,12 @@ app.post("/api/group/presence", async (req, res, next) => {
 });
 
 function sanitizeGroupMessagePayload(payload = {}) {
-  const body = String(payload.body || "").trim();
+  const body = String(payload.body || "").trim().slice(0, 5000);
   const room = groupRoomKey(payload.room);
-  const stickerUrl = String(payload.stickerUrl || "").trim();
-  const stickerMatch = stickerUrl.match(/telegram-(\d{3})\.png$/i);
-  if (stickerMatch && groupChatHiddenSiteEmojiIds.has(stickerMatch[1])) {
-    const error = new Error("Стикер убран из общего чата");
+  const requestedStickerUrl = String(payload.stickerUrl || "").trim();
+  const stickerUrl = requestedStickerUrl ? cleanMessageReactionUrl(requestedStickerUrl, { group: true }) : "";
+  if (requestedStickerUrl && !stickerUrl) {
+    const error = new Error("Недопустимый стикер");
     error.status = 400;
     throw error;
   }
@@ -4241,12 +4262,31 @@ function sanitizeGroupMessagePayload(payload = {}) {
   return { body, room, stickerUrl, emojiUrls, attachments };
 }
 
+function isGroupModeratorUser(user = {}) {
+  return String(user.role || "").toLowerCase() === "admin"
+    || ["cerber", "cerberm"].some((login) => sameLogin(login, user.login));
+}
+
+function toggleLoginValue(values = [], login = "") {
+  const items = Array.isArray(values) ? values.filter(Boolean) : [];
+  const index = items.findIndex((item) => sameLogin(item, login));
+  if (index >= 0) items.splice(index, 1);
+  else items.push(login);
+  return items;
+}
+
+function cleanMessageReactionUrl(value = "", options = {}) {
+  const url = String(value || "").trim();
+  const match = url.match(/^(?:\/)?assets\/site-emojis\/telegram-(\d{3})\.png$/i);
+  if (!match || (options.group && groupChatHiddenSiteEmojiIds.has(match[1]))) return "";
+  return url.replace(/^\//, "");
+}
+
 app.post("/api/group/messages", async (req, res, next) => {
   try {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const state = await loadSettingsState();
     assertClientRateLimit(req, "group-message", { limit: 25, windowMs: 60 * 1000, identity: user.login });
     const payload = sanitizeGroupMessagePayload(req.body || {});
     const message = {
@@ -4262,14 +4302,88 @@ app.post("/api/group/messages", async (req, res, next) => {
       date: new Date().toLocaleString("ru-RU")
     };
     if (payload.stickerUrl) message.stickerUrl = payload.stickerUrl;
-    state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
-    state.groupMessages.push(message);
-    state.groupMessages = state.groupMessages
-      .map((item) => ({ ...item, room: groupRoomKey(item.room) }))
-      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
-    await saveSettingsState(state);
+    const groupSettings = await mutateSettingsState((state) => {
+      state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
+      state.groupMessages.push(message);
+      state.groupMessages = state.groupMessages
+        .map((item) => ({ ...item, room: groupRoomKey(item.room) }))
+        .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+      return normalizeGroupSettings(state.groupSettings || {});
+    });
     notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
-    res.json({ message, ...(await stateFor(user)) });
+    res.json({ ok: true, message, groupSettings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/group/messages/:id", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "group-message-action", { limit: 40, windowMs: 60 * 1000, identity: user.login });
+    const action = String(req.body?.action || "").toLowerCase();
+    if (!["like", "reaction", "pin", "delete"].includes(action)) {
+      return res.status(400).json({ error: "Неизвестное действие" });
+    }
+    if (["pin", "delete"].includes(action) && !isGroupModeratorUser(user)) {
+      return res.status(403).json({ error: "Недостаточно прав" });
+    }
+    const { message, groupSettings } = await mutateSettingsState((state) => {
+      state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
+      const target = state.groupMessages.find((item) => String(item?.id || "") === String(req.params.id || ""));
+      if (!target) {
+        const error = new Error("Сообщение не найдено");
+        error.status = 404;
+        throw error;
+      }
+      if (action === "like") {
+        target.likes = toggleLoginValue(target.likes, user.login);
+      } else if (action === "reaction") {
+        const reactionUrl = cleanMessageReactionUrl(req.body?.emojiUrl, { group: true });
+        if (!reactionUrl) {
+          const error = new Error("Недопустимая реакция");
+          error.status = 400;
+          throw error;
+        }
+        target.reactions = target.reactions && typeof target.reactions === "object" ? target.reactions : {};
+        target.reactions[reactionUrl] = toggleLoginValue(target.reactions[reactionUrl], user.login);
+        if (!target.reactions[reactionUrl].length) delete target.reactions[reactionUrl];
+      } else {
+        state.groupSettings = normalizeGroupSettings(state.groupSettings || {});
+        if (action === "pin") state.groupSettings.pinnedMessageId = target.id;
+        if (action === "delete") {
+          target.deleted = true;
+          target.deletedAt = Date.now();
+          target.deletedBy = user.login;
+        }
+      }
+      return { message: target, groupSettings: normalizeGroupSettings(state.groupSettings || {}) };
+    });
+    notifyRealtime("group_message_updated");
+    res.json({ ok: true, message, groupSettings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/group/settings", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    if (!isGroupModeratorUser(user)) return res.status(403).json({ error: "Недостаточно прав" });
+    assertClientRateLimit(req, "group-settings", { limit: 15, windowMs: 60 * 1000, identity: user.login });
+    const title = String(req.body?.title || "").trim().slice(0, 80);
+    if (!title) return res.status(400).json({ error: "Введите название чата" });
+    const groupSettings = await mutateSettingsState((state) => {
+      state.groupSettings = normalizeGroupSettings(state.groupSettings || {});
+      state.groupSettings.title = title;
+      return state.groupSettings;
+    });
+    notifyRealtime("group_settings_updated");
+    res.json({ ok: true, groupSettings });
   } catch (error) {
     next(error);
   }
@@ -4287,7 +4401,7 @@ app.post("/api/exchangers/:id/messages", async (req, res, next) => {
     if (!exchanger) return res.status(404).json({ error: "Обменник не найден" });
     const recipient = await findProfileByLogin(exchanger.login || exchanger.ownerLogin);
     if (!recipient) return res.status(404).json({ error: "Привязанный пользователь обменника не найден" });
-    const body = String(req.body.body || req.body.message || "").trim();
+    const body = String(req.body.body || req.body.message || "").trim().slice(0, 5000);
     const subject = String(req.body.subject || `Вопрос обменнику ${exchanger.title || exchanger.name || recipient.login}`).trim().slice(0, 160);
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
@@ -4356,6 +4470,57 @@ app.post("/api/exchangers/:id/reviews", async (req, res, next) => {
   }
 });
 
+app.get("/api/profiles/:login", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "profile-lookup", { limit: 60, windowMs: 60 * 1000, identity: user.login });
+    const profile = await findProfileByLogin(req.params.login);
+    if (!profile) return res.status(404).json({ error: "Пользователь не найден" });
+    res.json({
+      user: {
+        login: profile.login,
+        name: profile.name || profile.login,
+        role: profile.role || "user",
+        createdAt: profile.created_at || null
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function privateMessageVisibleToUser(message = {}, user = {}) {
+  const key = loginKey(user.login || user.login_key);
+  if (!key) return false;
+  return [message.fromLogin, message.toLogin, message.login, message.recipientLogin]
+    .some((value) => loginKey(value) === key) ||
+    (Array.isArray(message.disputeParticipants) && message.disputeParticipants.some((value) => loginKey(value) === key));
+}
+
+app.get("/api/private-messages", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "private-messages-read", { limit: 90, windowMs: 60 * 1000, identity: user.login });
+    const { data, error } = await withTimeout(
+      supabase.from("messages").select("data,created_at").order("created_at", { ascending: false }).limit(1000),
+      "private messages query",
+      8000
+    );
+    if (error) throw error;
+    const messages = sanitizeMessagesForVisualReset((data || []).map((row) => ({
+      ...(row.data || {}),
+      createdAt: row.data?.createdAt || Date.parse(row.created_at) || 0
+    }))).filter((message) => privateMessageVisibleToUser(message, user));
+    res.json({ messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/private-messages", async (req, res, next) => {
   try {
     requireDb();
@@ -4369,11 +4534,14 @@ app.post("/api/private-messages", async (req, res, next) => {
     const body = String(req.body.body || req.body.message || "").trim();
     const subject = String(req.body.subject || "").trim().slice(0, 160);
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
-    if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
-    const state = await loadSettingsState();
+    const requestedStickerUrl = String(req.body.stickerUrl || "").trim();
+    const stickerUrl = requestedStickerUrl ? cleanMessageReactionUrl(requestedStickerUrl) : "";
+    if (requestedStickerUrl && !stickerUrl) return res.status(400).json({ error: "Недопустимый стикер" });
+    if (!body && !attachments.length && !stickerUrl) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const review = parseExchangerReviewCommand(body);
+    const state = review ? await loadSettingsState() : null;
     const linkedExchanger = review
-      ? (Array.isArray(state.exchangers) ? state.exchangers : []).find((item) => item.status !== "disabled" && item.active !== false && sameLogin(item.login || item.ownerLogin, recipient.login))
+      ? (Array.isArray(state?.exchangers) ? state.exchangers : []).find((item) => item.status !== "disabled" && item.active !== false && sameLogin(item.login || item.ownerLogin, recipient.login))
       : null;
     if (review && !linkedExchanger) return res.status(404).json({ error: "У этого пользователя нет активного обменника для отзыва" });
     const savedReview = review ? addExchangerReview(linkedExchanger, user, review) : null;
@@ -4392,13 +4560,44 @@ app.post("/api/private-messages", async (req, res, next) => {
       createdAt: now,
       date: new Date(now).toLocaleString("ru-RU"),
       system: savedReview ? "exchanger_review_message" : "private_message",
+      ...(stickerUrl ? { stickerUrl } : {}),
       ...(linkedExchanger ? { exchangerId: linkedExchanger.id } : {}),
       ...(savedReview ? { reviewId: savedReview.id, reviewRating: savedReview.rating } : {})
     };
     await upsertPrivateMessage(message);
-    if (savedReview) await saveSettingsState(state);
+    if (savedReview && state) await saveSettingsState(state);
     notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: linkedExchanger?.id || "", reviewId: savedReview?.id || "" });
-    res.json({ ok: true, peerLogin: recipient.login, message, ...(await stateFor(user)) });
+    res.json({ ok: true, peerLogin: recipient.login, message });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/private-messages/:id/reaction", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "private-message-reaction", { limit: 40, windowMs: 60 * 1000, identity: user.login });
+    const message = await loadPrivateMessageById(req.params.id);
+    if (!message || !privateMessageVisibleToUser(message, user)) {
+      return res.status(404).json({ error: "Сообщение не найдено" });
+    }
+    const action = String(req.body?.action || "reaction").toLowerCase();
+    if (action === "like") {
+      message.likes = toggleLoginValue(message.likes, user.login);
+    } else if (action === "reaction") {
+      const reactionUrl = cleanMessageReactionUrl(req.body?.emojiUrl);
+      if (!reactionUrl) return res.status(400).json({ error: "Недопустимая реакция" });
+      message.reactions = message.reactions && typeof message.reactions === "object" ? message.reactions : {};
+      message.reactions[reactionUrl] = toggleLoginValue(message.reactions[reactionUrl], user.login);
+      if (!message.reactions[reactionUrl].length) delete message.reactions[reactionUrl];
+    } else {
+      return res.status(400).json({ error: "Неизвестное действие" });
+    }
+    await upsertPrivateMessage(message, { notify: false });
+    notifyRealtime("private_message_updated");
+    res.json({ ok: true, message });
   } catch (error) {
     next(error);
   }
@@ -4971,15 +5170,23 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
           blockedAt: Date.now(),
           blockedBy: admin.login
         };
+        const { error: revokeError } = await supabase.from("sessions").delete().eq("login_key", key);
+        if (revokeError) throw revokeError;
       } else {
         delete state.blockedUsers[key];
       }
+      blockedUsersCache = { expiresAt: 0, value: {} };
       await saveSettingsState(state);
       await appendAdminLog(blocked ? "user_blocked" : "user_unblocked", admin.login, { login, reason: blockReason || "" });
     }
 
     if (role === "seller" || storePassword) {
-      const { data: rows } = await supabase.from("stores").select("id,data");
+      const { data: rows, error: storesReadError } = await withTimeout(
+        supabase.from("stores").select("id,data"),
+        "admin seller store query",
+        10000
+      );
+      if (storesReadError) throw storesReadError;
       let row = (rows || []).find((item) => sameLogin(item.data?.ownerLogin, login));
       const store = row?.data || {
         id: `store-${key}`,
@@ -4998,10 +5205,20 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
         reviewsList: []
       };
       store.ownerLogin = login;
-      const panelPassword = String(storePassword || store.adminPassword || "123").trim();
-      const panelPasswordHash = await hashPanelPassword(panelPassword);
-      if (panelPassword) await adminEnsureSellerProfile(login, "", login, { passwordHash: panelPasswordHash });
-      store.adminPassword = panelPassword;
+      const panelPassword = String(storePassword || "").trim();
+      const existingPasswordHash = String(store.adminPasswordHash || "").trim();
+      const legacyPassword = String(store.adminPassword || "").trim();
+      if (!row && !panelPassword) {
+        return res.status(400).json({ error: "Укажите пароль панели нового магазина" });
+      }
+      const panelPasswordHash = panelPassword
+        ? await hashPanelPassword(panelPassword)
+        : (existingPasswordHash || (legacyPassword ? await hashPanelPassword(legacyPassword) : ""));
+      if (!panelPasswordHash) {
+        return res.status(400).json({ error: "У магазина не настроен пароль панели" });
+      }
+      await adminEnsureSellerProfile(login, "", login, { passwordHash: panelPasswordHash });
+      store.adminPassword = "";
       const protectedStore = await normalizeStoreSecrets(store, { adminPasswordHash: panelPasswordHash });
       const savedStore = await saveStoreRow(protectedStore, "admin seller store save");
       await saveOwnerStoreFallback(savedStore);
@@ -6784,7 +7001,7 @@ function cleanAttachmentUrl(value = "") {
   const dataMatch = url.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
   if (dataMatch) {
     const mime = String(dataMatch[1] || "").toLowerCase();
-    if (!allowedInlineImageTypes.has(mime)) return "";
+    if (!allowedInlineAttachmentTypes.has(mime)) return "";
     return url;
   }
   if (/^https:\/\/[^\s"'<>]+$/i.test(url)) return url;
@@ -7010,7 +7227,12 @@ function mergeVersionedLtcBalances(next = {}, current = {}, incoming = {}) {
 }
 
 async function saveSettingsStateNow(state, options = {}) {
-  const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
+  const { data: currentSettings, error: settingsReadError } = await withTimeout(
+    supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
+    "settings read before save",
+    10000
+  );
+  if (settingsReadError) throw settingsReadError;
   let currentData = currentSettings?.data || {};
   const backupData = await loadSettingsBackupState();
   if (!stateHasDurableContent(currentData)) {
@@ -7035,6 +7257,10 @@ async function saveSettingsStateNow(state, options = {}) {
       ? currentExchangers
       : (incomingExchangers || currentExchangers)
   };
+  if (Array.isArray(state?.groupMessages)) {
+    next.groupMessages = mergeById(state.groupMessages, currentData.groupMessages)
+      .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
+  }
   preserveExistingStateCollections(next, currentData, state || {}, options);
   mergeVersionedLtcBalances(next, currentData, state || {});
   const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
@@ -7044,7 +7270,12 @@ async function saveSettingsStateNow(state, options = {}) {
   next.walletTransactions = allowEmptyKeys.has("walletTransactions")
     ? (Array.isArray(state?.walletTransactions) ? state.walletTransactions : [])
     : mergeDurableFinanceRecords(currentData.walletTransactions, state?.walletTransactions);
-  await supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" });
+  const { error: settingsSaveError } = await withTimeout(
+    supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" }),
+    "settings save",
+    12000
+  );
+  if (settingsSaveError) throw settingsSaveError;
   const backupSave = saveSettingsBackupState(next);
   if (options.deferSideEffects) {
     backupSave.catch((error) => {
@@ -7082,6 +7313,18 @@ async function saveSettingsState(state, options = {}) {
   const snapshot = cloneJson(state || {});
   const save = () => saveSettingsStateNow(snapshot, options);
   const pending = settingsSaveChain.then(save, save);
+  settingsSaveChain = pending.catch(() => {});
+  return pending;
+}
+
+async function mutateSettingsState(mutator, options = {}) {
+  const update = async () => {
+    const state = await loadSettingsState();
+    const result = await mutator(state);
+    await saveSettingsStateNow(state, options);
+    return result;
+  };
+  const pending = settingsSaveChain.then(update, update);
   settingsSaveChain = pending.catch(() => {});
   return pending;
 }
@@ -7744,7 +7987,12 @@ async function normalizeServerOrders(state = {}) {
 
 async function loadSettingsState() {
   await ensureSeed();
-  const { data: settings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
+  const { data: settings, error: settingsError } = await withTimeout(
+    supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle(),
+    "settings query",
+    10000
+  );
+  if (settingsError) throw settingsError;
   let state = settings?.data || {};
   const backupState = await loadSettingsBackupState();
   if (!stateHasDurableContent(state)) {
@@ -7900,11 +8148,14 @@ async function notifySiteUser(state, login, notification = {}) {
   return item;
 }
 
-async function upsertPrivateMessage(message) {
-  await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
-  siteNotifyDeliverPrivateMessage(message).catch((error) => {
-    console.error("Site notify bot delivery error", error);
-  });
+async function upsertPrivateMessage(message, options = {}) {
+  const { error } = await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
+  if (error) throw error;
+  if (options.notify !== false) {
+    siteNotifyDeliverPrivateMessage(message).catch((error) => {
+      console.error("Site notify bot delivery error", error);
+    });
+  }
 }
 
 async function adminLoadMarketplace(options = {}) {
@@ -8006,7 +8257,7 @@ async function updateDisputeMessage(id, body, deleted = false) {
     deleted: Boolean(deleted),
     editedAt: Date.now()
   };
-  await upsertPrivateMessage(next);
+  await upsertPrivateMessage(next, { notify: false });
   notifyRealtime(deleted ? "dispute_message_deleted" : "dispute_message_edited", {
     id: next.id,
     orderId: next.orderId || "",
@@ -8541,7 +8792,12 @@ async function adminEnsureSellerProfile(login, password, name = "", options = {}
   const suppliedPasswordHash = String(options.passwordHash || "").trim();
   const passwordHash = suppliedPasswordHash || (password
     ? await bcrypt.hash(String(password), 12)
-    : (existing?.password_hash || await bcrypt.hash("123", 12)));
+    : String(existing?.password_hash || "").trim());
+  if (!passwordHash) {
+    const error = new Error("Укажите пароль панели магазина");
+    error.status = 400;
+    throw error;
+  }
   const { data: user, error } = await supabase.from("profiles").upsert({
     login,
     login_key: key,
@@ -8626,7 +8882,7 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
   const name = String(body.name || existing?.name || ownerLogin || "New store").trim();
   const id = existing?.id || adminSlug(body.id || name || ownerLogin, "store");
   const inputAdminPassword = String(body.adminPassword || "").trim();
-  const fallbackAdminPassword = existing ? String(existing.adminPassword || "").trim() : "123";
+  const fallbackAdminPassword = existing ? String(existing.adminPassword || "").trim() : "";
   const countries = adminNormalizeStoreRegions(body.countries || body.regions || existing?.countries);
   const placementInput = body.placements ?? body.placement ?? existing?.placements ?? existing?.placement ?? adminLegacyStorePlacements(existing);
   const placements = adminNormalizeStorePlacements(placementInput);
@@ -9450,7 +9706,8 @@ function exchangerSlug(value = "") {
 async function findProfileByLogin(login) {
   const key = loginKey(login);
   if (!key) return null;
-  const { data: user } = await supabase.from("profiles").select("login,login_key,name,role,created_at").eq("login_key", key).maybeSingle();
+  const { data: user, error } = await supabase.from("profiles").select("login,login_key,name,role,created_at").eq("login_key", key).maybeSingle();
+  if (error) throw error;
   return user || null;
 }
 
@@ -11213,7 +11470,12 @@ async function siteNotifyHandleLogin(state, chatId, telegramUser, text) {
   }
   const key = loginKey(parts[1]);
   const password = parts.slice(2).join(" ");
-  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  const { data: user, error: userError } = await withTimeout(
+    supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+    "site notification bot login profile query",
+    8000
+  );
+  if (userError) throw userError;
   if (!user || !(await passwordMatchesProfile(user, password))) {
     await siteNotifySendMessage(chatId, "Неверный логин или пароль.");
     return;
@@ -11521,7 +11783,12 @@ async function handleBotLogin(state, chatId, text) {
   }
   const key = loginKey(parts[1]);
   const password = parts.slice(2).join(" ");
-  const { data: user } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
+  const { data: user, error: userError } = await withTimeout(
+    supabase.from("profiles").select("*").eq("login_key", key).maybeSingle(),
+    "telegram bot login profile query",
+    8000
+  );
+  if (userError) throw userError;
   if (!user || !(await passwordMatchesProfile(user, password))) {
     await botSendMessage(state, chatId, "Неверный логин или пароль.", botMainKeyboard());
     return;
@@ -13472,14 +13739,16 @@ app.get("*", (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  let message = String(error.message || "Server error");
-  if (/nowpayments|NOWPAYMENTS/i.test(message)) message = "Платежный шлюз не настроен или временно недоступен";
-  if (message.includes("Could not find the table")) {
+  const status = Number(error.status || 500);
+  const internalMessage = String(error.message || "");
+  let message = status >= 500 ? "Сервер временно недоступен" : String(error.message || "Ошибка запроса");
+  if (/nowpayments/i.test(internalMessage)) message = "Платежный шлюз не настроен или временно недоступен";
+  if (internalMessage.includes("Could not find the table")) {
     return res.status(500).json({
       error: "В Supabase ещё не созданы таблицы. Выполни SQL из файла supabase-schema.sql."
     });
   }
-  res.status(error.status || 500).json({ error: message });
+  res.status(status).json({ error: message });
 });
 
 const server = app.listen(port, () => {

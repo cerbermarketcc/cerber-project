@@ -21,6 +21,13 @@ const LOCAL_OFFLINE_PREVIEW = IS_LOCAL_APP_HOST && new URLSearchParams(location.
 const API_ENABLED = location.protocol !== "file:" && !LOCAL_OFFLINE_PREVIEW;
 const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
 const API_ORIGINS = Array.from(new Set([PRIMARY_API_ORIGIN, API_ORIGIN].filter(Boolean)));
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.getRegistrations?.().then((registrations) => {
+    registrations.forEach((registration) => registration.unregister());
+  }).catch(() => {});
+}
+
 const runtimeStorage = new Map();
 let runtimeApiToken = "";
 let runtimeSellerAdminApiToken = "";
@@ -1429,7 +1436,7 @@ function mountCmsVisualEditor() {
 
   const status = toolbar.querySelector("[data-cms-status]");
   const password = toolbar.querySelector("[data-cms-password]");
-  password.value = storageGet("cerber_text_admin_password") || "";
+  password.value = sessionStorageGet("cerber_text_admin_password") || "";
   const setStatus = (message) => status.textContent = message;
 
   document.addEventListener("click", (event) => {
@@ -2070,6 +2077,14 @@ function storageSet(key, value) {
   return saved;
 }
 
+function sessionStorageGet(key) {
+  try {
+    const value = sessionStorage.getItem(key);
+    if (value !== null && value !== "") return value;
+  } catch {}
+  return runtimeStorage.get(key) || "";
+}
+
 function sessionStorageSet(key, value) {
   const text = String(value ?? "");
   runtimeStorage.set(key, text);
@@ -2301,12 +2316,12 @@ function mergeMessageLists(remoteMessages = [], localMessages = []) {
     const existing = merged.get(message.id);
     if (existing) {
       merged.set(message.id, {
-        ...existing,
         ...message,
+        ...existing,
         deleted: Boolean(existing.deleted || message.deleted),
         reactions: {
-          ...(existing.reactions || {}),
-          ...(message.reactions || {})
+          ...(message.reactions || {}),
+          ...(existing.reactions || {})
         }
       });
       return;
@@ -2609,7 +2624,13 @@ function realtimeShouldRenderEvent(event = {}) {
   return false;
 }
 
-async function loadRealtimeState() {
+async function loadRealtimeState(event = {}) {
+  if (apiSessionToken() && route === "messages" && /private_message|dispute/.test(String(event.type || ""))) {
+    return loadPrivateMessagesRemote();
+  }
+  if (apiSessionToken() && route === "group-chat" && /group_/.test(String(event.type || ""))) {
+    return loadGroupMessagesRemote();
+  }
   if (apiSessionToken()) return loadRemoteSession();
   return loadRemoteState();
 }
@@ -2618,7 +2639,7 @@ function scheduleRealtimeRefresh(event = {}) {
   clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = setTimeout(async () => {
     const shouldRender = realtimeShouldRenderEvent(event);
-    const ok = await loadRealtimeState();
+    const ok = await loadRealtimeState(event);
     if (!ok) return;
     if (!shouldRender) {
       realtimePendingRender = false;
@@ -2889,33 +2910,13 @@ async function persistRemoteState() {
       method: "PUT",
       body: JSON.stringify({
         state: {
-          theme: db.theme,
           lang: db.lang,
-          messages: db.messages,
-          groupMessages: db.groupMessages,
-          groupSettings: db.groupSettings,
-          exchangeCards: db.exchangeCards,
-          exchangeRequests: db.exchangeRequests,
-          referrals: db.referrals,
-          referralPayments: db.referralPayments,
-          referralCodes: db.referralCodes,
-          balances: db.balances,
-          ltcBalances: db.ltcBalances,
-          walletTransactions: db.walletTransactions,
-          walletDeposits: db.walletDeposits,
-          walletWithdrawals: db.walletWithdrawals,
-          siteNotifications: db.siteNotifications,
-          broadcasts: db.broadcasts,
-          userFilters: db.userFilters,
-          storeApplications: db.storeApplications,
-          ownerSettings: db.ownerSettings,
-          paymentSettings: db.paymentSettings,
-          referralPeriod: db.referralPeriod
+          filters: db.filters
         }
       })
     });
-  } catch {
-    showToast("База временно недоступна");
+  } catch (error) {
+    console.error("[state] preference sync failed", error);
   }
 }
 
@@ -6317,6 +6318,7 @@ function renderChat(storeId) {
 function renderMessages() {
   route = "messages";
   const user = currentUser();
+  if (!user) return renderAuth();
   const visibleMessages = privateVisibleMessages(user.login);
   const conversations = privateConversations(visibleMessages, user.login);
   const activeMessages = activePrivateLogin ? privateConversationMessages(activePrivateLogin, visibleMessages, user.login) : [];
@@ -6423,10 +6425,25 @@ function renderMessages() {
     };
   });
   document.querySelectorAll("[data-private-site-emoji]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
       const sticker = siteEmojiMessageFields(button.dataset.privateSiteEmoji);
       if (!sticker || !activePrivateLogin) return;
-      db.messages.unshift({
+      if (API_ENABLED && apiSessionToken()) {
+        try {
+          const payload = await apiFetch("/api/private-messages", {
+            method: "POST",
+            timeoutMs: 15000,
+            body: JSON.stringify({ toLogin: activePrivateLogin, stickerUrl: sticker.stickerUrl })
+          });
+          rememberPrivateMessage(payload.message);
+          renderMessages();
+          return;
+        } catch (error) {
+          showToast(error.message || "Не удалось отправить стикер");
+          return;
+        }
+      }
+      rememberPrivateMessage({
         id: `private-${Date.now()}`,
         storeId: "",
         storeTag: activePrivateLogin,
@@ -6440,7 +6457,6 @@ function renderMessages() {
         createdAt: Date.now(),
         date: new Date().toLocaleString()
       });
-      saveDb();
       renderMessages();
     };
   });
@@ -6465,11 +6481,38 @@ function startPrivateMessagesRefresh() {
     const text = form?.querySelector("textarea")?.value || "";
     if (text.trim() || privateVoiceRecorder?.state === "recording" || privateVoiceDraft) return;
     const before = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-60));
-    const ok = await loadRemoteSession();
+    const ok = await loadPrivateMessagesRemote();
     if (!ok || route !== "messages") return;
     const after = JSON.stringify((db.messages || []).map((msg) => [msg.id, msg.createdAt, msg.fromLogin, msg.toLogin, msg.body, msg.stickerUrl, msg.attachments, msg.reactions]).slice(-60));
     if (before !== after) renderMessages();
   }, 3000);
+}
+
+function rememberPrivateMessage(message = {}) {
+  if (!message?.id) return false;
+  const index = (db.messages || []).findIndex((item) => String(item?.id || "") === String(message.id));
+  if (index >= 0) db.messages[index] = { ...db.messages[index], ...message };
+  else db.messages.unshift(message);
+  saveDb({ localOnly: true, silentLocalStorageError: true });
+  return true;
+}
+
+async function loadPrivateMessagesRemote() {
+  if (!API_ENABLED || !apiSessionToken()) return false;
+  try {
+    const payload = await apiFetch("/api/private-messages", { timeoutMs: 10000 });
+    if (!Array.isArray(payload.messages)) return false;
+    db.messages = mergeMessageLists(payload.messages, db.messages);
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    return true;
+  } catch (error) {
+    if (error.sessionExpired || error.status === 401 || error.status === 403) {
+      clearApiSession();
+      return false;
+    }
+    console.error("[private-chat] refresh failed", error);
+    return false;
+  }
 }
 
 function privateVisibleMessages(login = db.currentUser) {
@@ -6644,11 +6687,20 @@ function privateMessageView(msg) {
   `;
 }
 
-function handlePrivateSearch(event) {
+async function handlePrivateSearch(event) {
   event.preventDefault();
   const login = String(new FormData(event.currentTarget).get("login") || "").trim();
   if (!login || sameLogin(login, db.currentUser)) return;
-  const user = (db.users || []).find((item) => sameLogin(item.login, login));
+  let user = (db.users || []).find((item) => sameLogin(item.login, login));
+  if (!user && API_ENABLED && apiSessionToken()) {
+    try {
+      const payload = await apiFetch(`/api/profiles/${encodeURIComponent(login)}`, { timeoutMs: 10000 });
+      user = payload.user || null;
+      if (user?.login && !db.users.some((item) => sameLogin(item.login, user.login))) db.users.push(user);
+    } catch (error) {
+      if (error.status !== 404) console.error("[private-chat] profile lookup failed", error);
+    }
+  }
   if (!user) {
     showToast("Пользователь не найден");
     return;
@@ -6747,7 +6799,7 @@ async function handlePrivateMessageSend(event) {
         timeoutMs: 15000,
         body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin })
       });
-      applyRemoteState(payload);
+      rememberPrivateMessage(payload.message);
       privateVoiceDraft = null;
       showToast(tr("sent"));
       renderMessages();
@@ -6778,9 +6830,22 @@ async function handlePrivateMessageSend(event) {
   renderMessages();
 }
 
-function togglePrivateLike(messageId) {
+async function togglePrivateLike(messageId) {
   const msg = db.messages.find((item) => item.id === messageId);
   if (!msg) return;
+  if (API_ENABLED && apiSessionToken()) {
+    try {
+      const payload = await apiFetch(`/api/private-messages/${encodeURIComponent(messageId)}/reaction`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "like" })
+      });
+      rememberPrivateMessage(payload.message);
+      renderMessages();
+    } catch (error) {
+      showToast(error.message || "Не удалось сохранить отметку");
+    }
+    return;
+  }
   msg.likes = Array.isArray(msg.likes) ? msg.likes : [];
   const index = msg.likes.findIndex((login) => sameLogin(login, db.currentUser));
   if (index >= 0) msg.likes.splice(index, 1);
@@ -6798,11 +6863,28 @@ function renderMessageScope(scope) {
   else renderGroupChat();
 }
 
-function toggleMessageReaction(scope, messageId, emojiUrl) {
+async function toggleMessageReaction(scope, messageId, emojiUrl) {
   const cleanUrl = siteEmojiUrl(emojiUrl);
   if (!cleanUrl || !db.currentUser) return;
   const msg = (messageListForScope(scope) || []).find((item) => item.id === messageId);
   if (!msg) return;
+  if (API_ENABLED && apiSessionToken()) {
+    const endpoint = scope === "private"
+      ? `/api/private-messages/${encodeURIComponent(messageId)}/reaction`
+      : `/api/group/messages/${encodeURIComponent(messageId)}`;
+    try {
+      const payload = await apiFetch(endpoint, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "reaction", emojiUrl: cleanUrl })
+      });
+      if (scope === "private") rememberPrivateMessage(payload.message);
+      else applyGroupMessagesPayload(payload);
+      renderMessageScope(scope);
+    } catch (error) {
+      showToast(error.message || "Не удалось сохранить реакцию");
+    }
+    return;
+  }
   msg.reactions = msg.reactions && typeof msg.reactions === "object" ? msg.reactions : {};
   msg.reactions[cleanUrl] = Array.isArray(msg.reactions[cleanUrl]) ? msg.reactions[cleanUrl] : [];
   const index = msg.reactions[cleanUrl].findIndex((login) => sameLogin(login, db.currentUser));
@@ -7059,7 +7141,7 @@ function saveGroupPresenceSoon() {
   if (now - groupPresenceSavedAt < 15000) return;
   groupPresenceSavedAt = now;
   saveGroupPresenceRemote().then((saved) => {
-    if (!saved) saveDb();
+    if (!saved) saveDb({ localOnly: true, silentLocalStorageError: true });
   });
 }
 
@@ -7085,7 +7167,7 @@ async function joinGroupChat() {
         timeoutMs: 10000,
         body: JSON.stringify({ room: currentGroupRoom() })
       });
-      applyRemoteState(payload);
+      applyGroupMessagesPayload(payload);
     } catch (error) {
       console.error("[group-chat] join save failed", error);
       showToast(error.message || "Чат сохранён локально, сервер не ответил");
@@ -7105,6 +7187,32 @@ function visibleGroupMessages() {
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
 }
 
+function applyGroupMessagesPayload(payload = {}) {
+  const incomingMessages = Array.isArray(payload.groupMessages)
+    ? payload.groupMessages
+    : payload.message?.id ? [payload.message] : [];
+  if (incomingMessages.length) db.groupMessages = mergeMessageLists(incomingMessages, db.groupMessages);
+  if (payload.groupSettings) {
+    db.groupSettings = { ...(db.groupSettings || {}), ...payload.groupSettings };
+    ensureGroupSettings();
+    writeStoredGroupMembers(db.groupSettings.members || []);
+  }
+  saveDb({ localOnly: true, silentLocalStorageError: true });
+  return true;
+}
+
+async function loadGroupMessagesRemote(room = currentGroupRoom()) {
+  if (!API_ENABLED || !apiSessionToken()) return false;
+  try {
+    const payload = await apiFetch(`/api/group/messages?room=${encodeURIComponent(room)}`, { timeoutMs: 10000 });
+    applyGroupMessagesPayload(payload);
+    return true;
+  } catch (error) {
+    console.error("[group-chat] refresh failed", error);
+    return false;
+  }
+}
+
 async function sendGroupMessageRemote(message) {
   if (!API_ENABLED || !apiSessionToken()) return false;
   try {
@@ -7119,7 +7227,7 @@ async function sendGroupMessageRemote(message) {
         attachments: Array.isArray(message.attachments) ? message.attachments : []
       })
     });
-    applyRemoteState(payload);
+    applyGroupMessagesPayload(payload);
     return true;
   } catch (error) {
     console.error("[group-chat] message save failed", error);
@@ -7241,7 +7349,7 @@ function startGroupChatRefresh() {
       messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]),
       settings: db.groupSettings
     });
-    const ok = await loadRemoteSession();
+    const ok = await loadGroupMessagesRemote(room);
     if (!ok || route !== "group-chat") return;
     const after = JSON.stringify({
       messages: (db.groupMessages || []).filter((msg) => groupMessageRoom(msg) === room).map((msg) => [msg.id, msg.createdAt, msg.deleted, msg.body, msg.stickerUrl, msg.emojiUrls, msg.attachments, msg.reactions]),
@@ -7289,7 +7397,7 @@ function renderGroupChat() {
   const pinned = (db.groupMessages || []).find((msg) => msg.id === settings.pinnedMessageId && !msg.deleted && groupMessageRoom(msg) === currentGroupRoom());
   const messages = visibleGroupMessages();
   if (!messages.length && API_ENABLED && apiSessionToken()) {
-    loadRemoteSession().then((ok) => {
+    loadGroupMessagesRemote().then((ok) => {
       if (ok && route === "group-chat" && visibleGroupMessages().length) renderGroupChat();
     }).catch(() => {});
   }
@@ -7443,16 +7551,42 @@ function renderGroupChat() {
     button.onclick = () => openPrivateMessageModal(button.dataset.groupUser);
   });
   document.querySelectorAll("[data-group-pin]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
       if (!isGroupModerator()) return;
+      if (API_ENABLED && apiSessionToken()) {
+        try {
+          const payload = await apiFetch(`/api/group/messages/${encodeURIComponent(button.dataset.groupPin)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ action: "pin" })
+          });
+          applyGroupMessagesPayload(payload);
+          renderGroupChat();
+        } catch (error) {
+          showToast(error.message || "Не удалось закрепить сообщение");
+        }
+        return;
+      }
       db.groupSettings.pinnedMessageId = button.dataset.groupPin;
       saveDb();
       renderGroupChat();
     };
   });
   document.querySelectorAll("[data-group-delete]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
       if (!isGroupModerator()) return;
+      if (API_ENABLED && apiSessionToken()) {
+        try {
+          const payload = await apiFetch(`/api/group/messages/${encodeURIComponent(button.dataset.groupDelete)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ action: "delete" })
+          });
+          applyGroupMessagesPayload(payload);
+          renderGroupChat();
+        } catch (error) {
+          showToast(error.message || "Не удалось удалить сообщение");
+        }
+        return;
+      }
       const msg = db.groupMessages.find((item) => item.id === button.dataset.groupDelete);
       if (msg) msg.deleted = true;
       saveDb();
@@ -7553,9 +7687,22 @@ function groupAttachmentView(file) {
   return `<a class="proof-link" href="${esc(file.url)}" download="${esc(file.name || "file")}">${esc(file.name || "Файл")}</a>`;
 }
 
-function toggleGroupLike(messageId) {
+async function toggleGroupLike(messageId) {
   const msg = db.groupMessages.find((item) => item.id === messageId);
   if (!msg) return;
+  if (API_ENABLED && apiSessionToken()) {
+    try {
+      const payload = await apiFetch(`/api/group/messages/${encodeURIComponent(messageId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "like" })
+      });
+      applyGroupMessagesPayload(payload);
+      renderGroupChat();
+    } catch (error) {
+      showToast(error.message || "Не удалось сохранить отметку");
+    }
+    return;
+  }
   msg.likes = Array.isArray(msg.likes) ? msg.likes : [];
   const index = msg.likes.findIndex((login) => sameLogin(login, db.currentUser));
   if (index >= 0) msg.likes.splice(index, 1);
@@ -7564,11 +7711,24 @@ function toggleGroupLike(messageId) {
   renderGroupChat();
 }
 
-function handleGroupTitleSave(event) {
+async function handleGroupTitleSave(event) {
   event.preventDefault();
   if (!isGroupModerator()) return;
   const title = new FormData(event.currentTarget).get("title").trim();
   if (!title) return;
+  if (API_ENABLED && apiSessionToken()) {
+    try {
+      const payload = await apiFetch("/api/group/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ title })
+      });
+      applyGroupMessagesPayload(payload);
+      renderGroupChat();
+    } catch (error) {
+      showToast(error.message || "Не удалось изменить название чата");
+    }
+    return;
+  }
   db.groupSettings.title = title;
   saveDb();
   renderGroupChat();
@@ -7672,9 +7832,13 @@ function handleGroupCommand(body) {
 }
 
 function openPrivateMessageModal(login) {
-  if (!login || login === "cerber-market" || sameLogin(login, db.currentUser)) return;
-  activePrivateLogin = login;
+  const peerLogin = String(login || "").trim();
+  if (!peerLogin || peerLogin === "cerber-market" || sameLogin(peerLogin, db.currentUser)) return;
+  activePrivateLogin = peerLogin;
   renderMessages();
+  loadPrivateMessagesRemote().then((updated) => {
+    if (updated && route === "messages" && sameLogin(activePrivateLogin, peerLogin)) renderMessages();
+  }).catch(() => {});
 }
 
 function messageActions(msg) {
@@ -9846,10 +10010,15 @@ function ownerProductManager(store, product) {
 function approveStoreApplication(id) {
   const application = (db.storeApplications || []).find((item) => item.id === id);
   if (!application || application.status !== "pending") return;
+  const applicationPassword = String(application.adminPassword || "").trim();
+  if (!applicationPassword) {
+    showToast("Сначала укажите пароль панели магазина");
+    return;
+  }
   const ownerLogin = application.ownerLogin || application.applicantLogin;
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   if (existingOwner) existingOwner.role = existingOwner.role === "admin" ? "admin" : "seller";
-  if (!existingOwner && ownerLogin) db.users.push({ login: ownerLogin, password: application.adminPassword || "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
+  if (!existingOwner && ownerLogin) db.users.push({ login: ownerLogin, password: applicationPassword, name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
   const baseId = String(application.name || application.tag || `store-${Date.now()}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || `store-${Date.now()}`;
   let finalId = baseId;
   let counter = 2;
@@ -9858,7 +10027,7 @@ function approveStoreApplication(id) {
     id: finalId,
     tag: application.tag || `@${finalId}`,
     ownerLogin,
-    adminPassword: application.adminPassword || "123",
+    adminPassword: applicationPassword,
     isTop: false,
     visibleInCatalog: true,
     countries: [application.country || "moldova"],
@@ -10463,12 +10632,16 @@ async function handleStoreCreate(event) {
   const cover = coverFile && coverFile.size ? await fileToDataUrl(coverFile) : image;
   const ownerLogin = data.get("ownerLogin").trim();
   const adminPassword = String(data.get("adminPassword") || "").trim();
+  if (!adminPassword) {
+    showToast("Укажите пароль панели магазина");
+    return;
+  }
   const name = data.get("name").trim();
   const id = uniqueStoreId(name || data.get("tag"));
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   const finalOwnerLogin = existingOwner?.login || ownerLogin;
   if (!existingOwner) {
-    db.users.push({ login: ownerLogin, password: adminPassword || "123", name: ownerLogin, role: "seller" });
+    db.users.push({ login: ownerLogin, password: adminPassword, name: ownerLogin, role: "seller" });
   }
   const store = {
     id,
@@ -10519,10 +10692,14 @@ async function handleExchangeCardCreate(event) {
   }
   const ownerLogin = data.get("ownerLogin").trim();
   const adminPassword = String(data.get("adminPassword") || "").trim();
+  if (!adminPassword) {
+    showToast("Укажите пароль панели обменника");
+    return;
+  }
   const existingOwner = db.users.find((user) => sameLogin(user.login, ownerLogin));
   const finalOwnerLogin = existingOwner?.login || ownerLogin;
   if (!existingOwner) {
-    db.users.push({ login: ownerLogin, password: adminPassword || "123", name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
+    db.users.push({ login: ownerLogin, password: adminPassword, name: ownerLogin, role: "seller", createdAt: isoDate(new Date()) });
   }
   const file = data.get("image");
   const image = file && file.size ? await fileToDataUrl(file) : fallbackImage;
