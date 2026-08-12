@@ -48,6 +48,8 @@ let shopPanelFormLockUntil = 0;
 let shopPanelBusyForms = 0;
 let activeShopPanelTab = "dashboard";
 let liveLtcBalanceTimer = null;
+let walletDepositSyncTimer = null;
+let walletDepositSyncPromise = null;
 let activeShopDisputeId = "";
 let syncingLocalDisputeMessages = false;
 const pendingLocalDisputeMessageSyncIds = new Set();
@@ -2412,6 +2414,50 @@ async function syncPendingProductPayments() {
   }
 }
 
+function hasPendingWalletDeposit() {
+  return (db.walletDeposits || []).some((deposit) => (
+    deposit?.paymentId
+    && ["waiting", "processing", "pending"].includes(String(deposit.status || "waiting").toLowerCase())
+  ));
+}
+
+async function syncPendingWalletDeposits() {
+  if (!API_ENABLED || !apiSessionToken() || !hasPendingWalletDeposit()) {
+    clearInterval(walletDepositSyncTimer);
+    walletDepositSyncTimer = null;
+    return false;
+  }
+  if (walletDepositSyncPromise) return walletDepositSyncPromise;
+  walletDepositSyncPromise = apiFetch("/api/wallet/deposits/sync", {
+    method: "POST",
+    timeoutMs: 40000
+  }).then((payload) => {
+    const previousBalance = userLtcBalance();
+    applyRemoteState(payload);
+    if (!hasPendingWalletDeposit()) startWalletDepositSync();
+    const changed = Math.abs(userLtcBalance() - previousBalance) > 0.000000001;
+    if (changed && realtimeCanRenderNow()) {
+      if (route === "wallet") renderWallet();
+      else renderCurrent();
+    }
+    return true;
+  }).catch((error) => {
+    console.error("[wallet] deposit sync failed", error);
+    return false;
+  }).finally(() => {
+    walletDepositSyncPromise = null;
+  });
+  return walletDepositSyncPromise;
+}
+
+function startWalletDepositSync() {
+  clearInterval(walletDepositSyncTimer);
+  if (!API_ENABLED || !apiSessionToken() || !hasPendingWalletDeposit()) return;
+  walletDepositSyncTimer = setInterval(() => {
+    if (document.visibilityState === "visible") syncPendingWalletDeposits();
+  }, 10000);
+}
+
 async function loadRemoteState() {
   if (!API_ENABLED) return false;
   try {
@@ -2553,6 +2599,7 @@ function prunePersonalStateForCurrentUser() {
 
 function realtimeShouldRenderEvent(event = {}) {
   const type = String(event.type || "");
+  if (type === "wallet_deposit_completed") return true;
   if (route === "messages") return /private_message|dispute|support_ticket|state_updated/.test(type);
   if (route === "group-chat") return /group_/.test(type);
   if (route === "orders" || route === "exchange-order") return /order|dispute|exchange/.test(type);
@@ -2575,7 +2622,8 @@ function scheduleRealtimeRefresh(event = {}) {
     if (!ok) return;
     if (!shouldRender) {
       realtimePendingRender = false;
-      renderFloatingOnly();
+      if (String(event.type || "") === "wallet_deposit_completed" && realtimeCanRenderNow()) renderCurrent();
+      else renderFloatingOnly();
       return;
     }
     if (realtimeCanRenderNow()) {
@@ -9122,6 +9170,7 @@ async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "П
     body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, amountLtcEstimate: usdToLtc(amountUsd) })
   });
   applyRemoteState(payload);
+  startWalletDepositSync();
   const deposit = payload.deposit || {};
   if (!deposit.payAddress && !deposit.paymentUrl) throw new Error("Платежный шлюз не вернул адрес оплаты");
   const tx = (db.walletTransactions || []).find((item) => item.id === `tx-${deposit.id}` || item.paymentId === deposit.paymentId);
@@ -12822,11 +12871,13 @@ async function initApp() {
     await loadRemoteState();
     await loadRemoteSession();
     await syncPendingProductPayments();
+    await syncPendingWalletDeposits();
     await fetchLitecoinUsdRate();
   } catch (error) {
     console.error("[init] remote bootstrap failed", error);
   }
   safeRenderCurrent();
+  startWalletDepositSync();
   clearInterval(liveLtcBalanceTimer);
   liveLtcBalanceTimer = setInterval(async () => {
     if (!isShopPanelHash() || !sellerAdminApiSessionToken() || !shopPanelCanRefresh()) return;

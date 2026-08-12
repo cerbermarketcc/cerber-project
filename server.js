@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
-const cerberBuildVersion = "ltc-ledger-balances-2026-08-11-v148";
+const cerberBuildVersion = "wallet-deposit-credit-recovery-2026-08-12-v149";
 const adminAuditResetId = "owner-request-2026-08-09-v1";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -42,7 +42,7 @@ const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
 const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const walletDepositTtlMs = 40 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
-const paymentReconcileIntervalMs = 30 * 1000;
+const paymentReconcileIntervalMs = 15 * 1000;
 const dbQueryTimeoutMs = Math.max(12000, Number(process.env.DB_QUERY_TIMEOUT_MS || 25000));
 const exchangerReviewCooldownMs = 6 * 60 * 60 * 1000;
 const visualMarketplaceResetAt = 1784727156485;
@@ -59,6 +59,7 @@ const walletCoins = [
 let litecoinUsdRateCache = { rate: 0, sources: [], updatedAt: 0 };
 let paymentReconcilePromise = null;
 let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
+let settingsSaveChain = Promise.resolve();
 const withdrawalPayoutJobs = new Set();
 let nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
 const uiTranslationCache = new Map();
@@ -6850,6 +6851,7 @@ const PRESERVED_STATE_ARRAY_KEYS = [
 const PRESERVED_STATE_OBJECT_KEYS = [
   "balances",
   "ltcBalances",
+  "ltcBalanceVersions",
   "referralCodes",
   "telegramBot",
   "blockedUsers",
@@ -6946,7 +6948,68 @@ async function saveSettingsBackupState(state = {}) {
   });
 }
 
-async function saveSettingsState(state, options = {}) {
+function durableFinanceRecordRank(record = {}) {
+  const status = String(record.status || record.paymentStatus || "").toLowerCase();
+  if (["completed", "paid", "finished"].includes(status)) return 4;
+  if (["cancelled", "canceled", "failed", "expired", "refunded", "rejected"].includes(status)) return 3;
+  if (["processing", "pending", "waiting", "queued"].includes(status)) return 2;
+  return 1;
+}
+
+function durableFinanceRecordTimestamp(record = {}) {
+  return Number(
+    record.updatedAt
+    || record.completedAt
+    || record.paidAt
+    || record.cancelledAt
+    || record.processedAt
+    || record.createdAt
+    || 0
+  );
+}
+
+function mergeDurableFinanceRecords(current = [], incoming = []) {
+  const merged = new Map();
+  (Array.isArray(current) ? current : []).forEach((record) => {
+    if (record?.id) merged.set(String(record.id), record);
+  });
+  (Array.isArray(incoming) ? incoming : []).forEach((record) => {
+    if (!record?.id) return;
+    const id = String(record.id);
+    const saved = merged.get(id);
+    if (!saved) {
+      merged.set(id, record);
+      return;
+    }
+    const savedRank = durableFinanceRecordRank(saved);
+    const incomingRank = durableFinanceRecordRank(record);
+    const savedAt = durableFinanceRecordTimestamp(saved);
+    const incomingAt = durableFinanceRecordTimestamp(record);
+    if (incomingRank < savedRank || (incomingRank === savedRank && savedAt > incomingAt)) return;
+    merged.set(id, { ...saved, ...record });
+  });
+  return [...merged.values()].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function mergeVersionedLtcBalances(next = {}, current = {}, incoming = {}) {
+  const currentBalances = current.ltcBalances && typeof current.ltcBalances === "object" ? current.ltcBalances : {};
+  const incomingBalances = incoming.ltcBalances && typeof incoming.ltcBalances === "object" ? incoming.ltcBalances : {};
+  const currentVersions = current.ltcBalanceVersions && typeof current.ltcBalanceVersions === "object" ? current.ltcBalanceVersions : {};
+  const incomingVersions = incoming.ltcBalanceVersions && typeof incoming.ltcBalanceVersions === "object" ? incoming.ltcBalanceVersions : {};
+  const balances = { ...currentBalances };
+  const versions = { ...currentVersions };
+  Object.entries(incomingBalances).forEach(([key, value]) => {
+    const currentVersion = Number(currentVersions[key] || 0);
+    const incomingVersion = Number(incomingVersions[key] || 0);
+    if (Object.prototype.hasOwnProperty.call(currentBalances, key) && incomingVersion < currentVersion) return;
+    balances[key] = Math.max(0, Number(value || 0) || 0);
+    versions[key] = Math.max(currentVersion, incomingVersion);
+  });
+  next.ltcBalances = balances;
+  next.ltcBalanceVersions = versions;
+}
+
+async function saveSettingsStateNow(state, options = {}) {
   const { data: currentSettings } = await supabase.from("app_settings").select("data").eq("id", mainSettingsRowId).maybeSingle();
   let currentData = currentSettings?.data || {};
   const backupData = await loadSettingsBackupState();
@@ -6973,6 +7036,14 @@ async function saveSettingsState(state, options = {}) {
       : (incomingExchangers || currentExchangers)
   };
   preserveExistingStateCollections(next, currentData, state || {}, options);
+  mergeVersionedLtcBalances(next, currentData, state || {});
+  const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
+  next.walletDeposits = allowEmptyKeys.has("walletDeposits")
+    ? (Array.isArray(state?.walletDeposits) ? state.walletDeposits : [])
+    : mergeDurableFinanceRecords(currentData.walletDeposits, state?.walletDeposits);
+  next.walletTransactions = allowEmptyKeys.has("walletTransactions")
+    ? (Array.isArray(state?.walletTransactions) ? state.walletTransactions : [])
+    : mergeDurableFinanceRecords(currentData.walletTransactions, state?.walletTransactions);
   await supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: next }, { onConflict: "id" });
   const backupSave = saveSettingsBackupState(next);
   if (options.deferSideEffects) {
@@ -7005,6 +7076,14 @@ async function saveSettingsState(state, options = {}) {
   if (state && (state.orders || state.walletDeposits || state.walletWithdrawals || state.walletTransactions)) {
     scheduleFinanceMirror(next);
   }
+}
+
+async function saveSettingsState(state, options = {}) {
+  const snapshot = cloneJson(state || {});
+  const save = () => saveSettingsStateNow(snapshot, options);
+  const pending = settingsSaveChain.then(save, save);
+  settingsSaveChain = pending.catch(() => {});
+  return pending;
 }
 
 async function savePublicStoresCache(stores = []) {
@@ -8037,10 +8116,42 @@ function stateUserLtcBalance(state, login, key = loginKey(login)) {
 
 function setStateUserLtcBalance(state, login, value, key = loginKey(login)) {
   state.ltcBalances = state.ltcBalances && typeof state.ltcBalances === "object" ? state.ltcBalances : {};
+  state.ltcBalanceVersions = state.ltcBalanceVersions && typeof state.ltcBalanceVersions === "object" ? state.ltcBalanceVersions : {};
   const next = Math.max(0, Number(value || 0) || 0);
+  const version = Math.max(
+    Date.now(),
+    Number(state.ltcBalanceVersions[login] || 0) + 1,
+    Number(state.ltcBalanceVersions[key] || 0) + 1
+  );
   if (login) state.ltcBalances[login] = next;
   if (key) state.ltcBalances[key] = next;
+  if (login) state.ltcBalanceVersions[login] = version;
+  if (key) state.ltcBalanceVersions[key] = version;
   return next;
+}
+
+function walletTransactionAffectsUserLtcBalance(transaction = {}) {
+  if (transaction.scope && transaction.scope !== "user") return false;
+  const type = String(transaction.type || "").toLowerCase();
+  const status = String(transaction.status || "completed").toLowerCase();
+  if (type === "deposit") return ["completed", "paid", "finished"].includes(status);
+  if (type === "withdrawal") return !["failed", "expired", "cancelled", "canceled", "rejected", "refunded"].includes(status);
+  return ["purchase", "withdrawal_refund", "admin_adjustment"].includes(type)
+    && !["failed", "cancelled", "canceled", "rejected"].includes(status);
+}
+
+function userLtcBalanceFromLedger(state = {}, login = "") {
+  return roundLtc((Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .filter((transaction) => sameLogin(transaction.login || transaction.loginKey, login))
+    .filter(walletTransactionAffectsUserLtcBalance)
+    .reduce((sum, transaction) => sum + Number(transaction.amountLtc || 0), 0));
+}
+
+function reconcileUserLtcBalanceFromLedger(state = {}, login = "") {
+  const expected = Math.max(0, userLtcBalanceFromLedger(state, login));
+  const current = stateUserLtcBalance(state, login);
+  if (current + 0.000000001 >= expected) return current;
+  return setStateUserLtcBalance(state, login, expected);
 }
 
 function adminTimestamp(item) {
@@ -9928,6 +10039,7 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
     const startedAt = Date.now();
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
+    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
     const candidates = orders
       .filter((order) => (
         order?.type === "product"
@@ -9939,6 +10051,9 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
       .slice(0, 30);
     let checked = 0;
     let completed = 0;
+    let depositsChecked = 0;
+    let depositsCompleted = 0;
+    let depositsRepaired = 0;
     let changed = false;
     const statuses = {};
     const errors = [];
@@ -9976,12 +10091,63 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
         errors.push(String(error.message || error).slice(0, 200));
       }
     }
+    const completedDeposits = deposits.filter((deposit) => (
+      deposit?.id
+      && deposit.login
+      && ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase())
+    ));
+    for (const deposit of completedDeposits) {
+      const balanceBefore = stateUserLtcBalance(state, deposit.login);
+      const repaired = await completeWalletDeposit(deposit, state, deposit.paymentProviderPayload || {}, { notify: false });
+      if (repaired && Math.abs(stateUserLtcBalance(state, deposit.login) - balanceBefore) > 0.000000001) {
+        depositsRepaired += 1;
+        changed = true;
+      }
+    }
+    const depositCandidates = deposits
+      .filter((deposit) => (
+        deposit?.paymentId
+        && ["waiting", "processing", "pending"].includes(String(deposit.status || "waiting").toLowerCase())
+      ))
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
+      .slice(0, 30);
+    for (const deposit of depositCandidates) {
+      if (!force && Date.now() - Number(deposit.lastPaymentCheckAt || 0) < 10 * 1000) continue;
+      try {
+        const payment = await nowpaymentsRequest(`payment/${encodeURIComponent(deposit.paymentId)}`, { method: "GET" });
+        const status = String(payment.payment_status || payment.status || "waiting").toLowerCase();
+        const previousStatus = String(deposit.paymentStatus || deposit.status || "").toLowerCase();
+        depositsChecked += 1;
+        statuses[`deposit:${status}`] = Number(statuses[`deposit:${status}`] || 0) + 1;
+        deposit.lastPaymentCheckAt = Date.now();
+        deposit.paymentStatus = status;
+        deposit.paymentProviderPayload = payment;
+        changed = changed || previousStatus !== status;
+        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment)) {
+          await completeWalletDeposit(deposit, state, payment);
+          depositsCompleted += 1;
+          changed = true;
+        } else if (nowpaymentsPaymentIsPaid(status)) {
+          deposit.status = "underpaid";
+          deposit.paymentReviewReason = "provider_amount_below_expected";
+          changed = true;
+        } else if (nowpaymentsPaymentIsCancelled(status)) {
+          await cancelWalletDeposit(deposit, state, payment);
+          changed = true;
+        }
+      } catch (error) {
+        errors.push(String(error.message || error).slice(0, 200));
+      }
+    }
     if (changed && completed === 0) await saveSettingsState(state);
     paymentReconcileStatus = {
-      state: errors.length && !checked ? "error" : "ready",
+      state: errors.length && !(checked + depositsChecked) ? "error" : "ready",
       checked,
       completed,
-      pending: Math.max(0, candidates.length - completed),
+      pending: Math.max(0, candidates.length - completed) + Math.max(0, depositCandidates.length - depositsCompleted),
+      depositsChecked,
+      depositsCompleted,
+      depositsRepaired,
       statuses,
       updatedAt: Date.now(),
       durationMs: Date.now() - startedAt,
@@ -10003,28 +10169,43 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
   return paymentReconcilePromise;
 }
 
-async function completeWalletDeposit(deposit, state, providerPayload = {}) {
-  if (deposit.status === "completed") {
-    await saveSettingsState(state);
-    return;
+async function completeWalletDeposit(deposit, state, providerPayload = {}, options = {}) {
+  const wasAlreadyCompleted = ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase());
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  const txId = `tx-${deposit.id}`;
+  const savedTransaction = state.walletTransactions.find((transaction) => transaction.id === txId);
+  const savedTransactionCompleted = ["completed", "paid", "finished"].includes(String(savedTransaction?.status || "").toLowerCase());
+  const expectedBalance = userLtcBalanceFromLedger(state, deposit.login);
+  const currentBalance = stateUserLtcBalance(state, deposit.login);
+  if (
+    wasAlreadyCompleted
+    && deposit.balanceCreditedAt
+    && savedTransactionCompleted
+    && currentBalance + 0.000000001 >= expectedBalance
+  ) {
+    return { wasAlreadyCompleted: true, balanceBefore: currentBalance, balanceAfter: currentBalance, paidLtc: Number(deposit.amountLtc || 0) };
   }
-
   const paidUsd = Number(deposit.amountUsd || providerPayload.price_amount || 0);
   const providerPaidLtc = Number(providerPayload.actually_paid || providerPayload.pay_amount || deposit.payAmount || 0);
   const liveRate = deposit.payCurrency === "ltc" ? 0 : Number((await loadLitecoinUsdRate().catch(() => ({ rate: 0 }))).rate || 0);
   const paidLtc = deposit.payCurrency === "ltc"
     ? Number(providerPaidLtc || deposit.amountLtc || deposit.amountLtcExpected || 0)
     : Number(deposit.amountLtc || (liveRate > 0 ? paidUsd / liveRate : deposit.amountLtcExpected || 0));
+  if (!Number.isFinite(paidLtc) || paidLtc <= 0) {
+    const error = new Error("NOWPayments не вернул сумму для зачисления");
+    error.status = 409;
+    throw error;
+  }
+  const completedAt = Number(deposit.paidAt || Date.now());
   deposit.status = "completed";
-  deposit.paidAt = Date.now();
+  deposit.paymentStatus = String(providerPayload.payment_status || providerPayload.status || "finished").toLowerCase();
+  deposit.paidAt = completedAt;
+  deposit.completedAt = completedAt;
   deposit.amountLtc = paidLtc;
-  deposit.paymentProviderPayload = providerPayload;
+  deposit.paymentProviderPayload = Object.keys(providerPayload || {}).length ? providerPayload : deposit.paymentProviderPayload || {};
+  delete deposit.paymentReviewReason;
 
   state.ltcBalances = state.ltcBalances || {};
-  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-  setStateUserLtcBalance(state, deposit.login, stateUserLtcBalance(state, deposit.login) + paidLtc);
-
-  const txId = `tx-${deposit.id}`;
   const existingTx = state.walletTransactions.find((tx) => tx.id === txId);
   if (existingTx) {
     existingTx.status = "completed";
@@ -10033,7 +10214,8 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
     existingTx.coinId = deposit.coinId || "ltc";
     existingTx.payCurrency = deposit.payCurrency || "ltc";
     existingTx.payAmount = Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0);
-    existingTx.completedAt = Date.now();
+    existingTx.completedAt = completedAt;
+    existingTx.balanceCreditId = deposit.id;
   } else {
     state.walletTransactions.unshift({
       id: txId,
@@ -10045,20 +10227,32 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
       coinId: deposit.coinId || "ltc",
       payCurrency: deposit.payCurrency || "ltc",
       payAmount: Number(providerPayload.pay_amount || providerPayload.actually_paid || deposit.payAmount || 0),
-      createdAt: Date.now(),
-      date: new Date().toLocaleString("ru-RU"),
-      status: "completed"
+      createdAt: Number(deposit.createdAt || completedAt),
+      completedAt,
+      date: deposit.date || new Date(completedAt).toLocaleString("ru-RU"),
+      status: "completed",
+      balanceCreditId: deposit.id
     });
   }
-
-  await notifySiteUser(state, deposit.login, {
-    id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(deposit.login)}`,
-    eventType: "wallet_deposit_completed",
-    title: "Баланс пополнен",
-    body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено.`
-  });
+  const balanceBefore = stateUserLtcBalance(state, deposit.login);
+  const balanceAfter = !wasAlreadyCompleted && !deposit.balanceCreditedAt
+    ? setStateUserLtcBalance(state, deposit.login, balanceBefore + paidLtc)
+    : reconcileUserLtcBalanceFromLedger(state, deposit.login);
+  deposit.balanceCreditedAt = Number(deposit.balanceCreditedAt || Date.now());
+  deposit.balanceAfterLtc = balanceAfter;
   const referralPayment = applyReferralReward(state, deposit.login, paidUsd, `wallet-deposit:${deposit.id}`, paidLtc);
-  if (referralPayment) {
+  await saveSettingsState(state);
+  notifyRealtime("wallet_deposit_completed");
+
+  if (options.notify !== false) {
+    await notifySiteUser(state, deposit.login, {
+      id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(deposit.login)}`,
+      eventType: "wallet_deposit_completed",
+      title: "Баланс пополнен",
+      body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено. Баланс: ${Number(balanceAfter || 0).toFixed(8)} LTC.`
+    });
+  }
+  if (referralPayment && options.notify !== false) {
     await notifySiteUser(state, referralPayment.referrerLogin, {
       id: `notice-referral-reward-${referralPayment.id}-${loginKey(referralPayment.referrerLogin)}`,
       eventType: "referral_reward",
@@ -10066,8 +10260,8 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}) {
       body: `Начислено ${Number(referralPayment.reward || 0).toFixed(2)} $ за пополнение пользователя ${deposit.login}.`
     });
   }
-
-  await saveSettingsState(state);
+  if (options.notify !== false) await saveSettingsState(state);
+  return { wasAlreadyCompleted, balanceBefore, balanceAfter, paidLtc };
 }
 
 async function cancelWalletDeposit(deposit, state, providerPayload = {}) {
@@ -10561,11 +10755,32 @@ app.get("/api/telegram/wallet/deposits/:id", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const state = await loadSettingsState();
-    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
-    const deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
+    let state = await loadSettingsState();
+    let deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    let deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
     if (!deposit) return res.status(404).json({ error: "Пополнение не найдено" });
-    res.json({ deposit });
+    const status = String(deposit.status || "waiting").toLowerCase();
+    if (deposit.paymentId && ["waiting", "processing", "pending"].includes(status)) {
+      await reconcilePendingNowpaymentsOrders({ force: true });
+      state = await loadSettingsState();
+      deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+      deposit = deposits.find((item) => item.id === req.params.id && sameLogin(item.login, user.login)) || deposit;
+    }
+    res.json({
+      deposit,
+      balanceLtc: stateUserLtcBalance(state, user.login, user.login_key)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/wallet/deposits/sync", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    await reconcilePendingNowpaymentsOrders({ force: true });
+    res.json(await stateFor(user));
   } catch (error) {
     next(error);
   }
