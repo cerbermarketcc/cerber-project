@@ -159,31 +159,9 @@ select:focus-visible {
   box-shadow: inset 0 0 18px rgba(177, 23, 18, .05);
 }
 
-.market-brand-strip {
-  position: relative;
+.market-brand-spacer {
   min-height: 160px;
   margin: 12px 20px 6px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 82, 72, .32);
-  border-radius: 8px;
-  background: #0a0708;
-  box-shadow: 0 16px 46px rgba(0, 0, 0, .42), 0 0 30px rgba(206, 32, 25, .12);
-}
-
-.market-brand-strip::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(90deg, rgba(5, 5, 6, .2), transparent 45%, rgba(5, 5, 6, .2));
-}
-
-.market-brand-strip img {
-  display: block;
-  width: 100%;
-  height: 160px;
-  object-fit: cover;
-  object-position: center 45%;
 }
 
 .hero,
@@ -532,13 +510,9 @@ select {
 }
 
 @media (max-width: 899px) {
-  .market-brand-strip {
+  .market-brand-spacer {
     min-height: 116px;
     margin: 10px 8px 4px;
-  }
-
-  .market-brand-strip img {
-    height: 116px;
   }
 
   .brand-lockup {
@@ -676,8 +650,7 @@ select {
     display: none;
   }
 
-  .market-brand-strip,
-  .market-brand-strip img {
+  .market-brand-spacer {
     height: 104px;
     min-height: 104px;
   }

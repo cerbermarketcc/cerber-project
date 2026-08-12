@@ -4704,9 +4704,7 @@ function renderHome() {
     <section class="feed home-mirrors-first">
       ${officialMirrorsView()}
     </section>
-    <section class="market-brand-strip" aria-label="CERBER Marketplace">
-      <img src="assets/cerber-neon-marketplace.png" alt="CERBER Marketplace">
-    </section>
+    <div class="market-brand-spacer" aria-hidden="true"></div>
     <section class="hero">
       <h1>${topTitleView()}</h1>
       <label class="search"><b>⌕</b><input data-search value="${esc(filters.query || "")}" placeholder="${tr("search")}"></label>
