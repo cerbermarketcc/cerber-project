@@ -4413,7 +4413,24 @@ app.post("/api/support/tickets/:id/reply", async (req, res, next) => {
 
 app.get("/api/state", async (_req, res, next) => {
   try {
-    res.json(await stateFor(null));
+    const state = await loadSettingsState();
+    const catalog = buildPublicCatalogSnapshot(state);
+    res.json({
+      user: null,
+      state: {
+        stateSnapshotComplete: true,
+        catalogsAuthoritative: true,
+        currentUser: "",
+        theme: "dark",
+        lang: catalog.lang || "ru",
+        stores: catalog.stores || [],
+        exchangeCards: catalog.exchangeCards || [],
+        exchangers: catalog.exchangers || [],
+        groupSettings: publicGroupSettings(catalog.groupSettings || {}),
+        referralPeriod: catalog.referralPeriod || {},
+        filters: catalog.filters || {}
+      }
+    });
   } catch (error) {
     console.error("[api/state] public fallback after state load failed", { message: error.message });
     res.json({
@@ -4424,34 +4441,10 @@ app.get("/api/state", async (_req, res, next) => {
         currentUser: "",
         theme: "dark",
         lang: "ru",
-        users: [],
         stores: [],
-        messages: [],
-        orders: [],
         exchangeCards: [],
         exchangers: [],
-        exchangeRequests: [],
-        groupMessages: [],
-        groupSettings: normalizeGroupSettings({}),
-        referrals: [],
-        referralPayments: [],
-        referralCodes: {},
-        balances: {},
-        ltcBalances: {},
-        walletTransactions: [],
-        walletDeposits: [],
-        walletWithdrawals: [],
-        mirrorBots: [],
-        bots: { total: 0, active: 0, blocked: 0, items: [] },
-        siteNotifications: [],
-        broadcasts: [],
-        supportSettings: { recipients: [] },
-        supportTickets: [],
-        userFilters: [],
-        blockedUsers: {},
-        storeApplications: [],
-        ownerSettings: {},
-        paymentSettings: {},
+        groupSettings: publicGroupSettings({}),
         referralPeriod: {},
         filters: {}
       }
