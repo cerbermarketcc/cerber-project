@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const server = readFileSync(new URL("../server.js", import.meta.url), "utf8");
+const appClient = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const adminClient = readFileSync(new URL("../market-admin.js", import.meta.url), "utf8");
 const textAdminClient = readFileSync(new URL("../text-admin.js", import.meta.url), "utf8");
 const migration = readFileSync(new URL("../supabase-security-2fa.sql", import.meta.url), "utf8");
@@ -40,6 +42,19 @@ test("ordinary customer authentication remains separate from administrative 2FA"
   assert.doesNotMatch(login, /totp|recoveryCode|challengeToken|signAdminToken/);
   assert.match(registration, /createUserSession\(req, (?:key|existing\.login_key \|\| key)\)/);
   assert.match(login, /createUserSession\(req, user\.login_key\)/);
+});
+
+test("all public mirrors use one shared customer account database without cross-origin auth fallback", () => {
+  const registration = routeBody("post", "/api/auth/register");
+  const login = routeBody("post", "/api/auth/login");
+  assert.match(appClient, /const API_ORIGIN = API_ENABLED \? location\.origin : PRIMARY_API_ORIGIN;/);
+  assert.match(appClient, /const API_ORIGINS = \[API_ORIGIN\];/);
+  assert.doesNotMatch(appClient, /\[PRIMARY_API_ORIGIN, API_ORIGIN\]/);
+  assert.match(registration, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
+  assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
+  assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
+  assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
+  assert.match(indexHtml, /app\.js\?v=158/);
 });
 
 test("the text administration entry point supports mandatory first-login MFA", () => {

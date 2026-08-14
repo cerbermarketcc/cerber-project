@@ -19,7 +19,10 @@ const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const LOCAL_OFFLINE_PREVIEW = IS_LOCAL_APP_HOST && new URLSearchParams(location.search).has("offline-preview");
 const API_ENABLED = location.protocol !== "file:" && !LOCAL_OFFLINE_PREVIEW;
 const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
-const API_ORIGINS = Array.from(new Set([PRIMARY_API_ORIGIN, API_ORIGIN].filter(Boolean)));
+// Keep captcha, authentication and session requests on the currently opened mirror.
+// Every mirror reaches the same server-side Supabase database, so a cross-origin
+// Render fallback only risks splitting a multi-step authentication flow.
+const API_ORIGINS = [API_ORIGIN];
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.getRegistrations?.().then((registrations) => {
