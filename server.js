@@ -166,8 +166,12 @@ function supabaseHttpRequest(input, init = {}, timeoutMs = 20000) {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => {
-        resolve(new Response(Buffer.concat(chunks), {
-          status: res.statusCode || 0,
+        const status = Number(res.statusCode || 502);
+        const responseBody = method === "HEAD" || [204, 205, 304].includes(status)
+          ? null
+          : Buffer.concat(chunks);
+        resolve(new Response(responseBody, {
+          status,
           statusText: res.statusMessage || "",
           headers: responseHeadersToObject(res.headers)
         }));
