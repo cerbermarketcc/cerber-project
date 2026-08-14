@@ -8,18 +8,40 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import bcrypt from "bcryptjs";
 import compression from "compression";
+import QRCode from "qrcode";
 import { createClient } from "@supabase/supabase-js";
 import WebSocket, { WebSocketServer } from "ws";
+import {
+  adminRoleAllowsRequest,
+  boundedUserText,
+  consumeRecoveryCode,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  isBlockedStaticPath,
+  mergeSellerProductInput,
+  parseInlineMedia,
+  recoveryCodeHashes,
+  sanitizeAuditDetails,
+  sanitizeErrorForLog,
+  totpCodeForStep,
+  trustedWalletCreditLtc,
+  validateProviderPayout,
+  validateProviderPayment,
+  validIdempotencyKey,
+  verifyTotpCode
+} from "./security-core.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
+const isProduction = process.env.NODE_ENV === "production";
 const cerberBuildVersion = "incident-lockdown-2026-08-12-v157";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
+const invalidPasswordTimingHash = "$2a$12$DKwXcwowvOq8mcDQ4fPPFO.XO5L4ge59H0uKy6ucXFUSEIHnq8WLG";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -85,6 +107,77 @@ try {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeOperationLockKeys(keys = []) {
+  return [...new Set((Array.isArray(keys) ? keys : [keys])
+    .map((key) => String(key || "").toLowerCase().replace(/[^a-z0-9:_-]/g, "-").slice(0, 160))
+    .filter(Boolean))].sort();
+}
+
+async function acquireOperationLocks(keys = [], options = {}) {
+  requireDb();
+  const requestedKeys = normalizeOperationLockKeys(keys);
+  if (!requestedKeys.length) throw Object.assign(new Error("Operation lock key is required"), { status: 500 });
+  const holder = crypto.randomBytes(24).toString("hex");
+  const deadline = Date.now() + Math.max(1000, Number(options.waitMs || 12000));
+  let lastError = null;
+  while (Date.now() < deadline) {
+    const { data, error } = await supabase.rpc("acquire_operation_locks", {
+      requested_keys: requestedKeys,
+      requested_holder: holder,
+      ttl_seconds: Math.max(15, Math.min(120, Number(options.ttlSeconds || 90)))
+    });
+    if (error) {
+      lastError = error;
+      if (/acquire_operation_locks|schema cache|could not find the function|PGRST202/i.test(String(error.message || error.code || ""))) {
+        const migrationError = new Error("Security migration supabase-security-2fa.sql must be applied before financial operations are enabled");
+        migrationError.status = 503;
+        throw migrationError;
+      }
+      break;
+    }
+    if (data === true) {
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        const { error: releaseError } = await supabase.rpc("release_operation_locks", {
+          requested_keys: requestedKeys,
+          requested_holder: holder
+        });
+        if (releaseError) console.error("[security-lock] release failed", sanitizeErrorForLog(releaseError));
+      };
+    }
+    await delay(100 + crypto.randomInt(0, 100));
+  }
+  const error = new Error(lastError ? "Security lock service is unavailable" : "Another financial operation is still being processed");
+  error.status = lastError ? 503 : 409;
+  throw error;
+}
+
+async function withOperationLocks(keys, action, options = {}) {
+  const release = await acquireOperationLocks(keys, options);
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
+function requestNeedsFinancialLock(req = {}) {
+  if (["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase())) return false;
+  const pathname = String(req.path || "");
+  if (pathname.endsWith("/sync")) return false;
+  return [
+    /^\/api\/orders(?:\/|$)/,
+    /^\/api\/wallet(?:\/|$)/,
+    /^\/api\/payments(?:\/|$)/,
+    /^\/api\/telegram\/(?:wallet|webhook|mirror)(?:\/|$)/,
+    /^\/api\/(?:site-notify-bot|proverka-bot)\/webhook$/,
+    /^\/api\/store-admin\/(?:store|products|withdrawals)(?:\/|$)/,
+    /^\/api\/admin\/(?:stores|users|orders|withdrawals|settings|payout|catalog)(?:\/|$)/
+  ].some((pattern) => pattern.test(pathname));
 }
 
 async function translateUiPhrase(value, target) {
@@ -288,6 +381,8 @@ const publicStoresSelect = [
   "rating:data->rating"
 ].join(",");
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
+const appSourcePath = path.join(__dirname, "app.js");
+let baseTextCatalogCache = null;
 const adminLoginAttempts = new Map();
 const adminTokenTtlMs = 2 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
@@ -379,13 +474,13 @@ const cspDirectives = [
 ].join("; ");
 
 function isAllowedCorsOrigin(origin = "") {
-  return allowedCorsOrigins.has(origin) || localCorsOriginPattern.test(origin);
+  return allowedCorsOrigins.has(origin) || (!isProduction && localCorsOriginPattern.test(origin));
 }
 
 function isAllowedRequestHost(host = "") {
   const value = String(host || "").trim().toLowerCase();
   const hostname = value.replace(/:\d+$/, "");
-  return allowedRequestHosts.has(hostname) || localHostPattern.test(value);
+  return allowedRequestHosts.has(hostname) || (!isProduction && localHostPattern.test(value));
 }
 
 function maskSecret(value = "") {
@@ -474,7 +569,7 @@ app.use((req, res, next) => {
   }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-telegram-bot-api-secret-token");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Idempotency-Key, x-telegram-bot-api-secret-token");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
@@ -494,7 +589,12 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, res, next) => {
-  const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+  let pathname = "";
+  try {
+    pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+  } catch {
+    return res.status(400).send("Bad request");
+  }
   const freshAsset = pathname === "/" || /\.(?:html|js|css)$/i.test(pathname);
   if (pathname.startsWith("/api/")) {
     res.setHeader("Cache-Control", "no-store");
@@ -541,29 +641,187 @@ app.use((req, res, next) => {
   if (req.apiBodyLimitTier === "media") return mediaApiJsonParser(req, res, next);
   return smallApiJsonParser(req, res, next);
 });
-app.use((req, res, next) => {
-  const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
-  if (
-    /^\/(?:\.git|\.github|\.codex|node_modules|scripts)(?:\/|$)/i.test(pathname) ||
-    /^\/(?:server\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|.*\.env(?:\..*)?|cms-texts\.json)$/i.test(pathname) ||
-    /\.(?:php|ini|md|sql|ya?ml|lock)$/i.test(pathname)
-  ) {
-    return res.status(404).send("Not found");
+app.use(async (req, res, next) => {
+  try {
+    const siteMfaPublicRoutes = new Set([
+      "/api/admin/login",
+      "/api/admin/2fa/setup",
+      "/api/admin/2fa/confirm",
+      "/api/admin/2fa/verify"
+    ]);
+    const storeMfaPublicRoutes = new Set([
+      "/api/store-admin/login",
+      "/api/store-admin/2fa/setup",
+      "/api/store-admin/2fa/confirm",
+      "/api/store-admin/2fa/verify"
+    ]);
+    const siteAdminPath = (
+      (req.path.startsWith("/api/admin/") && !siteMfaPublicRoutes.has(req.path))
+      || req.path === "/api/health/deep"
+      || (req.path === "/api/cms-texts" && req.method !== "GET")
+    );
+    const storeAdminPath = req.path.startsWith("/api/store-admin/") && !storeMfaPublicRoutes.has(req.path);
+    if (siteMfaPublicRoutes.has(req.path) || storeMfaPublicRoutes.has(req.path)) {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Pragma", "no-cache");
+    }
+    if (siteAdminPath) {
+      const token = verifyAdminToken(req);
+      if (!token) return res.status(401).json({ error: "Admin session required" });
+      const account = await loadAdminAccountById(token.accountId);
+      if (
+        !account
+        || account.scope !== "site"
+        || account.disabled
+        || !account.totp_enabled
+        || !ADMIN_MFA_ROLES.has(account.role)
+        || Number(account.credential_version || 1) !== Number(token.credentialVersion || 0)
+        || Number(account.session_version || 1) !== Number(token.sessionVersion || 0)
+        || account.role !== token.role
+      ) {
+        return res.status(401).json({ error: "Admin session is no longer valid" });
+      }
+      if (!adminRoleCanRequest(account.role, req)) {
+        appendAdminLog("admin_authorization_denied", account.login, { path: req.path, method: req.method, role: account.role, ...requestSource(req) })
+          .catch((error) => console.error("[security] authorization log failed", sanitizeErrorForLog(error)));
+        return res.status(403).json({ error: "Administrative role does not permit this action" });
+      }
+      req.authenticatedAdmin = { ...token, account: adminAccountPublic(account) };
+      res.setHeader("Cache-Control", "no-store");
+    }
+    if (storeAdminPath) {
+      const token = verifySellerAdminToken(req);
+      if (!token) return res.status(401).json({ error: "Store admin session required" });
+      const account = await loadAdminAccountById(token.accountId);
+      if (
+        !account
+        || account.scope !== "store"
+        || account.disabled
+        || !account.totp_enabled
+        || String(account.store_id || "") !== String(token.storeId || "")
+        || Number(account.credential_version || 1) !== Number(token.credentialVersion || 0)
+        || Number(account.session_version || 1) !== Number(token.sessionVersion || 0)
+        || account.role !== token.role
+      ) {
+        return res.status(401).json({ error: "Store admin session is no longer valid" });
+      }
+      req.authenticatedSellerAdmin = {
+        ...token,
+        permissions: account.role === "staff" && Array.isArray(account.permissions)
+          ? account.permissions.map(String)
+          : token.permissions,
+        account: adminAccountPublic(account)
+      };
+      res.setHeader("Cache-Control", "no-store");
+    }
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
 });
-app.use(express.static(__dirname));
+app.use(async (req, res, next) => {
+  if (!requestNeedsFinancialLock(req)) return next();
+  try {
+    const release = await acquireOperationLocks(["finance:state"], { waitMs: 15000, ttlSeconds: 90 });
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      release().catch((error) => console.error("[security-lock] response release failed", sanitizeErrorForLog(error)));
+    };
+    res.once("finish", finish);
+    res.once("close", finish);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+app.use((req, res, next) => {
+  try {
+    const pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+    if (isBlockedStaticPath(pathname)) return res.status(404).send("Not found");
+    next();
+  } catch {
+    res.status(400).send("Bad request");
+  }
+});
+app.use(express.static(__dirname, { dotfiles: "deny", fallthrough: true, index: "index.html" }));
 
 async function readCmsTexts() {
   try {
-    return JSON.parse(await fs.readFile(cmsTextsPath, "utf8"));
+    return sanitizeCmsTexts(JSON.parse(await fs.readFile(cmsTextsPath, "utf8")));
   } catch {
     return {};
   }
 }
 
+async function readBaseTextCatalog() {
+  if (baseTextCatalogCache) return baseTextCatalogCache;
+  const source = await fs.readFile(appSourcePath, "utf8");
+  const lines = source.slice(source.indexOf("const text = {")).split(/\r?\n/);
+  const catalog = { ru: {}, md: {}, en: {} };
+  let language = "";
+  for (const line of lines.slice(1)) {
+    const languageMatch = line.match(/^\s{2}(ru|md|en):\s*\{\s*$/);
+    if (languageMatch) {
+      language = languageMatch[1];
+      continue;
+    }
+    if (language && /^\s{2}\},?\s*$/.test(line)) {
+      language = "";
+      continue;
+    }
+    if (!language && /^\};\s*$/.test(line)) break;
+    if (!language || !line.trim()) continue;
+    const entry = line.match(/^\s{4}([A-Za-z][A-Za-z0-9_]*):\s*("(?:\\.|[^"\\])*")\s*,?\s*$/);
+    if (!entry) throw new Error("Base text catalog contains a non-string entry");
+    catalog[language][entry[1]] = JSON.parse(entry[2]);
+  }
+  if (Object.values(catalog).some((values) => Object.keys(values).length < 10)) {
+    throw new Error("Base text catalog is incomplete");
+  }
+  baseTextCatalogCache = catalog;
+  return catalog;
+}
+
 async function writeCmsTexts(payload) {
-  await fs.writeFile(cmsTextsPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const clean = sanitizeCmsTexts(payload);
+  await fs.writeFile(cmsTextsPath, `${JSON.stringify(clean, null, 2)}\n`, "utf8");
+  return clean;
+}
+
+function sanitizeCmsTexts(payload = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 512 * 1024) {
+    const error = new Error("CMS text payload is too large");
+    error.status = 413;
+    throw error;
+  }
+  const clean = {};
+  if (typeof payload.title === "string") clean.title = boundedUserText(payload.title, 160, "Page title");
+  for (const language of ["ru", "md", "en"]) {
+    const values = payload[language];
+    if (!values || typeof values !== "object" || Array.isArray(values)) continue;
+    clean[language] = {};
+    Object.entries(values).slice(0, 1000).forEach(([key, value]) => {
+      if (typeof value !== "string") return;
+      const safeKey = String(key).trim().slice(0, 200);
+      if (safeKey && !["__proto__", "prototype", "constructor"].includes(safeKey)) {
+        clean[language][safeKey] = boundedUserText(value, 4000, "CMS text");
+      }
+    });
+  }
+  if (payload.__visual && typeof payload.__visual === "object" && !Array.isArray(payload.__visual)) {
+    clean.__visual = {};
+    Object.entries(payload.__visual).slice(0, 5000).forEach(([key, value]) => {
+      if (typeof value !== "string") return;
+      const safeKey = String(key).trim().slice(0, 1000);
+      if (safeKey && !["__proto__", "prototype", "constructor"].includes(safeKey)) {
+        clean.__visual[safeKey] = boundedUserText(value, 1000, "Visual CMS text");
+      }
+    });
+  }
+  return clean;
 }
 
 function secretValuesMatch(actualValue, expectedValue) {
@@ -585,6 +843,17 @@ function requireTelegramWebhookSecret(req, secret = "", label = "Telegram webhoo
   }
 }
 
+function rememberTelegramWebhookUpdate(state = {}, payload = {}, scope = "telegram") {
+  const updateId = String(payload?.update_id ?? "").trim();
+  if (!/^\d{1,24}$/.test(updateId)) return { valid: false, duplicate: false };
+  const key = `${String(scope || "telegram").slice(0, 120)}:${updateId}`;
+  state.telegramWebhookEvents = Array.isArray(state.telegramWebhookEvents) ? state.telegramWebhookEvents : [];
+  if (state.telegramWebhookEvents.some((item) => item?.key === key)) return { valid: true, duplicate: true };
+  state.telegramWebhookEvents.unshift({ key, createdAt: Date.now() });
+  state.telegramWebhookEvents = state.telegramWebhookEvents.slice(0, 2000);
+  return { valid: true, duplicate: false };
+}
+
 function verifyCmsAdmin(req) {
   return requireAdmin(req);
 }
@@ -600,6 +869,17 @@ function requestSource(req) {
   };
 }
 
+function requestIdempotencyKey(req, scope = "operation") {
+  const supplied = req.headers?.["x-idempotency-key"] || req.body?.idempotencyKey || req.body?.clientRequestId || "";
+  const key = validIdempotencyKey(supplied);
+  if (!key) {
+    const error = new Error(`${scope} requires a valid idempotency key`);
+    error.status = 400;
+    throw error;
+  }
+  return key;
+}
+
 function sessionSource(req) {
   return {
     ip: `sha256:${secretFingerprint(clientIp(req))}`,
@@ -613,11 +893,7 @@ async function createUserSession(req, loginKeyValue = "") {
     const token = crypto.randomBytes(32).toString("hex");
     const tokenDigest = sessionTokenDigest(token);
     const row = { token: tokenDigest, login_key: loginKeyValue, ...sessionSource(req) };
-    let { error } = await supabase.from("sessions").insert(row);
-    if (error && /ip|user_agent|schema cache|column/i.test(String(error.message || ""))) {
-      console.warn("[auth] session source columns unavailable, retrying minimal session", { loginKey: loginKeyValue, message: error.message, code: error.code || "" });
-      ({ error } = await supabase.from("sessions").insert({ token: tokenDigest, login_key: loginKeyValue }));
-    }
+    const { error } = await supabase.from("sessions").insert(row);
     if (!error) return token;
     lastError = error;
     if (!isDuplicateDbError(error)) break;
@@ -711,14 +987,396 @@ function settingsStateForRuntime(state = {}) {
   };
 }
 
+const ADMIN_MFA_ROLES = new Set(["owner", "admin", "moderator", "manager", "support", "staff"]);
+const MFA_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+
+function siteAdminAccountId(login = "") {
+  return `site:${loginKey(login)}`;
+}
+
+function storeAdminAccountId(storeId = "", principal = {}) {
+  const safeStoreId = String(storeId || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 100);
+  return principal.role === "owner"
+    ? `store:${safeStoreId}:owner`
+    : `store:${safeStoreId}:staff:${loginKey(principal.login || principal.staffLogin)}`;
+}
+
+function adminAccountPublic(account = {}) {
+  return {
+    id: String(account.id || ""),
+    scope: String(account.scope || ""),
+    login: String(account.login || ""),
+    loginKey: String(account.login_key || ""),
+    storeId: String(account.store_id || ""),
+    role: String(account.role || ""),
+    permissions: Array.isArray(account.permissions) ? account.permissions.map(String) : [],
+    mfaEnabled: Boolean(account.totp_enabled),
+    recoveryCodesRemaining: Array.isArray(account.recovery_code_hashes) ? account.recovery_code_hashes.length : 0,
+    disabled: Boolean(account.disabled),
+    createdAt: account.created_at || null,
+    updatedAt: account.updated_at || null
+  };
+}
+
+function adminAccountMigrationError(error) {
+  if (/admin_accounts|schema cache|could not find the table|42P01/i.test(String(error?.message || error?.code || ""))) {
+    const migrationError = new Error("Security migration supabase-security-2fa.sql must be applied before administrative access is enabled");
+    migrationError.status = 503;
+    return migrationError;
+  }
+  return error;
+}
+
+async function loadAdminAccountById(accountId = "") {
+  requireDb();
+  const { data, error } = await withTimeout(
+    supabase.from("admin_accounts").select("*").eq("id", String(accountId || "")).maybeSingle(),
+    "admin account lookup",
+    8000
+  );
+  if (error) throw adminAccountMigrationError(error);
+  return data || null;
+}
+
+async function loadSiteAdminAccount(login = "") {
+  const key = loginKey(login);
+  if (!key) return null;
+  requireDb();
+  const { data, error } = await withTimeout(
+    supabase.from("admin_accounts").select("*").eq("scope", "site").eq("login_key", key).maybeSingle(),
+    "site admin lookup",
+    8000
+  );
+  if (error) throw adminAccountMigrationError(error);
+  return data || null;
+}
+
+async function insertAdminAccount(row = {}) {
+  const { data, error } = await withTimeout(
+    supabase.from("admin_accounts").insert(row).select("*").single(),
+    "admin account create",
+    10000
+  );
+  if (error) {
+    if (isDuplicateDbError(error)) return loadAdminAccountById(row.id);
+    throw adminAccountMigrationError(error);
+  }
+  return data;
+}
+
+async function ensureOwnerAdminAccount(login = "") {
+  const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin").trim();
+  if (!sameLogin(login, configuredLogin)) return null;
+  const existing = await loadSiteAdminAccount(configuredLogin);
+  if (existing) return existing;
+  return insertAdminAccount({
+    id: siteAdminAccountId(configuredLogin),
+    scope: "site",
+    login_key: loginKey(configuredLogin),
+    login: configuredLogin,
+    role: "owner",
+    permissions: [],
+    credential_version: 1,
+    created_by: "environment-bootstrap"
+  });
+}
+
+async function ensureStoreAdminAccount(store = {}, principal = {}) {
+  const role = principal.role === "owner" ? "owner" : "staff";
+  const login = role === "owner"
+    ? String(store.ownerLogin || store.id || "").trim()
+    : String(principal.login || principal.staffLogin || "").trim();
+  const id = storeAdminAccountId(store.id, { role, login });
+  let account = await loadAdminAccountById(id);
+  if (!account) {
+    account = await insertAdminAccount({
+      id,
+      scope: "store",
+      login_key: loginKey(login),
+      login,
+      store_id: String(store.id || ""),
+      role,
+      permissions: role === "staff" && Array.isArray(principal.permissions) ? principal.permissions.map(String) : [],
+      credential_version: 1,
+      created_by: role === "owner" ? "store-owner-bootstrap" : `store:${store.id}:owner`
+    });
+  }
+  if (!account || account.disabled) return account;
+  const permissions = role === "staff" && Array.isArray(principal.permissions) ? principal.permissions.map(String) : [];
+  if (account.login !== login || account.role !== role || JSON.stringify(account.permissions || []) !== JSON.stringify(permissions)) {
+    const { data, error } = await supabase.from("admin_accounts")
+      .update({ login, login_key: loginKey(login), role, permissions, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw adminAccountMigrationError(error);
+    account = data;
+  }
+  return account;
+}
+
+function normalizedPermissionList(value = []) {
+  return [...new Set((Array.isArray(value) ? value : []).map(String).filter(Boolean))].sort();
+}
+
+async function synchronizeStoreAdminAccess(previousStore = {}, nextStore = {}) {
+  const storeId = String(nextStore.id || previousStore.id || "").trim();
+  if (!storeId) return;
+  const { data: accounts, error } = await supabase.from("admin_accounts").select("*").eq("scope", "store").eq("store_id", storeId);
+  if (error) throw adminAccountMigrationError(error);
+
+  const previousStaff = new Map((Array.isArray(previousStore.staff) ? previousStore.staff : [])
+    .map((member) => [loginKey(member?.login), member]));
+  const nextStaff = new Map((Array.isArray(nextStore.staff) ? nextStore.staff : [])
+    .map((member) => [loginKey(member?.login), member]));
+
+  for (const account of accounts || []) {
+    const patch = { updated_at: new Date().toISOString() };
+    let changed = false;
+    if (account.role === "owner") {
+      const login = String(nextStore.ownerLogin || nextStore.id || "").trim();
+      if (login && (account.login !== login || account.login_key !== loginKey(login))) {
+        patch.login = login;
+        patch.login_key = loginKey(login);
+        changed = true;
+      }
+      if (String(previousStore.adminPasswordHash || "") !== String(nextStore.adminPasswordHash || "")) changed = true;
+    } else {
+      const previousMember = previousStaff.get(account.login_key);
+      const nextMember = nextStaff.get(account.login_key);
+      if (!nextMember) {
+        if (!account.disabled) patch.disabled = true;
+        changed = true;
+      } else {
+        const permissions = normalizedPermissionList(nextMember.permissions);
+        if (account.disabled) {
+          patch.disabled = false;
+          changed = true;
+        }
+        if (JSON.stringify(normalizedPermissionList(account.permissions)) !== JSON.stringify(permissions)) {
+          patch.permissions = permissions;
+          changed = true;
+        }
+        if (String(previousMember?.passwordHash || "") !== String(nextMember.passwordHash || "")) changed = true;
+      }
+    }
+    if (!changed) continue;
+    patch.credential_version = Number(account.credential_version || 1) + 1;
+    patch.session_version = Number(account.session_version || 1) + 1;
+    const { error: updateError } = await supabase.from("admin_accounts").update(patch).eq("id", account.id);
+    if (updateError) throw adminAccountMigrationError(updateError);
+  }
+}
+
+function mfaRecoverySecret(account = {}) {
+  return crypto.createHmac("sha256", adminSecret()).update(`mfa-recovery:${account.scope}:${securityTokenVersion}`).digest("hex");
+}
+
+function mfaSigningSecret(scope = "site") {
+  return scope === "store" ? sellerAdminSecret() : adminSecret();
+}
+
+function signMfaChallenge(account = {}, req = {}) {
+  const now = Date.now();
+  const payload = Buffer.from(JSON.stringify({
+    purpose: "admin-mfa-challenge",
+    accountId: account.id,
+    scope: account.scope,
+    storeId: account.store_id || "",
+    login: account.login,
+    role: account.role,
+    credentialVersion: Number(account.credential_version || 1),
+    sessionVersion: Number(account.session_version || 1),
+    deviceHash: requestDeviceHash(req),
+    createdAt: now,
+    expiresAt: now + MFA_CHALLENGE_TTL_MS
+  })).toString("base64url");
+  const signature = crypto.createHmac("sha256", mfaSigningSecret(account.scope)).update(`challenge:${payload}`).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function challengeTokenFromRequest(req = {}) {
+  return String(req.body?.challengeToken || req.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+}
+
+function verifyMfaChallenge(req, expectedScope = "") {
+  const [payload, signature] = challengeTokenFromRequest(req).split(".");
+  if (!payload || !signature) return null;
+  let data;
+  try {
+    data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (data.purpose !== "admin-mfa-challenge" || (expectedScope && data.scope !== expectedScope)) return null;
+  if (Date.now() > Number(data.expiresAt || 0) || Number(data.createdAt || 0) < securityTokenEpochMs) return null;
+  if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
+  const expected = crypto.createHmac("sha256", mfaSigningSecret(data.scope)).update(`challenge:${payload}`).digest("base64url");
+  return secretValuesMatch(signature, expected) ? data : null;
+}
+
+async function accountForMfaChallenge(req, expectedScope = "") {
+  const challenge = verifyMfaChallenge(req, expectedScope);
+  if (!challenge) {
+    const error = new Error("2FA setup session is invalid or expired");
+    error.status = 401;
+    throw error;
+  }
+  const account = await loadAdminAccountById(challenge.accountId);
+  if (
+    !account
+    || account.disabled
+    || account.scope !== challenge.scope
+    || Number(account.credential_version || 1) !== Number(challenge.credentialVersion || 0)
+    || Number(account.session_version || 1) !== Number(challenge.sessionVersion || 0)
+  ) {
+    const error = new Error("2FA setup session is no longer valid");
+    error.status = 401;
+    throw error;
+  }
+  return { challenge, account };
+}
+
+async function beginMfaSetup(account = {}) {
+  if (account.totp_enabled) {
+    const error = new Error("2FA is already configured");
+    error.status = 409;
+    throw error;
+  }
+  let secret = decryptStoredSecret(account.pending_totp_secret_enc || "");
+  if (!secret) {
+    secret = generateTotpSecret();
+    const { data, error } = await supabase.from("admin_accounts")
+      .update({ pending_totp_secret_enc: encryptStoredSecret(secret), updated_at: new Date().toISOString() })
+      .eq("id", account.id)
+      .eq("credential_version", account.credential_version)
+      .select("*")
+      .single();
+    if (error) throw adminAccountMigrationError(error);
+    account = data;
+  }
+  const issuer = account.scope === "store" ? "CERBER Store Admin" : "CERBER Owner Admin";
+  const label = `${issuer}:${account.login}`;
+  const otpauthUrl = `otpauth://totp/${encodeURIComponent(label)}?secret=${encodeURIComponent(secret)}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl, { errorCorrectionLevel: "M", margin: 1, width: 240 });
+  return { account, secret, otpauthUrl, qrCodeDataUrl };
+}
+
+async function consumeAdminTotp(account = {}, suppliedCode = "") {
+  const secret = decryptStoredSecret(account.totp_secret_enc || account.pending_totp_secret_enc || "");
+  const result = verifyTotpCode(secret, suppliedCode, { window: 1 });
+  if (!result.valid || result.step <= Number(account.last_totp_step ?? -1)) return null;
+  const { data, error } = await supabase.from("admin_accounts")
+    .update({ last_totp_step: result.step, updated_at: new Date().toISOString() })
+    .eq("id", account.id)
+    .eq("credential_version", account.credential_version)
+    .lt("last_totp_step", result.step)
+    .select("*")
+    .maybeSingle();
+  if (error) throw adminAccountMigrationError(error);
+  return data || null;
+}
+
+async function verifyAdminSecondFactor(account = {}, body = {}) {
+  if (body.recoveryCode) {
+    const consumed = consumeRecoveryCode(
+      account.recovery_code_hashes,
+      mfaRecoverySecret(account),
+      account.id,
+      body.recoveryCode
+    );
+    if (!consumed.valid) return null;
+    const nextVersion = Number(account.credential_version || 1) + 1;
+    const { data, error } = await supabase.from("admin_accounts")
+      .update({
+        recovery_code_hashes: consumed.hashes,
+        credential_version: nextVersion,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", account.id)
+      .eq("credential_version", account.credential_version)
+      .select("*")
+      .maybeSingle();
+    if (error) throw adminAccountMigrationError(error);
+    return data || null;
+  }
+  return consumeAdminTotp(account, body.totp || body.code);
+}
+
+async function confirmMfaSetup(account = {}, suppliedCode = "") {
+  if (account.totp_enabled) {
+    const error = new Error("2FA is already configured");
+    error.status = 409;
+    throw error;
+  }
+  const secret = decryptStoredSecret(account.pending_totp_secret_enc || "");
+  const verification = verifyTotpCode(secret, suppliedCode, { window: 1 });
+  if (!verification.valid) return null;
+  const recoveryCodes = generateRecoveryCodes(10);
+  const nextVersion = Number(account.credential_version || 1) + 1;
+  const { data, error } = await supabase.from("admin_accounts")
+    .update({
+      totp_secret_enc: encryptStoredSecret(secret),
+      pending_totp_secret_enc: null,
+      totp_enabled: true,
+      recovery_code_hashes: recoveryCodeHashes(mfaRecoverySecret(account), account.id, recoveryCodes),
+      last_totp_step: verification.step,
+      credential_version: nextVersion,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", account.id)
+    .eq("credential_version", account.credential_version)
+    .eq("totp_enabled", false)
+    .select("*")
+    .maybeSingle();
+  if (error) throw adminAccountMigrationError(error);
+  return data ? { account: data, recoveryCodes } : null;
+}
+
+async function resetAdminAccountMfa(account = {}) {
+  const nextVersion = Number(account.credential_version || 1) + 1;
+  const { data, error } = await supabase.from("admin_accounts")
+    .update({
+      totp_secret_enc: null,
+      pending_totp_secret_enc: null,
+      totp_enabled: false,
+      recovery_code_hashes: [],
+      last_totp_step: -1,
+      credential_version: nextVersion,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", account.id)
+    .eq("credential_version", account.credential_version)
+    .select("*")
+    .maybeSingle();
+  if (error) throw adminAccountMigrationError(error);
+  return data || null;
+}
+
+async function revokeAdminAccountSessions(account = {}) {
+  const nextSessionVersion = Number(account.session_version || 1) + 1;
+  const { data, error } = await supabase.from("admin_accounts")
+    .update({ session_version: nextSessionVersion, updated_at: new Date().toISOString() })
+    .eq("id", account.id)
+    .eq("session_version", Number(account.session_version || 1))
+    .select("*")
+    .maybeSingle();
+  if (error) throw adminAccountMigrationError(error);
+  return data || null;
+}
+
 function requestDeviceHash(req = {}) {
   return secretFingerprint(String(req.headers?.["user-agent"] || ""));
 }
 
-function signAdminToken(login, role = "admin", req = {}) {
+function signAdminToken(account = {}, req = {}) {
   const payload = Buffer.from(JSON.stringify({
-    login,
-    role,
+    accountId: account.id,
+    login: account.login,
+    role: account.role,
+    credentialVersion: Number(account.credential_version || 1),
+    sessionVersion: Number(account.session_version || 1),
+    mfa: true,
     tokenVersion: securityTokenVersion,
     deviceHash: requestDeviceHash(req),
     createdAt: Date.now()
@@ -741,6 +1399,7 @@ function verifyAdminToken(req) {
     if (data.tokenVersion !== securityTokenVersion || createdAt < securityTokenEpochMs) return null;
     if (Date.now() - createdAt > adminTokenTtlMs) return null;
     if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
+    if (!data.mfa || !data.accountId || !Number.isFinite(Number(data.credentialVersion)) || !Number.isFinite(Number(data.sessionVersion))) return null;
     return data;
   } catch {
     return null;
@@ -748,7 +1407,7 @@ function verifyAdminToken(req) {
 }
 
 function requireAdmin(req) {
-  const admin = verifyAdminToken(req);
+  const admin = req.authenticatedAdmin || verifyAdminToken(req);
   if (!admin) {
     const error = new Error("Admin session required");
     error.status = 401;
@@ -834,38 +1493,96 @@ async function verifyMarketAdminCredentials(login = "", password = "", adminSecu
   const configuredOk = Boolean(configuredPassword)
     && loginKey(login) === loginKey(configuredLogin)
     && secretValuesMatch(password, configuredPassword);
+  if (configuredOk) {
+    const account = await ensureOwnerAdminAccount(configuredLogin);
+    return {
+      ok: Boolean(account && !account.disabled && account.role === "owner"),
+      login: configuredLogin,
+      source: "configured",
+      account
+    };
+  }
+  const account = await loadSiteAdminAccount(login);
+  const passwordOk = Boolean(account?.password_hash) && await bcrypt.compare(String(password || ""), account.password_hash).catch(() => false);
   return {
-    ok: configuredOk,
-    login: configuredLogin,
-    source: configuredOk ? "configured" : "none"
+    ok: Boolean(passwordOk && account && !account.disabled && ADMIN_MFA_ROLES.has(account.role)),
+    login: account?.login || login,
+    source: passwordOk ? "database" : "none",
+    account
   };
 }
 
-function verifyAdminTotp(value = "") {
-  const secret = String(process.env.ADMIN_TOTP_SECRET || "").trim();
-  if (!secret) {
-    const error = new Error("ADMIN_TOTP_SECRET must be configured before owner access is enabled");
-    error.status = 503;
+async function verifyAdminAccountPassword(account = {}, password = "") {
+  const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin");
+  if (account.role === "owner" && sameLogin(account.login, configuredLogin)) {
+    return secretValuesMatch(password, process.env.MARKET_ADMIN_PASSWORD || "");
+  }
+  return Boolean(account.password_hash) && bcrypt.compare(String(password || ""), account.password_hash).catch(() => false);
+}
+
+function requireOwnerAdmin(req) {
+  const admin = requireAdmin(req);
+  if (admin.role !== "owner") {
+    const error = new Error("Owner access required");
+    error.status = 403;
     throw error;
   }
-  const supplied = String(value || "").replace(/\D/g, "");
-  if (supplied.length !== 6) return false;
-  return [-30000, 0, 30000].some((offset) => secretValuesMatch(supplied, totpCode(secret, Date.now() + offset)));
+  return admin;
+}
+
+async function validatedAdminFromRequest(req) {
+  if (req.authenticatedAdmin) return req.authenticatedAdmin;
+  const token = verifyAdminToken(req);
+  if (!token) return null;
+  const account = await loadAdminAccountById(token.accountId);
+  if (
+    !account
+    || account.scope !== "site"
+    || account.disabled
+    || !account.totp_enabled
+    || account.role !== token.role
+    || Number(account.credential_version || 1) !== Number(token.credentialVersion || 0)
+    || Number(account.session_version || 1) !== Number(token.sessionVersion || 0)
+  ) return null;
+  return { ...token, account: adminAccountPublic(account) };
+}
+
+function adminRoleCanRequest(role = "", req = {}) {
+  return adminRoleAllowsRequest(role, req.method, req.path);
+}
+
+function adminOverviewForRole(overview = {}, role = "owner") {
+  if (["owner", "admin"].includes(role)) return overview;
+  const common = { stats: overview.stats || {}, adminLtcBalanceChart: overview.adminLtcBalanceChart || [] };
+  if (role === "manager") {
+    return {
+      ...common,
+      stores: overview.stores || [],
+      exchangers: overview.exchangers || [],
+      exchangeCards: overview.exchangeCards || [],
+      orders: overview.orders || [],
+      messages: overview.messages || []
+    };
+  }
+  if (role === "moderator") return { ...common, orders: overview.orders || [], messages: overview.messages || [], supportTickets: overview.supportTickets || [] };
+  if (role === "support") return { ...common, users: overview.users || [], messages: overview.messages || [], supportTickets: overview.supportTickets || [] };
+  return common;
 }
 
 async function appendAdminLog(action, actor = "admin", details = {}) {
+  const safeDetails = sanitizeAuditDetails(details);
   const entry = {
     id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     action,
     actor,
-    details,
+    details: safeDetails,
     createdAt: Date.now()
   };
   try {
     adminLogMemory = [entry, ...adminLogMemory.filter((item) => item.id !== entry.id)].slice(0, 500);
     await withTimeout(mirrorAuditLog(entry), "admin audit log save", 4000);
-    console.log(`[admin-log] ${action}`, { actor, ...details });
-    notifyRealtime(action, details);
+    console.log(`[admin-log] ${action}`, { actor, ...safeDetails });
+    notifyRealtime(action, safeDetails);
   } catch (error) {
     console.error("[admin-log] skipped", { action, actor, message: error.message });
   }
@@ -875,7 +1592,7 @@ function notifyAdminRealtime(type = "update", details = {}) {
   if (!adminRealtimeServer) return;
   const payload = JSON.stringify({ type, details, createdAt: Date.now() });
   adminRealtimeServer.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
+    if (client.isAdminAuthenticated === true && client.readyState === WebSocket.OPEN) client.send(payload);
   });
 }
 
@@ -942,7 +1659,7 @@ function publicGroupSettings(settings = {}) {
 }
 
 function publicUser(row) {
-  return row ? { login: row.login, name: row.name, role: row.role } : null;
+  return row ? { login: row.login, name: row.name } : null;
 }
 
 function publicStoreApplicationForUser(application = {}) {
@@ -1168,7 +1885,9 @@ function isBrokenImageValue(value = "") {
 function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
   const image = String(value || "").trim();
   if (isBrokenImageValue(image)) return fallback;
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image)) return image.length <= maxDataImageLength ? image : fallback;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image)) {
+    return parseInlineMedia(image, allowedInlineImageTypes, 5 * 1024 * 1024) ? image : fallback;
+  }
   if (trustedContentUrl(image)) return image;
   if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(image)) return image.replace(/^\//, "");
   return fallback;
@@ -1196,12 +1915,9 @@ function trustedContentUrl(value = "", options = {}) {
 
 function inlineImagePayload(value = "") {
   const source = String(value || "").trim();
-  const match = source.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
-  if (!match) return null;
-  const mimeType = String(match[1] || "").toLowerCase();
-  if (!allowedInlineImageTypes.has(mimeType)) return null;
-  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
-  if (!buffer.length || buffer.length > 5 * 1024 * 1024) return null;
+  const parsed = parseInlineMedia(source, allowedInlineImageTypes, 5 * 1024 * 1024);
+  if (!parsed) return null;
+  const { mimeType, buffer } = parsed;
   const extension = mimeType.includes("png")
     ? "png"
     : mimeType.includes("webp")
@@ -1366,24 +2082,22 @@ function sellerImagePatch(existingValue = "", inputValue = "") {
   const incoming = String(inputValue || "");
   if (isBrokenImageValue(incoming)) return isBrokenImageValue(existing) ? "" : existing;
   if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing)) return existing;
-  return incoming || existing;
+  const trustedIncoming = publicImageForState(incoming, "");
+  const trustedExisting = publicImageForState(existing, "");
+  return trustedIncoming || trustedExisting;
 }
 
 function sellerProductPatch(existing = {}, input = {}) {
-  const item = { ...existing, ...input };
+  const item = mergeSellerProductInput(existing, input);
   item.image = sellerImagePatch(existing.image, input.image);
   if (Array.isArray(input.images) && input.images.length) {
     const hasOnlyPlaceholder = input.images.every((image) => image === "assets/cerber-emblem.png");
-    item.images = hasOnlyPlaceholder && Array.isArray(existing.images) && existing.images.length ? existing.images : input.images;
+    const requestedImages = hasOnlyPlaceholder && Array.isArray(existing.images) && existing.images.length ? existing.images : input.images;
+    item.images = requestedImages.map((image) => publicImageForState(image, "")).filter(Boolean).slice(0, 5);
   } else if (Array.isArray(existing.images)) {
-    item.images = existing.images;
+    item.images = existing.images.map((image) => publicImageForState(image, "")).filter(Boolean).slice(0, 5);
   }
-  item.variants = (Array.isArray(input.variants) ? input.variants : (existing.variants || [])).map((variant, index) => ({
-    id: String(variant?.id || `variant-${item.id || "product"}-${index + 1}`),
-    subtype: String(variant?.subtype || "").trim(),
-    weight: String(variant?.weight ?? "").trim(),
-    priceUsd: Math.max(0, Number(variant?.priceUsd || 0))
-  }));
+  item.gallery = (Array.isArray(item.gallery) ? item.gallery : []).map((image) => publicImageForState(image, "")).filter(Boolean).slice(0, 8);
   return item;
 }
 
@@ -1420,12 +2134,16 @@ async function timedDbCheck(label, run, timeoutMs = 5000) {
       ...((value && typeof value === "object") ? value : {})
     };
   } catch (error) {
+    console.error("[health-check] failed", {
+      label,
+      status: Number(error?.status || 500),
+      code: String(error?.code || "").slice(0, 64)
+    });
     return {
       ok: false,
       ms: Date.now() - startedAt,
-      error: String(error.message || error),
-      status: error.status || 500,
-      code: error.code || ""
+      error: Number(error?.status || 500) === 504 ? "timeout" : "check_failed",
+      status: Number(error?.status || 500)
     };
   }
 }
@@ -2039,34 +2757,10 @@ async function stateFor(user) {
             currentUser: "",
             theme: "dark",
             lang: publicCatalog.lang || "ru",
-            users: [],
             stores: catalogStores,
-            messages: [],
-            orders: [],
             exchangeCards: Array.isArray(publicCatalog.exchangeCards) ? publicCatalog.exchangeCards : [],
             exchangers: publicExchangersForState(publicCatalog.exchangers || []),
-            exchangeRequests: [],
-            groupMessages: [],
             groupSettings: publicGroupSettings(publicCatalog.groupSettings || {}),
-            referrals: [],
-            referralPayments: [],
-            referralCodes: {},
-            balances: {},
-            ltcBalances: {},
-            walletTransactions: [],
-            walletDeposits: [],
-            walletWithdrawals: [],
-            mirrorBots: [],
-            bots: { total: 0, active: 0, blocked: 0, items: [] },
-            siteNotifications: [],
-            broadcasts: [],
-            supportSettings: { recipients: [] },
-            supportTickets: [],
-            userFilters: [],
-            blockedUsers: {},
-            storeApplications: [],
-            ownerSettings: {},
-            paymentSettings: {},
             referralPeriod: publicCatalog.referralPeriod || {},
             filters: publicCatalog.filters || {}
           }
@@ -2138,34 +2832,10 @@ async function stateFor(user) {
           currentUser: "",
           theme: "dark",
           lang: settingsData.lang || "ru",
-          users: [],
           stores: publicStores,
-          messages: [],
-          orders: [],
           exchangeCards: visibleExchangeCards,
           exchangers: visibleExchangers,
-          exchangeRequests: [],
-          groupMessages: [],
           groupSettings: publicGroupSettings(settingsData.groupSettings || {}),
-          referrals: [],
-          referralPayments: [],
-          referralCodes: {},
-          balances: {},
-          ltcBalances: {},
-          walletTransactions: [],
-          walletDeposits: [],
-          walletWithdrawals: [],
-          mirrorBots: [],
-          bots: { total: 0, active: 0, blocked: 0, items: [] },
-          siteNotifications: [],
-          broadcasts: [],
-          supportSettings: { recipients: [] },
-          supportTickets: [],
-          userFilters: [],
-          blockedUsers: {},
-          storeApplications: [],
-          ownerSettings: {},
-          paymentSettings: {},
           referralPeriod: settingsData.referralPeriod || {},
           filters: settingsData.filters || {}
         }
@@ -2428,7 +3098,7 @@ async function userFromRequest(req) {
     return null;
   }
   const expectedUserAgent = `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`;
-  if (session.user_agent && !secretValuesMatch(session.user_agent, expectedUserAgent)) return null;
+  if (!session.user_agent || !secretValuesMatch(session.user_agent, expectedUserAgent)) return null;
   const { data: user, error: userError } = await withTimeout(
     supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle(),
     "session profile query",
@@ -2590,39 +3260,6 @@ function applyReferralRegistration(state = {}, newLogin = "", refCode = "") {
   return referral;
 }
 
-function queuePendingReferralRegistration(state = {}, newLogin = "", refCode = "", referrerLogin = "") {
-  const code = String(refCode || "").trim();
-  const newKey = loginKey(newLogin);
-  const referrerKey = loginKey(referrerLogin);
-  if (!code || !newKey) return null;
-  state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
-  state.referrals = Array.isArray(state.referrals) ? state.referrals : [];
-  if (state.referrals.some((item) => sameLogin(item.login, newLogin))) return null;
-  const existing = state.pendingReferrals.find((item) => String(item.code || "") === code && sameLogin(item.login, newLogin));
-  if (existing && referrerKey && !existing.referrerLogin) existing.referrerLogin = referrerKey;
-  if (existing) return existing;
-  const item = {
-    id: `pending-ref-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
-    code,
-    login: newLogin,
-    loginKey: newKey,
-    referrerLogin: referrerKey,
-    createdAt: Date.now(),
-    date: new Date().toLocaleString("ru-RU")
-  };
-  state.pendingReferrals.unshift(item);
-  state.pendingReferrals = state.pendingReferrals.slice(0, 500);
-  return item;
-}
-
-function referralCodePrefix(refCode = "") {
-  return String(refCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).toLowerCase();
-}
-
-function referralLoginPrefix(login = "") {
-  return String(login || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).toLowerCase();
-}
-
 function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode = "") {
   const code = String(refCode || "").trim();
   if (!code || !referrerLogin) return [];
@@ -2642,20 +3279,10 @@ function resolvePendingReferralsForCode(state = {}, referrerLogin = "", refCode 
 }
 
 function resolvePendingReferralsForLogin(state = {}, referrerLogin = "") {
-  const ownerPrefix = referralLoginPrefix(referrerLogin);
   const ownerKey = loginKey(referrerLogin);
-  if (!ownerPrefix || !ownerKey) return [];
-  state.pendingReferrals = Array.isArray(state.pendingReferrals) ? state.pendingReferrals : [];
-  const codes = [...new Set(state.pendingReferrals
-    .map((item) => String(item.code || "").trim())
-    .filter((code) => referralCodePrefix(code) === ownerPrefix || state.pendingReferrals.some((item) => String(item.code || "").trim() === code && loginKey(item.referrerLogin) === ownerKey)))];
-  const resolved = [];
-  codes.forEach((code) => {
-    state.referralCodes = state.referralCodes || {};
-    state.referralCodes[loginKey(referrerLogin)] = code;
-    resolved.push(...resolvePendingReferralsForCode(state, referrerLogin, code));
-  });
-  return resolved;
+  const trustedCode = ownerKey ? String(state.referralCodes?.[ownerKey] || "").trim() : "";
+  if (!ownerKey || !trustedCode) return [];
+  return resolvePendingReferralsForCode(state, ownerKey, trustedCode);
 }
 
 function applyReferralReward(state = {}, referralLogin = "", amountUsd = 0, sourceId = "", amountLtc = 0) {
@@ -2751,29 +3378,15 @@ async function saveReferralRegistrationAsync(login = "", refCode = "", referrerL
 }
 
 async function applyReferralRegistrationWithPrefixFallback(state = {}, newLogin = "", refCode = "", referrerLogin = "") {
-  const explicitOwnerKey = loginKey(referrerLogin);
   const code = String(refCode || "").trim();
-  if (explicitOwnerKey && code && !sameLogin(explicitOwnerKey, newLogin)) {
-    state.referralCodes = state.referralCodes || {};
-    state.referralCodes[explicitOwnerKey] = code;
-    const explicit = applyReferralRegistration(state, newLogin, code);
-    if (explicit) return explicit;
-  }
-  const direct = applyReferralRegistration(state, newLogin, refCode);
-  if (direct) return direct;
-  const prefix = referralCodePrefix(refCode);
-  if (!prefix) return null;
-  const { data: profiles } = await supabase
-    .from("profiles")
-    .select("login,login_key")
-    .ilike("login_key", `${prefix}%`)
-    .limit(5);
-  const candidates = (profiles || []).filter((profile) => !sameLogin(profile.login || profile.login_key, newLogin));
-  if (candidates.length !== 1) return null;
-  const ownerKey = loginKey(candidates[0].login_key || candidates[0].login);
+  if (!code) return null;
   state.referralCodes = state.referralCodes || {};
-  state.referralCodes[ownerKey] = String(refCode || "").trim();
-  return applyReferralRegistration(state, newLogin, refCode);
+  const ownerEntry = Object.entries(state.referralCodes)
+    .find(([, value]) => secretValuesMatch(String(value || "").trim(), code));
+  if (!ownerEntry) return null;
+  const hintedOwner = loginKey(referrerLogin);
+  if (hintedOwner && !sameLogin(hintedOwner, ownerEntry[0])) return null;
+  return applyReferralRegistration(state, newLogin, code);
 }
 
 function authStateForUser(user, state = {}) {
@@ -2953,76 +3566,6 @@ async function telegramUserSummary(user) {
   };
 }
 
-async function telegramGroupChat() {
-  await ensureSeed();
-  const state = await loadSettingsState();
-  const settingsData = state.groupSettings || {};
-  const now = Date.now();
-  const presence = state.telegramChatPresence || {};
-  const onlineCount = Object.values(presence).filter((item) => now - Number(item.seenAt || 0) < 60 * 1000).length;
-  const messages = (Array.isArray(state.groupMessages) ? state.groupMessages : [])
-    .filter((message) => !message.deleted)
-    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))
-    .slice(-20)
-    .map(publicGroupMessage);
-
-  return {
-    title: "Cerber Чат",
-    onlineCount,
-    messages
-  };
-}
-
-async function updateTelegramChatPresence(user) {
-  await ensureSeed();
-  const state = await loadSettingsState();
-  const now = Date.now();
-  const presence = state.telegramChatPresence || {};
-  presence[loginKey(user.login)] = {
-    login: user.login,
-    seenAt: now
-  };
-  for (const [key, item] of Object.entries(presence)) {
-    if (now - Number(item.seenAt || 0) > 5 * 60 * 1000) {
-      delete presence[key];
-    }
-  }
-  state.telegramChatPresence = presence;
-  await saveSettingsState(state);
-  return Object.values(presence).filter((item) => now - Number(item.seenAt || 0) < 60 * 1000).length;
-}
-
-async function addTelegramGroupMessage(user, payload = {}) {
-  await ensureSeed();
-  const state = await loadSettingsState();
-  const body = String(payload.body || "").trim();
-  const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 3).map((file) => ({
-    name: String(file.name || "file").slice(0, 120),
-    type: String(file.type || "image/png").slice(0, 80),
-    url: cleanAttachmentUrl(file.url)
-  })).filter((file) => file.url) : [];
-
-  if (!body && !attachments.length) {
-    const error = new Error("Сообщение пустое");
-    error.status = 400;
-    throw error;
-  }
-
-  state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
-  const message = {
-    id: `group-tg-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
-    fromLogin: user.login,
-    body,
-    attachments,
-    likes: [],
-    createdAt: Date.now(),
-    date: new Date().toLocaleString("ru-RU")
-  };
-  state.groupMessages.push(message);
-  await saveSettingsState(state);
-  return publicGroupMessage(message);
-}
-
 function sellerAdminSecret() {
   const configured = String(process.env.SELLER_ADMIN_SECRET || process.env.ADMIN_JWT_SECRET || "");
   if (configured.length < 32) {
@@ -3033,11 +3576,15 @@ function sellerAdminSecret() {
   return crypto.createHmac("sha256", configured).update(`seller:${securityTokenVersion}`).digest("hex");
 }
 
-function signSellerAdminToken(storeId, meta = {}, req = {}) {
+function signSellerAdminToken(storeId, meta = {}, account = {}, req = {}) {
   const now = Date.now();
   const payload = Buffer.from(JSON.stringify({
     storeId,
     ...meta,
+    accountId: account.id,
+    credentialVersion: Number(account.credential_version || 1),
+    sessionVersion: Number(account.session_version || 1),
+    mfa: true,
     tokenVersion: securityTokenVersion,
     deviceHash: requestDeviceHash(req),
     createdAt: now,
@@ -3230,6 +3777,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
 }
 
 function verifySellerAdminToken(req) {
+  if (req.authenticatedSellerAdmin) return req.authenticatedSellerAdmin;
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
@@ -3243,6 +3791,7 @@ function verifySellerAdminToken(req) {
     if (data.tokenVersion !== securityTokenVersion || createdAt < securityTokenEpochMs) return null;
     if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
     if (data.expiresAt && Date.now() > Number(data.expiresAt)) return null;
+    if (!data.mfa || !data.accountId || !Number.isFinite(Number(data.credentialVersion)) || !Number.isFinite(Number(data.sessionVersion))) return null;
     return data;
   } catch {
     return null;
@@ -3267,6 +3816,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (!login || !password) return res.status(400).json({ error: "Введите логин и пароль" });
     if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(login)) return res.status(400).json({ error: "Логин: 3-40 символов, только буквы, цифры, точка, _ и -" });
     if (password.length < 10 || password.length > 128) return res.status(400).json({ error: "Пароль должен содержать от 10 до 128 символов" });
+    if (!name || name.length > 120) return res.status(400).json({ error: "Имя должно содержать от 1 до 120 символов" });
 
     const key = loginKey(login);
     const referralCode = String(req.body.ref || req.body.referralCode || "").trim();
@@ -3297,7 +3847,6 @@ app.post("/api/auth/register", async (req, res, next) => {
     const state = await loadSettingsState();
     ensureReferralCodeForState(state, login);
     const referral = await applyReferralRegistrationWithPrefixFallback(state, login, referralCode, referralOwnerLogin);
-    if (!referral && referralCode) queuePendingReferralRegistration(state, login, referralCode, referralOwnerLogin);
     const profileInsert = {
       login,
       login_key: key,
@@ -3349,7 +3898,12 @@ app.post("/api/auth/login", async (req, res, next) => {
       8000
     );
     if (userError) throw userError;
-    if (!user || !(await passwordMatchesProfile(user, password))) {
+    const passwordValid = user
+      ? await passwordMatchesProfile(user, password)
+      : await bcrypt.compare(password || "invalid", invalidPasswordTimingHash);
+    if (!user || !passwordValid) {
+      await delay(300 + crypto.randomInt(0, 250));
+      appendAdminLog("user_login_failed", key || "unknown", { loginKey: key, ...requestSource(req) }).catch(() => {});
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
     if (String(user.role || "user").toLowerCase() !== "user") return res.status(403).json({ error: "Служебный аккаунт недоступен через публичный вход" });
@@ -3361,8 +3915,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     const referralOwnerLogin = String(req.body.referrerLogin || req.body.referrer || req.body.r || "").trim();
     const canRepairReferral = !state.__authStateFallback;
     const repairedReferral = canRepairReferral && referralCode ? await applyReferralRegistrationWithPrefixFallback(state, user.login, referralCode, referralOwnerLogin) : null;
-    const pendingReferral = canRepairReferral && !repairedReferral && referralCode ? queuePendingReferralRegistration(state, user.login, referralCode, referralOwnerLogin) : null;
-    if (repairedReferral || pendingReferral) {
+    if (repairedReferral) {
       await withTimeout(saveSettingsState(state), "login referral repair save", 6000).catch((saveError) => {
         console.error("[auth] login referral repair delayed", { login: user.login, message: saveError.message });
         saveReferralRegistrationAsync(user.login, referralCode, referralOwnerLogin).catch((retryError) => {
@@ -3416,36 +3969,6 @@ app.get("/api/telegram/me", async (req, res, next) => {
 
 app.use("/api/telegram/group-chat", (_req, res) => {
   res.status(410).json({ error: "Общий чат в Telegram-боте отключен" });
-});
-
-app.get("/api/telegram/group-chat", async (req, res, next) => {
-  try {
-    const user = await userFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    res.json(await telegramGroupChat());
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/telegram/group-chat", async (req, res, next) => {
-  try {
-    const user = await userFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    res.json({ message: await addTelegramGroupMessage(user, req.body || {}) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/telegram/group-chat/presence", async (req, res, next) => {
-  try {
-    const user = await userFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    res.json({ onlineCount: await updateTelegramChatPresence(user) });
-  } catch (error) {
-    next(error);
-  }
 });
 
 app.get("/api/config", async (_req, res, next) => {
@@ -3515,7 +4038,7 @@ function baseHealthPayload(startedAt = Date.now()) {
       security: {
         marketAdminPasswordEnv: Boolean(process.env.MARKET_ADMIN_PASSWORD),
         adminJwtSecretEnv: String(process.env.ADMIN_JWT_SECRET || "").length >= 32,
-        adminTotpEnabled: Boolean(process.env.ADMIN_TOTP_SECRET),
+        individualAdminMfa: true,
         telegramWebhookSecret: Boolean(telegramWebhookSecret),
         sessionEpoch: new Date(securityTokenEpochMs).toISOString(),
         insecureDefaultMarketAdminPassword: !process.env.MARKET_ADMIN_PASSWORD
@@ -3546,7 +4069,17 @@ app.get("/api/health/deep", async (req, res, next) => {
       if (error) throw error;
       return { configured: true, mainSettings: Boolean(data) };
     }, 10000);
-    const tables = ["sessions", "orders", "wallet_deposits", "wallet_withdrawals", "ledger_entries", "payment_ipn_events", "audit_logs"];
+    const tables = [
+      "sessions",
+      "orders",
+      "wallet_deposits",
+      "wallet_withdrawals",
+      "ledger_entries",
+      "payment_ipn_events",
+      "audit_logs",
+      "admin_accounts",
+      "operation_locks"
+    ];
     const tableResults = [];
     for (const table of tables) {
       tableResults.push([table, await timedDbCheck(`health table ${table}`, () => tableHealth(table), 10000)]);
@@ -3605,8 +4138,9 @@ app.get("/api/health/deep", async (req, res, next) => {
     if (Number(error.status || 0) === 401 || Number(error.status || 0) === 403) {
       return next(error);
     }
+    console.error("[health-deep] failed", sanitizeErrorForLog(error));
     health.ok = false;
-    health.error = String(error.message || error);
+    health.error = "check_failed";
     health.durationMs = Date.now() - startedAt;
     res.status(503).json(health);
   }
@@ -3624,51 +4158,70 @@ app.put("/api/cms-texts", async (req, res, next) => {
   try {
     verifyCmsAdmin(req);
     const texts = req.body?.texts && typeof req.body.texts === "object" ? req.body.texts : {};
-    await writeCmsTexts(texts);
-    res.json({ ok: true, texts });
+    const savedTexts = await writeCmsTexts(texts);
+    res.json({ ok: true, texts: savedTexts });
   } catch (error) {
     next(error);
   }
 });
 
 function sellerStorePatch(existing = {}, input = {}) {
+  const allowedStaffPermissions = new Set(["profile", "cards", "products", "orders", "storage", "clients", "disputes", "finances", "connect"]);
   const image = sellerImagePatch(existing.image || existing.avatar, input.image || input.avatar);
   const cover = sellerImagePatch(existing.cover || existing.banner, input.cover || input.banner) || image;
   const existingProducts = Array.isArray(existing.products) ? existing.products : [];
   const existingStaff = Array.isArray(existing.staff) ? existing.staff : [];
   const staff = Array.isArray(input.staff)
-    ? input.staff.map((member) => {
-      const login = String(member?.login || "").trim();
+    ? input.staff.slice(0, 100).map((member) => {
+      const login = String(member?.login || "").trim().slice(0, 64);
       const previous = existingStaff.find((item) => sameLogin(item?.login, login)) || {};
       const password = String(member?.password || "").trim();
       const passwordHash = String(previous.passwordHash || "").trim();
+      if (!/^[a-zA-Z0-9_.@-]{3,64}$/.test(login)) return null;
+      if (password && (password.length < 10 || password.length > 128)) return null;
       return {
         login,
         password: password || String(previous.password || "").trim(),
         passwordHash,
-        name: String(member?.name ?? previous.name ?? "").trim(),
-        permissions: Array.isArray(member?.permissions) ? member.permissions.map(String).filter(Boolean) : (Array.isArray(previous.permissions) ? previous.permissions : []),
+        name: boundedUserText(member?.name ?? previous.name ?? "", 120, "Staff name"),
+        permissions: (Array.isArray(member?.permissions) ? member.permissions : (Array.isArray(previous.permissions) ? previous.permissions : []))
+          .map(String)
+          .filter((permission) => allowedStaffPermissions.has(permission)),
         createdAt: Number(member?.createdAt || previous.createdAt || Date.now()),
         updatedAt: Number(member?.updatedAt || Date.now())
       };
-    }).filter((member) => member.login && (member.password || member.passwordHash))
+    }).filter((member) => member?.login && (member.password || member.passwordHash))
     : existingStaff;
+  const gallery = (Array.isArray(input.gallery) ? input.gallery : (Array.isArray(existing.gallery) ? existing.gallery : []))
+    .map((value) => publicImageForState(value, ""))
+    .filter(Boolean)
+    .slice(0, 12);
+  const enabledCoins = {};
+  const requestedCoins = input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {});
+  walletCoins.forEach(({ id }) => {
+    if (typeof requestedCoins[id] === "boolean") enabledCoins[id] = requestedCoins[id];
+  });
+  const wallets = {};
+  const requestedWallets = input.wallets && typeof input.wallets === "object" ? input.wallets : (existing.wallets || {});
+  walletCoins.forEach(({ id }) => {
+    if (requestedWallets[id] !== undefined) wallets[id] = boundedUserText(requestedWallets[id], 200, "Wallet address");
+  });
   return {
     ...existing,
-    name: String(input.name ?? existing.name ?? "").trim(),
-    short: String(input.short ?? existing.short ?? "").trim(),
-    description: String(input.description ?? existing.description ?? "").trim(),
+    name: boundedUserText(input.name ?? existing.name ?? "", 160, "Store name"),
+    short: boundedUserText(input.short ?? existing.short ?? "", 500, "Store summary"),
+    description: boundedUserText(input.description ?? existing.description ?? "", 8000, "Store description"),
     image,
     avatar: image,
     cover,
     banner: cover,
-    gallery: Array.isArray(input.gallery) ? input.gallery.slice(0, 12) : (Array.isArray(existing.gallery) ? existing.gallery : []),
-    products: Array.isArray(input.products) ? input.products.map((product) => sellerProductPatch(existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {}, product)) : existingProducts,
-    reviewsList: Array.isArray(input.reviewsList) ? input.reviewsList : (Array.isArray(existing.reviewsList) ? existing.reviewsList : []),
-    enabledCoins: input.enabledCoins && typeof input.enabledCoins === "object" ? input.enabledCoins : (existing.enabledCoins || {}),
-    wallets: input.wallets && typeof input.wallets === "object" ? input.wallets : (existing.wallets || {}),
+    gallery,
+    products: Array.isArray(input.products) ? input.products.slice(0, 1000).map((product) => sellerProductPatch(existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {}, product)) : existingProducts,
+    reviewsList: Array.isArray(existing.reviewsList) ? existing.reviewsList : [],
+    enabledCoins,
+    wallets,
     autoReleaseHours: Math.min(168, Math.max(0, Number(input.autoReleaseHours ?? existing.autoReleaseHours ?? 24))),
-    ltcWallet: String(input.ltcWallet ?? existing.ltcWallet ?? "").trim(),
+    ltcWallet: boundedUserText(input.ltcWallet ?? existing.ltcWallet ?? "", 200, "LTC wallet"),
     adminPassword: String(input.adminPassword ?? existing.adminPassword ?? "").trim(),
     adminPasswordHash: String(input.adminPassword ? "" : existing.adminPasswordHash || "").trim(),
     staff,
@@ -3687,9 +4240,6 @@ function sellerStoreInputForToken(existing = {}, input = {}, token = {}) {
   }
   if (permissions.some((key) => ["cards", "products", "storage"].includes(key)) && Array.isArray(input.products)) {
     allowed.products = input.products;
-  }
-  if (permissions.includes("connect") && Array.isArray(input.reviewsList)) {
-    allowed.reviewsList = input.reviewsList;
   }
   return { ...existing, ...allowed, id: existing.id || input.id };
 }
@@ -3798,6 +4348,19 @@ async function migrateInlineStoreMedia() {
       console.error("[media] migration settings fallback", { message: error.message });
       return loadSettingsBackupState();
     });
+    let fallbackSecretsChanged = false;
+    if (Array.isArray(migrationState?.ownerStores)) {
+      migrationState.ownerStores = await Promise.all(migrationState.ownerStores.map(async (store) => {
+        const before = storeSecretsSnapshot(store);
+        const protectedStore = await normalizeStoreSecrets(store);
+        if (before !== storeSecretsSnapshot(protectedStore)) fallbackSecretsChanged = true;
+        return protectedStore;
+      }));
+      if (fallbackSecretsChanged) {
+        migrationState.publicStoresCache = migrationState.ownerStores.map(publicStoreForState);
+        migrationState.publicStoresCacheAt = Date.now();
+      }
+    }
     const fallbackStores = mergeStoreSources(migrationState.ownerStores || [], migrationState.publicStoresCache || []);
     const migratedStores = [];
     for (const row of rows) {
@@ -3812,15 +4375,18 @@ async function migrateInlineStoreMedia() {
         if (ownerProfile?.password_hash) sourceStore.adminPasswordHash = ownerProfile.password_hash;
       }
       const rowIncomplete = !row.data.id || !row.data.name || !row.data.ownerLogin || (!row.data.adminPasswordHash && !row.data.adminPassword);
-      const mediaResult = await externalizeStoreMedia(sourceStore);
-      if (mediaResult.changed || rowIncomplete) {
+      const secretsBefore = storeSecretsSnapshot(sourceStore);
+      const protectedStore = await normalizeStoreSecrets(sourceStore);
+      const secretsChanged = secretsBefore !== storeSecretsSnapshot(protectedStore);
+      const mediaResult = await externalizeStoreMedia(protectedStore);
+      if (mediaResult.changed || rowIncomplete || secretsChanged) {
         const saved = await saveStoreRow(mediaResult.store, "inline store media migration save");
         migratedStores.push(saved);
       } else {
         rememberSavedStore(sourceStore);
       }
     }
-    if (migratedStores.length) {
+    if (migratedStores.length || fallbackSecretsChanged) {
       if (migrationState) {
         await withTimeout(
           saveSettingsState(migrateStateStoreMedia(migrationState, migratedStores), { deferSideEffects: true }),
@@ -3871,6 +4437,71 @@ async function findSellerAdminStore(storeId, login) {
   )) || null;
 }
 
+function sellerMetaForAccount(account = {}) {
+  return account.role === "staff"
+    ? { role: "staff", staffLogin: account.login, permissions: Array.isArray(account.permissions) ? account.permissions.map(String) : [] }
+    : { role: "owner" };
+}
+
+async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {}, account = {}) {
+  const meta = sellerMetaForAccount(account);
+  const token = signSellerAdminToken(store.id, meta, account, req);
+  resetClientRateLimit(req, "store-admin-login-ip");
+  resetClientRateLimit(req, "store-admin-login", `${store.id}:${account.login}`);
+  appendAdminLog(account.role === "staff" ? "store_staff_login" : "store_admin_login", account.login || store.id, {
+    storeId: store.id,
+    accountId: account.id,
+    role: account.role,
+    ...requestSource(req)
+  }).catch((error) => console.error("[store-admin] login log failed", sanitizeErrorForLog(error)));
+  return res.json({
+    token,
+    store: storeForAdminState(store, meta),
+    staff: account.role === "staff"
+      ? { role: "staff", login: account.login, name: principal.name || "", permissions: meta.permissions }
+      : { role: "owner", permissions: null },
+    ...(await stateForStoreAdmin(store.id, meta))
+  });
+}
+
+async function continueStoreMfaLogin(req, res, store = {}, principal = {}) {
+  const account = await ensureStoreAdminAccount(store, principal);
+  if (!account || account.disabled) return res.status(403).json({ error: "Store administrator access is disabled" });
+  const challengeToken = signMfaChallenge(account, req);
+  if (!account.totp_enabled) {
+    return res.json({
+      requiresMfaSetup: true,
+      challengeToken,
+      admin: adminAccountPublic(account),
+      store: { id: store.id, name: store.name || store.id }
+    });
+  }
+  if (!req.body.totp && !req.body.recoveryCode) {
+    return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account), store: { id: store.id, name: store.name || store.id } });
+  }
+  const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+  if (!verifiedAccount) {
+    await delay(600);
+    return res.status(401).json({ error: "Invalid or already used 2FA code" });
+  }
+  return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
+}
+
+async function storePrincipalForAccount(account = {}) {
+  const store = await loadStoreWithFallback(account.store_id);
+  if (!store) return { store: null, principal: null };
+  if (account.role === "owner") return { store, principal: { role: "owner", login: store.ownerLogin || store.id } };
+  const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => sameLogin(member?.login, account.login));
+  return { store, principal: staff ? { ...staff, role: "staff" } : null };
+}
+
+async function verifyStoreAccountPassword(account = {}, password = "") {
+  const { store, principal } = await storePrincipalForAccount(account);
+  if (!store || !principal) return false;
+  if (account.role === "owner") return Boolean((await verifyStoreOwnerCredentials(store, password)).ok);
+  return verifyPanelPassword(password, principal.passwordHash, principal.password);
+}
+
 app.post("/api/store-admin/login", async (req, res, next) => {
   try {
     requireDb();
@@ -3905,31 +4536,153 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       : { ok: false, source: "login", storePasswordOk: false, profilePasswordHash: "" };
     if (ownerAuth.ok) {
       const authenticatedStore = await reconcileStoreOwnerCredentials(store, password, ownerAuth);
-      resetClientRateLimit(req, "store-admin-login-ip");
-      resetClientRateLimit(req, "store-admin-login", `${storeId}:${login}`);
-      const ownerToken = { role: "owner" };
-      appendAdminLog("store_admin_login", authenticatedStore.ownerLogin || authenticatedStore.id, { storeId: authenticatedStore.id, role: "owner", credentialSource: ownerAuth.source, ...requestSource(req) }).catch((error) => {
-        console.error("[store-admin] owner login log failed", { storeId: authenticatedStore.id, message: error.message });
+      return continueStoreMfaLogin(req, res, authenticatedStore, {
+        role: "owner",
+        login: authenticatedStore.ownerLogin || authenticatedStore.id
       });
-      return res.json({ token: signSellerAdminToken(authenticatedStore.id, ownerToken, req), store: storeForAdminState(authenticatedStore, ownerToken), staff: { role: "owner", permissions: null }, ...(await stateForStoreAdmin(authenticatedStore.id, ownerToken)) });
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
       return res.status(401).json({ error: "Неверный пароль" });
     }
     await persistStoreSecretMigration(store);
-    resetClientRateLimit(req, "store-admin-login-ip");
-    resetClientRateLimit(req, "store-admin-login", `${storeId}:${login}`);
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
-    appendAdminLog("store_staff_login", staff.login || store.id, { storeId: store.id, staffLogin: staff.login, role: "staff", ...requestSource(req) }).catch((error) => {
-      console.error("[store-admin] staff login log failed", { storeId: store.id, staffLogin: staff.login, message: error.message });
-    });
+    return continueStoreMfaLogin(req, res, store, { ...staff, role: "staff", permissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/cms-base-texts", async (_req, res, next) => {
+  try {
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.json({ texts: await readBaseTextCatalog() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/2fa/setup", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "store-admin-mfa-setup", { limit: 10, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "store");
+    const setup = await beginMfaSetup(account);
     res.json({
-      token: signSellerAdminToken(store.id, { role: "staff", staffLogin: staff.login, permissions }, req),
-      store: storeForAdminState(store, { role: "staff", permissions }),
-      staff: { role: "staff", login: staff.login, name: staff.name || "", permissions },
-      ...(await stateForStoreAdmin(store.id, { role: "staff", staffLogin: staff.login, permissions }))
+      account: adminAccountPublic(setup.account),
+      secret: setup.secret,
+      otpauthUrl: setup.otpauthUrl,
+      qrCodeDataUrl: setup.qrCodeDataUrl
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/2fa/confirm", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "store-admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "store");
+    const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
+    if (!confirmed) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    const { store, principal } = await storePrincipalForAccount(confirmed.account);
+    if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
+    await appendAdminLog("store_admin_mfa_enabled", confirmed.account.login, {
+      accountId: confirmed.account.id,
+      storeId: store.id,
+      ...requestSource(req)
+    });
+    const meta = sellerMetaForAccount(confirmed.account);
+    res.json({
+      token: signSellerAdminToken(store.id, meta, confirmed.account, req),
+      admin: adminAccountPublic(confirmed.account),
+      recoveryCodes: confirmed.recoveryCodes,
+      store: storeForAdminState(store, meta),
+      staff: confirmed.account.role === "staff"
+        ? { role: "staff", login: confirmed.account.login, name: principal.name || "", permissions: meta.permissions }
+        : { role: "owner", permissions: null },
+      ...(await stateForStoreAdmin(store.id, meta))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/2fa/verify", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "store-admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "store");
+    if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
+    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+    if (!verifiedAccount) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    const { store, principal } = await storePrincipalForAccount(verifiedAccount);
+    if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
+    return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/2fa/recovery-codes", async (req, res, next) => {
+  try {
+    const token = verifySellerAdminToken(req);
+    let account = await loadAdminAccountById(token.accountId);
+    if (!account || !(await verifyStoreAccountPassword(account, String(req.body.password || "")))) {
+      return res.status(401).json({ error: "Identity confirmation failed" });
+    }
+    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
+    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    const recoveryCodes = generateRecoveryCodes(10);
+    const { error } = await supabase.from("admin_accounts")
+      .update({ recovery_code_hashes: recoveryCodeHashes(mfaRecoverySecret(account), account.id, recoveryCodes), updated_at: new Date().toISOString() })
+      .eq("id", account.id)
+      .eq("credential_version", account.credential_version);
+    if (error) throw adminAccountMigrationError(error);
+    await appendAdminLog("store_admin_recovery_codes_rotated", account.login, { accountId: account.id, storeId: account.store_id, ...requestSource(req) });
+    res.json({ recoveryCodes, remaining: recoveryCodes.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/store-admin/2fa", async (req, res, next) => {
+  try {
+    const token = verifySellerAdminToken(req);
+    let account = await loadAdminAccountById(token.accountId);
+    if (!account || !(await verifyStoreAccountPassword(account, String(req.body.password || "")))) {
+      return res.status(401).json({ error: "Identity confirmation failed" });
+    }
+    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
+    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    await resetAdminAccountMfa(account);
+    await appendAdminLog("store_admin_mfa_disabled", account.login, { accountId: account.id, storeId: account.store_id, ...requestSource(req) });
+    res.json({ ok: true, requiresMfaSetup: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/logout", async (req, res, next) => {
+  try {
+    const token = verifySellerAdminToken(req);
+    const account = await loadAdminAccountById(token.accountId);
+    if (account) await revokeAdminAccountSessions(account);
+    await appendAdminLog("store_admin_logout", account?.login || token.storeId, { accountId: token.accountId, storeId: token.storeId, ...requestSource(req) });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/staff/:login/2fa/reset", async (req, res, next) => {
+  try {
+    const token = verifySellerAdminToken(req);
+    if (token.role !== "owner") return res.status(403).json({ error: "Store owner access required" });
+    const accountId = storeAdminAccountId(token.storeId, { role: "staff", login: req.params.login });
+    const account = await loadAdminAccountById(accountId);
+    if (!account || account.store_id !== token.storeId) return res.status(404).json({ error: "Store administrator not found" });
+    const reset = await resetAdminAccountMfa(account);
+    await appendAdminLog("store_staff_mfa_reset", token.account?.login || token.storeId, { accountId: reset.id, storeId: token.storeId, ...requestSource(req) });
+    res.json({ account: adminAccountPublic(reset) });
   } catch (error) {
     next(error);
   }
@@ -3991,6 +4744,7 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       }
     }
     const savedStore = await saveStoreRow(mergedStore, "store-admin store save");
+    await synchronizeStoreAdminAccess(existing, savedStore);
     scheduleStorePublication(savedStore, "store-admin store save");
     console.log("[store-admin] store saved", {
       storeId: savedStore.id,
@@ -4068,26 +4822,7 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
     const products = Array.isArray(existing.products) ? existing.products : [];
     const product = products.find((item) => String(item?.id || "") === String(req.params.productId || ""));
     if (!product) return res.status(404).json({ error: "Карточка не найдена" });
-    product.positions = positionsInput.map((position) => ({
-      id: String(position?.id || `position-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`),
-      variantId: String(position?.variantId || "").trim(),
-      subtype: String(position?.subtype || "").trim(),
-      title: String(position?.title || product.title || "Товар").trim(),
-      description: String(position?.description || "").trim(),
-      deliveryItems: Array.isArray(position?.deliveryItems) ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean) : [],
-      delimiter: String(position?.delimiter || "\n"),
-      priceUsd: Number(position?.priceUsd || product.priceUsd || 0),
-      country: String(position?.country || "moldova"),
-      city: String(position?.city || "chisinau"),
-      district: String(position?.district || "").trim(),
-      deliveryType: String(position?.deliveryType || "Товар").trim(),
-      saleMode: String(position?.saleMode || position?.productMode || position?.orderMode || position?.status || "ready").toLowerCase() === "preorder" ? "preorder" : "ready",
-      weight: String(position?.weight ?? "").trim(),
-      stock: Array.isArray(position?.deliveryItems)
-        ? position.deliveryItems.map((item) => String(item || "").trim()).filter(Boolean).length
-        : Math.max(0, Number(position?.stock || 0)),
-      status: String(position?.status || "ready")
-    }));
+    product.positions = mergeSellerProductInput(product, { positions: positionsInput }).positions;
     if (product.positions.length) {
       const firstReady = product.positions.find((position) => position.status !== "disabled") || product.positions[0];
       product.priceUsd = Number(product.priceUsd || firstReady.priceUsd || 0);
@@ -4113,11 +4848,13 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
 app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
   try {
     requireDb();
-    const admin = verifyAdminToken(req);
+    const admin = await validatedAdminFromRequest(req);
+    if (admin && admin.role !== "owner") return res.status(403).json({ error: "Owner access required" });
     const sellerToken = admin ? null : verifySellerAdminToken(req);
     if (sellerToken) return res.status(403).json({ error: "Закрыть диспут может только клиент или владелец сайта" });
     const user = admin ? null : await userFromRequest(req);
     if (!admin && !user) return res.status(401).json({ error: "Нет доступа" });
+    assertClientRateLimit(req, "dispute-close", { limit: 10, windowMs: 60 * 1000, identity: admin?.accountId || user?.login || "unknown" });
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const found = await findProductOrderForDispute(state, req.params.id);
@@ -4126,10 +4863,16 @@ app.post("/api/orders/:id/dispute/close", async (req, res, next) => {
     if (user && !sameLogin(order.login, user.login)) {
       return res.status(403).json({ error: "Нет доступа к этому спору" });
     }
+    if (!order.disputeOpen || String(order.status || "").toLowerCase() !== "dispute") {
+      return res.status(409).json({ error: "Диспут не открыт или уже закрыт" });
+    }
+    if (String(order.paymentStatus || "").toLowerCase() !== "paid") {
+      auditSecurityEvent("unpaid_dispute_close_rejected", req, { orderId: order.id, login: user?.login || "", admin: admin?.login || "" });
+      return res.status(409).json({ error: "Нельзя закрыть диспут по неподтверждённой оплате" });
+    }
     const now = Date.now();
     const publicNumber = ensureDisputeNumber(state, order);
     order.status = "completed";
-    order.paymentStatus = "paid";
     order.disputeOpen = false;
     order.disputeChatClosed = true;
     order.disputeClosedAt = now;
@@ -4204,17 +4947,18 @@ app.post("/api/referrals/claim-code", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const code = String(req.body.code || req.body.ref || "").trim();
-    if (!code) return res.status(400).json({ error: "Укажите реферальный код" });
+    assertClientRateLimit(req, "referral-code-sync", { limit: 12, windowMs: 60 * 1000, identity: user.login });
+    const submittedCode = String(req.body.code || req.body.ref || "").trim();
     const state = await loadSettingsState();
     state.referralCodes = state.referralCodes || {};
-    const key = loginKey(user.login);
-    const existingOwner = Object.entries(state.referralCodes).find(([ownerKey, value]) => String(value || "").trim() === code && ownerKey !== key);
-    if (existingOwner) return res.status(409).json({ error: "Этот реферальный код уже занят" });
-    state.referralCodes[key] = code;
+    const code = ensureReferralCodeForState(state, user.login);
+    if (submittedCode && !secretValuesMatch(submittedCode, code)) {
+      auditSecurityEvent("referral_code_override_rejected", req, { login: user.login });
+      return res.status(409).json({ error: "Реферальный код уже закреплён за аккаунтом" });
+    }
     const resolved = resolvePendingReferralsForCode(state, user.login, code);
     await saveSettingsState(state);
-    notifyRealtime("referral_code_claimed", { login: user.login, code, resolved: resolved.length });
+    notifyRealtime("referral_code_synced", { login: user.login, resolved: resolved.length });
     res.json({ ok: true, code, resolved: resolved.length, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
@@ -4319,8 +5063,9 @@ app.post("/api/support/tickets", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
-    const subject = String(req.body.subject || "Обращение").trim();
-    const body = String(req.body.body || "").trim();
+    assertClientRateLimit(req, "support-ticket-create", { limit: 5, windowMs: 15 * 60 * 1000, identity: user.login });
+    const subject = boundedUserText(req.body.subject || "Обращение", 160, "Support subject");
+    const body = boundedUserText(req.body.body || "", 5000, "Support message");
     const attachments = normalizeSupportAttachments(req.body.attachments);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите текст или прикрепите фото" });
     const ticket = {
@@ -4372,10 +5117,11 @@ app.post("/api/support/tickets/:id/reply", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
+    assertClientRateLimit(req, "support-ticket-reply", { limit: 30, windowMs: 60 * 1000, identity: user.login });
     const ticket = (state.supportTickets || []).find((item) => String(item.id) === String(req.params.id));
     if (!ticket || !sameLogin(ticket.fromLogin, user.login)) return res.status(404).json({ error: "Обращение не найдено" });
     if (ticket.status === "closed") return res.status(409).json({ error: "Обращение закрыто" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Support reply");
     const attachments = normalizeSupportAttachments(req.body.attachments);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите текст или прикрепите фото" });
     const reply = { id: `reply-${Date.now()}`, fromLogin: user.login, body, attachments, createdAt: Date.now() };
@@ -4470,6 +5216,7 @@ app.post("/api/group/join", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "group-join", { limit: 20, windowMs: 60 * 1000, identity: user.login });
     const room = groupRoomKey(req.body?.room);
     const { groupSettings, groupMessages } = await mutateSettingsState((state) => {
       const settings = normalizeGroupSettings(state.groupSettings || {});
@@ -4523,6 +5270,7 @@ app.post("/api/group/presence", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "group-presence", { limit: 90, windowMs: 60 * 1000, identity: user.login });
     const room = groupRoomKey(req.body?.room);
     const now = Date.now();
     const groupSettings = await mutateSettingsState((state) => {
@@ -4587,7 +5335,9 @@ function sanitizeGroupMessagePayload(payload = {}) {
 }
 
 function isGroupModeratorUser(user = {}) {
-  return String(user.role || "").toLowerCase() === "admin";
+  // Administrative authority is never derived from an ordinary customer
+  // profile. Moderation must use an MFA-authenticated administrator route.
+  return false;
 }
 
 function toggleLoginValue(values = [], login = "") {
@@ -4650,7 +5400,7 @@ app.patch("/api/group/messages/:id", async (req, res, next) => {
     if (!["like", "reaction", "pin", "delete"].includes(action)) {
       return res.status(400).json({ error: "Неизвестное действие" });
     }
-    if (["pin", "delete"].includes(action) && !isGroupModeratorUser(user)) {
+    if (action === "pin" && !isGroupModeratorUser(user)) {
       return res.status(403).json({ error: "Недостаточно прав" });
     }
     const { message, groupSettings } = await mutateSettingsState((state) => {
@@ -4659,6 +5409,11 @@ app.patch("/api/group/messages/:id", async (req, res, next) => {
       if (!target) {
         const error = new Error("Сообщение не найдено");
         error.status = 404;
+        throw error;
+      }
+      if (action === "delete" && !sameLogin(target.fromLogin, user.login)) {
+        const error = new Error("You can delete only your own group message");
+        error.status = 403;
         throw error;
       }
       if (action === "like") {
@@ -4775,7 +5530,7 @@ app.post("/api/exchangers/:id/reviews", async (req, res, next) => {
       .find((item) => String(item.id || "") === String(req.params.id || "") && item.status !== "disabled" && item.active !== false);
     if (!exchanger) return res.status(404).json({ error: "Обменник не найден" });
     const rating = Number(req.body.rating || req.body.score || 0);
-    const text = String(req.body.text || req.body.body || req.body.message || "").trim();
+    const text = boundedUserText(req.body.text || req.body.body || req.body.message || "", 1000, "Review");
     if (!Number.isFinite(rating) || rating < 1 || rating > 5 || !text) {
       return res.status(400).json({ error: "Выберите оценку от 1 до 5 и напишите текст отзыва" });
     }
@@ -4805,7 +5560,6 @@ app.get("/api/profiles/:login", async (req, res, next) => {
       user: {
         login: profile.login,
         name: profile.name || profile.login,
-        role: profile.role || "user",
         createdAt: profile.created_at || null
       }
     });
@@ -4855,8 +5609,8 @@ app.post("/api/private-messages", async (req, res, next) => {
     const recipient = await findProfileByLogin(toLogin);
     if (!recipient) return res.status(404).json({ error: "Пользователь не найден" });
     if (sameLogin(recipient.login, user.login)) return res.status(400).json({ error: "Нельзя отправить сообщение самому себе" });
-    const body = String(req.body.body || req.body.message || "").trim();
-    const subject = String(req.body.subject || "").trim().slice(0, 160);
+    const body = boundedUserText(req.body.body || req.body.message || "", 5000, "Private message");
+    const subject = boundedUserText(req.body.subject || "", 160, "Message subject");
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     const requestedStickerUrl = String(req.body.stickerUrl || "").trim();
     const stickerUrl = requestedStickerUrl ? cleanMessageReactionUrl(requestedStickerUrl) : "";
@@ -4932,19 +5686,262 @@ app.post("/api/admin/login", async (req, res, next) => {
   try {
     assertAdminRateLimit(req, login);
     const state = await ensureAdminSecurity();
-    const password = String(req.body.password || "");
-    const credentials = await verifyMarketAdminCredentials(login, password, state.adminSecurity);
-    const authenticated = credentials.ok && verifyAdminTotp(req.body.totp);
-    markAdminLoginAttempt(req, login, authenticated);
-    appendAdminLog(authenticated ? "admin_login_success" : "admin_login_failed", login || "unknown", {
+    const credentials = await verifyMarketAdminCredentials(login, String(req.body.password || ""), state.adminSecurity);
+    if (!credentials.ok || !credentials.account) {
+      markAdminLoginAttempt(req, login, false);
+      appendAdminLog("admin_login_failed", login || "unknown", {
+        ...requestSource(req),
+        credentialSource: credentials.source
+      }).catch((error) => console.error("[admin-login] log failed", sanitizeErrorForLog(error)));
+      await delay(600);
+      return res.status(401).json({ error: "Invalid login credentials" });
+    }
+    const account = credentials.account;
+    const challengeToken = signMfaChallenge(account, req);
+    if (!account.totp_enabled) {
+      markAdminLoginAttempt(req, login, true);
+      appendAdminLog("admin_mfa_setup_required", account.login, {
+        ...requestSource(req),
+        accountId: account.id
+      }).catch((error) => console.error("[admin-login] log failed", sanitizeErrorForLog(error)));
+      return res.json({ requiresMfaSetup: true, challengeToken, admin: adminAccountPublic(account) });
+    }
+    if (!req.body.totp && !req.body.recoveryCode) {
+      markAdminLoginAttempt(req, login, true);
+      return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account) });
+    }
+    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+    markAdminLoginAttempt(req, login, Boolean(verifiedAccount));
+    appendAdminLog(verifiedAccount ? "admin_login_success" : "admin_mfa_failed", login || "unknown", {
       ...requestSource(req),
       credentialSource: credentials.source
-    }).catch((error) => console.error("[admin-login] log failed", { message: error.message }));
-    if (!authenticated) {
+    }).catch((error) => console.error("[admin-login] log failed", sanitizeErrorForLog(error)));
+    if (!verifiedAccount) {
       await delay(600);
-      return res.status(401).json({ error: "Неверные данные входа или код 2FA" });
+      return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    res.json({ token: signAdminToken(credentials.login, "admin", req), admin: { login: credentials.login, role: "admin" } });
+    res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/2fa/setup", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "admin-mfa-setup", { limit: 10, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "site");
+    const setup = await beginMfaSetup(account);
+    res.json({
+      account: adminAccountPublic(setup.account),
+      secret: setup.secret,
+      otpauthUrl: setup.otpauthUrl,
+      qrCodeDataUrl: setup.qrCodeDataUrl
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/2fa/confirm", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "site");
+    const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
+    if (!confirmed) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    await appendAdminLog("admin_mfa_enabled", confirmed.account.login, { accountId: confirmed.account.id, ...requestSource(req) });
+    res.json({
+      token: signAdminToken(confirmed.account, req),
+      admin: adminAccountPublic(confirmed.account),
+      recoveryCodes: confirmed.recoveryCodes
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/2fa/verify", async (req, res, next) => {
+  try {
+    assertClientRateLimit(req, "admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
+    const { account } = await accountForMfaChallenge(req, "site");
+    if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
+    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+    if (!verifiedAccount) {
+      await appendAdminLog("admin_mfa_failed", account.login, { accountId: account.id, ...requestSource(req) });
+      return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    }
+    await appendAdminLog("admin_login_success", verifiedAccount.login, { accountId: verifiedAccount.id, ...requestSource(req) });
+    res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/2fa/recovery-codes", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    let account = await loadAdminAccountById(admin.accountId);
+    if (!account || !(await verifyAdminAccountPassword(account, String(req.body.password || "")))) {
+      return res.status(401).json({ error: "Identity confirmation failed" });
+    }
+    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
+    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    const recoveryCodes = generateRecoveryCodes(10);
+    const { data, error } = await supabase.from("admin_accounts")
+      .update({
+        recovery_code_hashes: recoveryCodeHashes(mfaRecoverySecret(account), account.id, recoveryCodes),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", account.id)
+      .eq("credential_version", account.credential_version)
+      .select("*")
+      .single();
+    if (error) throw adminAccountMigrationError(error);
+    await appendAdminLog("admin_recovery_codes_rotated", data.login, { accountId: data.id, ...requestSource(req) });
+    res.json({ recoveryCodes, remaining: recoveryCodes.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/admin/2fa", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    let account = await loadAdminAccountById(admin.accountId);
+    if (!account || !(await verifyAdminAccountPassword(account, String(req.body.password || "")))) {
+      return res.status(401).json({ error: "Identity confirmation failed" });
+    }
+    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
+    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    const reset = await resetAdminAccountMfa(account);
+    await appendAdminLog("admin_mfa_disabled", reset.login, { accountId: reset.id, ...requestSource(req) });
+    res.json({ ok: true, requiresMfaSetup: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/logout", async (req, res, next) => {
+  try {
+    const admin = requireAdmin(req);
+    const account = await loadAdminAccountById(admin.accountId);
+    if (account) await revokeAdminAccountSessions(account);
+    await appendAdminLog("admin_logout", admin.login, { accountId: admin.accountId, ...requestSource(req) });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/accounts", async (req, res, next) => {
+  try {
+    requireOwnerAdmin(req);
+    const { data: accounts, error } = await supabase.from("admin_accounts")
+      .select("*")
+      .eq("scope", "site")
+      .order("created_at", { ascending: true });
+    if (error) throw adminAccountMigrationError(error);
+    res.json({ accounts: (accounts || []).map(adminAccountPublic) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/accounts", async (req, res, next) => {
+  try {
+    const owner = requireOwnerAdmin(req);
+    const login = String(req.body.login || "").trim();
+    const password = String(req.body.password || "");
+    const role = String(req.body.role || "admin").toLowerCase();
+    if (!/^[a-zA-Z0-9_.-]{3,64}$/.test(login)) return res.status(400).json({ error: "Invalid administrator login" });
+    if (password.length < 12 || password.length > 128) return res.status(400).json({ error: "Administrator password must contain 12 to 128 characters" });
+    if (!new Set(["admin", "moderator", "manager", "support"]).has(role)) return res.status(400).json({ error: "Invalid administrator role" });
+    if (await loadSiteAdminAccount(login)) return res.status(409).json({ error: "Administrator already exists" });
+    const account = await insertAdminAccount({
+      id: siteAdminAccountId(login),
+      scope: "site",
+      login_key: loginKey(login),
+      login,
+      role,
+      password_hash: await bcrypt.hash(password, 12),
+      permissions: [],
+      credential_version: 1,
+      created_by: owner.login
+    });
+    await appendAdminLog("admin_account_created", owner.login, { accountId: account.id, role, ...requestSource(req) });
+    res.status(201).json({ account: adminAccountPublic(account) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/accounts/:id", async (req, res, next) => {
+  try {
+    const owner = requireOwnerAdmin(req);
+    const account = await loadAdminAccountById(req.params.id);
+    if (!account || account.scope !== "site") return res.status(404).json({ error: "Administrator not found" });
+    if (account.role === "owner") return res.status(403).json({ error: "The owner account cannot be changed here" });
+    const patch = { updated_at: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(req.body, "disabled")) patch.disabled = Boolean(req.body.disabled);
+    if (req.body.role) {
+      const role = String(req.body.role).toLowerCase();
+      if (!new Set(["admin", "moderator", "manager", "support"]).has(role)) return res.status(400).json({ error: "Invalid administrator role" });
+      patch.role = role;
+    }
+    if (req.body.password) {
+      const password = String(req.body.password);
+      if (password.length < 12 || password.length > 128) return res.status(400).json({ error: "Administrator password must contain 12 to 128 characters" });
+      patch.password_hash = await bcrypt.hash(password, 12);
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, "disabled")
+      || Boolean(req.body.role)
+      || Boolean(req.body.password)
+    ) {
+      patch.credential_version = Number(account.credential_version || 1) + 1;
+      patch.session_version = Number(account.session_version || 1) + 1;
+    }
+    const { data: saved, error } = await supabase.from("admin_accounts").update(patch).eq("id", account.id).select("*").single();
+    if (error) throw adminAccountMigrationError(error);
+    await appendAdminLog("admin_account_updated", owner.login, { accountId: account.id, ...requestSource(req) });
+    res.json({ account: adminAccountPublic(saved) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/accounts/:id/2fa/reset", async (req, res, next) => {
+  try {
+    const owner = requireOwnerAdmin(req);
+    const account = await loadAdminAccountById(req.params.id);
+    if (!account || account.scope !== "site") return res.status(404).json({ error: "Administrator not found" });
+    if (account.id === owner.accountId) return res.status(400).json({ error: "Use personal 2FA settings for your own account" });
+    const reset = await resetAdminAccountMfa(account);
+    await appendAdminLog("admin_mfa_reset_by_owner", owner.login, { accountId: reset.id, ...requestSource(req) });
+    res.json({ account: adminAccountPublic(reset) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/stores/:id/2fa/reset", async (req, res, next) => {
+  try {
+    const owner = requireOwnerAdmin(req);
+    const store = await loadStoreWithFallback(req.params.id);
+    if (!store) return res.status(404).json({ error: "Store not found" });
+    const staffLogin = String(req.body.staffLogin || "").trim();
+    const accountId = storeAdminAccountId(store.id, staffLogin
+      ? { role: "staff", login: staffLogin }
+      : { role: "owner", login: store.ownerLogin || store.id });
+    const account = await loadAdminAccountById(accountId);
+    if (!account) return res.status(404).json({ error: "Store administrator has not started 2FA enrollment yet" });
+    const reset = await resetAdminAccountMfa(account);
+    await appendAdminLog("store_admin_mfa_reset_by_owner", owner.login, {
+      accountId: reset.id,
+      storeId: store.id,
+      staffLogin,
+      ...requestSource(req)
+    });
+    res.json({ account: adminAccountPublic(reset) });
   } catch (error) {
     next(error);
   }
@@ -4955,7 +5952,13 @@ app.get("/api/admin/overview", async (req, res, next) => {
     const admin = requireAdmin(req);
     await loadLitecoinUsdRate().catch(() => ({ rate: cachedLitecoinUsdRate() }));
     const data = await adminLoadMarketplace({ compact: req.query.compact === "1" });
-    res.json({ admin, ...adminBuildOverview(data) });
+    let adminAccounts = [];
+    if (admin.role === "owner") {
+      const { data: rows, error } = await supabase.from("admin_accounts").select("*").eq("scope", "site").order("created_at", { ascending: true });
+      if (error) throw adminAccountMigrationError(error);
+      adminAccounts = (rows || []).map(adminAccountPublic);
+    }
+    res.json({ admin, adminAccounts, ...adminOverviewForRole(adminBuildOverview(data), admin.role) });
   } catch (error) {
     next(error);
   }
@@ -5105,7 +6108,7 @@ app.post("/api/admin/public-catalog/rebuild", async (req, res, next) => {
 
 app.get("/api/admin/payments/payout-config", async (req, res, next) => {
   try {
-    requireAdmin(req);
+    requireOwnerAdmin(req);
     res.json({
       nowpaymentsApiKey: Boolean(nowpaymentsApiKey),
       payoutsEnabled: nowpaymentsPayoutsEnabled,
@@ -5123,8 +6126,8 @@ app.post("/api/admin/private-messages", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     const toLogin = String(req.body.toLogin || req.body.login || "").trim();
-    const subject = String(req.body.subject || "Сообщение от сайта").trim();
-    const body = String(req.body.body || req.body.message || "").trim();
+    const subject = boundedUserText(req.body.subject || "Сообщение от сайта", 160, "Message subject");
+    const body = boundedUserText(req.body.body || req.body.message || "", 5000, "Private message");
     if (!toLogin || !body) return res.status(400).json({ error: "Укажите получателя и текст сообщения" });
     const { data: user } = await supabase.from("profiles").select("login,login_key").eq("login_key", loginKey(toLogin)).maybeSingle();
     if (!user) return res.status(404).json({ error: "Пользователь не найден" });
@@ -5134,7 +6137,7 @@ app.post("/api/admin/private-messages", async (req, res, next) => {
       storeId: "site",
       storeTag: "CERBER",
       toLogin: user.login,
-      fromLogin: req.body.fromLogin || "CERBER",
+      fromLogin: admin.login,
       subject,
       body,
       createdAt: now,
@@ -5170,7 +6173,7 @@ app.post("/api/admin/support-tickets/:id/reply", async (req, res, next) => {
     const ticket = (state.supportTickets || []).find((item) => String(item.id) === String(req.params.id));
     if (!ticket) return res.status(404).json({ error: "Обращение не найдено" });
     if (ticket.status === "closed") return res.status(409).json({ error: "Обращение уже закрыто" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Support reply");
     const attachments = normalizeSupportAttachments(req.body.attachments);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите ответ или прикрепите фото" });
     const reply = { id: `reply-${Date.now()}`, fromLogin: admin.login, body, attachments, createdAt: Date.now() };
@@ -5248,95 +6251,7 @@ app.delete("/api/admin/marketplace-data", async (req, res, next) => {
   try {
     const admin = requireAdmin(req);
     await appendAdminLog("marketplace_bulk_clear_blocked", admin.login, {});
-    return res.status(403).json({ error: "Массовое удаление отключено после инцидента безопасности" });
-    requireDb();
-    const state = await loadSettingsState();
-    const { data: storeRows, error: storesLoadError } = await withTimeout(
-      supabase.from("stores").select("id,data"),
-      "marketplace bulk clear stores load",
-      20000
-    );
-    if (storesLoadError) throw storesLoadError;
-    const allStores = mergeStoreSources(
-      (Array.isArray(storeRows) ? storeRows : []).map((row) => row.data || { id: row.id }),
-      mergeStoreSources(state.ownerStores || [], state.publicStoresCache || [])
-    );
-    const storeIds = new Set(allStores.map((store) => String(store?.id || "")).filter(Boolean));
-    const previousCounts = {
-      stores: storeIds.size,
-      storeRows: Array.isArray(storeRows) ? storeRows.length : 0,
-      ownerStores: Array.isArray(state.ownerStores) ? state.ownerStores.length : 0,
-      publicStoresCache: Array.isArray(state.publicStoresCache) ? state.publicStoresCache.length : 0,
-      exchangers: Array.isArray(state.exchangers) ? state.exchangers.length : 0,
-      exchangeCards: Array.isArray(state.exchangeCards) ? state.exchangeCards.length : 0,
-      storeApplications: Array.isArray(state.storeApplications) ? state.storeApplications.length : 0,
-      exchangeRequests: Array.isArray(state.exchangeRequests) ? state.exchangeRequests.length : 0
-    };
-    state.ownerStores = [];
-    state.publicStoresCache = [];
-    state.publicStoresCacheAt = Date.now();
-    state.exchangers = [];
-    state.exchangeCards = [];
-    state.storeApplications = [];
-    state.exchangeRequests = [];
-    state.deletedStoreIds = [];
-    state.orders = (Array.isArray(state.orders) ? state.orders : []).filter((order) => {
-      const storeId = String(order?.storeId || order?.store_id || "");
-      return storeId && !storeIds.has(storeId);
-    });
-    state.updatedAt = Date.now();
-    await saveSettingsState(state, {
-      allowEmptyExchangers: true,
-      allowEmptyKeys: [
-        "ownerStores",
-        "publicStoresCache",
-        "exchangers",
-        "exchangeCards",
-        "storeApplications",
-        "exchangeRequests",
-        "deletedStoreIds",
-        "orders"
-      ]
-    });
-    const deleteResult = await withTimeout(
-      supabase.from("stores").delete().neq("id", ""),
-      "marketplace bulk clear stores delete",
-      30000
-    );
-    if (deleteResult?.error) throw deleteResult.error;
-    const emptyCatalog = {
-      theme: "dark",
-      lang: state.lang || "ru",
-      stores: [],
-      exchangeCards: [],
-      exchangers: [],
-      groupSettings: normalizeGroupSettings(state.groupSettings || {}),
-      referralPeriod: state.referralPeriod || {},
-      filters: state.filters || {},
-      clearedAt: Date.now(),
-      clearedBy: admin.login,
-      updatedAt: Date.now()
-    };
-    publicStoresMemoryCache = [];
-    publicStoresMemoryCacheAt = Date.now();
-    publicCatalogMemorySnapshot = cloneJson(emptyCatalog);
-    publicCatalogMemorySnapshotAt = Date.now();
-    await withTimeout(
-      supabase.from("app_settings").upsert([
-        { id: publicCatalogRowId, data: emptyCatalog },
-        { id: publicCatalogBackupRowId, data: { ...emptyCatalog, backupOf: publicCatalogRowId, backupAt: Date.now() } }
-      ], { onConflict: "id" }),
-      "marketplace bulk clear public catalog save",
-      12000
-    );
-    await appendAdminLog("marketplace_bulk_cleared", admin.login, previousCounts);
-    console.log("[admin] marketplace bulk cleared", previousCounts);
-    notifyRealtime("marketplace_bulk_cleared", previousCounts);
-    res.json({
-      ok: true,
-      cleared: previousCounts,
-      ...(adminBuildOverview(await adminLoadMarketplace({ compact: true })))
-    });
+    res.status(403).json({ error: "Массовое удаление отключено после инцидента безопасности" });
   } catch (error) {
     next(error);
   }
@@ -5462,14 +6377,18 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
     if (profileError) throw profileError;
     if (!existingProfile) return res.status(404).json({ error: "Пользователь не найден" });
     const updates = {};
-    if (role) updates.role = String(role);
-    if (name) updates.name = String(name).trim();
+    const requestedRole = role ? String(role).toLowerCase() : "";
+    if (requestedRole && !new Set(["user", "seller"]).has(requestedRole)) {
+      return res.status(400).json({ error: "Administrative roles must be created in the protected administrator accounts section" });
+    }
+    if (requestedRole) updates.role = requestedRole;
+    if (name !== undefined) updates.name = boundedUserText(name, 120, "User name");
     const nextUserPassword = String(newPassword || "");
     if (nextUserPassword) {
       if (nextUserPassword.length < 10 || nextUserPassword.length > 128) {
         return res.status(400).json({ error: "Новый пароль пользователя должен содержать от 10 до 128 символов" });
       }
-      const nextRole = String(role || existingProfile.role || "user").toLowerCase();
+      const nextRole = String(requestedRole || existingProfile.role || "user").toLowerCase();
       if (nextRole !== "user") {
         return res.status(400).json({ error: "Пароль служебного аккаунта меняется через настройки соответствующей панели" });
       }
@@ -5502,7 +6421,7 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       await appendAdminLog(blocked ? "user_blocked" : "user_unblocked", admin.login, { login, reason: blockReason || "" });
     }
 
-    if (role === "seller" || storePassword) {
+    if (requestedRole === "seller" || storePassword) {
       const { data: rows, error: storesReadError } = await withTimeout(
         supabase.from("stores").select("id,data"),
         "admin seller store query",
@@ -5553,7 +6472,7 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
       await saveOwnerStoreFallback(savedStore);
     }
 
-    await appendAdminLog("user_updated", admin.login, { login, role, name: name || "", sellerPanel: Boolean(role === "seller" || storePassword) });
+    await appendAdminLog("user_updated", admin.login, { login, role: requestedRole, name: name || "", sellerPanel: Boolean(requestedRole === "seller" || storePassword) });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
     next(error);
@@ -5562,7 +6481,7 @@ app.patch("/api/admin/users/:login", async (req, res, next) => {
 
 app.post("/api/admin/users/:login/balance", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
     requireDb();
     const requestedLogin = String(req.params.login || "").trim();
     const key = loginKey(requestedLogin);
@@ -5579,8 +6498,18 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
     }
     if (!reason) return res.status(400).json({ error: "Укажите причину изменения баланса" });
 
-    const requestId = String(req.body.clientRequestId || crypto.randomUUID()).replace(/[^a-z0-9_-]/gi, "").slice(0, 100) || crypto.randomUUID();
-    const transactionId = `admin-balance-${requestId}`;
+    const requestId = requestIdempotencyKey(req, "Balance adjustment");
+    const requestSignature = crypto.createHash("sha256")
+      .update([
+        admin.accountId,
+        key,
+        action,
+        amountUsd.toFixed(8),
+        reason,
+        requestId
+      ].join("|"))
+      .digest("hex");
+    const transactionId = `admin-balance-${crypto.createHash("sha256").update(requestId).digest("hex").slice(0, 32)}`;
     const rate = Number((await loadLitecoinUsdRate()).rate || 0);
     if (!Number.isFinite(rate) || rate <= 0) return res.status(503).json({ error: "Курс LTC временно недоступен" });
 
@@ -5588,6 +6517,9 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const existingTransaction = state.walletTransactions.find((item) => item.id === transactionId);
     if (existingTransaction) {
+      if (!secretValuesMatch(existingTransaction.requestSignature || "", requestSignature)) {
+        return res.status(409).json({ error: "Idempotency key was already used for another balance adjustment" });
+      }
       const existingBalanceLtc = stateUserLtcBalance(state, user.login, user.login_key);
       return res.json({
         ok: true,
@@ -5627,6 +6559,8 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
       action,
       title: actionTitles[action],
       reason,
+      idempotencyKey: requestId,
+      requestSignature,
       amountLtc: deltaLtc,
       amountUsd: deltaUsd,
       requestedAmountUsd: amountUsd,
@@ -5681,7 +6615,10 @@ app.use("/api/owner", (_req, res) => {
 
 app.post("/api/admin/disputes/test", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
+    if (process.env.NODE_ENV === "production" || process.env.SECURITY_TEST_ENDPOINTS_ENABLED !== "true") {
+      return res.status(404).json({ error: "Not found" });
+    }
     requireDb();
     const data = await adminLoadMarketplace();
     const state = data.state || {};
@@ -5697,7 +6634,7 @@ app.post("/api/admin/disputes/test", async (req, res, next) => {
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
 
     const now = Date.now();
-    const productTitle = String(req.body.productTitle || req.body.product || "Тестовый товар").trim();
+    const productTitle = boundedUserText(req.body.productTitle || req.body.product || "Тестовый товар", 160, "Product title");
     const amountUsd = Math.max(0, Number(req.body.amountUsd || 10));
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму диспута" });
     const products = Array.isArray(store.products) ? store.products : [];
@@ -5877,7 +6814,7 @@ app.post("/api/admin/disputes/:id/reply", async (req, res, next) => {
     const dispute = order || request;
     if (!dispute) return res.status(404).json({ error: "Диспут не найден" });
     if (dispute.disputeOpen === false || dispute.disputeChatClosed) return res.status(409).json({ error: "Диспут закрыт" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute reply");
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = data.stores.find((item) => item.id === dispute.storeId || sameLogin(item.ownerLogin, dispute.toLogin));
@@ -5967,6 +6904,7 @@ app.post("/api/admin/stores", async (req, res, next) => {
     protectedStore.credentialVersion = securityTokenVersion;
     protectedStore.staff = [];
     const savedStore = await saveStoreRow(protectedStore, "admin store create");
+    await synchronizeStoreAdminAccess(existing?.data || {}, savedStore);
     await withTimeout(
       adminEnsureSellerProfile(savedStore.ownerLogin, "", savedStore.ownerLogin, { passwordHash: panelPasswordHash }),
       "admin seller profile sync",
@@ -6007,6 +6945,7 @@ app.patch("/api/admin/stores/:id", async (req, res, next) => {
       protectedStore.staff = [];
     }
     const savedStore = await saveStoreRow(protectedStore, "admin store update");
+    await synchronizeStoreAdminAccess(row.data, savedStore);
     const canonicalPanelPasswordHash = panelPasswordHash || String(savedStore.adminPasswordHash || "").trim();
     if (savedStore.ownerLogin && canonicalPanelPasswordHash) {
       await withTimeout(
@@ -6148,7 +7087,7 @@ app.delete("/api/admin/exchangers/:id", async (req, res, next) => {
 
 app.post("/api/admin/orders/recover", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
     const data = await adminLoadMarketplace();
     const result = recoverProductOrderFromHistory(data.state, data.stores, data.messages, req.body || {});
     if (result.created) {
@@ -6177,7 +7116,11 @@ app.post("/api/admin/orders/recover", async (req, res, next) => {
 
 app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
   try {
-    requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
+    auditSecurityEvent("unsafe_order_repair_rejected", req, { admin: admin.login });
+    return res.status(410).json({
+      error: "Unsafe payment repair is disabled. Use verified NOWPayments reconciliation or an audited balance adjustment."
+    });
     requireDb();
     const targetLogin = loginKey(req.body.login || "");
     const targetStoreId = String(req.body.storeId || "").trim();
@@ -6199,7 +7142,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
     const commissionLtc = roundLtc(grossLtc * Math.min(1, Math.max(0, commissionRatio)));
     const sellerAmountLtc = roundLtc(Math.max(0, grossLtc - commissionLtc));
     const orderId = String(req.body.orderId || `order-repair-${targetLogin || "user"}-${targetStoreId}-${now}`).trim();
-    const productTitle = String(req.body.productTitle || req.body.product || "Восстановленный заказ").trim();
+    const productTitle = boundedUserText(req.body.productTitle || req.body.product || "Восстановленный заказ", 160, "Product title");
     const createdAt = Number(req.body.createdAt || req.body.paidAt || now);
     const message = {
       id: `sale-ledger-${orderId}`,
@@ -6390,7 +7333,7 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
 
 app.put("/api/admin/settings", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
     const state = await loadSettingsState();
     state.ownerSettings = { ...(state.ownerSettings || {}), ...(req.body.ownerSettings || {}) };
     state.paymentSettings = { ...(state.paymentSettings || {}), ...(req.body.paymentSettings || {}) };
@@ -6405,7 +7348,7 @@ app.put("/api/admin/settings", async (req, res, next) => {
 
 app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
     assertClientRateLimit(req, "owner-withdrawal", { limit: 5, windowMs: 60 * 1000, identity: admin.login });
     const data = await adminLoadMarketplace();
     const state = data.state;
@@ -6473,7 +7416,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
 
 app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
   try {
-    const admin = requireAdmin(req);
+    const admin = requireOwnerAdmin(req);
     const state = await loadSettingsState();
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
@@ -6483,6 +7426,9 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
     const nextStatus = String(req.body.status || "").trim().toLowerCase();
     if (!["pending", "processing", "paid", "completed", "rejected", "cancelled", "canceled"].includes(nextStatus)) {
       return res.status(400).json({ error: "Неверный статус вывода" });
+    }
+    if (withdrawal.provider === "nowpayments" && withdrawal.providerPayoutId) {
+      return res.status(409).json({ error: "NOWPayments payout status is controlled only by a verified provider callback" });
     }
     const prevStatus = String(withdrawal.status || "pending").toLowerCase();
     withdrawal.status = nextStatus;
@@ -6607,29 +7553,7 @@ app.post("/api/admin/broadcasts", async (req, res, next) => {
 app.post("/api/admin/bots", async (req, res, next) => {
   try {
     requireAdmin(req);
-    return res.status(405).json({ error: "Зеркало создает только пользователь через Telegram-бота" });
-    const admin = requireAdmin(req);
-    const state = await loadSettingsState();
-    state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
-    const chatId = String(req.body.chatId || "").trim();
-    const token = String(req.body.token || "").trim();
-    const loginKeyValue = loginKey(req.body.loginKey || req.body.login || "");
-    if (!chatId && !token) return res.status(400).json({ error: "Укажите chatId или token бота" });
-    const existing = state.mirrorBots.find((bot) => (
-      (chatId && String(bot.chatId || "") === chatId) || (token && String(bot.token || "") === token)
-    ));
-    const bot = existing || {};
-    bot.chatId = chatId || bot.chatId || "";
-    bot.token = token || bot.token || "";
-    bot.loginKey = loginKeyValue || bot.loginKey || "";
-    bot.verified = req.body.verified !== false;
-    bot.blocked = Boolean(req.body.blocked);
-    bot.createdAt = bot.createdAt || Date.now();
-    bot.updatedAt = Date.now();
-    if (!existing) state.mirrorBots.unshift(bot);
-    await saveSettingsState(state);
-    await appendAdminLog("mirror_bot_saved", admin.login, { chatId: bot.chatId, loginKey: bot.loginKey });
-    res.json(adminBuildOverview(await adminLoadMarketplace()));
+    res.status(405).json({ error: "Зеркало создает только пользователь через Telegram-бота" });
   } catch (error) {
     next(error);
   }
@@ -6678,7 +7602,7 @@ app.patch("/api/admin/bots", async (req, res, next) => {
         mirror.status = mirror.active ? "active" : "disabled";
       } else if (action === "restartWebhook") {
         if (!mirror.token) return res.status(400).json({ error: "У зеркала нет токена" });
-        if (!telegramWebhookSecret) return res.status(503).json({ error: "TELEGRAM_WEBHOOK_SECRET не настроен" });
+        if (!telegramWebhookSecret) return res.status(503).json({ error: "Сервис Telegram временно недоступен" });
         mirror.webhookId = mirror.webhookId || mirrorWebhookId(mirror.token);
         mirror.webhookUrl = mirror.webhookUrl || mirrorWebhookUrl(mirror.token);
         await telegramTokenApi(mirror.token, "setWebhook", {
@@ -6726,20 +7650,28 @@ app.post("/api/broadcasts/:id/track", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
-    const state = await loadSettingsState();
-    const notification = (state.siteNotifications || []).find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
-    if (!notification) return res.status(404).json({ error: "Уведомление не найдено" });
     const action = String(req.body.action || "closed");
-    if (action === "clicked") notification.clickedAt = Date.now();
-    if (action === "closed") notification.closedAt = Date.now();
-    const broadcast = (state.broadcasts || []).find((item) => item.id === notification.broadcastId);
-    if (broadcast) {
-      broadcast.stats = broadcast.stats || {};
-      if (action === "clicked") broadcast.stats.clicked = Number(broadcast.stats.clicked || 0) + 1;
-      if (action === "closed") broadcast.stats.closed = Number(broadcast.stats.closed || 0) + 1;
-    }
-    await saveSettingsState(state);
-    res.json({ ok: true });
+    if (!new Set(["clicked", "closed"]).has(action)) return res.status(400).json({ error: "Неизвестное действие" });
+    assertClientRateLimit(req, "broadcast-track", { limit: 30, windowMs: 60 * 1000, identity: user.login });
+    const lockKey = `broadcast:${String(req.params.id || "").slice(0, 120)}:${loginKey(user.login)}`;
+    const result = await withOperationLocks([lockKey], () => mutateSettingsState((state) => {
+      const notification = (state.siteNotifications || []).find((item) => item.id === req.params.id && sameLogin(item.login, user.login));
+      if (!notification) {
+        const error = new Error("Уведомление не найдено");
+        error.status = 404;
+        throw error;
+      }
+      const timestampKey = action === "clicked" ? "clickedAt" : "closedAt";
+      if (notification[timestampKey]) return { recorded: false };
+      notification[timestampKey] = Date.now();
+      const broadcast = (state.broadcasts || []).find((item) => item.id === notification.broadcastId);
+      if (broadcast) {
+        broadcast.stats = broadcast.stats || {};
+        broadcast.stats[action] = Number(broadcast.stats[action] || 0) + 1;
+      }
+      return { recorded: true };
+    }), { waitMs: 5000, ttlSeconds: 20 });
+    res.json({ ok: true, ...result });
   } catch (error) {
     next(error);
   }
@@ -6882,7 +7814,8 @@ function nowpaymentsPaymentIsPaid(status = "") {
   return ["finished", "paid"].includes(String(status || "").toLowerCase());
 }
 
-function nowpaymentsPaymentCoversExpected(payload = {}) {
+function nowpaymentsPaymentCoversExpected(payload = {}, expected = {}) {
+  if (expected && Object.keys(expected).length) return validateProviderPayment(payload, expected).ok;
   const expectedCrypto = Number(payload.pay_amount || 0);
   const actuallyPaidCrypto = Number(payload.actually_paid || 0);
   if (expectedCrypto > 0 && actuallyPaidCrypto > 0) {
@@ -7204,7 +8137,7 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
   return withdrawal;
 }
 
-async function processNowpaymentsWithdrawalPayout(withdrawalId = "") {
+async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
   if (!nowpaymentsPayoutsEnabled || !withdrawalId) return;
   const state = await loadSettingsState();
   state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
@@ -7280,6 +8213,16 @@ async function processNowpaymentsWithdrawalPayout(withdrawalId = "") {
   });
 }
 
+async function processNowpaymentsWithdrawalPayout(withdrawalId = "") {
+  const id = String(withdrawalId || "");
+  if (!nowpaymentsPayoutsEnabled || !id) return;
+  return withOperationLocks(
+    ["finance:state", `withdrawal:${id}`],
+    () => processNowpaymentsWithdrawalPayoutUnlocked(id),
+    { waitMs: 30000, ttlSeconds: 120 }
+  );
+}
+
 function scheduleNowpaymentsWithdrawalPayout(withdrawalId = "") {
   const id = String(withdrawalId || "");
   if (!nowpaymentsPayoutsEnabled || !id || withdrawalPayoutJobs.has(id)) return;
@@ -7292,7 +8235,7 @@ function scheduleNowpaymentsWithdrawalPayout(withdrawalId = "") {
   timer.unref?.();
 }
 
-async function resumeQueuedWithdrawalPayouts() {
+async function resumeQueuedWithdrawalPayoutsUnlocked() {
   if (!nowpaymentsPayoutsEnabled) return;
   const state = await loadSettingsState();
   const withdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
@@ -7308,6 +8251,15 @@ async function resumeQueuedWithdrawalPayouts() {
     }
   });
   if (changed) await saveSettingsState(state);
+}
+
+async function resumeQueuedWithdrawalPayouts() {
+  if (!nowpaymentsPayoutsEnabled) return;
+  return withOperationLocks(
+    ["finance:state", "withdrawal:queue"],
+    () => resumeQueuedWithdrawalPayoutsUnlocked(),
+    { waitMs: 15000, ttlSeconds: 90 }
+  );
 }
 
 async function createNowpaymentsWalletPayment(paymentPayload) {
@@ -7333,9 +8285,7 @@ function cleanAttachmentUrl(value = "") {
   if (!url || url.length > maxDataImageLength) return "";
   const dataMatch = url.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
   if (dataMatch) {
-    const mime = String(dataMatch[1] || "").toLowerCase();
-    if (!allowedInlineAttachmentTypes.has(mime)) return "";
-    return url;
+    return parseInlineMedia(url, allowedInlineAttachmentTypes, 5 * 1024 * 1024) ? url : "";
   }
   if (trustedContentUrl(url)) return trustedContentUrl(url);
   if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(url)) return url.replace(/^\//, "");
@@ -8182,15 +9132,8 @@ async function restoreExpiredProductReservation(state = {}, order = {}) {
 
 async function ensureProductOrderSettlement(state = {}, order = {}, store = null) {
   if (!order || order.type !== "product") return false;
-  const status = String(order.status || "").toLowerCase();
   const paymentStatus = String(order.paymentStatus || "").toLowerCase();
-  if (paymentStatus !== "paid") {
-    if (["active", "completed", "closed", "paid"].includes(status)) {
-      order.paymentStatus = "paid";
-    } else {
-      return false;
-    }
-  }
+  if (paymentStatus !== "paid") return false;
   if (!adminIsWithdrawableStoreOrder(order)) return false;
 
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
@@ -8480,7 +9423,7 @@ async function upsertPrivateMessage(message, options = {}) {
   if (error) throw error;
   if (options.notify !== false) {
     siteNotifyDeliverPrivateMessage(message).catch((error) => {
-      console.error("Site notify bot delivery error", error);
+      console.error("Site notify bot delivery error", sanitizeErrorForLog(error));
     });
   }
 }
@@ -8602,7 +9545,7 @@ app.patch("/api/messages/:id", async (req, res, next) => {
     const message = await loadPrivateMessageById(req.params.id);
     if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
     if (!sameLogin(message.fromLogin, user.login)) return res.status(403).json({ error: "Можно изменить только своё сообщение" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute message");
     if (!body) return res.status(400).json({ error: "Введите сообщение" });
     res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
   } catch (error) {
@@ -8633,7 +9576,7 @@ app.patch("/api/store-admin/messages/:id", async (req, res, next) => {
     if (!editableDisputeMessage(message) || String(message.storeId || "") !== String(token.storeId)) return res.status(404).json({ error: "Сообщение не найдено" });
     const store = await loadStoreWithFallback(token.storeId);
     if (![store?.ownerLogin, store?.id].some((value) => sameLogin(message.fromLogin, value))) return res.status(403).json({ error: "Можно изменить только сообщение магазина" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute message");
     if (!body) return res.status(400).json({ error: "Введите сообщение" });
     res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
   } catch (error) {
@@ -8662,7 +9605,7 @@ app.patch("/api/admin/messages/:id", async (req, res, next) => {
     const message = await loadPrivateMessageById(req.params.id);
     if (!editableDisputeMessage(message)) return res.status(404).json({ error: "Сообщение не найдено" });
     if (!sameLogin(message.fromLogin, admin.login) && !String(message.system || "").startsWith("admin-dispute")) return res.status(403).json({ error: "Можно изменить только своё сообщение" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute message");
     if (!body) return res.status(400).json({ error: "Введите сообщение" });
     res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
   } catch (error) {
@@ -8861,6 +9804,9 @@ function storeOrderHeldForPayout(order = {}) {
 }
 
 function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
+  // Legacy chat messages are not cryptographic proof of payment and must never affect balances.
+  return null;
+  /* c8 ignore start -- retained temporarily only to decode historical exports */
   if (String(message.system || "") !== "store-sale-ledger") return null;
   const storeId = String(message.storeId || store?.id || "").trim();
   if (!storeId) return null;
@@ -8999,6 +9945,7 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
     originalCommissionUsd: completedRows.reduce((sum, row) => sum + Number(row.originalCommissionUsd || 0), 0),
     originalNetUsd: completedRows.reduce((sum, row) => sum + Number(row.originalNetUsd || 0), 0)
   };
+  /* c8 ignore stop */
 }
 
 function storeCommissionPercentForOrder(store = null) {
@@ -9382,7 +10329,7 @@ function storeAdminWithdrawalForState(withdrawal = {}) {
 }
 
 function withdrawalRequestFingerprint(req, { scope = "", identity = "", amountUsd = 0, amountLtc = 0, address = "" } = {}) {
-  const idempotencyKey = String(req.headers["x-idempotency-key"] || req.body?.idempotencyKey || "").trim().slice(0, 160);
+  const idempotencyKey = requestIdempotencyKey(req, "Withdrawal");
   const amountPart = Number(amountUsd || 0) > 0 ? Number(amountUsd || 0).toFixed(8) : Number(amountLtc || 0).toFixed(8);
   const signature = crypto.createHash("sha256")
     .update([scope, loginKey(identity), String(address || "").trim().toLowerCase(), amountPart].join(":"))
@@ -9396,12 +10343,23 @@ function reusableWithdrawalStatuses(status = "") {
 
 function findReusableWithdrawal(state = {}, { scope = "", login = "", storeId = "", idempotencyKey = "", signature = "", windowMs = 2 * 60 * 1000 } = {}) {
   const now = Date.now();
-  return (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).find((item) => {
-    if (!reusableWithdrawalStatuses(item.status) || !withdrawalConsumesBalance(item)) return false;
+  const matchingIdentity = (Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : []).filter((item) => {
     if (scope && item.scope !== scope) return false;
     if (storeId && String(item.storeId || "") !== String(storeId || "")) return false;
     if (login && !sameLogin(item.login || item.loginKey, login)) return false;
-    if (idempotencyKey && String(item.idempotencyKey || "") === idempotencyKey) return true;
+    return true;
+  });
+  const sameKey = idempotencyKey
+    ? matchingIdentity.find((item) => String(item.idempotencyKey || "") === idempotencyKey)
+    : null;
+  if (sameKey && signature && !secretValuesMatch(String(sameKey.requestSignature || ""), signature)) {
+    const error = new Error("Idempotency key was already used for another withdrawal");
+    error.status = 409;
+    throw error;
+  }
+  return matchingIdentity.find((item) => {
+    if (!reusableWithdrawalStatuses(item.status) || !withdrawalConsumesBalance(item)) return false;
+    if (sameKey && item === sameKey) return true;
     if (signature && String(item.requestSignature || "") === signature && now - Number(item.createdAt || 0) <= windowMs) return true;
     return false;
   });
@@ -9602,9 +10560,9 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
     positionId: position.id || "",
     product: product.title || productName,
     storeName: store?.name || storeId || "",
-    status: "dispute",
-    paymentStatus: "paid",
-    paymentProvider: "recovered",
+    status: "manual_review",
+    paymentStatus: "review",
+    paymentProvider: "recovered-unverified",
     createdAt,
     paidAt: createdAt,
     amountUsd,
@@ -9625,8 +10583,6 @@ function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], 
     recoveredFromMessages: relatedMessages.map((message) => message.id).filter(Boolean).slice(0, 20)
   };
 
-  applyProductOrderCommission(order, state, store);
-  applyProductOrderLtcSettlement(order, state, store);
   state.orders.unshift(order);
   return { order, created: true };
 }
@@ -10462,22 +11418,29 @@ async function createWalletDepositRecord(user, options = {}) {
 
   const amountUsd = Number(options.amountUsd || 0);
   const coin = walletCoinFromRequest(options);
-  const amountLtcExpected = Math.max(0, Number(options.amountLtcEstimate || 0));
   if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
     const error = new Error("Укажите сумму пополнения");
     error.status = 400;
     throw error;
   }
+  const ltcUsdRateAtCreation = Number((await loadLitecoinUsdRate()).rate || 0);
+  if (!Number.isFinite(ltcUsdRateAtCreation) || ltcUsdRateAtCreation <= 0) {
+    const error = new Error("LTC exchange rate is temporarily unavailable");
+    error.status = 503;
+    throw error;
+  }
+  const amountLtcExpected = amountUsd / ltcUsdRateAtCreation;
 
   const state = await loadSettingsState();
   const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
   const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const deposit = {
-    id: `deposit-${Date.now()}`,
+    id: `deposit-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
     login: user.login,
     status: "waiting",
     amountUsd,
     amountLtcExpected,
+    ltcUsdRateAtCreation,
     coinId: coin.id,
     payCurrency: coin.payCurrency,
     createdAt: Date.now(),
@@ -10539,8 +11502,27 @@ async function createWalletDepositRecord(user, options = {}) {
 }
 
 async function completeProductOrder(order, state, providerPayload = {}) {
+  const providerValidation = validateProviderPayment(providerPayload, {
+    id: order.id,
+    paymentId: order.paymentId,
+    payCurrency: order.payCurrency || order.coinId,
+    amountUsd: order.amountUsd,
+    payAmount: order.payAmount || order.walletDepositAmountLtc
+  });
+  if (!providerValidation.ok) {
+    const error = new Error(`Payment verification failed: ${providerValidation.reason}`);
+    error.status = 409;
+    throw error;
+  }
   const paidAt = Date.now();
-  const wasAlreadyPaid = String(order.paymentStatus || "").toLowerCase() === "paid" || ["active", "completed", "closed", "paid"].includes(String(order.status || "").toLowerCase());
+  const statusBeforePayment = String(order.status || "").toLowerCase();
+  const paymentStatusBeforePayment = String(order.paymentStatus || "").toLowerCase();
+  const wasAlreadyPaid = paymentStatusBeforePayment === "paid" || ["active", "completed", "closed", "paid"].includes(statusBeforePayment);
+  const hadUnrestoredReservation = statusBeforePayment === "pending_payment"
+    && paymentStatusBeforePayment !== "paid"
+    && !order.stockRestoredAt
+    && !order.reservationRestored;
+  if (hadUnrestoredReservation && !order.stockReservedAt) order.stockReservedAt = Number(order.createdAt || paidAt);
   order.paymentStatus = "paid";
   if (!wasAlreadyPaid) {
     order.status = "active";
@@ -10574,6 +11556,28 @@ async function completeProductOrder(order, state, providerPayload = {}) {
         if (product) {
           product.purchases = Number(product.purchases || 0) + 1;
           const position = (product.positions || []).find((item) => item.id === order.positionId);
+          if (order.stockRestoredAt || order.reservationRestored) {
+            if (!position || Number(position.stock || 0) <= 0) {
+              order.status = "manual_review";
+              order.paymentStatus = "review";
+              order.paymentReviewReason = "late_payment_inventory_unavailable";
+              await saveSettingsState(state);
+              const error = new Error("Paid order requires manual review because its inventory reservation expired");
+              error.status = 409;
+              throw error;
+            }
+            position.stock = Math.max(0, Number(position.stock || 0) - 1);
+            if (order.reservedDescription) {
+              const deliveryItems = order.reservedFromPosition
+                ? (Array.isArray(position.deliveryItems) ? position.deliveryItems : [])
+                : (Array.isArray(product.deliveryItems) ? product.deliveryItems : []);
+              const restoredIndex = deliveryItems.indexOf(order.reservedDescription);
+              if (restoredIndex >= 0) deliveryItems.splice(restoredIndex, 1);
+            }
+            order.stockReservedAt = Date.now();
+            order.reservationRestored = false;
+            delete order.stockRestoredAt;
+          }
           if (!order.reservedDescription) {
             const positionItems = Array.isArray(position?.deliveryItems) ? position.deliveryItems : [];
             const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
@@ -10586,9 +11590,9 @@ async function completeProductOrder(order, state, providerPayload = {}) {
               order.reservedStock = true;
             }
           }
-          if (position && Number(position.stock || 0) > 0 && !order.reservedStock && !order.stockReleasedAt) {
+          if (position && Number(position.stock || 0) > 0 && !order.stockReservedAt && !order.stockRestoredAt) {
             position.stock = Math.max(0, Number(position.stock || 0) - 1);
-            order.stockReleasedAt = Date.now();
+            order.stockReservedAt = Date.now();
           }
         }
         await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
@@ -10636,7 +11640,7 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   if (!wasAlreadyPaid) notifyRealtime("order_paid", { orderId: order.id, storeId: order.storeId || "" });
 }
 
-async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
+async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {}) {
   if (!nowpaymentsApiKey || !supabase) return paymentReconcileStatus;
   if (paymentReconcilePromise) return paymentReconcilePromise;
   paymentReconcilePromise = (async () => {
@@ -10680,7 +11684,7 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
         order.walletDepositAddress = order.payAddress || order.walletDepositAddress || "";
         order.paymentProviderPayload = payment;
         changed = changed || previousStatus !== status;
-        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment)) {
+        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment, order)) {
           order.ltcAmount = Number(payment.actually_paid || payment.pay_amount || order.payAmount || order.ltcAmount || 0);
           delete order.paymentReviewReason;
           await completeProductOrder(order, state, payment);
@@ -10701,11 +11705,15 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
       && ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase())
     ));
     for (const deposit of completedDeposits) {
-      const balanceBefore = stateUserLtcBalance(state, deposit.login);
-      const repaired = await completeWalletDeposit(deposit, state, deposit.paymentProviderPayload || {}, { notify: false });
-      if (repaired && Math.abs(stateUserLtcBalance(state, deposit.login) - balanceBefore) > 0.000000001) {
-        depositsRepaired += 1;
-        changed = true;
+      try {
+        const balanceBefore = stateUserLtcBalance(state, deposit.login);
+        const repaired = await completeWalletDeposit(deposit, state, deposit.paymentProviderPayload || {}, { notify: false });
+        if (repaired && Math.abs(stateUserLtcBalance(state, deposit.login) - balanceBefore) > 0.000000001) {
+          depositsRepaired += 1;
+          changed = true;
+        }
+      } catch (error) {
+        errors.push(`deposit repair ${deposit.id}: ${String(error.message || error).slice(0, 160)}`);
       }
     }
     const depositCandidates = deposits
@@ -10727,7 +11735,7 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
         deposit.paymentStatus = status;
         deposit.paymentProviderPayload = payment;
         changed = changed || previousStatus !== status;
-        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment)) {
+        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment, deposit)) {
           await completeWalletDeposit(deposit, state, payment);
           depositsCompleted += 1;
           changed = true;
@@ -10773,6 +11781,14 @@ async function reconcilePendingNowpaymentsOrders({ force = false } = {}) {
   return paymentReconcilePromise;
 }
 
+async function reconcilePendingNowpaymentsOrders(options = {}) {
+  return withOperationLocks(
+    ["finance:state"],
+    () => reconcilePendingNowpaymentsOrdersUnlocked(options),
+    { waitMs: 15000, ttlSeconds: 90 }
+  );
+}
+
 async function completeWalletDeposit(deposit, state, providerPayload = {}, options = {}) {
   const wasAlreadyCompleted = ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase());
   state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
@@ -10789,12 +11805,20 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}, optio
   ) {
     return { wasAlreadyCompleted: true, balanceBefore: currentBalance, balanceAfter: currentBalance, paidLtc: Number(deposit.amountLtc || 0) };
   }
+  const providerValidation = validateProviderPayment(providerPayload, {
+    id: deposit.id,
+    paymentId: deposit.paymentId,
+    payCurrency: deposit.payCurrency || deposit.coinId,
+    amountUsd: deposit.amountUsd,
+    payAmount: deposit.payAmount
+  });
+  if (!providerValidation.ok) {
+    const error = new Error(`Wallet payment verification failed: ${providerValidation.reason}`);
+    error.status = 409;
+    throw error;
+  }
   const paidUsd = Number(deposit.amountUsd || providerPayload.price_amount || 0);
-  const providerPaidLtc = Number(providerPayload.actually_paid || providerPayload.pay_amount || deposit.payAmount || 0);
-  const liveRate = deposit.payCurrency === "ltc" ? 0 : Number((await loadLitecoinUsdRate().catch(() => ({ rate: 0 }))).rate || 0);
-  const paidLtc = deposit.payCurrency === "ltc"
-    ? Number(providerPaidLtc || deposit.amountLtc || deposit.amountLtcExpected || 0)
-    : Number(deposit.amountLtc || (liveRate > 0 ? paidUsd / liveRate : deposit.amountLtcExpected || 0));
+  const paidLtc = trustedWalletCreditLtc(deposit, providerPayload);
   if (!Number.isFinite(paidLtc) || paidLtc <= 0) {
     const error = new Error("NOWPayments не вернул сумму для зачисления");
     error.status = 409;
@@ -10886,6 +11910,8 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     requireDb();
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "product-balance-purchase", { limit: 20, windowMs: 60 * 1000, identity: user.login });
+    const clientRequestId = requestIdempotencyKey(req, "Product purchase");
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
@@ -10903,6 +11929,21 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
 
     const state = await loadSettingsState();
     state.orders = Array.isArray(state.orders) ? state.orders : [];
+    const existingOrder = state.orders.find((item) => (
+      item.type === "product"
+      && item.clientRequestId === clientRequestId
+      && sameLogin(item.login, user.login)
+    ));
+    if (existingOrder) {
+      if (
+        String(existingOrder.storeId || "") !== storeId
+        || String(existingOrder.productId || "") !== productId
+        || String(existingOrder.positionId || "") !== positionId
+      ) {
+        return res.status(409).json({ error: "Idempotency key was already used for another product purchase" });
+      }
+      return res.json({ order: publicOrderForUser(existingOrder), reused: true, ...(await stateFor(user)) });
+    }
     state.ltcBalances = state.ltcBalances || {};
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
@@ -10927,6 +11968,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const now = Date.now();
     const order = {
       id: `order-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      clientRequestId,
       type: "product",
       login: user.login,
       storeId,
@@ -10951,7 +11993,6 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     };
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
-    applyProductOrderLtcSettlement(order, state, store);
     applyProductOrderLtcSettlement(order, state, store);
     recordProductOrderLedger(order, state, store);
     setStateUserLtcBalance(state, user.login, balance - ltcAmount, user.login_key);
@@ -11008,10 +12049,12 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
 app.post("/api/orders/product/deposit", async (req, res, next) => {
   try {
     requireDb();
-    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    if (!nowpaymentsApiKey) return res.status(503).json({ error: "Платежный сервис временно недоступен" });
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
+    assertClientRateLimit(req, "product-payment-reservation", { limit: 10, windowMs: 10 * 60 * 1000, identity: user.login });
+    const clientRequestId = requestIdempotencyKey(req, "Product payment");
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
@@ -11043,9 +12086,53 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
 
     const state = await loadSettingsState();
     state.orders = Array.isArray(state.orders) ? state.orders : [];
+    const existingOrder = state.orders.find((item) => (
+      item.type === "product"
+      && item.clientRequestId === clientRequestId
+      && sameLogin(item.login, user.login)
+    ));
+    if (existingOrder) {
+      if (
+        String(existingOrder.storeId || "") !== storeId
+        || String(existingOrder.productId || "") !== productId
+        || String(existingOrder.positionId || "") !== positionId
+      ) {
+        return res.status(409).json({ error: "Idempotency key was already used for another product payment" });
+      }
+      return res.json({
+        order: publicOrderForUser(existingOrder),
+        paymentUrl: existingOrder.paymentUrl || "",
+        reused: true,
+        ...(await stateFor(user))
+      });
+    }
+    const activePendingOrders = state.orders.filter((item) => (
+      item.type === "product"
+      && sameLogin(item.login, user.login)
+      && String(item.status || "").toLowerCase() === "pending_payment"
+      && String(item.paymentStatus || "").toLowerCase() !== "paid"
+      && (!item.paymentExpiresAt || Date.now() < Number(item.paymentExpiresAt))
+    ));
+    const activePositionReservation = activePendingOrders.find((item) => (
+      String(item.storeId || "") === storeId
+      && String(item.productId || "") === productId
+      && String(item.positionId || "") === positionId
+    ));
+    if (activePositionReservation) {
+      return res.json({
+        order: publicOrderForUser(activePositionReservation),
+        paymentUrl: activePositionReservation.paymentUrl || "",
+        reused: true,
+        ...(await stateFor(user))
+      });
+    }
+    if (activePendingOrders.length >= 5) {
+      return res.status(429).json({ error: "Complete or wait for an existing payment reservation before creating another one" });
+    }
     const now = Date.now();
     const order = {
       id: `order-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      clientRequestId,
       type: "product",
       login: user.login,
       storeId,
@@ -11106,6 +12193,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       order.reservedStock = Boolean(order.reservedDescription);
     }
     position.stock = Math.max(0, Number(position.stock || 0) - 1);
+    order.stockReservedAt = Date.now();
     state.orders.unshift(order);
     await notifySiteUser(state, user.login, {
       id: `notice-order-created-${order.id}-${loginKey(user.login)}`,
@@ -11136,10 +12224,11 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
 app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], async (req, res, next) => {
   try {
     requireDb();
-    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    if (!nowpaymentsApiKey) return res.status(503).json({ error: "Платежный сервис временно недоступен" });
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
+    assertClientRateLimit(req, "payment-invoice-create", { limit: 10, windowMs: 10 * 60 * 1000, identity: user.login });
     const orderId = String(req.body.orderId || "");
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
@@ -11172,7 +12261,10 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
       body: JSON.stringify(invoicePayload)
     });
     const invoice = await response.json().catch(() => ({}));
-    if (!response.ok) return res.status(502).json({ error: invoice.message || "Payment invoice error" });
+    if (!response.ok) {
+      console.error("[payments] invoice creation failed", { status: response.status, providerCode: String(invoice.code || "").slice(0, 80) });
+      return res.status(502).json({ error: "Платежный сервис временно недоступен" });
+    }
 
     order.paymentInvoiceId = invoice.id || invoice.invoice_id || "";
     order.paymentUrl = invoice.invoice_url || invoice.payment_url || "";
@@ -11191,24 +12283,44 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
 app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], async (req, res, next) => {
   try {
     requireDb();
-    if (!nowpaymentsApiKey) return res.status(500).json({ error: "NOWPAYMENTS_API_KEY не настроен на сервере" });
+    if (!nowpaymentsApiKey) return res.status(503).json({ error: "Платежный сервис временно недоступен" });
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
+    assertClientRateLimit(req, "wallet-deposit-create", { limit: 10, windowMs: 10 * 60 * 1000, identity: user.login });
+    const clientRequestId = requestIdempotencyKey(req, "Wallet deposit");
     const amountUsd = Number(req.body.amountUsd || 0);
     const coin = walletCoinFromRequest(req.body);
-    const amountLtcExpected = Math.max(0, Number(req.body.amountLtcEstimate || 0));
-    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return res.status(400).json({ error: "Укажите сумму пополнения" });
+    if (!Number.isFinite(amountUsd) || amountUsd < 1 || amountUsd > 100000) {
+      return res.status(400).json({ error: "Сумма пополнения должна быть от 1 до 100 000 $" });
+    }
+    const ltcUsdRateAtCreation = Number((await loadLitecoinUsdRate()).rate || 0);
+    if (!Number.isFinite(ltcUsdRateAtCreation) || ltcUsdRateAtCreation <= 0) {
+      return res.status(503).json({ error: "Курс LTC временно недоступен. Попробуйте еще раз." });
+    }
+    const amountLtcExpected = amountUsd / ltcUsdRateAtCreation;
 
     const state = await loadSettingsState();
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
     const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+    const existingDeposit = deposits.find((item) => item.clientRequestId === clientRequestId && sameLogin(item.login, user.login));
+    if (existingDeposit) {
+      if (
+        Number(existingDeposit.amountUsd || 0) !== amountUsd
+        || String(existingDeposit.payCurrency || "").toLowerCase() !== String(coin.payCurrency || "").toLowerCase()
+      ) {
+        return res.status(409).json({ error: "Idempotency key was already used for another wallet deposit" });
+      }
+      return res.json({ deposit: existingDeposit, reused: true, ...(await stateFor(user)) });
+    }
     const deposit = {
-      id: `deposit-${Date.now()}`,
+      id: `deposit-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
+      clientRequestId,
       login: user.login,
       status: "waiting",
       amountUsd,
       amountLtcExpected,
+      ltcUsdRateAtCreation,
       coinId: coin.id,
       payCurrency: coin.payCurrency,
       createdAt: Date.now(),
@@ -11383,6 +12495,7 @@ app.post("/api/wallet/deposits/sync", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "wallet-deposit-sync", { limit: 10, windowMs: 60 * 1000, identity: user.login });
     await reconcilePendingNowpaymentsOrders({ force: true });
     res.json(await stateFor(user));
   } catch (error) {
@@ -11438,6 +12551,18 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
         || (callbackPaymentId && String(item.paymentId || "") === callbackPaymentId)
       ));
       if (!deposit) return res.status(404).json({ error: "Order not found" });
+      const validation = paid ? validateProviderPayment(req.body, deposit) : { ok: true };
+      if (paid && !validation.ok) {
+        deposit.paymentStatus = "review";
+        deposit.paymentReviewReason = validation.reason;
+        await saveSettingsState({ ...state, walletDeposits: deposits });
+        await appendAdminLog("payment_verification_failed", "nowpayments", {
+          kind: "deposit",
+          depositId: deposit.id,
+          reason: validation.reason
+        });
+        return res.status(409).json({ error: "Payment verification failed" });
+      }
       if (paid) await completeWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
       else if (cancelled) await cancelWalletDeposit(deposit, { ...state, walletDeposits: deposits }, req.body);
       else return res.json({ ok: true, ignored: status });
@@ -11457,11 +12582,17 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
       await saveSettingsState({ ...state, orders });
       return res.json({ ok: true, ignored: status });
     }
-    if (!nowpaymentsPaymentCoversExpected(req.body)) {
+    const paymentValidation = validateProviderPayment(req.body, order);
+    if (!paymentValidation.ok) {
       order.paymentStatus = "underpaid";
-      order.paymentReviewReason = "provider_amount_below_expected";
+      order.paymentReviewReason = paymentValidation.reason;
       await saveSettingsState({ ...state, orders });
-      return res.json({ ok: true, ignored: "underpaid" });
+      await appendAdminLog("payment_verification_failed", "nowpayments", {
+        kind: "order",
+        orderId: order.id,
+        reason: paymentValidation.reason
+      });
+      return res.status(409).json({ error: "Payment verification failed" });
     }
     delete order.paymentReviewReason;
     await completeProductOrder(order, { ...state, orders }, req.body);
@@ -11476,6 +12607,7 @@ app.post("/api/orders/payments/sync", async (req, res, next) => {
   try {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "order-payment-sync", { limit: 10, windowMs: 60 * 1000, identity: user.login });
     await reconcilePendingNowpaymentsOrders({ force: true });
     res.json(await stateFor(user));
   } catch (error) {
@@ -11499,6 +12631,24 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const withdrawal = state.walletWithdrawals.find((item) => withdrawalMatchesNowpaymentsPayoutIds(item, payoutIds));
     if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found" });
+    const payoutValidation = validateProviderPayout(req.body, {
+      currency: withdrawal.payCurrency || withdrawal.coinId || "ltc",
+      amount: withdrawal.amountLtc,
+      address: withdrawal.address
+    });
+    if (!payoutValidation.ok) {
+      withdrawal.status = "manual_review";
+      withdrawal.requiresManualReview = true;
+      withdrawal.providerStatus = "verification_failed";
+      withdrawal.providerVerificationError = payoutValidation.reason;
+      withdrawal.providerUpdatedAt = Date.now();
+      await saveSettingsState(state);
+      await appendAdminLog("payout_verification_failed", "nowpayments", {
+        withdrawalId: withdrawal.id,
+        reason: payoutValidation.reason
+      });
+      return res.status(409).json({ error: "Payout verification failed" });
+    }
     withdrawal.providerStatus = status || withdrawal.providerStatus || "";
     withdrawal.providerStatusPayload = req.body;
     withdrawal.providerUpdatedAt = Date.now();
@@ -11736,7 +12886,7 @@ async function telegramEnsureWebhook() {
       { command: "mirror", description: "Подключить зеркало от BotFather" },
       { command: "addmirror", description: "Подключить зеркало от BotFather" }
     ]
-  }).catch((error) => console.error("Telegram setMyCommands error", error));
+  }).catch((error) => console.error("Telegram setMyCommands error", sanitizeErrorForLog(error)));
   const payload = {
     url: mainTelegramWebhookUrl(),
     allowed_updates: ["message", "callback_query"]
@@ -11853,11 +13003,11 @@ async function siteNotifyEnsureWebhook() {
       { command: "logout", description: "Отключить уведомления" },
       { command: "help", description: "Помощь" }
     ]
-  }).catch((error) => console.error("Site notify setMyCommands error", error));
+  }).catch((error) => console.error("Site notify setMyCommands error", sanitizeErrorForLog(error)));
   await siteNotifyBotApi("setWebhook", {
     url: siteNotifyWebhookUrl(),
     secret_token: siteNotifyWebhookSecret
-  }).catch((error) => console.error("Site notify setWebhook error", error));
+  }).catch((error) => console.error("Site notify setWebhook error", sanitizeErrorForLog(error)));
 }
 
 async function siteNotifyDeliverPrivateMessage(message = {}) {
@@ -12541,8 +13691,11 @@ app.post("/api/site-notify-bot/webhook", async (req, res, next) => {
   try {
     requireTelegramWebhookSecret(req, siteNotifyWebhookSecret, "Site notify webhook");
     requireDb();
-    if (!siteNotifyBotToken) return res.status(500).json({ error: "SITE_NOTIFY_BOT_TOKEN is not configured" });
+    if (!siteNotifyBotToken) return res.status(503).json({ error: "Telegram service is temporarily unavailable" });
     const state = await loadSettingsState();
+    const update = rememberTelegramWebhookUpdate(state, req.body, "site-notify");
+    if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
+    if (update.duplicate) return res.json({ ok: true, duplicate: true });
     if (req.body?.message) await siteNotifyHandleMessage(state, req.body.message);
     await saveSettingsState(state);
     res.json({ ok: true });
@@ -12555,8 +13708,11 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
   try {
     requireTelegramWebhookSecret(req, telegramWebhookSecret, "Telegram webhook");
     requireDb();
-    if (!telegramBotToken) return res.status(500).json({ error: "TELEGRAM_BOT_TOKEN не настроен" });
+    if (!telegramBotToken) return res.status(503).json({ error: "Telegram service is temporarily unavailable" });
     const state = await loadSettingsState();
+    const update = rememberTelegramWebhookUpdate(state, req.body, "telegram-main");
+    if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
+    if (update.duplicate) return res.json({ ok: true, duplicate: true });
     if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
     else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
     await saveSettingsState(state);
@@ -12573,6 +13729,9 @@ app.post("/api/telegram/mirror/:webhookId", async (req, res, next) => {
     const state = await loadSettingsState();
     const mirror = findMirrorBotByWebhookId(state, req.params.webhookId);
     if (!mirror?.token || mirror.blocked) return res.status(404).json({ error: "Mirror bot not found" });
+    const update = rememberTelegramWebhookUpdate(state, req.body, `telegram-mirror:${mirror.id || req.params.webhookId}`);
+    if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
+    if (update.duplicate) return res.json({ ok: true, duplicate: true });
     state.__telegramToken = mirror.token;
     state.__mirrorId = mirror.id || mirror.webhookId || req.params.webhookId;
     mirror.users = mirror.users && typeof mirror.users === "object" ? mirror.users : {};
@@ -12668,7 +13827,7 @@ app.post("/api/orders/:id/review", async (req, res, next) => {
       return res.status(400).json({ error: "Отзыв можно оставить после завершения сделки" });
     }
     if (order.reviewLeft) return res.status(409).json({ error: "Отзыв уже оставлен" });
-    const text = String(req.body.text || "").trim();
+    const text = boundedUserText(req.body.text || "", 1000, "Review");
     const rating = Math.max(1, Math.min(5, Number(req.body.rating || 5)));
     if (!text) return res.status(400).json({ error: "Напишите отзыв" });
     const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
@@ -12783,7 +13942,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     const order = found.order;
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Диспут не найден" });
     if (order.disputeChatClosed || order.disputeOpen === false || !orderHasDisputeHistory(order)) return res.status(409).json({ error: "Диспут закрыт" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute reply");
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = found.store || await loadStoreWithFallback(order.storeId);
@@ -12791,7 +13950,7 @@ app.post("/api/orders/:id/dispute/reply", async (req, res, next) => {
     const requestKey = disputeRequestKey(req.body.clientRequestId);
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
-    const replyToLogin = String(req.body.toLogin || "").trim() || store?.ownerLogin || "admin";
+    const replyToLogin = store?.ownerLogin || "admin";
     order.status = "dispute";
     order.disputeOpen = true;
     order.disputeChatClosed = false;
@@ -12901,7 +14060,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
     ).find((item) => item.id === req.params.id && item.type === "product");
     if (!order || String(order.storeId || "") !== String(token.storeId || "")) return res.status(404).json({ error: "Диспут не найден" });
     if (order.disputeChatClosed || order.disputeOpen === false) return res.status(409).json({ error: "Диспут закрыт" });
-    const body = String(req.body.body || "").trim();
+    const body = boundedUserText(req.body.body || "", 5000, "Dispute reply");
     const attachments = normalizeSupportAttachments(req.body.attachments, 4);
     if (!body && !attachments.length) return res.status(400).json({ error: "Введите сообщение или прикрепите файл" });
     const store = await loadStoreWithFallback(token.storeId);
@@ -13603,7 +14762,7 @@ async function proverkaFlushState() {
     await saveSettingsState({ ...currentData, proverkaBot: proverkaStateCache });
   } catch (error) {
     proverkaStateDirty = true;
-    console.error("Proverka stats save error", error);
+    console.error("Proverka stats save error", sanitizeErrorForLog(error));
   } finally {
     proverkaStateSaveInFlight = false;
     if (proverkaStateDirty) proverkaScheduleSave(10000);
@@ -13615,7 +14774,7 @@ function proverkaScheduleSave(delayMs = 2500) {
   if (proverkaStateSaveTimer) clearTimeout(proverkaStateSaveTimer);
   proverkaStateSaveTimer = setTimeout(() => {
     proverkaStateSaveTimer = null;
-    proverkaFlushState().catch((error) => console.error("Proverka stats flush error", error));
+    proverkaFlushState().catch((error) => console.error("Proverka stats flush error", sanitizeErrorForLog(error)));
   }, delayMs);
   if (typeof proverkaStateSaveTimer.unref === "function") proverkaStateSaveTimer.unref();
 }
@@ -13714,7 +14873,7 @@ async function proverkaEnsureCommands() {
   }).catch((error) => {
     const retryAfter = Number(String(error.message || "").match(/retry after (\d+)/i)?.[1] || 900);
     proverkaCommandsNextSyncAt = Date.now() + retryAfter * 1000;
-    console.error("Proverka setMyCommands error", error);
+    console.error("Proverka setMyCommands error", sanitizeErrorForLog(error));
   });
 }
 
@@ -13736,7 +14895,7 @@ function proverkaStartTimer(chatId, minutes, replyToMessageId) {
   const timer = setTimeout(() => {
     proverkaTimers.delete(key);
     proverkaSendMessage(chatId, "⚠️ Время истекло!", { replyToMessageId }).catch((error) => {
-      console.error("Proverka timer send error", error);
+      console.error("Proverka timer send error", sanitizeErrorForLog(error));
     });
   }, minutes * 60 * 1000);
   if (typeof timer.unref === "function") timer.unref();
@@ -13984,21 +15143,25 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
   try {
     requireTelegramWebhookSecret(req, proverkaWebhookSecret, "Proverka webhook");
     requireDb();
-    if (!proverkaBotToken) return res.status(500).json({ error: "PROVERKA_BOT_TOKEN is not configured" });
+    if (!proverkaBotToken) return res.status(503).json({ error: "Telegram service is temporarily unavailable" });
+    const state = await proverkaLoadState();
+    const update = rememberTelegramWebhookUpdate(state.proverkaBot, req.body, "proverka");
+    if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
+    if (update.duplicate) return res.json({ ok: true, duplicate: true });
+    proverkaScheduleSave();
     if (req.body?.message) {
       const message = req.body.message;
       Promise.resolve().then(async () => {
         await proverkaEnsureCommands();
-        const state = await proverkaLoadState();
         await handleProverkaMessage(state, message);
         proverkaScheduleSave();
       }).catch((error) => {
-        console.error("Proverka background processing error", error);
+        console.error("Proverka background processing error", sanitizeErrorForLog(error));
       });
     }
     res.json({ ok: true });
   } catch (error) {
-    console.error("Proverka webhook error", error);
+    console.error("Proverka webhook error", sanitizeErrorForLog(error));
     next(error);
   }
 });
@@ -14019,60 +15182,95 @@ app.get("*", (_req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
-  console.error(error);
+  console.error("[request-error]", sanitizeErrorForLog(error));
   const status = Number(error.status || 500);
   const internalMessage = String(error.message || "");
   let message = status >= 500 ? "Сервер временно недоступен" : String(error.message || "Ошибка запроса");
   if (/nowpayments/i.test(internalMessage)) message = "Платежный шлюз не настроен или временно недоступен";
-  if (internalMessage.includes("Could not find the table")) {
-    return res.status(500).json({
-      error: "В Supabase ещё не созданы таблицы. Выполни SQL из файла supabase-schema.sql."
-    });
-  }
   res.status(status).json({ error: message });
 });
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
-  revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", error));
-  loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", error));
-  telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", error));
-  siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", error));
-  proverkaEnsureWebhook().catch((error) => console.error("Proverka webhook setup error", error));
+  revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", sanitizeErrorForLog(error)));
+  loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", sanitizeErrorForLog(error)));
+  telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", sanitizeErrorForLog(error)));
+  siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", sanitizeErrorForLog(error)));
+  proverkaEnsureWebhook().catch((error) => console.error("Proverka webhook setup error", sanitizeErrorForLog(error)));
   setTimeout(() => {
-    migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", error));
+    migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", sanitizeErrorForLog(error)));
   }, 1500);
   setTimeout(() => {
-    reconcilePendingNowpaymentsOrders({ force: true }).catch((error) => console.error("Payment reconciliation startup error", error));
+    reconcilePendingNowpaymentsOrders({ force: true }).catch((error) => console.error("Payment reconciliation startup error", sanitizeErrorForLog(error)));
   }, 2500);
   setTimeout(() => {
-    resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue startup error", error));
+    resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue startup error", sanitizeErrorForLog(error)));
   }, 3500);
 });
 
 const paymentReconcileTimer = setInterval(() => {
-  reconcilePendingNowpaymentsOrders().catch((error) => console.error("Payment reconciliation interval error", error));
+  reconcilePendingNowpaymentsOrders().catch((error) => console.error("Payment reconciliation interval error", sanitizeErrorForLog(error)));
 }, paymentReconcileIntervalMs);
 paymentReconcileTimer.unref?.();
 
 const withdrawalPayoutTimer = setInterval(() => {
-  resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue interval error", error));
+  resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue interval error", sanitizeErrorForLog(error)));
 }, 60 * 1000);
 withdrawalPayoutTimer.unref?.();
 
-adminRealtimeServer = new WebSocketServer({ noServer: true });
+adminRealtimeServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 adminRealtimeServer.on("connection", (socket, req) => {
-  const protocols = String(req.headers["sec-websocket-protocol"] || "").split(",").map((item) => item.trim()).filter(Boolean);
-  const token = protocols.find((item) => item !== "cerber-admin") || "";
-  const admin = verifyAdminToken({ headers: { authorization: `Bearer ${token}`, "user-agent": req.headers["user-agent"] || "" } });
-  if (!admin) {
-    socket.close(1008, "Unauthorized");
-    return;
-  }
-  socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
+  socket.isAdminAuthenticated = false;
+  const authenticationTimer = setTimeout(() => socket.close(1008, "Authentication required"), 5000);
+  authenticationTimer.unref?.();
+  socket.once("message", async (rawMessage, isBinary) => {
+    if (isBinary) {
+      clearTimeout(authenticationTimer);
+      socket.close(1003, "Text authentication required");
+      return;
+    }
+    let message;
+    try {
+      message = JSON.parse(rawMessage.toString("utf8"));
+    } catch {
+      clearTimeout(authenticationTimer);
+      socket.close(1008, "Invalid authentication message");
+      return;
+    }
+    const token = message?.type === "authenticate" ? String(message.token || "") : "";
+    const admin = verifyAdminToken({ headers: { authorization: `Bearer ${token}`, "user-agent": req.headers["user-agent"] || "" } });
+    if (!admin) {
+      clearTimeout(authenticationTimer);
+      socket.close(1008, "Unauthorized");
+      return;
+    }
+    try {
+      const account = await loadAdminAccountById(admin.accountId);
+      if (
+        !account
+        || account.disabled
+        || !account.totp_enabled
+        || account.scope !== "site"
+        || account.role !== admin.role
+        || Number(account.credential_version || 1) !== Number(admin.credentialVersion || 0)
+        || Number(account.session_version || 1) !== Number(admin.sessionVersion || 0)
+      ) {
+        clearTimeout(authenticationTimer);
+        socket.close(1008, "Unauthorized");
+        return;
+      }
+      socket.isAdminAuthenticated = true;
+      clearTimeout(authenticationTimer);
+      socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
+    } catch {
+      clearTimeout(authenticationTimer);
+      socket.close(1011, "Authorization unavailable");
+    }
+  });
+  socket.once("close", () => clearTimeout(authenticationTimer));
 });
 
-publicRealtimeServer = new WebSocketServer({ noServer: true });
+publicRealtimeServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 publicRealtimeServer.on("connection", (socket) => {
   socket.send(JSON.stringify({ type: "connected", createdAt: Date.now() }));
 });

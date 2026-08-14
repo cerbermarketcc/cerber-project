@@ -2099,6 +2099,11 @@ function storageSet(key, value) {
   return saved;
 }
 
+function newClientRequestId(scope = "request") {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  return `${String(scope).replace(/[^a-z0-9_-]/gi, "-").slice(0, 24)}:${random}`;
+}
+
 function sessionStorageGet(key) {
   try {
     const value = sessionStorage.getItem(key);
@@ -4407,18 +4412,9 @@ function renderSellerAdminLogin(storeId = "", message = "") {
           timeoutMs: 12000,
           body: JSON.stringify({ storeId: store.id, password })
         });
-        const nextStoreId = payload.store?.id || store.id;
-        rememberSellerAdminApiToken(payload.token);
-        applyRemoteState(payload);
-        if (payload.store) restoreShopPanelStore(payload.store);
-        try {
-          storageSet(SELLER_ADMIN_KEY, nextStoreId);
-          storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
-        } catch {}
-        sellerAdminStoreId = nextStoreId;
-        route = "seller";
-        location.hash = `seller-${nextStoreId}`;
-        renderSeller();
+        if (payload.requiresMfaSetup) return renderStoreMfaSetup(payload.challengeToken, payload.admin, payload.store || { id: store.id, name: store.name }, "seller");
+        if (payload.requiresMfa) return renderStoreMfaVerify(payload.challengeToken, payload.admin, payload.store || { id: store.id, name: store.name }, "seller");
+        completeStoreAdminLogin(payload, store.id, "seller");
         return;
       } catch (error) {
         renderSellerAdminLogin(store.id, error.message || "Неверный пароль");
@@ -5924,9 +5920,10 @@ async function handleProductPurchase(storeId, productId, positionId) {
   }
   if (API_ENABLED) {
     try {
+      const clientRequestId = newClientRequestId("product-balance");
       const payload = await apiFetch("/api/orders/product/balance", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId })
+        body: JSON.stringify({ storeId, productId, positionId, clientRequestId })
       });
       applyRemoteState(payload);
       renderOrders("active");
@@ -6114,9 +6111,10 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     const button = event.currentTarget;
     setButtonLoading(button, true);
     try {
+      const clientRequestId = newClientRequestId("product-balance");
       const payload = await apiFetch("/api/orders/product/balance", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId })
+        body: JSON.stringify({ storeId, productId, positionId, clientRequestId })
       });
       applyRemoteState(payload);
       document.querySelector("[data-modal]")?.classList.remove("open");
@@ -6132,9 +6130,10 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     const selectedCoinId = document.querySelector("[data-checkout-coin]")?.value || defaultCoin.id;
     const selectedCoin = walletCoinById(selectedCoinId);
     try {
+      const clientRequestId = newClientRequestId("product-payment");
       const payload = await apiFetch("/api/orders/product/deposit", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId, coinId: selectedCoin.id, payCurrency: selectedCoin.payCurrency })
+        body: JSON.stringify({ storeId, productId, positionId, coinId: selectedCoin.id, payCurrency: selectedCoin.payCurrency, clientRequestId })
       });
       applyRemoteState(payload);
       document.querySelector("[data-modal]")?.classList.remove("open");
@@ -8244,7 +8243,7 @@ function referralAnalytics(payments, totalDeposits, totalEarned) {
 function showReferralQr(qrUrl, code, link) {
   showModal(`
     <button class="qr-close" data-close-modal>${navIcon("close")}</button>
-    <img class="qr-image" src="${qrUrl}" alt="QR">
+    <img class="qr-image" src="${esc(qrUrl)}" alt="QR">
     <div class="divider"></div>
     <p class="qr-code">${esc(code)} <button data-copy-code>⧉</button></p>
     <button class="primary" data-share-ref>Поделиться ${navIcon("share")}</button>
@@ -8321,7 +8320,7 @@ function exchangeCatalogHtml(exchangers = [], cards = [], emptyText = "Обме�
     ...exchangers.map(exchangerCardView),
     ...cards.map(exchangeCardView)
   ].join("");
-  return html || `<article class="panel empty-state"><p>${emptyText}</p></article>`;
+  return html || `<article class="panel empty-state"><p>${esc(emptyText)}</p></article>`;
 }
 
 function bindExchangeCatalogCards() {
@@ -9304,6 +9303,7 @@ async function createWalletWithdrawal(event) {
     if (!API_ENABLED) throw new Error("API недоступен");
     const payload = await apiFetch("/api/wallet/withdrawals", {
       method: "POST",
+      headers: { "X-Idempotency-Key": newClientRequestId("wallet-withdrawal") },
       body: JSON.stringify({ kind: "ltc_withdraw", amountLtc, address, note: data.get("note") || "" })
     });
     applyRemoteState(payload);
@@ -9350,7 +9350,7 @@ async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "П
   }
   const payload = await apiFetch("/api/wallet/deposits/create", {
     method: "POST",
-    body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, amountLtcEstimate: usdToLtc(amountUsd) })
+    body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, clientRequestId: newClientRequestId("wallet-deposit") })
   });
   applyRemoteState(payload);
   startWalletDepositSync();
@@ -10902,10 +10902,11 @@ const SHOP_PANEL_TABS = [
   ["finances", "$", "Финансы"],
   ["connect", "M", "Связь"],
   ["staff", "A", "Персонал"],
+  ["security", "2", "Безопасность"],
   ["settings", "*", "Настройки"]
 ];
 
-const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "staff", "settings"].includes(id));
+const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "staff", "security", "settings"].includes(id));
 
 function shopStaffSession() {
   try {
@@ -10924,6 +10925,7 @@ function shopStaffPermissions() {
 function canAccessShopTab(tab) {
   const permissions = shopStaffPermissions();
   if (!permissions) return true;
+  if (tab === "security") return true;
   return permissions.includes(tab);
 }
 
@@ -11009,6 +11011,7 @@ function shopPanelTabContent(tab, data) {
     }
   }
   if (tab === "settings") return shopSettingsTab(store);
+  if (tab === "security") return shopSecurityTab();
   if (tab === "orders") {
     return `
       <section class="seller-dashboard-hero"><div><h2>Заказы</h2><p>Таблица заявок клиентов, статусы оплат и быстрый контроль выдачи.</p></div></section>
@@ -11654,7 +11657,10 @@ function shopStaffTab(store) {
         return `
           <div class="seller-source">
             <span>${esc(member.login || "")}${member.name ? ` · ${esc(member.name)}` : ""}<br><small>${esc(labels || "нет прав")}</small></span>
-            <strong><button class="ghost-button danger" data-shop-staff-delete="${esc(member.login || "")}">Удалить</button></strong>
+            <strong class="shop-staff-actions">
+              <button class="ghost-button" type="button" data-shop-staff-mfa-reset="${esc(member.login || "")}">Сбросить 2FA</button>
+              <button class="ghost-button danger" type="button" data-shop-staff-delete="${esc(member.login || "")}">Удалить</button>
+            </strong>
           </div>
         `;
       }).join("") : `<p>Сотрудников пока нет.</p>`}
@@ -11678,6 +11684,34 @@ function shopSettingsTab(store) {
   </form></section>`;
 }
 
+function shopSecurityTab() {
+  return `
+    <section class="seller-dashboard-hero"><div><h2>Безопасность</h2><p>Управление двухфакторной защитой текущего административного доступа.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Новые резервные коды</h3><span>старые будут отключены</span></div>
+      <form class="form" data-shop-recovery-rotate>
+        <div class="row">
+          <label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label>
+          <label class="field">Код Authenticator<input name="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
+        </div>
+        <button class="primary">Создать новые коды</button>
+      </form>
+      <div class="recovery-codes" data-shop-recovery-output hidden></div>
+    </section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Перенастроить 2FA</h3><span>потребуется новый QR-код</span></div>
+      <p class="desc">Отключение завершит текущую административную сессию. При следующем входе настройка 2FA будет обязательной.</p>
+      <form class="form" data-shop-mfa-disable>
+        <div class="row">
+          <label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label>
+          <label class="field">Код Authenticator<input name="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
+        </div>
+        <button class="ghost-button danger">Отключить и настроить заново</button>
+      </form>
+    </section>
+  `;
+}
+
 function shopPanelSession() {
   return storageGet(SHOP_PANEL_SESSION_KEY) || "";
 }
@@ -11693,6 +11727,119 @@ function shopPanelLoginStore(login, password) {
     ? db.stores.filter((store) => store.id === hashId)
     : db.stores.filter((store) => sameLogin(store.ownerLogin, login) || sameLogin(store.id, login));
   return candidates.find((store) => String(storeAdminPassword(store) || "") === String(password || "")) || null;
+}
+
+function completeStoreAdminLogin(payload = {}, fallbackStoreId = "", destination = "shop") {
+  if (!payload.token) throw new Error("Сервер не выдал административную сессию магазина");
+  const nextStoreId = payload.store?.id || fallbackStoreId;
+  rememberSellerAdminApiToken(payload.token);
+  storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
+  storageSet(SELLER_ADMIN_KEY, nextStoreId);
+  if (payload.staff?.role === "staff") storageSet(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
+  else storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
+  sellerAdminStoreId = nextStoreId;
+  applyRemoteState(payload);
+  const store = payload.store || db.stores.find((item) => item.id === nextStoreId) || null;
+  if (store) restoreShopPanelStore(store);
+  if (destination === "seller") {
+    route = "seller";
+    location.hash = `seller-${nextStoreId}`;
+    renderSeller();
+    return;
+  }
+  renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
+}
+
+function renderStoreRecoveryCodes(payload = {}, fallbackStoreId = "", destination = "shop") {
+  const codes = Array.isArray(payload.recoveryCodes) ? payload.recoveryCodes : [];
+  root.innerHTML = `
+    <main class="auth-wrap shop-panel-login">
+      <section class="auth-card">
+        <h1>Резервные коды</h1>
+        <p>Сохраните эти одноразовые коды. После закрытия страницы они больше не показываются.</p>
+        <div class="recovery-codes">${codes.map((code) => `<code>${esc(code)}</code>`).join("")}</div>
+        <button class="primary" data-store-recovery-continue>Я сохранил коды</button>
+      </section>
+    </main>
+  `;
+  document.querySelector("[data-store-recovery-continue]").onclick = () => completeStoreAdminLogin(payload, fallbackStoreId, destination);
+  bindButtonFeedback(root);
+}
+
+async function renderStoreMfaSetup(challengeToken, account = {}, storeInfo = {}, destination = "shop", message = "") {
+  try {
+    const setup = await apiFetch("/api/store-admin/2fa/setup", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${challengeToken}` },
+      body: JSON.stringify({ challengeToken })
+    });
+    root.innerHTML = `
+      <main class="auth-wrap shop-panel-login">
+        <section class="auth-card">
+          <h1>Настройка 2FA магазина</h1>
+          <p>${esc(storeInfo.name || storeInfo.id || "Магазин")} · ${esc(account.login || "администратор")}</p>
+          ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+          <img class="mfa-qr" src="${esc(setup.qrCodeDataUrl)}" alt="QR-код для Authenticator">
+          <label class="field">Секрет для ручного ввода<input value="${esc(setup.secret)}" readonly></label>
+          <form class="form" data-store-mfa-setup-form>
+            <label class="field">Текущий 6-значный код<input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+            <button class="primary">Подтвердить и включить 2FA</button>
+          </form>
+        </section>
+      </main>
+    `;
+    document.querySelector("[data-store-mfa-setup-form]").onsubmit = async (event) => {
+      event.preventDefault();
+      const totp = new FormData(event.currentTarget).get("totp");
+      setButtonLoading(event.currentTarget.querySelector("button"), true, "Проверяю...");
+      try {
+        const confirmed = await apiFetch("/api/store-admin/2fa/confirm", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${challengeToken}` },
+          body: JSON.stringify({ challengeToken, totp })
+        });
+        renderStoreRecoveryCodes(confirmed, storeInfo.id, destination);
+      } catch (error) {
+        renderStoreMfaSetup(challengeToken, account, storeInfo, destination, error.message);
+      }
+    };
+    bindButtonFeedback(root);
+  } catch (error) {
+    if (destination === "seller") renderSellerAdminLogin(storeInfo.id, error.message);
+    else renderShopPanelLogin(error.message);
+  }
+}
+
+function renderStoreMfaVerify(challengeToken, account = {}, storeInfo = {}, destination = "shop", message = "") {
+  root.innerHTML = `
+    <main class="auth-wrap shop-panel-login">
+      <section class="auth-card">
+        <h1>Подтверждение входа</h1>
+        <p>${esc(storeInfo.name || storeInfo.id || "Магазин")} · ${esc(account.login || "администратор")}</p>
+        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        <form class="form" data-store-mfa-verify-form>
+          <label class="field">Код 2FA или recovery-код<input name="factor" autocomplete="one-time-code" maxlength="20" required></label>
+          <button class="primary">Подтвердить</button>
+        </form>
+      </section>
+    </main>
+  `;
+  document.querySelector("[data-store-mfa-verify-form]").onsubmit = async (event) => {
+    event.preventDefault();
+    const factor = String(new FormData(event.currentTarget).get("factor") || "").trim();
+    setButtonLoading(event.currentTarget.querySelector("button"), true, "Проверяю...");
+    try {
+      const payload = await apiFetch("/api/store-admin/2fa/verify", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${challengeToken}` },
+        body: JSON.stringify({ challengeToken, ...(factor.replace(/\D/g, "").length === 6 ? { totp: factor } : { recoveryCode: factor }) })
+      });
+      completeStoreAdminLogin(payload, storeInfo.id, destination);
+    } catch (error) {
+      renderStoreMfaVerify(challengeToken, account, storeInfo, destination, error.message);
+    }
+  };
+  bindButtonFeedback(root);
 }
 
 function renderShopPanelLogin(message = "") {
@@ -11732,20 +11879,9 @@ function renderShopPanelLogin(message = "") {
         method: "POST",
         body: JSON.stringify({ storeId: loginStoreId, login, password })
       });
-      const nextStoreId = payload.store?.id || loginStoreId;
-      rememberSellerAdminApiToken(payload.token);
-      storageSet(SHOP_PANEL_SESSION_KEY, nextStoreId);
-      storageSet(SELLER_ADMIN_KEY, nextStoreId);
-      if (payload.staff?.role === "staff") {
-        storageSet(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
-      } else {
-        storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
-      }
-      sellerAdminStoreId = nextStoreId;
-      applyRemoteState(payload);
-      const store = payload.store || db.stores.find((item) => item.id === nextStoreId) || null;
-      if (store) restoreShopPanelStore(store);
-      renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
+      if (payload.requiresMfaSetup) return renderStoreMfaSetup(payload.challengeToken, payload.admin, payload.store || { id: loginStoreId }, "shop");
+      if (payload.requiresMfa) return renderStoreMfaVerify(payload.challengeToken, payload.admin, payload.store || { id: loginStoreId }, "shop");
+      completeStoreAdminLogin(payload, loginStoreId, "shop");
     } catch (error) {
       renderShopPanelLogin(error.message || "Неверный пароль");
     }
@@ -11872,7 +12008,15 @@ function renderShopPanel(activeTab = "dashboard") {
       overlay.classList.remove("open");
     }
   });
-  document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", () => {
+  document.querySelector("[data-shop-panel-logout]")?.addEventListener("click", async () => {
+    const activeToken = sellerAdminApiSessionToken();
+    if (activeToken) {
+      await apiFetch("/api/store-admin/logout", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${activeToken}` },
+        timeoutMs: 8000
+      }).catch(() => {});
+    }
     try {
       storageRemove(SHOP_PANEL_SESSION_KEY);
       clearSellerAdminApiSession();
@@ -12256,6 +12400,67 @@ function bindShopPanelActions(store, activeTab) {
     };
   });
 
+  document.querySelectorAll("[data-shop-staff-mfa-reset]").forEach((button) => {
+    button.onclick = async () => {
+      const login = String(button.dataset.shopStaffMfaReset || "").trim();
+      if (!login || !confirm(`Сбросить 2FA сотрудника ${login}? Его текущие административные сессии будут завершены.`)) return;
+      const token = sellerAdminApiSessionToken();
+      if (!token) return showToast("Войдите в Shop Admin заново");
+      try {
+        await apiFetch(`/api/store-admin/staff/${encodeURIComponent(login)}/2fa/reset`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({})
+        });
+        showToast("2FA сотрудника сброшена. При следующем входе он настроит её заново.");
+      } catch (error) {
+        showToast(error.message || "Не удалось сбросить 2FA");
+      }
+    };
+  });
+
+  document.querySelector("[data-shop-recovery-rotate]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Создаю...", async () => {
+      const data = new FormData(form);
+      const token = sellerAdminApiSessionToken();
+      if (!token) throw new Error("Войдите в Shop Admin заново");
+      const payload = await apiFetch("/api/store-admin/2fa/recovery-codes", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ password: data.get("password"), totp: data.get("totp") })
+      });
+      const output = document.querySelector("[data-shop-recovery-output]");
+      if (output) {
+        output.hidden = false;
+        output.innerHTML = (payload.recoveryCodes || []).map((code) => `<code>${esc(code)}</code>`).join("");
+      }
+      form.reset();
+      showToast("Новые одноразовые коды созданы. Старые больше не действуют.");
+    });
+  });
+
+  document.querySelector("[data-shop-mfa-disable]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!confirm("Отключить 2FA и завершить текущую административную сессию?")) return;
+    await runShopFormSubmit(form, "Отключаю...", async () => {
+      const data = new FormData(form);
+      const token = sellerAdminApiSessionToken();
+      if (!token) throw new Error("Войдите в Shop Admin заново");
+      await apiFetch("/api/store-admin/2fa", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ password: data.get("password"), totp: data.get("totp") })
+      });
+      storageRemove(SHOP_PANEL_SESSION_KEY);
+      storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
+      clearSellerAdminApiSession();
+      renderShopPanelLogin("2FA отключена. Войдите и настройте её заново.");
+    });
+  });
+
   document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -12375,7 +12580,10 @@ async function requestShopPayout(event) {
     const payload = await apiFetch("/api/store-admin/withdrawals", {
       method: "POST",
       timeoutMs: 30000,
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Idempotency-Key": newClientRequestId("store-withdrawal")
+      },
       body: JSON.stringify({ storeId: store.id, amountLtc, address })
     });
     applyRemoteState(payload);
@@ -12455,7 +12663,15 @@ function renderSeller() {
       ${store.products.map((product) => productCardView(product, store)).join("")}
     </section>
   `);
-  document.querySelector("[data-seller-admin-logout]")?.addEventListener("click", () => {
+  document.querySelector("[data-seller-admin-logout]")?.addEventListener("click", async () => {
+    const activeToken = sellerAdminApiSessionToken();
+    if (activeToken) {
+      await apiFetch("/api/store-admin/logout", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${activeToken}` },
+        timeoutMs: 8000
+      }).catch(() => {});
+    }
     try {
       storageRemove(SELLER_ADMIN_KEY);
       clearSellerAdminApiSession();

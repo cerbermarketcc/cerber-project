@@ -23,8 +23,6 @@ services:
         sync: false
       - key: IP_HASH_SECRET
         sync: false
-      - key: ADMIN_TOTP_SECRET
-        sync: false
       - key: MARKET_ADMIN_LOGIN
         sync: false
       - key: MARKET_ADMIN_PASSWORD

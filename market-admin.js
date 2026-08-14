@@ -15,6 +15,7 @@ const adminRuntimeStorage = new Map();
 const coins = ["ltc", "eth", "trx", "usdt_trc20", "usdt_erc20", "usdt_sol", "sol"];
 const nav = ["Dashboard", "Магазины", "Пользователи", "Сделки", "Диспуты", "Рассылки", "Финансы", "Настройки", "Разное", "Логи", "Health", "Боты"];
 nav.splice(2, 0, "Обменники");
+nav.splice(1, 0, "Администраторы");
 const supportTopics = [
   "Общие вопросы",
   "Ввод/вывод средств",
@@ -26,6 +27,11 @@ const supportTopics = [
   "Сообщить о баге (предлагается вознаграждение)",
   "Открытие магазина"
 ];
+
+function adminRequestId(scope = "request") {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  return `${String(scope).replace(/[^a-z0-9_-]/gi, "-").slice(0, 24)}:${random}`;
+}
 
 function adminStorageGet(key) {
   if (key === TOKEN_KEY) {
@@ -98,6 +104,20 @@ let adminLastInteractionAt = 0;
 let adminDetailRestoreNonce = 0;
 let adminFormLockUntil = 0;
 let adminBusyForms = 0;
+
+async function logoutAdminSession() {
+  const activeToken = token;
+  if (activeToken) {
+    await api("/api/admin/logout", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${activeToken}` }
+    }).catch(() => {});
+  }
+  adminStorageRemove(TOKEN_KEY);
+  token = "";
+  realtimeSocket?.close();
+  clearInterval(refreshTimer);
+}
 
 function readAdminUiState() {
   try {
@@ -193,7 +213,7 @@ function fmtLtc(value) {
 }
 
 function cryptoValue(usd, ltc) {
-  return `${fmtMoney(usd)}<br><small>${fmtLtc(ltc)}</small>`;
+  return `${fmtMoney(usd)} · ${fmtLtc(ltc)}`;
 }
 
 function fmtDate(value) {
@@ -419,9 +439,8 @@ function renderAdminLoadError(message = "") {
     const loaded = await refreshData();
     if (loaded) connectRealtime();
   };
-  root.querySelector("[data-admin-login-reset]").onclick = () => {
-    adminStorageRemove(TOKEN_KEY);
-    token = "";
+  root.querySelector("[data-admin-login-reset]").onclick = async () => {
+    await logoutAdminSession();
     renderLogin();
   };
   bindAdminButtonFeedback(root);
@@ -434,7 +453,10 @@ function connectRealtime() {
     const api = new URL(API_ORIGIN);
     const protocol = api.protocol === "https:" ? "wss:" : "ws:";
     realtimeSocket?.close();
-    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime`, ["cerber-admin", token]);
+    realtimeSocket = new WebSocket(`${protocol}//${api.host}/api/admin/realtime`);
+    realtimeSocket.onopen = () => {
+      realtimeSocket?.send(JSON.stringify({ type: "authenticate", token }));
+    };
     realtimeSocket.onmessage = () => refreshData(true);
     realtimeSocket.onclose = () => {
       if (token) setTimeout(connectRealtime, 5000);
@@ -442,7 +464,7 @@ function connectRealtime() {
   } catch {}
 }
 
-function renderLogin(message = "") {
+function renderLoginLegacy(message = "") {
   root.innerHTML = `
     <section class="login-page">
       <form class="login-card" data-login-form>
@@ -481,6 +503,151 @@ function renderLogin(message = "") {
   };
 }
 
+async function finishAdminAuth(payload = {}) {
+  if (!payload.token) throw new Error("Сервер не выдал административную сессию");
+  token = payload.token;
+  adminStorageSet(TOKEN_KEY, token);
+  const loaded = await refreshData();
+  if (loaded) connectRealtime();
+}
+
+function renderRecoveryCodes(payload = {}) {
+  const codes = Array.isArray(payload.recoveryCodes) ? payload.recoveryCodes : [];
+  root.innerHTML = `
+    <section class="login-page">
+      <div class="login-card">
+        <p class="eyebrow">CERBER MARKETPLACE</p>
+        <h1>Резервные коды</h1>
+        <p class="muted">Сохраните эти одноразовые коды сейчас. После закрытия страницы они больше не показываются.</p>
+        <div class="recovery-codes">${codes.map((code) => `<code>${esc(code)}</code>`).join("")}</div>
+        <button class="primary" data-recovery-continue>Я сохранил коды</button>
+      </div>
+    </section>
+  `;
+  root.querySelector("[data-recovery-continue]").onclick = () => finishAdminAuth(payload).catch((error) => renderLogin(error.message));
+  bindAdminButtonFeedback(root);
+}
+
+async function renderAdminMfaSetup(challengeToken, account = {}, message = "") {
+  try {
+    const setup = await api("/api/admin/2fa/setup", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${challengeToken}` },
+      body: JSON.stringify({ challengeToken })
+    });
+    root.innerHTML = `
+      <section class="login-page">
+        <form class="login-card" data-mfa-setup-form>
+          <p class="eyebrow">CERBER MARKETPLACE</p>
+          <h1>Настройка двухфакторной аутентификации</h1>
+          <p class="muted">Добавьте ${esc(account.login || "администратора")} в Google Authenticator, Microsoft Authenticator, Aegis или другое TOTP-приложение.</p>
+          ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+          <img class="mfa-qr" src="${esc(setup.qrCodeDataUrl)}" alt="QR-код для Authenticator">
+          <label class="field">Секрет для ручного ввода<input value="${esc(setup.secret)}" readonly data-mfa-secret></label>
+          <label class="field">Текущий 6-значный код<input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+          <button class="primary">Подтвердить и включить 2FA</button>
+          <button class="ghost" type="button" data-mfa-cancel>Выйти</button>
+        </form>
+      </section>
+    `;
+    root.querySelector("[data-mfa-cancel]").onclick = () => renderLogin();
+    root.querySelector("[data-mfa-setup-form]").onsubmit = async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const endSubmit = beginAdminFormSubmit(event.currentTarget, "Проверяю...");
+      if (!endSubmit) return;
+      try {
+        const confirmed = await api("/api/admin/2fa/confirm", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${challengeToken}` },
+          body: JSON.stringify({ challengeToken, totp: form.get("totp") })
+        });
+        renderRecoveryCodes(confirmed);
+      } catch (error) {
+        await renderAdminMfaSetup(challengeToken, account, error.message);
+      } finally {
+        endSubmit();
+      }
+    };
+    bindAdminButtonFeedback(root);
+  } catch (error) {
+    renderLogin(error.message);
+  }
+}
+
+function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
+  root.innerHTML = `
+    <section class="login-page">
+      <form class="login-card" data-mfa-verify-form>
+        <p class="eyebrow">CERBER MARKETPLACE</p>
+        <h1>Подтверждение входа</h1>
+        <p class="muted">Введите код Authenticator для ${esc(account.login || "администратора")} или один резервный код.</p>
+        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        <label class="field">Код 2FA или recovery-код<input name="factor" autocomplete="one-time-code" maxlength="20" required></label>
+        <button class="primary">Подтвердить</button>
+        <button class="ghost" type="button" data-mfa-cancel>Назад</button>
+      </form>
+    </section>
+  `;
+  root.querySelector("[data-mfa-cancel]").onclick = () => renderLogin();
+  root.querySelector("[data-mfa-verify-form]").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const factor = String(form.get("factor") || "").trim();
+    const endSubmit = beginAdminFormSubmit(event.currentTarget, "Проверяю...");
+    if (!endSubmit) return;
+    try {
+      const payload = await api("/api/admin/2fa/verify", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${challengeToken}` },
+        body: JSON.stringify({ challengeToken, ...(factor.replace(/\D/g, "").length === 6 ? { totp: factor } : { recoveryCode: factor }) })
+      });
+      await finishAdminAuth(payload);
+    } catch (error) {
+      renderAdminMfaVerify(challengeToken, account, error.message);
+    } finally {
+      endSubmit();
+    }
+  };
+  bindAdminButtonFeedback(root);
+}
+
+function renderLogin(message = "") {
+  root.innerHTML = `
+    <section class="login-page">
+      <form class="login-card" data-login-form>
+        <p class="eyebrow">CERBER MARKETPLACE</p>
+        <h1>Административная панель</h1>
+        <p class="muted">После проверки пароля вход подтверждается через Authenticator.</p>
+        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        <label class="field">Логин<input name="login" value="admin" autocomplete="username" required></label>
+        <label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary">Продолжить</button>
+      </form>
+    </section>
+  `;
+  root.querySelector("[data-login-form]").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const endSubmit = beginAdminFormSubmit(event.currentTarget, "Проверяю...");
+    if (!endSubmit) return;
+    try {
+      const payload = await api("/api/admin/login", {
+        method: "POST",
+        body: JSON.stringify({ login: form.get("login"), password: form.get("password") })
+      });
+      if (payload.requiresMfaSetup) return renderAdminMfaSetup(payload.challengeToken, payload.admin);
+      if (payload.requiresMfa) return renderAdminMfaVerify(payload.challengeToken, payload.admin);
+      await finishAdminAuth(payload);
+    } catch (error) {
+      renderLogin(error.message);
+    } finally {
+      endSubmit();
+    }
+  };
+  bindAdminButtonFeedback(root);
+}
+
 async function load() {
   const loaded = await refreshData();
   if (loaded) connectRealtime();
@@ -515,11 +682,8 @@ function renderShell() {
     renderShell();
   });
   root.querySelectorAll("[data-logout]").forEach((button) => {
-    button.onclick = () => {
-      adminStorageRemove(TOKEN_KEY);
-      token = "";
-      realtimeSocket?.close();
-      clearInterval(refreshTimer);
+    button.onclick = async () => {
+      await logoutAdminSession();
       renderLogin();
     };
   });
@@ -711,6 +875,7 @@ function storePlacementPositionControls(placements = [], store = {}) {
 function renderSection() {
   if (!data) return "";
   if (section === "Dashboard") return renderDashboard();
+  if (section === "Администраторы") return renderAdministrators();
   if (section === "Магазины") return renderStores();
   if (section === "Обменники") return renderExchangers();
   if (section === "Пользователи") return renderUsers();
@@ -727,12 +892,49 @@ function renderSection() {
 }
 
 function statCard(label, value, hint = "") {
-  return `<article class="card"><span>${label}</span><strong>${value}</strong><small>${hint}</small></article>`;
+  return `<article class="card"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(hint)}</small></article>`;
 }
 
 function filterRows(rows, keys) {
   if (!query) return rows;
   return rows.filter((row) => keys.some((key) => String(row[key] ?? "").toLowerCase().includes(query)));
+}
+
+function renderAdministrators() {
+  const accounts = Array.isArray(data.adminAccounts) ? data.adminAccounts : [];
+  if (data.admin?.role !== "owner") return `<p class="notice">Этот раздел доступен только владельцу.</p>`;
+  return `
+    <section class="split-card">
+      <h2>Новый администратор</h2>
+      <p class="muted">После первого входа администратор сам подключит Authenticator. Без настройки 2FA доступ к панели и API не выдаётся.</p>
+      <form data-admin-account-create>
+        <div class="row">
+          <label class="field">Логин<input name="login" minlength="3" maxlength="64" required></label>
+          <label class="field">Временный пароль<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          <label class="field">Роль<select name="role"><option value="admin">Admin</option><option value="manager">Manager</option><option value="moderator">Moderator</option><option value="support">Support</option></select></label>
+        </div>
+        <button class="primary">Создать администратора</button>
+      </form>
+    </section>
+    <section class="table-wrap">
+      <table>
+        <thead><tr><th>Логин</th><th>Роль</th><th>2FA</th><th>Recovery</th><th>Статус</th><th>Действия</th></tr></thead>
+        <tbody>${accounts.map((account) => `
+          <tr>
+            <td>${esc(account.login)}</td>
+            <td>${esc(account.role)}</td>
+            <td>${account.mfaEnabled ? "Включена" : "Не настроена"}</td>
+            <td>${esc(account.recoveryCodesRemaining || 0)}</td>
+            <td>${account.disabled ? "Отключён" : "Активен"}</td>
+            <td class="actions">
+              ${account.role === "owner" ? "" : `<button class="ghost" data-admin-account-toggle="${esc(account.id)}" data-disabled="${account.disabled ? "0" : "1"}">${account.disabled ? "Включить" : "Отключить"}</button>`}
+              ${account.role === "owner" ? "" : `<button class="ghost" data-admin-account-mfa-reset="${esc(account.id)}">Сбросить 2FA</button>`}
+            </td>
+          </tr>
+        `).join("") || `<tr><td colspan="6">Администраторы не найдены</td></tr>`}</tbody>
+      </table>
+    </section>
+  `;
 }
 
 function renderDashboard() {
@@ -997,7 +1199,7 @@ function userDetail(payload) {
       </form>
     </section>
     <form data-user-form="${esc(u.login)}">
-      <div class="row"><label class="field">Имя пользователя<input name="name" value="${esc(u.name || "")}" maxlength="120"></label><label class="field">Роль<select name="role">${["admin", "moderator", "seller", "user"].map((role) => `<option value="${role}" ${u.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></label></div>
+      <div class="row"><label class="field">Имя пользователя<input name="name" value="${esc(u.name || "")}" maxlength="120"></label><label class="field">Роль<select name="role">${["seller", "user"].map((role) => `<option value="${role}" ${u.role === role ? "selected" : ""}>${role}</option>`).join("")}</select><small>Администраторы создаются отдельно в разделе «Безопасность» и всегда используют 2FA.</small></label></div>
       <label class="field">Новый пароль клиента<input name="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять"></label>
       <label class="field">Пароль магазина<input name="storePassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="задать для роли Магазин"></label>
       <label class="field">Причина блокировки<input name="blockReason" value="${esc(payload.status?.reason || "Ваш аккаунт заблокирован")}"></label>
@@ -1420,7 +1622,19 @@ function renderSettings() {
     <p class="muted">Автозакрытие: если клиент оплатил, не подтвердил заказ и не открыл диспут, после указанного времени сделка станет успешной, а сумма будет учтена в доходе магазина.</p>
     <label class="field">Platform LTC wallet<input name="platformLtcWallet" value="${esc(payment.platformLtcWallet || "")}" placeholder="ltc1..."></label>
     <button class="primary">Сохранить настройки</button>
-  </form></article>`;
+  </form></article>
+  <article class="split-card"><h2>Безопасность аккаунта</h2>
+    <p class="muted">Для изменения 2FA подтвердите текущий пароль и одноразовый код из Authenticator.</p>
+    <form data-admin-recovery-rotate>
+      <div class="row"><label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label><label class="field">Код 2FA<input name="totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label></div>
+      <button class="primary">Создать новые recovery-коды</button>
+    </form>
+    <div class="recovery-codes" data-admin-recovery-output hidden></div>
+    <form data-admin-mfa-disable>
+      <div class="row"><label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label><label class="field">Код 2FA<input name="totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label></div>
+      <button class="ghost danger">Отключить и настроить 2FA заново</button>
+    </form>
+  </article>`;
 }
 
 function renderMiscLegacy() {
@@ -1741,6 +1955,52 @@ function bindPlacementPositionControls(scope = root) {
 
 function bindActions() {
   bindPlacementPositionControls();
+  root.querySelector("[data-admin-account-create]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fd = new FormData(form);
+    const endSubmit = beginAdminFormSubmit(form, "Создаю...");
+    if (!endSubmit) return;
+    try {
+      const payload = await api("/api/admin/accounts", {
+        method: "POST",
+        body: JSON.stringify({ login: fd.get("login"), password: fd.get("password"), role: fd.get("role") })
+      });
+      data.adminAccounts = [...(data.adminAccounts || []), payload.account];
+      toast("Администратор создан. При первом входе он настроит 2FA.");
+      renderCurrentView();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      endSubmit();
+    }
+  });
+  root.querySelectorAll("[data-admin-account-toggle]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        const payload = await api(`/api/admin/accounts/${encodeURIComponent(button.dataset.adminAccountToggle)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ disabled: button.dataset.disabled === "1" })
+        });
+        data.adminAccounts = (data.adminAccounts || []).map((account) => account.id === payload.account.id ? payload.account : account);
+        renderCurrentView();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
+  root.querySelectorAll("[data-admin-account-mfa-reset]").forEach((button) => {
+    button.onclick = async () => {
+      if (!confirm("Сбросить 2FA этого администратора? Его текущие сессии перестанут работать.")) return;
+      try {
+        const payload = await api(`/api/admin/accounts/${encodeURIComponent(button.dataset.adminAccountMfaReset)}/2fa/reset`, { method: "POST", body: "{}" });
+        data.adminAccounts = (data.adminAccounts || []).map((account) => account.id === payload.account.id ? payload.account : account);
+        renderCurrentView();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
   root.querySelector("[data-exchanger-create-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -2243,6 +2503,7 @@ function bindActions() {
     try {
       data = await api("/api/admin/withdrawals/owner", {
         method: "POST",
+        headers: { "X-Idempotency-Key": adminRequestId("owner-withdrawal") },
         body: JSON.stringify({ amountLtc, address })
       });
       toast("Заявка владельца на вывод создана");
@@ -2299,6 +2560,49 @@ function bindActions() {
       renderShell();
     } catch (error) {
       toast(error.message, true);
+    }
+  });
+  root.querySelector("[data-admin-recovery-rotate]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fd = new FormData(form);
+    const endSubmit = beginAdminFormSubmit(form, "Создаю...");
+    if (!endSubmit) return;
+    try {
+      const payload = await api("/api/admin/2fa/recovery-codes", {
+        method: "POST",
+        body: JSON.stringify({ password: fd.get("password"), totp: fd.get("totp") })
+      });
+      const output = root.querySelector("[data-admin-recovery-output]");
+      if (output) {
+        output.hidden = false;
+        output.innerHTML = (payload.recoveryCodes || []).map((code) => `<code>${esc(code)}</code>`).join("");
+      }
+      form.reset();
+      toast("Новые recovery-коды созданы. Сохраните их сейчас.");
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      endSubmit();
+    }
+  });
+  root.querySelector("[data-admin-mfa-disable]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!confirm("Отключить 2FA? Текущая сессия завершится, а при следующем входе потребуется новая настройка.")) return;
+    const form = event.currentTarget;
+    const fd = new FormData(form);
+    const endSubmit = beginAdminFormSubmit(form, "Отключаю...");
+    if (!endSubmit) return;
+    try {
+      await api("/api/admin/2fa", {
+        method: "DELETE",
+        body: JSON.stringify({ password: fd.get("password"), totp: fd.get("totp") })
+      });
+      await logoutAdminSession();
+      renderLogin("2FA отключена. Войдите и настройте её заново.");
+    } catch (error) {
+      toast(error.message, true);
+      endSubmit();
     }
   });
   root.querySelectorAll("[data-support-reply-form]").forEach((form) => {

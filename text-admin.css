@@ -87,6 +87,35 @@ button {
   padding: 20px;
 }
 
+.login .auth-note {
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
+
+.login .mfa-qr {
+  display: block;
+  width: min(240px, 100%);
+  height: auto;
+  margin: 16px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.login .recovery-codes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.login .recovery-codes code {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  text-align: center;
+}
+
 .login form,
 .toolbar {
   display: grid;
@@ -94,6 +123,10 @@ button {
   gap: 12px;
   align-items: end;
   margin-top: 16px;
+}
+
+.login form.mfa-form {
+  grid-template-columns: minmax(180px, 1fr) 180px;
 }
 
 .toolbar {

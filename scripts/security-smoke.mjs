@@ -78,10 +78,10 @@ const unapprovedHost = await request({ path: "/api/health", headers: { Host: "ev
 const checks = [
   ["health endpoint", health.status === 200, `${health.status} ${JSON.parse(health.text || "{}").build || ""}`],
   ["anonymous state", stateResponse.status === 200, stateResponse.status],
-  ["anonymous users hidden", Array.isArray(state.users) && state.users.length === 0, state.users?.length],
-  ["anonymous orders hidden", Array.isArray(state.orders) && state.orders.length === 0, state.orders?.length],
-  ["anonymous messages hidden", Array.isArray(state.messages) && state.messages.length === 0, state.messages?.length],
-  ["anonymous deposits hidden", Array.isArray(state.walletDeposits) && state.walletDeposits.length === 0, state.walletDeposits?.length],
+  ["anonymous users schema hidden", !("users" in state), Object.keys(state).join(",")],
+  ["anonymous orders schema hidden", !("orders" in state), Object.keys(state).join(",")],
+  ["anonymous messages schema hidden", !("messages" in state), Object.keys(state).join(",")],
+  ["anonymous deposits schema hidden", !("walletDeposits" in state), Object.keys(state).join(",")],
   ["captcha challenge issued", captchaResponse.status === 200 && Boolean(captcha.question && captcha.token), captchaResponse.status],
   ["captcha answer not exposed in token", !("answer" in decodedCaptcha) && Boolean(decodedCaptcha.id), Object.keys(decodedCaptcha).join(",")],
   ["server source blocked", (await request({ path: "/server.js" })).status === 404, "expected 404"],
@@ -89,6 +89,10 @@ const checks = [
   ["unapproved Host blocked", [403, 421].includes(unapprovedHost.status), unapprovedHost.status],
   ["unapproved Origin blocked", (await request({ path: "/api/auth/login", method: "POST", headers: { ...jsonHeaders, Origin: "https://evil.example" }, body: "{}" })).status === 403, "expected 403"],
   ["large anonymous body blocked", (await request({ path: "/api/auth/login", method: "POST", headers: jsonHeaders, body: Buffer.alloc(300 * 1024, 97) })).status === 413, "expected 413"],
+  ["admin API requires full MFA session", (await request({ path: "/api/admin/overview" })).status === 401, "expected 401"],
+  ["store API requires full MFA session", (await request({ path: "/api/store-admin/state" })).status === 401, "expected 401"],
+  ["deep health requires full MFA session", (await request({ path: "/api/health/deep" })).status === 401, "expected 401"],
+  ["MFA setup requires password challenge", (await request({ path: "/api/admin/2fa/setup", method: "POST", headers: jsonHeaders, body: "{}" })).status === 401, "expected 401"],
   ["legacy owner API disabled", (await request({ path: "/api/owner/state" })).status === 410, "expected 410"],
   ["Telegram password login disabled", (await request({ path: "/api/telegram/login", method: "POST", headers: jsonHeaders, body: "{}" })).status === 410, "expected 410"]
 ];
