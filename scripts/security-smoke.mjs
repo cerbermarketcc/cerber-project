@@ -39,6 +39,7 @@ function request({ path, method = "GET", headers = {}, body = "", userAgent = "c
       protocol: target.protocol,
       hostname: target.hostname,
       port: target.port || undefined,
+      servername: target.protocol === "https:" ? target.hostname : undefined,
       path,
       method,
       headers: {
@@ -73,6 +74,7 @@ let decodedCaptcha = {};
 try {
   decodedCaptcha = JSON.parse(Buffer.from(captchaPayload, "base64url").toString("utf8"));
 } catch {}
+const unapprovedHost = await request({ path: "/api/health", headers: { Host: "evil.example" } });
 const checks = [
   ["health endpoint", health.status === 200, `${health.status} ${JSON.parse(health.text || "{}").build || ""}`],
   ["anonymous state", stateResponse.status === 200, stateResponse.status],
@@ -84,7 +86,7 @@ const checks = [
   ["captcha answer not exposed in token", !("answer" in decodedCaptcha) && Boolean(decodedCaptcha.id), Object.keys(decodedCaptcha).join(",")],
   ["server source blocked", (await request({ path: "/server.js" })).status === 404, "expected 404"],
   ["node_modules blocked", (await request({ path: "/node_modules/express/index.js" })).status === 404, "expected 404"],
-  ["unapproved Host blocked", (await request({ path: "/api/health", headers: { Host: "evil.example" } })).status === 421, "expected 421"],
+  ["unapproved Host blocked", [403, 421].includes(unapprovedHost.status), unapprovedHost.status],
   ["unapproved Origin blocked", (await request({ path: "/api/auth/login", method: "POST", headers: { ...jsonHeaders, Origin: "https://evil.example" }, body: "{}" })).status === 403, "expected 403"],
   ["large anonymous body blocked", (await request({ path: "/api/auth/login", method: "POST", headers: jsonHeaders, body: Buffer.alloc(300 * 1024, 97) })).status === 413, "expected 413"],
   ["legacy owner API disabled", (await request({ path: "/api/owner/state" })).status === 410, "expected 410"],
