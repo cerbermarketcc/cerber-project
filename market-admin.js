@@ -1,12 +1,12 @@
 const root = document.getElementById("admin-app");
 const TOKEN_KEY = "cerber_market_admin_token";
 const UI_STATE_KEY = "cerber_market_admin_ui_state";
-const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
+const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const IS_LOCAL_ADMIN_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const SAME_ORIGIN_API = ["http:", "https:"].includes(location.protocol) ? location.origin : "";
 const API_ORIGIN = SAME_ORIGIN_API || PRIMARY_API_ORIGIN;
-const API_ORIGINS = Array.from(new Set([API_ORIGIN, PRIMARY_API_ORIGIN].filter(Boolean)));
+const API_ORIGINS = [API_ORIGIN];
 const ADMIN_FORM_LOCK_MS = 5 * 60 * 1000;
 const ADMIN_UPLOAD_TIMEOUT_MS = 90000;
 const ADMIN_IMAGE_TARGET_BYTES = 950000;
@@ -1049,7 +1049,7 @@ function storeDetail(id) {
   if (!store) return "";
   const status = store.status === "active" || store.status === "ACTIVE" ? "ACTIVE" : "DISABLE";
   const countries = store.countries || store.regions || [];
-  const panelUrl = store.panel?.shopPanelUrl || `${PRIMARY_API_ORIGIN}/#shop-panel-${store.id}`;
+  const panelUrl = store.panel?.shopPanelUrl || `${location.origin}/#shop-panel-${store.id}`;
   const grossRevenue = Number(store.grossRevenue || 0);
   const storeRevenue = Number(store.revenue || 0);
   const ownerCommission = Number(store.commission || 0);

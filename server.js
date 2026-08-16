@@ -37,7 +37,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "incident-lockdown-2026-08-12-v157";
+const cerberBuildVersion = "security-origin-lockdown-2026-08-16-v159";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -49,8 +49,9 @@ const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const internalCaptchaTtlMs = 10 * 60 * 1000;
-const configuredSessionTtlHours = Number(process.env.USER_SESSION_TTL_HOURS || 336);
-const userSessionTtlMs = Math.max(1, Number.isFinite(configuredSessionTtlHours) ? configuredSessionTtlHours : 336) * 60 * 60 * 1000;
+const configuredSessionTtlHours = Number(process.env.USER_SESSION_TTL_HOURS || 24);
+const userSessionTtlHours = Math.max(1, Math.min(168, Number.isFinite(configuredSessionTtlHours) ? configuredSessionTtlHours : 24));
+const userSessionTtlMs = userSessionTtlHours * 60 * 60 * 1000;
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -60,7 +61,7 @@ const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
-const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.to";
+const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const referralPublicBaseUrl = publicBaseUrl;
 const mediaBucketName = process.env.SUPABASE_MEDIA_BUCKET || "cerber-media";
 const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
@@ -410,7 +411,6 @@ const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
   .map((origin) => origin.trim())
   .filter(Boolean);
 const allowedCorsOrigins = new Set([
-  "https://cerber-project.onrender.com",
   "https://cerber.to",
   "https://www.cerber.to",
   "https://cerber.love",
@@ -436,6 +436,13 @@ const allowedRequestHosts = new Set([
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const localHostPattern = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+const directRenderHosts = new Set(["cerber-project.onrender.com"]);
+const blockDirectRenderOrigin = isProduction && String(process.env.BLOCK_DIRECT_RENDER_ORIGIN || "true").toLowerCase() !== "false";
+const cloudflareOriginSecret = String(process.env.CLOUDFLARE_ORIGIN_SECRET || "");
+const cloudflareOriginHeader = "x-cerber-origin-verify";
+if (cloudflareOriginSecret && cloudflareOriginSecret.length < 32) {
+  throw new Error("CLOUDFLARE_ORIGIN_SECRET must contain at least 32 characters");
+}
 const clientRateLimits = new Map();
 const usedInternalCaptchas = new Map();
 const internalCaptchaChallenges = new Map();
@@ -468,7 +475,7 @@ const cspDirectives = [
   "font-src 'self' https://fonts.gstatic.com data:",
   `img-src 'self' data: blob: ${trustedMediaSources}`,
   `media-src 'self' data: blob: ${trustedMediaSources}`,
-  "connect-src 'self' https://cerber-project.onrender.com https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://api.coingecko.com https://challenges.cloudflare.com wss://cerber-project.onrender.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip https://api.telegram.org",
+  "connect-src 'self' https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://api.coingecko.com https://challenges.cloudflare.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip",
   "frame-src https://challenges.cloudflare.com",
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
@@ -481,6 +488,29 @@ function isAllowedRequestHost(host = "") {
   const value = String(host || "").trim().toLowerCase();
   const hostname = value.replace(/:\d+$/, "");
   return allowedRequestHosts.has(hostname) || (!isProduction && localHostPattern.test(value));
+}
+
+function requestHostname(req = {}) {
+  return String(req.headers?.host || "").trim().toLowerCase().replace(/:\d+$/, "");
+}
+
+function isOriginBypassRoute(req = {}) {
+  const method = String(req.method || "GET").toUpperCase();
+  const pathname = String(req.path || "");
+  if (["GET", "HEAD"].includes(method) && pathname === "/api/health") return true;
+  if (method !== "POST") return false;
+  return [
+    "/api/payments/nowpayments/ipn",
+    "/api/payments/nowpayments/payout-ipn",
+    "/api/site-notify-bot/webhook",
+    "/api/telegram/webhook",
+    "/api/proverka-bot/webhook"
+  ].includes(pathname) || /^\/api\/telegram\/mirror\/[a-zA-Z0-9_-]{1,160}$/.test(pathname);
+}
+
+function hasVerifiedCloudflareOrigin(req = {}) {
+  return Boolean(cloudflareOriginSecret)
+    && secretValuesMatch(req.headers?.[cloudflareOriginHeader], cloudflareOriginSecret);
 }
 
 function maskSecret(value = "") {
@@ -558,6 +588,15 @@ function storeSecretsSnapshot(store = {}) {
 app.use((req, res, next) => {
   if (!isAllowedRequestHost(req.headers.host)) {
     return res.status(421).send("Misdirected Request");
+  }
+  const originBypassRoute = isOriginBypassRoute(req);
+  if (blockDirectRenderOrigin && directRenderHosts.has(requestHostname(req)) && !originBypassRoute) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(404).send("Not found");
+  }
+  if (isProduction && cloudflareOriginSecret && !originBypassRoute && !hasVerifiedCloudflareOrigin(req)) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(404).send("Not found");
   }
   const origin = String(req.headers.origin || "");
   const allowedOrigin = origin && isAllowedCorsOrigin(origin);
@@ -15276,6 +15315,15 @@ publicRealtimeServer.on("connection", (socket) => {
 });
 
 server.on("upgrade", (req, socket, head) => {
+  const directRenderRequest = directRenderHosts.has(requestHostname(req));
+  if (
+    blockDirectRenderOrigin
+    && (directRenderRequest || (cloudflareOriginSecret && !hasVerifiedCloudflareOrigin(req)))
+  ) {
+    socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
   let pathname = "";
   try {
     pathname = new URL(req.url || "", `http://${req.headers.host || "localhost"}`).pathname;

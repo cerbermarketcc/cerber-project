@@ -7,7 +7,8 @@
     "build": "node --check server.js && node --check app.js && node --check market-admin.js && node --check text-admin.js && node --check security-core.js",
     "start": "node server.js",
     "test": "node --test test/*.test.js",
-    "test:security": "node scripts/security-smoke.mjs"
+    "test:security": "node scripts/security-smoke.mjs",
+    "test:secrets": "node scripts/check-secrets.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.3",

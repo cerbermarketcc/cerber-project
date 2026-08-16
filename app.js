@@ -12,9 +12,9 @@ const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
-const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v157";
+const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v158";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
-const PRIMARY_API_ORIGIN = "https://cerber-project.onrender.com";
+const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
 const LOCAL_OFFLINE_PREVIEW = IS_LOCAL_APP_HOST && new URLSearchParams(location.search).has("offline-preview");
 const API_ENABLED = location.protocol !== "file:" && !LOCAL_OFFLINE_PREVIEW;
@@ -3202,11 +3202,11 @@ function storeAdminPassword(store) {
 }
 
 function sellerAdminLink(store) {
-  return `${PRIMARY_API_ORIGIN}/#seller-${store.id}`;
+  return `${location.origin}/#seller-${store.id}`;
 }
 
 function shopPanelLink(store) {
-  return `${PRIMARY_API_ORIGIN}/#shop-panel-${store.id}`;
+  return `${location.origin}/#shop-panel-${store.id}`;
 }
 
 function sellerStores() {
@@ -10104,7 +10104,7 @@ function uniqueExchangeId(name) {
 }
 
 function exchangeAdminLink() {
-  return `${PRIMARY_API_ORIGIN}/#exchange-admin`;
+  return `${location.origin}/#exchange-admin`;
 }
 
 function adminCreationNoticeView() {
@@ -12936,7 +12936,7 @@ function showPendingSiteBroadcast() {
     if (notification.buttonUrl) {
       try {
         const target = new URL(notification.buttonUrl, location.origin);
-        const trustedHosts = new Set([location.hostname, "cerber.to", "www.cerber.to", "cerber.love", "www.cerber.love", "cerber.vip", "www.cerber.vip", "cerber-project.onrender.com"]);
+        const trustedHosts = new Set([location.hostname, "cerber.to", "www.cerber.to", "cerber.love", "www.cerber.love", "cerber.vip", "www.cerber.vip"]);
         if (target.protocol === "https:" && trustedHosts.has(target.hostname)) window.open(target.href, "_blank", "noopener,noreferrer");
       } catch {}
     }

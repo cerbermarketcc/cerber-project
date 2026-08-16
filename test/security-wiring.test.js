@@ -8,7 +8,11 @@ const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8"
 const adminClient = readFileSync(new URL("../market-admin.js", import.meta.url), "utf8");
 const textAdminClient = readFileSync(new URL("../text-admin.js", import.meta.url), "utf8");
 const migration = readFileSync(new URL("../supabase-security-2fa.sql", import.meta.url), "utf8");
+const legacyStateLockdown = readFileSync(new URL("../supabase-legacy-state-lockdown.sql", import.meta.url), "utf8");
+const lockdownVerification = readFileSync(new URL("../supabase-verify-lockdown.sql", import.meta.url), "utf8");
 const schema = readFileSync(new URL("../supabase-schema.sql", import.meta.url), "utf8");
+const renderConfig = readFileSync(new URL("../render.yaml", import.meta.url), "utf8");
+const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 
 function routeBody(method, route) {
   const marker = `app.${method}("${route}"`;
@@ -54,7 +58,53 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=158/);
+  assert.match(indexHtml, /app\.js\?v=159/);
+});
+
+test("browser clients never connect directly to Supabase or fall back to the Render origin", () => {
+  for (const client of [appClient, adminClient, textAdminClient]) {
+    assert.doesNotMatch(client, /createClient\s*\(|SUPABASE_(?:ANON|SERVICE_ROLE)_KEY|\.from\(["'](?:profiles|sessions|orders|messages|app_settings)["']\)/);
+    assert.doesNotMatch(client, /cerber-project\.onrender\.com/);
+  }
+  assert.match(appClient, /const PRIMARY_API_ORIGIN = "https:\/\/cerber\.vip"/);
+  assert.match(adminClient, /const API_ORIGINS = \[API_ORIGIN\]/);
+});
+
+test("direct Render origin is closed while health and signed provider callbacks remain reachable", () => {
+  assert.match(server, /const blockDirectRenderOrigin = isProduction/);
+  assert.match(server, /directRenderHosts\.has\(requestHostname\(req\)\)/);
+  assert.match(server, /const cloudflareOriginSecret = String\(process\.env\.CLOUDFLARE_ORIGIN_SECRET/);
+  assert.match(server, /hasVerifiedCloudflareOrigin\(req\)/);
+  assert.match(server, /server\.on\("upgrade",[\s\S]{0,500}directRenderHosts\.has\(requestHostname\(req\)\)/);
+  assert.match(server, /server\.on\("upgrade",[\s\S]{0,700}cloudflareOriginSecret && !hasVerifiedCloudflareOrigin\(req\)/);
+  assert.match(server, /pathname === "\/api\/health"/);
+  assert.match(server, /"\/api\/payments\/nowpayments\/ipn"/);
+  const connectDirective = server.match(/"connect-src[^\n]+/)?.[0] || "";
+  assert.doesNotMatch(connectDirective, /onrender\.com|api\.telegram\.org/);
+  assert.match(renderConfig, /BLOCK_DIRECT_RENDER_ORIGIN[\s\S]{0,80}value: "true"/);
+  assert.match(renderConfig, /CLOUDFLARE_ORIGIN_SECRET[\s\S]{0,80}sync: false/);
+});
+
+test("legacy shared Supabase state is fail-closed and verification detects permissive access", () => {
+  assert.match(legacyStateLockdown, /to_regclass\('public\.cerberus_state'\)/);
+  assert.match(legacyStateLockdown, /enable row level security/i);
+  assert.match(legacyStateLockdown, /force row level security/i);
+  assert.match(legacyStateLockdown, /drop policy if exists/i);
+  assert.match(legacyStateLockdown, /revoke all privileges on table public\.cerberus_state from public, anon, authenticated/i);
+  assert.match(legacyStateLockdown, /grant all privileges on table public\.cerberus_state to service_role/i);
+  assert.match(legacyStateLockdown, /revoke execute on all functions in schema public from public, anon, authenticated/i);
+  assert.match(legacyStateLockdown, /revoke all privileges on schema public from public, anon, authenticated/i);
+  assert.doesNotMatch(legacyStateLockdown, /using\s*\(\s*true\s*\)|with check\s*\(\s*true\s*\)/i);
+  assert.match(lockdownVerification, /role_table_grants/);
+  assert.match(lockdownVerification, /coalesce\(qual/);
+  assert.match(schema, /revoke all privileges on all tables in schema public from public, anon, authenticated/i);
+});
+
+test("repository ignores common secret, SSH and certificate formats", () => {
+  for (const expected of [".env", "*.pem", "*.key", "*.p12", "*.pfx", "*.ppk", "id_rsa", "id_ed25519", ".ssh/", "secrets/"]) {
+    assert.ok(gitignore.split(/\r?\n/).includes(expected), `${expected} must be ignored`);
+  }
+  assert.ok(gitignore.split(/\r?\n/).includes("!.env.example"));
 });
 
 test("the text administration entry point supports mandatory first-login MFA", () => {
