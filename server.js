@@ -37,7 +37,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "registration-proxy-fix-2026-08-16-v161";
+const cerberBuildVersion = "registration-session-fix-2026-08-16-v162";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -922,19 +922,36 @@ function requestIdempotencyKey(req, scope = "operation") {
   return key;
 }
 
-function sessionSource(req) {
-  return {
-    ip: `sha256:${secretFingerprint(clientIp(req))}`,
-    user_agent: `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`
-  };
+function userSessionAgentFingerprint(req = {}) {
+  return secretFingerprint(`user-session-agent:${String(req.headers?.["user-agent"] || "").slice(0, 512)}`);
+}
+
+function signUserSessionBinding(payload = "") {
+  return crypto.createHmac("sha256", adminSecret()).update(`user-session-binding:${payload}`).digest("base64url");
+}
+
+function createBoundUserSessionToken(req = {}) {
+  const payload = `u2.${crypto.randomBytes(32).toString("base64url")}.${userSessionAgentFingerprint(req)}`;
+  return `${payload}.${signUserSessionBinding(payload)}`;
+}
+
+function userSessionTokenMatchesRequest(token = "", req = {}) {
+  const value = String(token || "");
+  const parts = value.split(".");
+  if (parts.length !== 4 || parts[0] !== "u2") return false;
+  const payload = parts.slice(0, 3).join(".");
+  return secretValuesMatch(parts[2], userSessionAgentFingerprint(req))
+    && secretValuesMatch(parts[3], signUserSessionBinding(payload));
 }
 
 async function createUserSession(req, loginKeyValue = "") {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const token = crypto.randomBytes(32).toString("hex");
+    const token = createBoundUserSessionToken(req);
     const tokenDigest = sessionTokenDigest(token);
-    const row = { token: tokenDigest, login_key: loginKeyValue, ...sessionSource(req) };
+    // Keep the durable session row compatible with both the original and the
+    // hardened schema. Device binding is authenticated inside the signed token.
+    const row = { token: tokenDigest, login_key: loginKeyValue };
     const { error } = await supabase.from("sessions").insert(row);
     if (!error) return token;
     lastError = error;
@@ -3131,9 +3148,10 @@ async function userFromRequest(req) {
   requireDb();
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
+  if (!userSessionTokenMatchesRequest(token, req)) return null;
   const tokenDigest = sessionTokenDigest(token);
   const { data: session, error: sessionError } = await withTimeout(
-    supabase.from("sessions").select("login_key,created_at,user_agent").eq("token", tokenDigest).maybeSingle(),
+    supabase.from("sessions").select("login_key,created_at").eq("token", tokenDigest).maybeSingle(),
     "session token query",
     8000
   );
@@ -3144,8 +3162,6 @@ async function userFromRequest(req) {
     supabase.from("sessions").delete().eq("token", tokenDigest).then(() => {}).catch(() => {});
     return null;
   }
-  const expectedUserAgent = `sha256:${secretFingerprint(req.headers["user-agent"] || "")}`;
-  if (!session.user_agent || !secretValuesMatch(session.user_agent, expectedUserAgent)) return null;
   const { data: user, error: userError } = await withTimeout(
     supabase.from("profiles").select("*").eq("login_key", session.login_key).maybeSingle(),
     "session profile query",

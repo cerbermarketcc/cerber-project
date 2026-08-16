@@ -58,7 +58,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=161/);
+  assert.match(indexHtml, /app\.js\?v=162/);
 });
 
 test("browser clients never connect directly to Supabase or fall back to the Render origin", () => {
@@ -232,7 +232,11 @@ test("database migrations enforce private tables and per-admin 2FA state", () =>
 test("customer sessions are server-side, expiring and device-bound", () => {
   assert.match(server, /sessionTokenDigest\(token\)/);
   assert.match(server, /Date\.now\(\) - createdAt > userSessionTtlMs/);
-  assert.match(server, /!session\.user_agent \|\| !secretValuesMatch\(session\.user_agent, expectedUserAgent\)/);
+  assert.match(server, /createBoundUserSessionToken\(req\)/);
+  assert.match(server, /userSessionTokenMatchesRequest\(token, req\)/);
+  assert.match(server, /secretValuesMatch\(parts\[2\], userSessionAgentFingerprint\(req\)\)/);
+  assert.match(server, /from\("sessions"\)\.select\("login_key,created_at"\)/);
+  assert.doesNotMatch(server, /from\("sessions"\)\.select\("login_key,created_at,user_agent"\)/);
   assert.match(server, /supabase\.from\("sessions"\)\.delete\(\)\.eq\("token", tokenDigest\)/);
 });
 
