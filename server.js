@@ -37,7 +37,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "security-origin-lockdown-2026-08-16-v159";
+const cerberBuildVersion = "registration-proxy-fix-2026-08-16-v160";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -64,7 +64,10 @@ const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || 
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
 const referralPublicBaseUrl = publicBaseUrl;
 const mediaBucketName = process.env.SUPABASE_MEDIA_BUCKET || "cerber-media";
-const mainLtcWallet = process.env.NOWPAYMENTS_LTC_WALLET || "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
+const mainLtcWallet = String(process.env.NOWPAYMENTS_LTC_WALLET || "").trim();
+if (isProduction && !/^ltc1[ac-hj-np-z02-9]{8,87}$/i.test(mainLtcWallet)) {
+  throw new Error("NOWPAYMENTS_LTC_WALLET must contain a valid LTC address");
+}
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
@@ -1460,7 +1463,9 @@ function adminClientKey(req, login = "") {
 }
 
 function clientIp(req) {
-  return String(req.ip || req.socket?.remoteAddress || "local").trim();
+  const cloudflareIp = String(req.headers?.["cf-connecting-ip"] || "").split(",")[0].trim();
+  if (/^[0-9a-f:.]{3,64}$/i.test(cloudflareIp)) return cloudflareIp;
+  return String(req.ip || req.socket?.remoteAddress || "local").trim().slice(0, 128);
 }
 
 function sessionTokenDigest(token = "") {
@@ -2261,7 +2266,10 @@ function signInternalCaptcha(payload) {
 }
 
 function internalCaptchaFingerprint(req = {}) {
-  return secretFingerprint(`${clientIp(req)}\n${String(req.headers?.["user-agent"] || "")}`);
+  // Cloudflare and Render can legitimately change proxy hops between the GET
+  // challenge and POST answer. The signed, short-lived, one-use challenge is
+  // bound to the browser agent instead of an unstable proxy address.
+  return secretFingerprint(String(req.headers?.["user-agent"] || "").slice(0, 512));
 }
 
 function pruneInternalCaptchas(now = Date.now()) {

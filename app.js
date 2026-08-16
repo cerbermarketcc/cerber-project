@@ -12,7 +12,7 @@ const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
-const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v158";
+const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v160";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -126,7 +126,6 @@ const PARTIAL_STATE_OBJECT_KEYS = [
 ];
 
 const fallbackImage = "assets/cerber-emblem.png";
-const MAIN_LTC_WALLET = "ltc1qnl73w78t8v39kkjqd5jgr2y8a62g4mh4rhu6lu";
 let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
@@ -357,7 +356,7 @@ const defaults = {
     provider: "gateway",
     payBaseUrl: "",
     platformCommissionPercent: 0,
-    platformLtcWallet: MAIN_LTC_WALLET
+    platformLtcWallet: ""
   },
   referralPeriod: {},
   filters: {
@@ -1662,7 +1661,7 @@ function normalizeDb(next) {
   next.ownerSettings.disputeArbiters = Array.isArray(next.ownerSettings.disputeArbiters) ? next.ownerSettings.disputeArbiters : [];
   next.ownerSettings.exchangeOperators = Array.isArray(next.ownerSettings.exchangeOperators) ? next.ownerSettings.exchangeOperators : [];
   if (!next.paymentSettings) next.paymentSettings = structuredClone(defaults.paymentSettings);
-  if (!next.paymentSettings.platformLtcWallet) next.paymentSettings.platformLtcWallet = MAIN_LTC_WALLET;
+  if (!next.paymentSettings.platformLtcWallet) next.paymentSettings.platformLtcWallet = "";
   const previousPaymentProvider = next.paymentSettings.provider;
   next.paymentSettings.provider = "gateway";
   if (previousPaymentProvider !== "gateway") next.paymentSettings.platformCommissionPercent = 0;
@@ -3905,12 +3904,9 @@ function referralCodeFor(login = db.currentUser) {
 }
 
 function referralLinkFor(login = db.currentUser) {
-  const currentHost = String(location.host || "").toLowerCase();
   const base = location.protocol === "file:"
     ? "https://cerber.to"
-    : currentHost.includes("onrender.com")
-      ? "https://cerber.to"
-      : location.origin;
+    : location.origin;
   const owner = loginKey(login);
   const ownerParam = owner ? `&r=${encodeURIComponent(owner)}` : "";
   return `${base}/?ref=${encodeURIComponent(referralCodeFor(login))}${ownerParam}`;
@@ -4361,8 +4357,8 @@ function renderAuth(message = "") {
         ${message ? `<p class="${message.includes("успеш") || message.includes("success") ? "" : "notice"}">${esc(message)}</p>` : `<p>${tr("adminHint")}</p>`}
         <form class="form" data-auth-form>
           ${authMode === "register" ? `<label class="field">${tr("name")}<input name="name" required></label>` : ""}
-          <label class="field">${tr("username")}<input name="login" required autocomplete="username"></label>
-          <label class="field">${tr("password")}<input name="password" type="password" required autocomplete="current-password"></label>
+          <label class="field">${tr("username")}<input name="login" minlength="3" maxlength="40" pattern="[a-zA-Z0-9_.-]{3,40}" required autocomplete="username" autocapitalize="none"></label>
+          <label class="field">${tr("password")}<input name="password" type="password" ${authMode === "register" ? 'minlength="10" maxlength="128" autocomplete="new-password"' : 'autocomplete="current-password"'} required></label>
           ${API_ENABLED ? "" : `<label><input name="captcha" type="checkbox"> ${tr("captcha")}</label>`}
           <button class="primary" type="submit" data-auth-submit ${authSubmitDisabled ? "disabled" : ""}>${authMode === "login" ? tr("enter") : tr("create")}</button>
         </form>
@@ -4941,7 +4937,7 @@ function showProductOrder(orderId) {
   const linkedDeposit = order.walletDepositId ? (db.walletDeposits || []).find((item) => item.id === order.walletDepositId) : null;
   const ltcAmount = productOrderLtcAmount(order);
   const orderCoin = walletCoinById(linkedDeposit?.coinId || order.coinId || "ltc");
-  const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || (order.status === "pending_payment" ? MAIN_LTC_WALLET : "");
+  const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || "";
   const orderDepositPayAmount = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
   const orderDepositUsd = Number(linkedDeposit?.amountUsd || order.walletDepositAmountUsd || order.amountUsd || 0);
   const orderPaymentUrl = linkedDeposit?.paymentUrl || order.walletDepositPaymentUrl || order.paymentUrl || "";
@@ -9331,7 +9327,7 @@ async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "П
       payAmount: coin.id === "ltc" ? amountLtc : amountUsd,
       coinId: coin.id,
       payCurrency: coin.payCurrency,
-      payAddress: MAIN_LTC_WALLET,
+      payAddress: "",
       status: "processing",
       expiresAt: Date.now() + WALLET_DEPOSIT_TTL_MS,
       createdAt: Date.now()

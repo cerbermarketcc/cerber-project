@@ -58,7 +58,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=159/);
+  assert.match(indexHtml, /app\.js\?v=160/);
 });
 
 test("browser clients never connect directly to Supabase or fall back to the Render origin", () => {
@@ -68,6 +68,17 @@ test("browser clients never connect directly to Supabase or fall back to the Ren
   }
   assert.match(appClient, /const PRIMARY_API_ORIGIN = "https:\/\/cerber\.vip"/);
   assert.match(adminClient, /const API_ORIGINS = \[API_ORIGIN\]/);
+  assert.doesNotMatch(appClient, /onrender\.com|ltc1[ac-hj-np-z02-9]{8,87}/i);
+  assert.doesNotMatch(server, /NOWPAYMENTS_LTC_WALLET\s*\|\|\s*["']ltc1/i);
+});
+
+test("registration captcha survives Cloudflare proxy changes without weakening request rate limits", () => {
+  const fingerprint = server.match(/function internalCaptchaFingerprint\(req = \{\}\) \{[\s\S]{0,500}?\n\}/)?.[0] || "";
+  const clientAddress = server.match(/function clientIp\(req\) \{[\s\S]{0,500}?\n\}/)?.[0] || "";
+  assert.match(fingerprint, /user-agent/);
+  assert.doesNotMatch(fingerprint, /clientIp\(req\)/);
+  assert.match(clientAddress, /cf-connecting-ip/);
+  assert.match(clientAddress, /req\.ip/);
 });
 
 test("direct Render origin is closed while health and signed provider callbacks remain reachable", () => {
