@@ -20,8 +20,7 @@ const LOCAL_OFFLINE_PREVIEW = IS_LOCAL_APP_HOST && new URLSearchParams(location.
 const API_ENABLED = location.protocol !== "file:" && !LOCAL_OFFLINE_PREVIEW;
 const API_ORIGIN = API_ENABLED ? location.origin : PRIMARY_API_ORIGIN;
 // Keep captcha, authentication and session requests on the currently opened mirror.
-// Every mirror reaches the same server-side Supabase database, so a cross-origin
-// Render fallback only risks splitting a multi-step authentication flow.
+// Every mirror reaches the same server-side database through its own API.
 const API_ORIGINS = [API_ORIGIN];
 
 if ("serviceWorker" in navigator) {
@@ -2206,7 +2205,7 @@ async function apiFetch(path, options = {}) {
     } catch (error) {
       lastError = error;
       const hasNextOrigin = index < API_ORIGINS.length - 1;
-      const canRetry = hasNextOrigin && /API error|Supabase is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
+      const canRetry = hasNextOrigin && /API error|Database is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
       if (!canRetry) throw error;
     }
   }

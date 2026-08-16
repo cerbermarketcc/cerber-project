@@ -58,13 +58,14 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=160/);
+  assert.match(indexHtml, /app\.js\?v=161/);
 });
 
 test("browser clients never connect directly to Supabase or fall back to the Render origin", () => {
   for (const client of [appClient, adminClient, textAdminClient]) {
     assert.doesNotMatch(client, /createClient\s*\(|SUPABASE_(?:ANON|SERVICE_ROLE)_KEY|\.from\(["'](?:profiles|sessions|orders|messages|app_settings)["']\)/);
     assert.doesNotMatch(client, /cerber-project\.onrender\.com/);
+    assert.doesNotMatch(client, /supabase/i);
   }
   assert.match(appClient, /const PRIMARY_API_ORIGIN = "https:\/\/cerber\.vip"/);
   assert.match(adminClient, /const API_ORIGINS = \[API_ORIGIN\]/);

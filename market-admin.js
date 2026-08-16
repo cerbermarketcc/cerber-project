@@ -1847,7 +1847,7 @@ function renderHealth() {
   return `
     <section class="grid">
       ${statCard("Health", healthPending ? "CHECKING" : (health.ok ? "OK" : "FAIL"), health.time || "")}
-      ${statCard("Supabase", healthPending ? "CHECKING" : (checks.supabase?.ok ? "OK" : "FAIL"), "database")}
+      ${statCard("Database", healthPending ? "CHECKING" : (checks.database?.ok ? "OK" : "FAIL"), "database")}
       ${statCard("NOWPayments", healthPending ? "CHECKING" : (checks.nowpayments?.readyForPayouts ? "READY" : "CHECK"), "payments")}
       ${statCard("Telegram", healthPending ? "CHECKING" : (checks.telegram?.mainBot ? "OK" : "CHECK"), "bots")}
     </section>
@@ -1855,7 +1855,7 @@ function renderHealth() {
       <article class="table-card">
         <h3>Services</h3>
         <table><tbody>
-          <tr><td>Supabase</td><td>${healthStatus(checks.supabase?.ok)}</td></tr>
+          <tr><td>Database</td><td>${healthStatus(checks.database?.ok)}</td></tr>
           <tr><td>NOWPayments API</td><td>${healthStatus(checks.nowpayments?.apiKey)}</td></tr>
           <tr><td>NOWPayments IPN secret</td><td>${healthStatus(checks.nowpayments?.ipnSecret)}</td></tr>
           <tr><td>NOWPayments payouts</td><td>${healthStatus(checks.nowpayments?.readyForPayouts)}</td></tr>

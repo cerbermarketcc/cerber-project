@@ -37,7 +37,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "registration-proxy-fix-2026-08-16-v160";
+const cerberBuildVersion = "registration-proxy-fix-2026-08-16-v161";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -4067,7 +4067,7 @@ function baseHealthPayload(startedAt = Date.now()) {
     build: cerberBuildVersion,
     time: new Date().toISOString(),
     checks: {
-      supabase: { ok: Boolean(supabaseUrl && supabaseServiceKey) },
+      database: { ok: Boolean(supabaseUrl && supabaseServiceKey) },
       nowpayments: {
         apiKey: Boolean(nowpaymentsApiKey),
         ipnSecret: Boolean(nowpaymentsIpnSecret),
@@ -4110,7 +4110,7 @@ app.get("/api/health/deep", async (req, res, next) => {
   const health = baseHealthPayload(startedAt);
   try {
     requireAdmin(req);
-    health.checks.supabase = await timedDbCheck("deep health supabase ping", async () => {
+    health.checks.database = await timedDbCheck("deep health database ping", async () => {
       if (!supabase) return { configured: false };
       const { data, error } = await supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle();
       if (error) throw error;
@@ -4178,7 +4178,7 @@ app.get("/api/health/deep", async (req, res, next) => {
         latestFailureStage: String(latestFailed?.autoPayoutStage || "")
       };
     }
-    health.ok = Boolean(health.checks.supabase.ok) && Object.values(health.checks.tables).every((item) => item.ok);
+    health.ok = Boolean(health.checks.database.ok) && Object.values(health.checks.tables).every((item) => item.ok);
     health.durationMs = Date.now() - startedAt;
     res.status(health.ok ? 200 : 503).json(health);
   } catch (error) {
