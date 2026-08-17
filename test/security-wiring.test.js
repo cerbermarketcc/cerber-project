@@ -442,7 +442,7 @@ test("legacy order recovery cannot manufacture a paid order or settlement", () =
 });
 
 test("one-time clean launch reset preserves profiles and the site owner", () => {
-  assert.match(server, /clean-marketplace-launch-2026-08-17-v167/);
+  assert.match(server, /clean-marketplace-launch-2026-08-17-v168/);
   assert.match(server, /maintenance_\$\{cleanLaunchResetId\}/);
   assert.match(server, /await runCleanLaunchResetOnce\(\)/);
   assert.match(server, /runCleanLaunchResetOnce\(\{ force: true, finalize: true \}\)/);
