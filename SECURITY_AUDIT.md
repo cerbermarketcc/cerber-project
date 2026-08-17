@@ -1,6 +1,6 @@
 # CERBER Security Audit
 
-Дата повторной проверки: 2026-08-14
+Дата повторной проверки: 2026-08-17
 
 Ветка исправлений: `codex/security-audit-2fa`
 
@@ -16,10 +16,11 @@
 
 Обычные клиенты не получили 2FA: регистрация и вход клиентов используют прежний flow с captcha и server-side session. 2FA применяется только к `owner`, `admin`, `manager`, `moderator`, `support`, владельцам магазинов и сотрудникам магазинов с административным доступом.
 
-Кодовая ветка проходит build, 37 automated security tests, 19 HTTP smoke checks и dependency audit без известных уязвимостей. Production нельзя считать защищённым этой версией, пока не выполнены два обязательных внешних действия:
+Кодовая ветка проходит build, 47 automated security tests, HTTP smoke checks и dependency audit без известных уязвимостей. Production нельзя считать защищённым этой версией, пока не выполнены обязательные внешние действия:
 
 1. Применить `supabase-security-2fa.sql` в production Supabase.
-2. Заменить все секреты, которые ранее попадали в Git, логи или скриншоты, затем отозвать старые сессии.
+2. Применить `supabase-auth-rate-limits.sql` для межпроцессной защиты административного входа.
+3. Заменить все секреты, которые ранее попадали в Git, логи или скриншоты, затем отозвать старые сессии.
 
 ## Architecture
 
@@ -47,7 +48,7 @@
 
 ### Хранение сессий и секретов
 
-- Customer session: случайный 32-byte token, в БД хранится только HMAC digest; TTL 14 дней; обязательная привязка к User-Agent; logout удаляет запись.
+- Customer session: случайный 32-byte token, в БД хранится только HMAC digest; production TTL 24 часа; обязательная привязка к User-Agent; logout удаляет запись.
 - Admin session: HMAC token на 2 часа, `mfa: true`, device hash, credential/session version; аккаунт повторно проверяется в БД на каждом admin request.
 - MFA challenge: отдельный purpose-bound token на 10 минут; не принимается `verifyAdminToken`.
 - TOTP secret: отдельный для каждого администратора, AES-256-GCM encrypted at rest.
@@ -171,7 +172,7 @@
 - Affected: registration referral helper.
 - Cause: client `referrerLogin` and unknown code could create/assign server referral ownership.
 - Impact: stolen referral rewards and manipulated balances.
-- Fix: only an already existing server-owned referral code can resolve an owner; client hint must match.
+- Fix: only an already existing server-owned referral code can resolve an owner; client hint must match. New 96-bit random codes are generated only by the server; the browser no longer uses login/time/`Math.random()`.
 - Tests: referral code ownership and manufactured referral registration regressions.
 - Status: **FIXED**.
 
@@ -198,8 +199,8 @@
 - Affected: `stores.data`, staff records and `app_settings.ownerStores` fallback.
 - Cause: historical schema stored `adminPassword/password` alongside hashes.
 - Impact: credential disclosure after a DB read.
-- Fix: bcrypt cost 12, plaintext fields removed on every save/login and startup migration covers both primary rows and fallback state.
-- Test: startup secret migration regression.
+- Fix: bcrypt cost 12, plaintext fields removed at the central store persistence boundary, on every login and by startup migration for both primary rows and fallback state. The owner bootstrap supports `MARKET_ADMIN_PASSWORD_HASH`, so Render does not need to retain an open password after migration.
+- Test: startup secret migration and all-store-write-path regressions.
 - Status: **FIXED IN CODE; VERIFY AFTER DEPLOY**.
 
 ### SEC-013 - MEDIUM - Bearer tokens persisted in localStorage
@@ -225,9 +226,9 @@
 - Affected: login, registration, MFA, messaging, translation, payment creation/sync and withdrawals.
 - Cause: missing endpoint-specific limits and idempotency.
 - Impact: brute force, credential stuffing, spam and provider/API exhaustion.
-- Fix: per-IP/per-account scopes, delays, body limits, challenge TTL and idempotency keys.
-- Test: expensive-action rate-limit regression.
-- Status: **FIXED FOR CURRENT SINGLE INSTANCE; DISTRIBUTED LIMITER REMAINS**.
+- Fix: separate account/IP lockouts, randomized failure delay, `Retry-After`, body limits, challenge TTL and idempotency keys. Site/store password and MFA failures are persisted atomically in Postgres; an in-memory limiter remains as fail-safe.
+- Test: privileged account/IP lockout migration and route wiring; expensive-action rate-limit regression.
+- Status: **FIXED IN CODE; `supabase-auth-rate-limits.sql` REQUIRED**.
 
 ### SEC-016 - MEDIUM - Dynamic JavaScript execution in text administration
 
@@ -265,6 +266,24 @@
 - Test: current-tree secret scan and static denylist test.
 - Status: **FIXED**.
 
+### SEC-020 - MEDIUM - Public legacy admin hash disclosed the admin URL
+
+- Affected: `/#admin`, `/#owner` in the buyer application.
+- Cause: an unauthenticated legacy screen linked to the real administrative login page.
+- Impact: no API authorization bypass, but unnecessary endpoint discovery and attack-surface disclosure.
+- Fix: legacy hashes are no longer accepted as routes, their hash is cleared, and unauthenticated visitors return to normal customer authentication without an admin link.
+- Test: public hash route disclosure regression.
+- Status: **FIXED**.
+
+### SEC-021 - HIGH - Incomplete DOM XSS defense in depth
+
+- Affected: dynamic cards, chat attachments, modal content and URL-bearing attributes.
+- Cause: output encoding was extensive but depended on every template call being correct; HTML escaping alone does not make a `javascript:` URL safe.
+- Impact: session theft or privileged actions if a future stored/reflected injection reached an unsafe DOM sink.
+- Fix: retained contextual escaping, added a centralized rendered-HTML sanitizer, blocked active tags/event handlers/`srcdoc`, allowlisted URL schemes, restricted inline style syntax and enforced `noopener noreferrer` for new windows.
+- Test: dangerous scheme/tag/attribute wiring regression plus existing upload/CSP tests.
+- Status: **FIXED WITH RESIDUAL TEMPLATE REVIEW RISK**.
+
 ## Admin 2FA Verification
 
 | Scenario | Result |
@@ -285,7 +304,7 @@
 
 | Area | Status | Notes |
 |---|---|---|
-| Authentication | PASS | bcrypt, captcha, rate limits, generic login error |
+| Authentication | PASS* | bcrypt, captcha, generic errors, persistent privileged limiter; `*` migration required |
 | Admin 2FA | PASS* | `*` Requires production migration and first enrollment |
 | Authorization | PASS | Backend deny-by-default middleware + RBAC + ownership |
 | Sessions | PASS | HMAC digests/versioning/TTL/device binding/logout invalidation |
@@ -311,7 +330,7 @@
 
 ### Automated unit/regression tests
 
-- 37/37 passed with `node --test test/*.test.js`.
+- 47/47 passed with `node --test test/*.test.js`.
 - TOTP Base32/RFC 6238 behavior and replay step.
 - Recovery code entropy, hashing and one-time consumption.
 - Payment/order/currency/amount/address mismatch rejection.
@@ -324,7 +343,8 @@
 - WebSocket pre-auth denial.
 - Public-state data minimization and profile role isolation.
 - Referral forgery, dispute payment forgery and unsafe order recovery.
-- Rate limits, session lifecycle, error handling and migration wiring.
+- Persistent admin/store account and IP lockouts, session lifecycle, error handling and migration wiring.
+- Public admin hash removal, server-only referral generation, password persistence and DOM XSS regressions.
 
 ### Build and dependency checks
 
@@ -356,10 +376,10 @@
 ## Remaining Risks
 
 1. **Secret rotation is mandatory.** Replace Supabase service role/DB credentials, all admin/session/encryption secrets, NOWPayments API/IPN/payout credentials and TOTP secret, Telegram tokens/webhook secrets and Turnstile secret. Update Render atomically and revoke old sessions.
-2. **Migration must be applied.** Until `supabase-security-2fa.sql` is active, admin 2FA accounts and cross-instance operation locks cannot work safely.
+2. **Migrations must be applied.** Until `supabase-security-2fa.sql` and `supabase-auth-rate-limits.sql` are active, admin 2FA/operation locks and cross-instance brute-force protection cannot work safely.
 3. **Backend still uses Supabase service role.** RLS blocks direct public access, but compromise of the Render service role remains high impact. A future architecture should move critical financial mutations into narrow SECURITY DEFINER RPCs and use a less privileged runtime role.
 4. **Financial state is partly stored as a large JSON document.** Locks prevent concurrent mutation, but normalized transactional tables would provide stronger constraints and recovery.
-5. **Rate limiting is process-local.** Render currently runs one process; multiple instances require Redis/Postgres-backed distributed limits.
+5. **General non-privileged limits remain process-local.** Privileged password/MFA limits are Postgres-backed after migration; high-volume public endpoints still rely mainly on the current Render process and Cloudflare.
 6. **CSP allows `style-src 'unsafe-inline'`.** Script execution remains restricted, but removing inline styles would strengthen CSP.
 7. **Uploaded images are validated, not fully re-encoded.** Add image re-encoding/metadata stripping and malware scanning if uploads become higher risk.
 8. **No formal backup restore test.** Verify encrypted Supabase backups and perform a documented restore drill.
@@ -373,7 +393,7 @@ Do not expose the new admin flow until all steps are complete:
 1. Rotate compromised credentials listed in `INCIDENT_RESPONSE.md`.
 2. Set strong unique values (minimum 32 random bytes) for `ADMIN_JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `SELLER_ADMIN_SECRET`, `CAPTCHA_SECRET` and `IP_HASH_SECRET`.
 3. Set `SECURITY_TOKEN_EPOCH_MS` to invalidate all pre-incident customer/admin sessions.
-4. Apply `supabase-security-2fa.sql` and verify RLS/revokes/RPC functions.
+4. Apply `supabase-security-2fa.sql`, then `supabase-auth-rate-limits.sql`, and verify RLS/revokes/RPC functions.
 5. Keep `NOWPAYMENTS_PAYOUTS_ENABLED=false` until payment/payout smoke tests and provider whitelist settings pass.
 6. Deploy this branch and confirm all domains report the same build.
 7. Owner first login: enroll Authenticator and store recovery codes offline.
@@ -383,9 +403,9 @@ Do not expose the new admin flow until all steps are complete:
 
 ## Final Security Score
 
-**82/100 for the remediated code branch.**
+**86/100 for the remediated code branch.**
 
-The score is intentionally below 100 because privileged service-role architecture, JSON financial state, process-local rate limits, upload re-encoding, backup recovery and external penetration testing remain unresolved. Current production should not inherit the 82/100 score until secret rotation, SQL migration, deployment and live verification are complete.
+The score is intentionally below 100 because privileged service-role architecture, JSON financial state, some public process-local limits, upload re-encoding, backup recovery and external penetration testing remain unresolved. Current production should not inherit the 86/100 score until secret rotation, both SQL migrations, deployment and live verification are complete.
 
 ## Final Conclusion
 

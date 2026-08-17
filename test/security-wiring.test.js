@@ -8,6 +8,7 @@ const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8"
 const adminClient = readFileSync(new URL("../market-admin.js", import.meta.url), "utf8");
 const textAdminClient = readFileSync(new URL("../text-admin.js", import.meta.url), "utf8");
 const migration = readFileSync(new URL("../supabase-security-2fa.sql", import.meta.url), "utf8");
+const authRateLimitMigration = readFileSync(new URL("../supabase-auth-rate-limits.sql", import.meta.url), "utf8");
 const legacyStateLockdown = readFileSync(new URL("../supabase-legacy-state-lockdown.sql", import.meta.url), "utf8");
 const lockdownVerification = readFileSync(new URL("../supabase-verify-lockdown.sql", import.meta.url), "utf8");
 const schema = readFileSync(new URL("../supabase-schema.sql", import.meta.url), "utf8");
@@ -58,7 +59,67 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=162/);
+  assert.match(indexHtml, /app\.js\?v=164/);
+});
+
+test("privileged login failures are locked by account and IP across server instances", () => {
+  const adminLogin = routeBody("post", "/api/admin/login");
+  const storeLogin = routeBody("post", "/api/store-admin/login");
+  assert.match(server, /function privilegedRateLimitKeys[\s\S]{0,1200}:account[\s\S]{0,800}:ip/);
+  assert.match(server, /limit: 5,[\s\S]{0,120}lockMs: 30 \* 60 \* 1000/);
+  assert.match(server, /limit: 20,[\s\S]{0,120}lockMs: 60 \* 60 \* 1000/);
+  assert.match(adminLogin, /assertPrivilegedLoginRateLimit\(req, "site-admin-login", login\)/);
+  assert.match(adminLogin, /markPrivilegedLoginAttempt\(req, "site-admin-login", credentials\.account \? login : "", false\)/);
+  assert.match(storeLogin, /assertPrivilegedLoginRateLimit\(req, "store-admin-login", privilegedIdentity\)/);
+  assert.match(storeLogin, /markPrivilegedLoginAttempt\(req, "store-admin-login", ownerLoginOk \|\| staff \? privilegedIdentity : "", false\)/);
+  assert.match(server, /res\.setHeader\("Retry-After"/);
+  assert.match(authRateLimitMigration, /create table if not exists public\.auth_rate_limits/i);
+  assert.match(authRateLimitMigration, /for update/i);
+  assert.match(authRateLimitMigration, /force row level security/i);
+  assert.match(authRateLimitMigration, /revoke all privileges on table public\.auth_rate_limits from public, anon, authenticated/i);
+  assert.match(authRateLimitMigration, /grant execute on function public\.record_auth_failure[\s\S]{0,100}service_role/i);
+});
+
+test("public hash routes do not disclose an administrative entry point", () => {
+  const hashRoutes = appClient.match(/function hashRoute\(\)[\s\S]{0,500}?\n\}/)?.[0] || "";
+  const legacyAdmin = appClient.match(/function renderLegacyAdminDisabled\(\)[\s\S]{0,500}?\n\}/)?.[0] || "";
+  assert.doesNotMatch(hashRoutes, /["'](?:admin|owner)["']/);
+  assert.doesNotMatch(appClient, /market-admin\.html/);
+  assert.match(legacyAdmin, /history\.replaceState/);
+  assert.match(legacyAdmin, /renderAuth\(\)/);
+});
+
+test("passwords are hashed before database persistence and legacy store secrets are stripped", () => {
+  const registration = routeBody("post", "/api/auth/register");
+  const adminCreate = routeBody("post", "/api/admin/accounts");
+  const saveStoreStart = server.indexOf("async function saveStoreRow");
+  const saveStoreEnd = server.indexOf("\nasync function", saveStoreStart + 30);
+  const saveStore = server.slice(saveStoreStart, saveStoreEnd);
+  assert.match(registration, /bcrypt\.hash\(password, 12\)/);
+  assert.match(adminCreate, /password_hash: await bcrypt\.hash\(password, 12\)/);
+  assert.match(server, /MARKET_ADMIN_PASSWORD_HASH/);
+  assert.match(server, /verifyConfiguredMarketAdminPassword/);
+  assert.match(saveStore, /normalizeStoreSecrets\(store\)/);
+  assert.match(server, /delete item\.adminPassword/);
+  assert.match(server, /delete staffItem\.password/);
+  assert.match(appClient, /function clientStorageUser[\s\S]{0,220}password_hash/);
+  assert.match(appClient, /function clientStorageStore[\s\S]{0,220}adminPasswordHash/);
+  assert.equal((server.match(/\.from\("stores"\)\s*\.upsert/g) || []).length, 1);
+});
+
+test("rendered user content is escaped and dangerous URL schemes are filtered", () => {
+  assert.match(appClient, /function esc\(value\)[\s\S]{0,220}amp;[\s\S]{0,120}quot;/);
+  assert.match(appClient, /function safeContentUrl[\s\S]{0,900}url\.protocol === "https:"/);
+  assert.match(appClient, /function sanitizeRenderedHtml[\s\S]{0,1400}blockedTags/);
+  assert.match(appClient, /name\.startsWith\("on"\) \|\| name === "srcdoc"/);
+  assert.match(appClient, /root\.innerHTML = sanitizeRenderedHtml\(`/);
+  assert.match(appClient, /innerHTML = sanitizeRenderedHtml\(`<div class="modal/);
+  assert.match(adminClient, /function sanitizeAdminHtml[\s\S]{0,1400}blockedTags/);
+  assert.match(adminClient, /name\.startsWith\("on"\) \|\| name === "srcdoc"/);
+  assert.match(adminClient, /sanitizeAdminHtml\(renderSection\(\)\)/);
+  assert.match(adminClient, /safeAdminContentUrl[\s\S]{0,900}url\.protocol === "https:"/);
+  assert.doesNotMatch(appClient, /(?:eval|Function)\s*\(/);
+  assert.doesNotMatch(adminClient, /(?:eval|Function)\s*\(/);
 });
 
 test("browser clients never connect directly to Supabase or fall back to the Render origin", () => {
@@ -286,11 +347,15 @@ test("expensive user actions have endpoint-specific anti-abuse limits", () => {
 
 test("referral codes are server-owned and cannot be replaced by the client", () => {
   const claim = routeBody("post", "/api/referrals/claim-code");
+  const browserGenerator = appClient.match(/function referralCodeFor\(login = db\.currentUser\)[\s\S]{0,400}?\n\}/)?.[0] || "";
   assert.match(claim, /ensureReferralCodeForState\(state, user\.login\)/);
   assert.match(claim, /!secretValuesMatch\(submittedCode, code\)/);
   assert.match(claim, /referral_code_override_rejected/);
   assert.doesNotMatch(claim, /state\.referralCodes\[key\]\s*=\s*(?:submittedCode|req\.body|code)/);
   assert.match(claim, /assertClientRateLimit\(req, "referral-code-sync"/);
+  assert.match(server, /ensureReferralCodeForState[\s\S]{0,500}crypto\.randomBytes\(12\)/);
+  assert.doesNotMatch(browserGenerator, /Date\.now|Math\.random|saveDb/);
+  assert.match(appClient, /body: JSON\.stringify\(\{\}\)/);
 });
 
 test("registration cannot manufacture a referral owner from client hints", () => {

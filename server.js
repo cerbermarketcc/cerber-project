@@ -37,7 +37,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "registration-session-fix-2026-08-16-v162";
+const cerberBuildVersion = "privileged-auth-hardening-2026-08-17-v164";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -387,7 +387,8 @@ const publicStoresSelect = [
 const cmsTextsPath = path.join(__dirname, "cms-texts.json");
 const appSourcePath = path.join(__dirname, "app.js");
 let baseTextCatalogCache = null;
-const adminLoginAttempts = new Map();
+const privilegedLoginAttempts = new Map();
+let authRateLimitMigrationWarningLogged = false;
 const adminTokenTtlMs = 2 * 60 * 60 * 1000;
 let adminRealtimeServer = null;
 let publicRealtimeServer = null;
@@ -554,7 +555,7 @@ async function verifyPanelPassword(password = "", passwordHash = "", legacyPassw
     }
   }
   const legacy = String(legacyPassword || "");
-  return Boolean(legacy && value === legacy);
+  return Boolean(legacy && secretValuesMatch(value, legacy));
 }
 
 async function normalizeStoreSecrets(store = {}, options = {}) {
@@ -1475,10 +1476,6 @@ function requireAdmin(req) {
   return admin;
 }
 
-function adminClientKey(req, login = "") {
-  return `${clientIp(req)}:${loginKey(login)}`;
-}
-
 function clientIp(req) {
   const cloudflareIp = String(req.headers?.["cf-connecting-ip"] || "").split(",")[0].trim();
   if (/^[0-9a-f:.]{3,64}$/i.test(cloudflareIp)) return cloudflareIp;
@@ -1515,45 +1512,179 @@ function resetClientRateLimit(req, scope, identity = "") {
   clientRateLimits.delete(`${scope}:${clientIp(req)}:${loginKey(identity)}`);
 }
 
-function assertAdminRateLimit(req, login) {
-  const key = adminClientKey(req, login);
-  const record = adminLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
-  if (record.lockedUntil && Date.now() < record.lockedUntil) {
-    const error = new Error("Too many login attempts. Try later.");
-    error.status = 429;
-    throw error;
+function privilegedRateLimitKeys(req, scope = "admin-login", identity = "") {
+  const normalizedScope = String(scope || "admin-login").toLowerCase().replace(/[^a-z0-9:_-]/g, "-").slice(0, 80);
+  const normalizedIdentity = loginKey(identity);
+  const keys = [];
+  if (normalizedIdentity) {
+    keys.push({
+      scope: `${normalizedScope}:account`,
+      keyHash: secretFingerprint(`account:${normalizedScope}:${normalizedIdentity}`),
+      memoryKey: `${normalizedScope}:account:${normalizedIdentity}`,
+      limit: 5,
+      windowMs: 15 * 60 * 1000,
+      lockMs: 30 * 60 * 1000
+    });
+  }
+  keys.push({
+    scope: `${normalizedScope}:ip`,
+    keyHash: secretFingerprint(`ip:${normalizedScope}:${clientIp(req)}`),
+    memoryKey: `${normalizedScope}:ip:${clientIp(req)}`,
+    limit: 20,
+    windowMs: 15 * 60 * 1000,
+    lockMs: 60 * 60 * 1000
+  });
+  return keys;
+}
+
+function privilegedRateLimitError(retryAfterSeconds = 60) {
+  const error = new Error("Too many login attempts. Try later.");
+  error.status = 429;
+  error.retryAfter = Math.max(1, Math.ceil(Number(retryAfterSeconds || 60)));
+  return error;
+}
+
+function activeMemoryLoginRecord(key, windowMs) {
+  const now = Date.now();
+  let record = privilegedLoginAttempts.get(key);
+  if (!record || now >= Number(record.windowStartedAt || 0) + windowMs) {
+    record = { failures: 0, windowStartedAt: now, lockedUntil: 0 };
+    privilegedLoginAttempts.set(key, record);
+  }
+  return record;
+}
+
+function assertMemoryPrivilegedRateLimit(keys = []) {
+  const now = Date.now();
+  for (const key of keys) {
+    const record = activeMemoryLoginRecord(key.memoryKey, key.windowMs);
+    if (Number(record.lockedUntil || 0) > now) {
+      throw privilegedRateLimitError((Number(record.lockedUntil) - now) / 1000);
+    }
   }
 }
 
-function markAdminLoginAttempt(req, login, ok) {
-  const key = adminClientKey(req, login);
-  if (ok) {
-    adminLoginAttempts.delete(key);
-    return;
+function markMemoryPrivilegedLoginAttempt(keys = [], ok = false) {
+  const now = Date.now();
+  for (const key of keys) {
+    if (ok && key.scope.endsWith(":account")) {
+      privilegedLoginAttempts.delete(key.memoryKey);
+      continue;
+    }
+    if (ok) continue;
+    const record = activeMemoryLoginRecord(key.memoryKey, key.windowMs);
+    record.failures += 1;
+    if (record.failures >= key.limit) record.lockedUntil = Math.max(Number(record.lockedUntil || 0), now + key.lockMs);
+    privilegedLoginAttempts.set(key.memoryKey, record);
   }
-  const record = adminLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
-  record.count += 1;
-  if (record.count >= 5) record.lockedUntil = Date.now() + 10 * 60 * 1000;
-  adminLoginAttempts.set(key, record);
+  if (privilegedLoginAttempts.size > 5000) {
+    for (const [key, record] of privilegedLoginAttempts) {
+      if (now > Math.max(Number(record.lockedUntil || 0), Number(record.windowStartedAt || 0) + 60 * 60 * 1000)) {
+        privilegedLoginAttempts.delete(key);
+      }
+    }
+  }
+}
+
+function authRateLimitMigrationMissing(error = {}) {
+  return /auth_rate_limits|auth_rate_limit_status|record_auth_failure|clear_auth_failures|schema cache|PGRST202|42P01/i
+    .test(String(error?.message || error?.code || ""));
+}
+
+function warnAuthRateLimitMigration(error = {}) {
+  if (authRateLimitMigrationWarningLogged) return;
+  authRateLimitMigrationWarningLogged = true;
+  console.error("[security] persistent privileged login limiter is unavailable; apply supabase-auth-rate-limits.sql", sanitizeErrorForLog(error));
+}
+
+async function assertPersistentPrivilegedRateLimit(keys = []) {
+  if (!supabase) return;
+  for (const key of keys) {
+    const { data, error } = await supabase.rpc("auth_rate_limit_status", {
+      requested_scope: key.scope,
+      requested_key_hash: key.keyHash
+    });
+    if (error) {
+      if (authRateLimitMigrationMissing(error)) {
+        warnAuthRateLimitMigration(error);
+        return;
+      }
+      throw error;
+    }
+    const record = Array.isArray(data) ? data[0] : data;
+    const lockedUntil = Date.parse(record?.locked_until || "") || 0;
+    if (lockedUntil > Date.now()) throw privilegedRateLimitError((lockedUntil - Date.now()) / 1000);
+  }
+}
+
+async function assertPrivilegedLoginRateLimit(req, scope, identity) {
+  const keys = privilegedRateLimitKeys(req, scope, identity);
+  assertMemoryPrivilegedRateLimit(keys);
+  await assertPersistentPrivilegedRateLimit(keys);
+  return keys;
+}
+
+async function markPrivilegedLoginAttempt(req, scope, identity, ok) {
+  const keys = privilegedRateLimitKeys(req, scope, identity);
+  markMemoryPrivilegedLoginAttempt(keys, ok);
+  if (!supabase) return;
+  for (const key of keys) {
+    const rpc = ok && key.scope.endsWith(":account")
+      ? supabase.rpc("clear_auth_failures", {
+        requested_scope: key.scope,
+        requested_key_hash: key.keyHash
+      })
+      : ok
+        ? null
+        : supabase.rpc("record_auth_failure", {
+          requested_scope: key.scope,
+          requested_key_hash: key.keyHash,
+          failure_limit: key.limit,
+          window_seconds: Math.ceil(key.windowMs / 1000),
+          lock_seconds: Math.ceil(key.lockMs / 1000)
+        });
+    if (!rpc) continue;
+    const { error } = await rpc;
+    if (!error) continue;
+    if (authRateLimitMigrationMissing(error)) {
+      warnAuthRateLimitMigration(error);
+      return;
+    }
+    console.error("[security] persistent login limiter update failed", sanitizeErrorForLog(error));
+  }
+}
+
+function privilegedLoginFailureDelay() {
+  return 900 + crypto.randomInt(0, 500);
 }
 
 async function ensureAdminSecurity(options = {}) {
   const login = String(process.env.MARKET_ADMIN_LOGIN || "admin").trim();
   const password = String(process.env.MARKET_ADMIN_PASSWORD || "");
-  if (!login || !password) {
-    const error = new Error("MARKET_ADMIN_LOGIN and MARKET_ADMIN_PASSWORD must be configured in Render");
+  const passwordHash = String(process.env.MARKET_ADMIN_PASSWORD_HASH || "").trim();
+  if (!login || (!password && !passwordHash)) {
+    const error = new Error("MARKET_ADMIN_LOGIN and MARKET_ADMIN_PASSWORD or MARKET_ADMIN_PASSWORD_HASH must be configured in Render");
     error.status = 503;
     throw error;
   }
   return { adminSecurity: { login } };
 }
 
+async function verifyConfiguredMarketAdminPassword(password = "") {
+  const configuredHash = String(process.env.MARKET_ADMIN_PASSWORD_HASH || "").trim();
+  if (configuredHash) {
+    return bcrypt.compare(String(password || ""), configuredHash).catch(() => false);
+  }
+  const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
+  if (configuredPassword) return secretValuesMatch(password, configuredPassword);
+  await bcrypt.compare(String(password || ""), invalidPasswordTimingHash).catch(() => false);
+  return false;
+}
+
 async function verifyMarketAdminCredentials(login = "", password = "", adminSecurity = {}) {
   const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin");
-  const configuredPassword = String(process.env.MARKET_ADMIN_PASSWORD || "");
-  const configuredOk = Boolean(configuredPassword)
-    && loginKey(login) === loginKey(configuredLogin)
-    && secretValuesMatch(password, configuredPassword);
+  const configuredPasswordOk = await verifyConfiguredMarketAdminPassword(password);
+  const configuredOk = loginKey(login) === loginKey(configuredLogin) && configuredPasswordOk;
   if (configuredOk) {
     const account = await ensureOwnerAdminAccount(configuredLogin);
     return {
@@ -1564,9 +1695,12 @@ async function verifyMarketAdminCredentials(login = "", password = "", adminSecu
     };
   }
   const account = await loadSiteAdminAccount(login);
-  const passwordOk = Boolean(account?.password_hash) && await bcrypt.compare(String(password || ""), account.password_hash).catch(() => false);
+  const passwordOk = await bcrypt.compare(
+    String(password || ""),
+    String(account?.password_hash || invalidPasswordTimingHash)
+  ).catch(() => false);
   return {
-    ok: Boolean(passwordOk && account && !account.disabled && ADMIN_MFA_ROLES.has(account.role)),
+    ok: Boolean(account?.password_hash && passwordOk && account && !account.disabled && ADMIN_MFA_ROLES.has(account.role)),
     login: account?.login || login,
     source: passwordOk ? "database" : "none",
     account
@@ -1576,7 +1710,7 @@ async function verifyMarketAdminCredentials(login = "", password = "", adminSecu
 async function verifyAdminAccountPassword(account = {}, password = "") {
   const configuredLogin = String(process.env.MARKET_ADMIN_LOGIN || "admin");
   if (account.role === "owner" && sameLogin(account.login, configuredLogin)) {
-    return secretValuesMatch(password, process.env.MARKET_ADMIN_PASSWORD || "");
+    return verifyConfiguredMarketAdminPassword(password);
   }
   return Boolean(account.password_hash) && bcrypt.compare(String(password || ""), account.password_hash).catch(() => false);
 }
@@ -3293,8 +3427,12 @@ function ensureReferralCodeForState(state = {}, login = "") {
   if (!key) return "";
   state.referralCodes = state.referralCodes || {};
   if (!state.referralCodes[key]) {
-    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    state.referralCodes[key] = `${seed.slice(0, 4)}${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+    const usedCodes = new Set(Object.values(state.referralCodes).map((value) => String(value || "").trim()).filter(Boolean));
+    let code = "";
+    do {
+      code = crypto.randomBytes(12).toString("base64url").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 16);
+    } while (!code || usedCodes.has(code));
+    state.referralCodes[key] = code;
   }
   return state.referralCodes[key];
 }
@@ -4099,12 +4237,13 @@ function baseHealthPayload(startedAt = Date.now()) {
         siteNotifyBot: Boolean(siteNotifyBotToken)
       },
       security: {
-        marketAdminPasswordEnv: Boolean(process.env.MARKET_ADMIN_PASSWORD),
+        marketAdminPasswordEnv: Boolean(process.env.MARKET_ADMIN_PASSWORD || process.env.MARKET_ADMIN_PASSWORD_HASH),
+        marketAdminPasswordHashed: Boolean(process.env.MARKET_ADMIN_PASSWORD_HASH),
         adminJwtSecretEnv: String(process.env.ADMIN_JWT_SECRET || "").length >= 32,
         individualAdminMfa: true,
         telegramWebhookSecret: Boolean(telegramWebhookSecret),
         sessionEpoch: new Date(securityTokenEpochMs).toISOString(),
-        insecureDefaultMarketAdminPassword: !process.env.MARKET_ADMIN_PASSWORD
+        insecureDefaultMarketAdminPassword: !(process.env.MARKET_ADMIN_PASSWORD || process.env.MARKET_ADMIN_PASSWORD_HASH)
       },
       tables: {},
       bots: { mirrors: 0, active: 0, errors: 0 },
@@ -4343,7 +4482,8 @@ async function saveStoreRow(store = {}, label = "store save") {
     error.status = 400;
     throw error;
   }
-  const mediaResult = await externalizeStoreMedia(store);
+  const protectedStore = await normalizeStoreSecrets(store);
+  const mediaResult = await externalizeStoreMedia(protectedStore);
   const durableStore = mediaResult.store;
   const { data: savedRow, error } = await withTimeout(
     supabase
@@ -4511,6 +4651,7 @@ async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {
   const token = signSellerAdminToken(store.id, meta, account, req);
   resetClientRateLimit(req, "store-admin-login-ip");
   resetClientRateLimit(req, "store-admin-login", `${store.id}:${account.login}`);
+  await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true);
   appendAdminLog(account.role === "staff" ? "store_staff_login" : "store_admin_login", account.login || store.id, {
     storeId: store.id,
     accountId: account.id,
@@ -4542,9 +4683,11 @@ async function continueStoreMfaLogin(req, res, store = {}, principal = {}) {
   if (!req.body.totp && !req.body.recoveryCode) {
     return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account), store: { id: store.id, name: store.name || store.id } });
   }
+  await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
   const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
   if (!verifiedAccount) {
-    await delay(600);
+    await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
+    await delay(privilegedLoginFailureDelay());
     return res.status(401).json({ error: "Invalid or already used 2FA code" });
   }
   return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
@@ -4574,6 +4717,8 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
+    const privilegedIdentity = `${storeId}:${login || "owner"}`;
+    await assertPrivilegedLoginRateLimit(req, "store-admin-login", privilegedIdentity);
     assertClientRateLimit(req, "store-admin-login-ip", {
       limit: 30,
       windowMs: 10 * 60 * 1000
@@ -4584,10 +4729,14 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       identity: `${storeId}:${login}`
     });
     if (storeId.length > 120 || login.length > 120 || password.length > 256) {
+      await markPrivilegedLoginAttempt(req, "store-admin-login", "", false);
       return res.status(400).json({ error: "Некорректные данные входа" });
     }
     const store = await findSellerAdminStore(storeId, login);
     if (!store) {
+      await bcrypt.compare(password, invalidPasswordTimingHash).catch(() => false);
+      await markPrivilegedLoginAttempt(req, "store-admin-login", "", false);
+      await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Неверный пароль" });
     }
     if (store.credentialVersion !== securityTokenVersion) {
@@ -4598,6 +4747,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
       ? await verifyStoreOwnerCredentials(store, password)
       : { ok: false, source: "login", storePasswordOk: false, profilePasswordHash: "" };
     if (ownerAuth.ok) {
+      await markPrivilegedLoginAttempt(req, "store-admin-login", privilegedIdentity, true);
       const authenticatedStore = await reconcileStoreOwnerCredentials(store, password, ownerAuth);
       return continueStoreMfaLogin(req, res, authenticatedStore, {
         role: "owner",
@@ -4606,8 +4756,11 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     }
     const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => loginKey(member?.login) === loginKey(login));
     if (!staff || !(await verifyPanelPassword(password, staff.passwordHash, staff.password))) {
+      await markPrivilegedLoginAttempt(req, "store-admin-login", ownerLoginOk || staff ? privilegedIdentity : "", false);
+      await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Неверный пароль" });
     }
+    await markPrivilegedLoginAttempt(req, "store-admin-login", privilegedIdentity, true);
     await persistStoreSecretMigration(store);
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     return continueStoreMfaLogin(req, res, store, { ...staff, role: "staff", permissions });
@@ -4645,8 +4798,13 @@ app.post("/api/store-admin/2fa/confirm", async (req, res, next) => {
   try {
     assertClientRateLimit(req, "store-admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "store");
+    await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
     const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
-    if (!confirmed) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    if (!confirmed) {
+      await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
+      await delay(privilegedLoginFailureDelay());
+      return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    }
     const { store, principal } = await storePrincipalForAccount(confirmed.account);
     if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
     await appendAdminLog("store_admin_mfa_enabled", confirmed.account.login, {
@@ -4675,8 +4833,13 @@ app.post("/api/store-admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "store-admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "store");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
+    await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
     const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
-    if (!verifiedAccount) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    if (!verifiedAccount) {
+      await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
+      await delay(privilegedLoginFailureDelay());
+      return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    }
     const { store, principal } = await storePrincipalForAccount(verifiedAccount);
     if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
     return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
@@ -5747,22 +5910,22 @@ app.patch("/api/private-messages/:id/reaction", async (req, res, next) => {
 app.post("/api/admin/login", async (req, res, next) => {
   const login = String(req.body.login || "").trim();
   try {
-    assertAdminRateLimit(req, login);
+    await assertPrivilegedLoginRateLimit(req, "site-admin-login", login);
     const state = await ensureAdminSecurity();
     const credentials = await verifyMarketAdminCredentials(login, String(req.body.password || ""), state.adminSecurity);
     if (!credentials.ok || !credentials.account) {
-      markAdminLoginAttempt(req, login, false);
+      await markPrivilegedLoginAttempt(req, "site-admin-login", credentials.account ? login : "", false);
       appendAdminLog("admin_login_failed", login || "unknown", {
         ...requestSource(req),
         credentialSource: credentials.source
       }).catch((error) => console.error("[admin-login] log failed", sanitizeErrorForLog(error)));
-      await delay(600);
+      await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid login credentials" });
     }
     const account = credentials.account;
+    await markPrivilegedLoginAttempt(req, "site-admin-login", login, true);
     const challengeToken = signMfaChallenge(account, req);
     if (!account.totp_enabled) {
-      markAdminLoginAttempt(req, login, true);
       appendAdminLog("admin_mfa_setup_required", account.login, {
         ...requestSource(req),
         accountId: account.id
@@ -5770,17 +5933,17 @@ app.post("/api/admin/login", async (req, res, next) => {
       return res.json({ requiresMfaSetup: true, challengeToken, admin: adminAccountPublic(account) });
     }
     if (!req.body.totp && !req.body.recoveryCode) {
-      markAdminLoginAttempt(req, login, true);
       return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account) });
     }
+    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
     const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
-    markAdminLoginAttempt(req, login, Boolean(verifiedAccount));
+    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, Boolean(verifiedAccount));
     appendAdminLog(verifiedAccount ? "admin_login_success" : "admin_mfa_failed", login || "unknown", {
       ...requestSource(req),
       credentialSource: credentials.source
     }).catch((error) => console.error("[admin-login] log failed", sanitizeErrorForLog(error)));
     if (!verifiedAccount) {
-      await delay(600);
+      await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
     res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
@@ -5809,8 +5972,14 @@ app.post("/api/admin/2fa/confirm", async (req, res, next) => {
   try {
     assertClientRateLimit(req, "admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "site");
+    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
     const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
-    if (!confirmed) return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    if (!confirmed) {
+      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, false);
+      await delay(privilegedLoginFailureDelay());
+      return res.status(401).json({ error: "Invalid or already used 2FA code" });
+    }
+    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true);
     await appendAdminLog("admin_mfa_enabled", confirmed.account.login, { accountId: confirmed.account.id, ...requestSource(req) });
     res.json({
       token: signAdminToken(confirmed.account, req),
@@ -5827,11 +5996,15 @@ app.post("/api/admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "site");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
+    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
     const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
     if (!verifiedAccount) {
+      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, false);
       await appendAdminLog("admin_mfa_failed", account.login, { accountId: account.id, ...requestSource(req) });
+      await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
+    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true);
     await appendAdminLog("admin_login_success", verifiedAccount.login, { accountId: verifiedAccount.id, ...requestSource(req) });
     res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
   } catch (error) {
@@ -7332,7 +7505,7 @@ app.post("/api/admin/orders/repair-missing", async (req, res, next) => {
       store.productOrders.unshift(order);
     }
     store.productOrders = store.productOrders.slice(0, 500);
-    await supabase.from("stores").upsert({ id: store.id || targetStoreId, data: store }, { onConflict: "id" });
+    await saveStoreRow({ ...store, id: store.id || targetStoreId }, "admin order repair store save");
     await saveOwnerStoreFallback(store);
     notifyRealtime("order_repaired", { orderId: order.id, storeId: order.storeId, login: order.login });
     res.json({
@@ -7361,7 +7534,7 @@ app.patch("/api/admin/stores/:id/products/:productId", async (req, res, next) =>
     ["title", "category", "description", "priceUsd", "status"].forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) product[key] = req.body[key];
     });
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "admin product update store save");
     await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(store)] }, "admin product public catalog refresh").catch((error) => {
       console.error("[product] public catalog refresh failed", { storeId: store.id, productId: product.id, message: error.message });
     });
@@ -7381,7 +7554,7 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
     if (!row?.data) return res.status(404).json({ error: "Store not found" });
     const store = row.data;
     store.products = (store.products || []).filter((item) => item.id !== req.params.productId);
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "admin product delete store save");
     await refreshPublicCatalogFromStoreRows({ publicStoresCache: [publicStoreForState(store)] }, "admin product delete public catalog refresh").catch((error) => {
       console.error("[product] public catalog refresh failed", { storeId: store.id, productId: req.params.productId, message: error.message });
     });
@@ -8609,6 +8782,8 @@ async function saveSettingsStateNow(state, options = {}) {
   }
   preserveExistingStateCollections(next, currentData, state || {}, options);
   mergeVersionedLtcBalances(next, currentData, state || {});
+  next.ownerStores = await Promise.all((Array.isArray(next.ownerStores) ? next.ownerStores : []).map((store) => normalizeStoreSecrets(store)));
+  next.publicStoresCache = (Array.isArray(next.publicStoresCache) ? next.publicStoresCache : []).map(publicStoreForState);
   const allowEmptyKeys = new Set(Array.isArray(options.allowEmptyKeys) ? options.allowEmptyKeys : []);
   next.walletDeposits = allowEmptyKeys.has("walletDeposits")
     ? (Array.isArray(state?.walletDeposits) ? state.walletDeposits : [])
@@ -8960,17 +9135,18 @@ async function clearDeletedStoreTombstone(storeId) {
 
 async function saveOwnerStoreFallback(store = {}) {
   if (!store.id) return;
+  const protectedStore = await normalizeStoreSecrets(store);
   const state = await loadSettingsState();
   const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
-  state.ownerStores = [store, ...ownerStores.filter((item) => String(item?.id || "") !== String(store.id))];
+  state.ownerStores = [protectedStore, ...ownerStores.filter((item) => String(item?.id || "") !== String(protectedStore.id))];
   const publicStoresCache = Array.isArray(state.publicStoresCache) ? state.publicStoresCache : [];
-  state.publicStoresCache = [publicStoreForState(store), ...publicStoresCache.filter((item) => String(item?.id || "") !== String(store.id))];
+  state.publicStoresCache = [publicStoreForState(protectedStore), ...publicStoresCache.filter((item) => String(item?.id || "") !== String(protectedStore.id))];
   state.publicStoresCacheAt = Date.now();
   await saveSettingsState(state);
   await savePublicCatalogSnapshot(state, state.publicStoresCache).catch((error) => {
     console.error("[public-catalog] sync after owner store fallback failed", { message: error.message });
   });
-  console.log("[owner-store] fallback saved", { storeId: store.id, ownerStores: state.ownerStores.length });
+  console.log("[owner-store] fallback saved", { storeId: protectedStore.id, ownerStores: state.ownerStores.length });
 }
 
 async function persistStoreSecretMigration(store = {}) {
@@ -8979,7 +9155,7 @@ async function persistStoreSecretMigration(store = {}) {
   const normalized = await normalizeStoreSecrets(store);
   const after = storeSecretsSnapshot(normalized);
   if (before === after) return store;
-  await supabase.from("stores").upsert({ id: normalized.id, data: normalized }, { onConflict: "id" });
+  await saveStoreRow(normalized, "store secret migration");
   await saveOwnerStoreFallback(normalized);
   Object.keys(store).forEach((key) => delete store[key]);
   Object.assign(store, normalized);
@@ -9139,7 +9315,7 @@ async function syncProductOrderEverywhere(state = {}, order = {}, store = null) 
     if (storeOrderIndex >= 0) resolvedStore.productOrders[storeOrderIndex] = { ...resolvedStore.productOrders[storeOrderIndex], ...order };
     else resolvedStore.productOrders.unshift({ ...order, storeId: order.storeId || resolvedStore.id, storeName: order.storeName || resolvedStore.name || resolvedStore.id });
     resolvedStore.productOrders = resolvedStore.productOrders.slice(0, 500);
-    await supabase.from("stores").upsert({ id: resolvedStore.id, data: resolvedStore }, { onConflict: "id" });
+    await saveStoreRow(resolvedStore, "order lifecycle store save");
     await saveOwnerStoreFallback(resolvedStore);
   }
   return order;
@@ -9185,7 +9361,7 @@ async function restoreExpiredProductReservation(state = {}, order = {}) {
   }
   order.reservationRestored = true;
   if (store.id) {
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "order reservation restore store save");
     if (Array.isArray(state.ownerStores)) {
       state.ownerStores = state.ownerStores.map((item) => String(item?.id || "") === String(store.id) ? { ...item, ...store } : item);
     }
@@ -11658,7 +11834,7 @@ async function completeProductOrder(order, state, providerPayload = {}) {
             order.stockReservedAt = Date.now();
           }
         }
-        await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+        await saveStoreRow(store, "payment provider store save");
       }
       if (!wasAlreadyPaid) {
         await notifySiteUser(state, order.login, {
@@ -12073,7 +12249,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
       date: new Date(now).toLocaleString("ru-RU"),
       status: "completed"
     });
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "balance purchase store save");
     await saveOwnerStoreFallback(store);
     await notifySiteUser(state, user.login, {
       id: `notice-order-paid-${order.id}-${loginKey(user.login)}`,
@@ -12274,7 +12450,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       title: "Новый заказ ожидает оплату",
       body: `Клиент ${user.login} создал заказ ${order.product || order.id} в магазине ${store.name || store.id}.`
     });
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "payment reservation store save");
     await saveOwnerStoreFallback(store);
     await saveSettingsState(state);
     notifyRealtime("order_created", { orderId: order.id, storeId });
@@ -13919,7 +14095,7 @@ app.post("/api/orders/:id/review", async (req, res, next) => {
     }
     order.reviewLeft = true;
     order.reviewId = review.id;
-    await supabase.from("stores").upsert({ id: store.id, data: store }, { onConflict: "id" });
+    await saveStoreRow(store, "product review store save");
     await saveOwnerStoreFallback(store);
     await saveSettingsState({ ...state, orders });
     notifyRealtime("order_review_created", { orderId: order.id, storeId: order.storeId });
@@ -15250,6 +15426,7 @@ app.use((error, _req, res, _next) => {
   const internalMessage = String(error.message || "");
   let message = status >= 500 ? "Сервер временно недоступен" : String(error.message || "Ошибка запроса");
   if (/nowpayments/i.test(internalMessage)) message = "Платежный шлюз не настроен или временно недоступен";
+  if (status === 429 && error.retryAfter) res.setHeader("Retry-After", String(Math.max(1, Math.ceil(Number(error.retryAfter)))));
   res.status(status).json({ error: message });
 });
 

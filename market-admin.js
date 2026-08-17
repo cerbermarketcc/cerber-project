@@ -176,6 +176,51 @@ function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
 }
 
+function safeAdminContentUrl(value, fallback = "") {
+  const source = String(value || "").trim();
+  if (!source) return fallback;
+  if (source.length <= 8 * 1024 * 1024 && /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i.test(source)) return source;
+  if (source.startsWith("#")) return source;
+  try {
+    const url = new URL(source, location.origin);
+    if (url.username || url.password) return fallback;
+    if (url.protocol === "https:") return url.href;
+    if (url.protocol === "blob:" && url.origin === location.origin) return url.href;
+    if (IS_LOCAL_ADMIN_HOST && url.protocol === "http:") return url.href;
+  } catch {}
+  return fallback;
+}
+
+function sanitizeAdminHtml(value = "") {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const blockedTags = new Set(["SCRIPT", "IFRAME", "OBJECT", "EMBED", "BASE", "META", "LINK"]);
+  template.content.querySelectorAll("*").forEach((element) => {
+    if (blockedTags.has(element.tagName)) {
+      element.remove();
+      return;
+    }
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc") {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (name === "style" && !/^(?:(?:width|height|border-radius):\d+(?:\.\d+)?(?:px|%);?|object-fit:(?:cover|contain);?)+$/i.test(attribute.value.trim())) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (!["href", "src", "poster", "action", "formaction", "xlink:href"].includes(name)) return;
+      if (name === "xlink:href" && attribute.value.startsWith("#")) return;
+      const safeUrl = safeAdminContentUrl(attribute.value);
+      if (safeUrl) element.setAttribute(attribute.name, safeUrl);
+      else element.removeAttribute(attribute.name);
+    });
+    if (element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
+  });
+  return template.innerHTML;
+}
+
 function stableDisputeNumber(value = "") {
   const text = String(value || Date.now());
   let hash = 0;
@@ -669,7 +714,7 @@ function renderShell() {
           <div><p class="eyebrow">Раздел</p><h1>${esc(section)}</h1></div>
           <input data-search placeholder="Поиск по всему" value="${esc(query)}">
         </div>
-        <div data-view>${renderSection()}</div>
+        <div data-view>${sanitizeAdminHtml(renderSection())}</div>
       </section>
     </section>
   `;
@@ -705,7 +750,7 @@ function renderCurrentView({ preserveScroll = false } = {}) {
   if (!view) return;
   const scrollX = window.scrollX;
   const scrollY = window.scrollY;
-  view.innerHTML = renderSection();
+  view.innerHTML = sanitizeAdminHtml(renderSection());
   restoreAdminDetailPanels();
   bindActions();
   bindAdminButtonFeedback(root);
@@ -718,7 +763,7 @@ function restoreAdminDetailPanels() {
   if (!data) return;
   const storeDetailBox = root.querySelector("[data-store-detail]");
   if (storeDetailBox && selectedStoreId && data.stores?.some((store) => store.id === selectedStoreId)) {
-    storeDetailBox.innerHTML = storeDetail(selectedStoreId);
+    storeDetailBox.innerHTML = sanitizeAdminHtml(storeDetail(selectedStoreId));
     enhanceAdminMobileTables(storeDetailBox);
   }
   const disputeDetailBox = root.querySelector("[data-dispute-detail]");
@@ -728,7 +773,7 @@ function restoreAdminDetailPanels() {
     api(`/api/admin/disputes/${encodeURIComponent(selectedDisputeId)}`)
       .then((payload) => {
         if (nonce !== adminDetailRestoreNonce || selectedDisputeId !== disputeDetailBox.dataset.restoredDispute) return;
-        disputeDetailBox.innerHTML = disputeDetail(payload);
+        disputeDetailBox.innerHTML = sanitizeAdminHtml(disputeDetail(payload));
         bindActions();
         bindAdminButtonFeedback(root);
         enhanceAdminMobileTables(disputeDetailBox);
@@ -1232,7 +1277,7 @@ function showUserModal(payload) {
   const modal = document.createElement("div");
   modal.className = "admin-modal user-profile-modal";
   modal.dataset.userModal = login;
-  modal.innerHTML = `
+  modal.innerHTML = sanitizeAdminHtml(`
     <div class="admin-modal-backdrop" data-close-user-modal></div>
     <section class="admin-modal-panel" role="dialog" aria-modal="true" aria-label="Пользователь ${esc(login)}">
       <header class="admin-modal-head">
@@ -1241,7 +1286,7 @@ function showUserModal(payload) {
       </header>
       <div class="admin-user-modal-body">${userDetail(payload)}</div>
     </section>
-  `;
+  `);
   root.appendChild(modal);
   const close = () => {
     modal.remove();
@@ -1294,7 +1339,7 @@ function showTestDisputeModal() {
   const modal = document.createElement("div");
   modal.className = "admin-modal";
   modal.dataset.testDisputeModal = "true";
-  modal.innerHTML = `
+  modal.innerHTML = sanitizeAdminHtml(`
     <div class="admin-modal-backdrop" data-close-test-dispute-modal></div>
     <section class="admin-modal-panel">
       <header class="admin-modal-head">
@@ -1324,7 +1369,7 @@ function showTestDisputeModal() {
         </div>
       </form>
     </section>
-  `;
+  `);
   document.body.appendChild(modal);
   bindAdminButtonFeedback(modal);
   const close = () => modal.remove();
@@ -1414,7 +1459,7 @@ function renderDisputePayload(payload, { openChat = false, closeChat = false } =
   const box = root.querySelector("[data-dispute-detail]");
   if (box) {
     box.dataset.restoredDispute = selectedDisputeId;
-    box.innerHTML = disputeDetail(payload);
+    box.innerHTML = sanitizeAdminHtml(disputeDetail(payload));
   }
   if (closeChat) document.querySelector("[data-dispute-modal]")?.remove();
   else if (openChat || document.querySelector("[data-dispute-modal]")) showDisputeChatModal(payload);
@@ -1503,7 +1548,7 @@ function showDisputeChatModal(payload) {
   const modal = document.createElement("div");
   modal.className = "admin-modal open";
   modal.dataset.disputeModal = "true";
-  modal.innerHTML = `
+  modal.innerHTML = sanitizeAdminHtml(`
     <div class="admin-modal-backdrop" data-close-dispute-modal></div>
     <section class="admin-modal-panel dispute-chat-modal">
       <header class="admin-modal-head">
@@ -1515,7 +1560,7 @@ function showDisputeChatModal(payload) {
       </header>
       ${disputeChatHtml(payload)}
     </section>
-  `;
+  `);
   document.body.appendChild(modal);
   modal.querySelectorAll("[data-close-dispute-modal]").forEach((button) => button.addEventListener("click", () => modal.remove()));
   modal.querySelector("[data-admin-dispute-reply]")?.addEventListener("submit", async (event) => {
@@ -2037,7 +2082,7 @@ function bindActions() {
   root.querySelectorAll("[data-exchanger-edit]").forEach((button) => {
     button.onclick = () => {
       const box = root.querySelector("[data-exchanger-detail]");
-      if (box) box.innerHTML = exchangerDetail(button.dataset.exchangerEdit);
+      if (box) box.innerHTML = sanitizeAdminHtml(exchangerDetail(button.dataset.exchangerEdit));
       bindActions();
       bindAdminButtonFeedback(root);
       if (box) enhanceAdminMobileTables(box);
@@ -2142,7 +2187,7 @@ function bindActions() {
         const box = root.querySelector("[data-created-store]");
         if (box) {
           box.closest("details")?.setAttribute("open", "");
-          box.innerHTML = `<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`;
+          box.innerHTML = sanitizeAdminHtml(`<p class="muted">Панель: <a href="${esc(result.panel.shopPanelUrl)}" target="_blank">${esc(result.panel.shopPanelUrl)}</a><br>Логин: <strong>${esc(result.panel.login)}</strong> · Пароль: <strong>${esc(result.panel.password)}</strong></p>`);
           box.scrollIntoView?.({ block: "nearest" });
         }
       });
@@ -2159,7 +2204,7 @@ function bindActions() {
     persistAdminUiState();
     const box = root.querySelector("[data-store-detail]");
     if (box) {
-      box.innerHTML = storeDetail(row.dataset.store);
+      box.innerHTML = sanitizeAdminHtml(storeDetail(row.dataset.store));
       enhanceAdminMobileTables(box);
     }
     bindActions();

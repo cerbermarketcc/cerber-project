@@ -12,7 +12,7 @@ const GROUP_MEMBERS_KEY = "cerber_group_members_v1";
 const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messages_v1";
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
-const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v162";
+const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v164";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -2727,7 +2727,7 @@ function renderRealtimeTarget() {
 
 function renderFloatingOnly() {
   const existing = document.querySelector("[data-group-widget]");
-  const nextHtml = renderGroupFloatingWidget();
+  const nextHtml = sanitizeRenderedHtml(renderGroupFloatingWidget());
   if (!existing && nextHtml) {
     root.insertAdjacentHTML("beforeend", nextHtml);
     bindGroupFloatingWidget();
@@ -3133,20 +3133,16 @@ function sellerAdminHashId() {
 
 function hashRoute() {
   const hash = decodeURIComponent(location.hash || "").replace(/^#/, "").trim().toLowerCase();
-  const routes = new Set(["admin", "owner", "seller", "wallet", "catalog", "products", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
+  const routes = new Set(["seller", "wallet", "catalog", "products", "orders", "messages", "group-chat", "support", "referrals", "exchange"]);
   return routes.has(hash) ? hash : "";
 }
 
 function renderLegacyAdminDisabled() {
-  layout(`
-    <section class="screen">
-      <article class="panel">
-        <h2>Админка отключена</h2>
-        <p>Эта админка отключена. Используйте /market-admin.html</p>
-        <a class="primary" href="/market-admin.html">Открыть market-admin.html</a>
-      </article>
-    </section>
-  `);
+  route = "home";
+  if (/^#(?:admin|owner)$/i.test(location.hash || "")) {
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+  }
+  return !db.currentUser || !currentUser() ? renderAuth() : renderHome();
 }
 
 function isShopPanelHash() {
@@ -3893,13 +3889,7 @@ function productPaymentUrl(order) {
 function referralCodeFor(login = db.currentUser) {
   const key = loginKey(login);
   if (!key) return "";
-  if (!db.referralCodes) db.referralCodes = {};
-  if (!db.referralCodes[key]) {
-    const seed = `${key}${Date.now()}CERBER`.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    db.referralCodes[key] = seed.slice(0, 4) + Math.random().toString(36).slice(2, 10).toUpperCase();
-    saveDb();
-  }
-  return db.referralCodes[key];
+  return String(db.referralCodes?.[key] || "").trim();
 }
 
 function referralLinkFor(login = db.currentUser) {
@@ -3907,8 +3897,10 @@ function referralLinkFor(login = db.currentUser) {
     ? "https://cerber.to"
     : location.origin;
   const owner = loginKey(login);
+  const code = referralCodeFor(login);
+  if (!code) return "";
   const ownerParam = owner ? `&r=${encodeURIComponent(owner)}` : "";
-  return `${base}/?ref=${encodeURIComponent(referralCodeFor(login))}${ownerParam}`;
+  return `${base}/?ref=${encodeURIComponent(code)}${ownerParam}`;
 }
 
 function pendingReferralCode() {
@@ -3969,22 +3961,23 @@ function addReferralDeposit(referralLogin, amount) {
   saveDb();
 }
 
-async function syncReferralCodeRemote(code = referralCodeFor()) {
-  if (!API_ENABLED || !apiSessionToken() || !code) return false;
-  if (syncedReferralCodes.has(code)) return false;
-  syncedReferralCodes.add(code);
+async function syncReferralCodeRemote() {
+  const syncKey = loginKey(db.currentUser);
+  if (!API_ENABLED || !apiSessionToken() || !syncKey) return false;
+  if (syncedReferralCodes.has(syncKey)) return false;
+  syncedReferralCodes.add(syncKey);
   try {
     const payload = await apiFetch("/api/referrals/claim-code", {
       method: "POST",
       timeoutMs: 15000,
-      body: JSON.stringify({ code })
+      body: JSON.stringify({})
     });
     applyRemoteState(payload);
     const resolved = Number(payload.resolved || 0);
     if (resolved > 0) showToast(`Рефералы обновлены: +${resolved}`);
-    return resolved > 0;
+    return true;
   } catch (error) {
-    syncedReferralCodes.delete(code);
+    syncedReferralCodes.delete(syncKey);
     console.error("[referrals] code sync failed", error);
     return false;
   }
@@ -4079,6 +4072,52 @@ function esc(value) {
     "\"": "&quot;",
     "'": "&#039;"
   }[char]));
+}
+
+function safeContentUrl(value, fallback = "") {
+  const source = String(value || "").trim();
+  if (!source) return fallback;
+  if (source.length <= 8 * 1024 * 1024 && /^data:(?:image|audio|video)\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i.test(source)) return source;
+  if (/^litecoin:[a-z0-9]{20,120}(?:\?amount=\d+(?:\.\d{1,8})?)?$/i.test(source)) return source;
+  if (source.startsWith("#")) return source;
+  try {
+    const url = new URL(source, location.origin);
+    if (url.username || url.password) return fallback;
+    if (url.protocol === "https:") return url.href;
+    if (url.protocol === "blob:" && url.origin === location.origin) return url.href;
+    if (IS_LOCAL_APP_HOST && url.protocol === "http:") return url.href;
+  } catch {}
+  return fallback;
+}
+
+function sanitizeRenderedHtml(value = "") {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const blockedTags = new Set(["SCRIPT", "IFRAME", "OBJECT", "EMBED", "BASE", "META", "LINK"]);
+  template.content.querySelectorAll("*").forEach((element) => {
+    if (blockedTags.has(element.tagName)) {
+      element.remove();
+      return;
+    }
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc") {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (name === "style" && !/^(?:(?:bottom|height):\d+(?:\.\d+)?%;?|--coin-accent:#[0-9a-f]{3,8};?)+$/i.test(attribute.value.trim())) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (!["href", "src", "poster", "action", "formaction", "xlink:href"].includes(name)) return;
+      if (name === "xlink:href" && attribute.value.startsWith("#")) return;
+      const safeUrl = safeContentUrl(attribute.value);
+      if (safeUrl) element.setAttribute(attribute.name, safeUrl);
+      else element.removeAttribute(attribute.name);
+    });
+    if (element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
+  });
+  return template.innerHTML;
 }
 
 function displayContentText(value) {
@@ -4263,7 +4302,7 @@ function layout(content) {
     ["orders", "orders", "Заказы"],
     ["messages", "messages", "Чаты"]
   ];
-  root.innerHTML = `
+  root.innerHTML = sanitizeRenderedHtml(`
     <main class="app">
       <header class="topbar">
         <button class="logo-button" data-route="home" aria-label="CERBER Marketplace">
@@ -4334,7 +4373,7 @@ function layout(content) {
     ${renderGroupFloatingWidget()}
     <div class="modal-backdrop" data-modal></div>
     <div class="toast"></div>
-  `;
+  `);
   bindGlobal();
   applyLanguageDomTranslations();
   applyCmsVisualTextOverrides();
@@ -4745,9 +4784,9 @@ function renderHome() {
   document.querySelector("[data-search]").oninput = (event) => {
     db.filters = { ...catalogFilters(), query: event.target.value };
     saveDb({ localOnly: true, silentLocalStorageError: true });
-    document.querySelector("[data-feed]").innerHTML = activeHomeTab === "exchange"
+    document.querySelector("[data-feed]").innerHTML = sanitizeRenderedHtml(activeHomeTab === "exchange"
       ? exchangeCatalogHtml(visibleExchangers(), db.exchangeCards.filter((card) => card.active !== false), "")
-      : homeStores(activeHomeTab).map((store) => storeCard(store)).join("");
+      : homeStores(activeHomeTab).map((store) => storeCard(store)).join(""));
     activeHomeTab === "exchange" ? bindExchangeCatalogCards() : bindStoreCards();
   };
   if (activeHomeTab === "exchange") bindExchangeCatalogCards();
@@ -4790,8 +4829,8 @@ function renderCatalog() {
   document.querySelector("[data-search]").oninput = (event) => {
     db.filters = { ...catalogFilters(), query: event.target.value };
     saveDb({ localOnly: true, silentLocalStorageError: true });
-    document.querySelector("[data-feed]").innerHTML = visibleStores(false)
-      .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`;
+    document.querySelector("[data-feed]").innerHTML = sanitizeRenderedHtml(visibleStores(false)
+      .map((store) => storeCard(store)).join("") || `<article class="panel empty-state"><p>Ничего не найдено</p></article>`);
     bindStoreCards();
   };
 }
@@ -7508,7 +7547,7 @@ function renderGroupChat() {
     const box = document.querySelector("[data-group-emoji-draft]");
     if (!box) return;
     box.hidden = !groupEmojiDraft.length;
-    box.innerHTML = `${groupInlineEmojiHtml(groupEmojiDraft)}<button type="button" data-group-emoji-clear title="${esc(tr("groupClearTitle"))}">×</button>`;
+    box.innerHTML = sanitizeRenderedHtml(`${groupInlineEmojiHtml(groupEmojiDraft)}<button type="button" data-group-emoji-clear title="${esc(tr("groupClearTitle"))}">×</button>`);
     box.querySelector("[data-group-emoji-clear]")?.addEventListener("click", () => {
       groupEmojiDraft = [];
       renderGroupEmojiDraft();
@@ -8096,12 +8135,12 @@ function renderReferrals(tab = activeReferralTab) {
   activeReferralTab = tab;
   const code = referralCodeFor();
   const link = referralLinkFor();
-  const linkHost = new URL(link).host;
+  const linkHost = link ? new URL(link).host : location.host;
   const { refs, payments, totalDeposits, totalEarned, activeRefs } = referralStatsForCurrentUser();
-  syncReferralCodeRemote(code).then((synced) => {
+  syncReferralCodeRemote().then((synced) => {
     if (synced && route === "referrals") renderReferrals(activeReferralTab);
   }).catch(() => {});
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(link)}`;
+  const qrUrl = link ? `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(link)}` : "";
   layout(`
     <section class="screen referral-screen">
       <h1>Реферальная программа</h1>
@@ -8154,9 +8193,10 @@ function renderReferrals(tab = activeReferralTab) {
     saveDb();
     renderReferrals("analytics");
   });
-  document.querySelector("[data-create-ref]")?.addEventListener("click", () => {
-    referralCodeFor();
-    saveDb();
+  document.querySelector("[data-create-ref]")?.addEventListener("click", async (event) => {
+    setButtonLoading(event.currentTarget, true, "Создаём...");
+    const synced = await syncReferralCodeRemote();
+    if (!synced) showToast("Не удалось создать ссылку. Попробуйте ещё раз.");
     renderReferrals("referrals");
   });
   document.querySelectorAll("[data-copy-ref]").forEach((button) => {
@@ -8175,9 +8215,9 @@ function renderReferrals(tab = activeReferralTab) {
   });
   document.querySelector("[data-ref-search]")?.addEventListener("input", (event) => {
     const q = event.target.value.toLowerCase();
-    document.querySelector("[data-ref-list]").innerHTML = refs
+    document.querySelector("[data-ref-list]").innerHTML = sanitizeRenderedHtml(refs
       .filter((item) => item.login.toLowerCase().includes(q))
-      .map(referralCard).join("") || `<article class="empty-ref"><h3>Ничего не найдено</h3></article>`;
+      .map(referralCard).join("") || `<article class="empty-ref"><h3>Ничего не найдено</h3></article>`);
   });
 }
 
@@ -8299,7 +8339,7 @@ function renderExchangeCatalog() {
     const q = event.target.value.toLowerCase();
     const filteredExchangers = exchangers.filter((item) => `${item.name || item.title} ${item.description} ${item.login}`.toLowerCase().includes(q));
     const filteredCards = cards.filter((card) => `${card.name} ${card.description}`.toLowerCase().includes(q));
-    document.querySelector("[data-exchange-list]").innerHTML = exchangeCatalogHtml(filteredExchangers, filteredCards, "Ничего не найдено");
+    document.querySelector("[data-exchange-list]").innerHTML = sanitizeRenderedHtml(exchangeCatalogHtml(filteredExchangers, filteredCards, "Ничего не найдено"));
     bindExchangeCatalogCards();
   });
 }
@@ -12891,7 +12931,8 @@ function blobToDataUrl(blob) {
 }
 
 function showModal(html, className = "") {
-  document.querySelector("[data-modal]").innerHTML = `<div class="modal ${className}">${html}</div>`;
+  const safeClassName = String(className || "").split(/\s+/).filter((item) => /^[a-z0-9_-]+$/i.test(item)).join(" ");
+  document.querySelector("[data-modal]").innerHTML = sanitizeRenderedHtml(`<div class="modal ${safeClassName}">${html}</div>`);
   document.querySelector("[data-modal]").classList.add("open");
   applyLanguageDomTranslations(document.querySelector("[data-modal]"));
   bindButtonFeedback(document.querySelector("[data-modal]"));
@@ -13163,6 +13204,10 @@ function renderCurrent() {
     sellerAdminStoreId = hashStoreId;
     if (sellerAdminSessionId() === hashStoreId) return renderSeller();
     return renderSellerAdminLogin(hashStoreId);
+  }
+  if (/^#(?:admin|owner)$/i.test(location.hash || "")) {
+    route = "home";
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
   }
   const directRoute = hashRoute();
   if (directRoute === "products" && route !== "products") {
