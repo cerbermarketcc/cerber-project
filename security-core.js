@@ -128,6 +128,37 @@ export function normalizePublicBaseUrl(value = "", options = {}) {
   }
 }
 
+export function cleanMarketplaceLaunchState(state = {}) {
+  const source = state && typeof state === "object" && !Array.isArray(state) ? state : {};
+  return {
+    ...source,
+    ownerStores: [],
+    publicStoresCache: [],
+    stores: [],
+    exchangers: [],
+    exchangeCards: [],
+    exchangeRequests: [],
+    storeApplications: [],
+    orders: [],
+    walletTransactions: [],
+    walletDeposits: [],
+    walletWithdrawals: [],
+    referralPayments: [],
+    siteNotifications: [],
+    broadcasts: [],
+    supportTickets: [],
+    nowpaymentsIpnEvents: [],
+    adminLogs: [],
+    balances: {},
+    ltcBalances: {},
+    ltcBalanceVersions: {},
+    storeBalancesUsd: {},
+    storeBalancesLtc: {},
+    ownerBalanceUsd: 0,
+    ownerBalanceLtc: 0
+  };
+}
+
 export function boundedUserText(value = "", maxLength = 5000, fieldName = "Text") {
   const limit = Math.min(100_000, Math.max(1, Number(maxLength) || 5000));
   const text = String(value ?? "").trim();

@@ -14,6 +14,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import {
   adminRoleAllowsRequest,
   boundedUserText,
+  cleanMarketplaceLaunchState,
   consumeRecoveryCode,
   generateRecoveryCodes,
   generateTotpSecret,
@@ -38,8 +39,10 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "payment-callback-normalization-2026-08-17-v166";
+const cerberBuildVersion = "clean-marketplace-launch-2026-08-17-v167";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
+const cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v1";
+const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
 const invalidPasswordTimingHash = "$2a$12$DKwXcwowvOq8mcDQ4fPPFO.XO5L4ge59H0uKy6ucXFUSEIHnq8WLG";
@@ -2569,6 +2572,151 @@ async function ensureSeed() {
   }
 }
 
+async function deleteAllRowsForCleanLaunch(table, column = "id", options = {}) {
+  const { error, count } = await supabase
+    .from(table)
+    .delete({ count: "exact" })
+    .not(column, "is", null);
+  if (error) {
+    if (options.optional && mirrorTableUnavailable(error)) return 0;
+    throw error;
+  }
+  return Number(count || 0);
+}
+
+async function removeStoreMediaForCleanLaunch() {
+  const storage = supabase.storage.from(mediaBucketName);
+  const pendingFolders = ["stores"];
+  const objectPaths = [];
+  while (pendingFolders.length) {
+    const folder = pendingFolders.pop();
+    let offset = 0;
+    while (true) {
+      const { data, error } = await storage.list(folder, {
+        limit: 1000,
+        offset,
+        sortBy: { column: "name", order: "asc" }
+      });
+      if (error) {
+        if (/not found|does not exist|bucket/i.test(String(error.message || ""))) return 0;
+        throw error;
+      }
+      const entries = Array.isArray(data) ? data : [];
+      for (const entry of entries) {
+        const objectPath = `${folder}/${entry.name}`;
+        if (entry.id || entry.metadata) objectPaths.push(objectPath);
+        else pendingFolders.push(objectPath);
+      }
+      if (entries.length < 1000) break;
+      offset += entries.length;
+    }
+  }
+  for (let index = 0; index < objectPaths.length; index += 100) {
+    const { error } = await storage.remove(objectPaths.slice(index, index + 100));
+    if (error) throw error;
+  }
+  return objectPaths.length;
+}
+
+async function runCleanLaunchResetOnce(options = {}) {
+  if (!supabase) return { skipped: true, reason: "database-unavailable" };
+  await ensureSeed();
+  const { data: marker, error: markerError } = await supabase
+    .from("app_settings")
+    .select("id,data")
+    .eq("id", cleanLaunchResetMarkerRowId)
+    .maybeSingle();
+  if (markerError) throw markerError;
+  if (marker?.data?.status === "completed" && !options.force) {
+    return { skipped: true, reason: "already-completed" };
+  }
+
+  const [{ data: settingsRows, error: settingsError }, { data: messageRows, error: messagesError }] = await Promise.all([
+    supabase.from("app_settings").select("id,data"),
+    supabase.from("messages").select("id,data").limit(10000)
+  ]);
+  if (settingsError) throw settingsError;
+  if (messagesError) throw messagesError;
+
+  const cleanedSettingsRows = (Array.isArray(settingsRows) ? settingsRows : [])
+    .filter((row) => row?.id !== cleanLaunchResetMarkerRowId)
+    .map((row) => ({
+      id: row.id,
+      data: cleanMarketplaceLaunchState(row.data || {}),
+      updated_at: new Date().toISOString()
+    }));
+  if (cleanedSettingsRows.length) {
+    const { error } = await supabase.from("app_settings").upsert(cleanedSettingsRows, { onConflict: "id" });
+    if (error) throw error;
+  }
+
+  const marketplaceMessageIds = (Array.isArray(messageRows) ? messageRows : [])
+    .filter((row) => {
+      const data = row?.data || {};
+      const storeId = String(data.storeId || data.store_id || "").toLowerCase();
+      return Boolean(storeId || data.exchangerId || data.exchanger_id)
+        && !["site", "support"].includes(storeId);
+    })
+    .map((row) => row.id)
+    .filter(Boolean);
+  for (let index = 0; index < marketplaceMessageIds.length; index += 200) {
+    const { error } = await supabase.from("messages").delete().in("id", marketplaceMessageIds.slice(index, index + 200));
+    if (error) throw error;
+  }
+
+  const deleted = {};
+  deleted.ledgerEntries = await deleteAllRowsForCleanLaunch("ledger_entries", "id", { optional: true });
+  deleted.walletWithdrawals = await deleteAllRowsForCleanLaunch("wallet_withdrawals", "id", { optional: true });
+  deleted.walletDeposits = await deleteAllRowsForCleanLaunch("wallet_deposits", "id", { optional: true });
+  deleted.orders = await deleteAllRowsForCleanLaunch("orders", "id", { optional: true });
+  const { error: storeAdminError, count: storeAdminCount } = await supabase
+    .from("admin_accounts")
+    .delete({ count: "exact" })
+    .eq("scope", "store");
+  if (storeAdminError && !mirrorTableUnavailable(storeAdminError)) throw storeAdminError;
+  deleted.storeAdminAccounts = Number(storeAdminCount || 0);
+  const { error: delegatedAdminError, count: delegatedAdminCount } = await supabase
+    .from("admin_accounts")
+    .delete({ count: "exact" })
+    .eq("scope", "site")
+    .neq("role", "owner");
+  if (delegatedAdminError && !mirrorTableUnavailable(delegatedAdminError)) throw delegatedAdminError;
+  deleted.delegatedAdminAccounts = Number(delegatedAdminCount || 0);
+  deleted.stores = await deleteAllRowsForCleanLaunch("stores", "id");
+  deleted.auditLogs = await deleteAllRowsForCleanLaunch("audit_logs", "id", { optional: true });
+  deleted.marketplaceMessages = marketplaceMessageIds.length;
+
+  let removedMedia = 0;
+  try {
+    removedMedia = await removeStoreMediaForCleanLaunch();
+  } catch (error) {
+    console.warn("[clean-launch] unreferenced store media cleanup failed", sanitizeErrorForLog(error));
+  }
+
+  publicStoresMemoryCache = [];
+  publicStoresMemoryCacheAt = Date.now();
+  publicCatalogMemorySnapshot = null;
+  publicCatalogMemorySnapshotAt = 0;
+  settingsBackupMemorySnapshot = null;
+  settingsBackupMemoryAt = 0;
+  adminLogMemory = [];
+
+  const { error: markerSaveError } = await supabase.from("app_settings").upsert({
+    id: cleanLaunchResetMarkerRowId,
+    data: {
+      completed: Boolean(options.finalize),
+      status: options.finalize ? "completed" : "pending-final-pass",
+      resetId: cleanLaunchResetId,
+      completedAt: new Date().toISOString(),
+      removedMedia
+    },
+    updated_at: new Date().toISOString()
+  }, { onConflict: "id" });
+  if (markerSaveError) throw markerSaveError;
+  console.warn("[clean-launch] marketplace reset completed", { resetId: cleanLaunchResetId, ...deleted, removedMedia });
+  return { skipped: false, deleted, removedMedia };
+}
+
 function compactSettingsData(row = {}) {
   if (row?.data && typeof row.data === "object") return row.data;
   return {
@@ -2645,7 +2793,7 @@ function stateHasDurableContent(state = {}) {
 }
 
 function publicExchangeCardsForState(exchangeCards = null) {
-  const source = Array.isArray(exchangeCards) && exchangeCards.length ? exchangeCards : defaultExchangeCards;
+  const source = Array.isArray(exchangeCards) ? exchangeCards : defaultExchangeCards;
   return source
     .filter((card) => card.id !== "kent-ltc" && !/kent\s*ltc/i.test(String(card.name || "")))
     .map((card) => ({
@@ -2708,7 +2856,9 @@ function mergePublicCatalogSnapshots(primary = {}, backup = {}) {
     const backupItems = Array.isArray(backup?.[key]) ? backup[key] : [];
     next[key] = primaryItems.length ? primaryItems : backupItems;
   });
-  if (!arrayHasItems(next.exchangeCards)) next.exchangeCards = publicExchangeCardsForState();
+  if (!Array.isArray(primary?.exchangeCards) && !Array.isArray(backup?.exchangeCards)) {
+    next.exchangeCards = publicExchangeCardsForState();
+  }
   next.groupSettings = normalizeGroupSettings(objectHasKeys(primary?.groupSettings) ? primary.groupSettings : (backup?.groupSettings || {}));
   next.referralPeriod = objectHasKeys(primary?.referralPeriod) ? primary.referralPeriod : (backup?.referralPeriod || {});
   next.filters = objectHasKeys(primary?.filters) ? primary.filters : (backup?.filters || {});
@@ -15431,8 +15581,20 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: message });
 });
 
+const cleanLaunchStartupResult = await runCleanLaunchResetOnce().catch((error) => {
+  console.error("[clean-launch] reset failed", sanitizeErrorForLog(error));
+  if (isProduction) throw error;
+  return { skipped: true, reason: "local-reset-failed" };
+});
+
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
+  if (!cleanLaunchStartupResult.skipped) {
+    setTimeout(() => {
+      runCleanLaunchResetOnce({ force: true, finalize: true })
+        .catch((error) => console.error("[clean-launch] final pass failed", sanitizeErrorForLog(error)));
+    }, 15 * 1000).unref?.();
+  }
   revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", sanitizeErrorForLog(error)));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", sanitizeErrorForLog(error)));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", sanitizeErrorForLog(error)));

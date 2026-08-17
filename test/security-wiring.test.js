@@ -440,3 +440,21 @@ test("legacy order recovery cannot manufacture a paid order or settlement", () =
   assert.doesNotMatch(server, /if \(\["active", "completed", "closed", "paid"\]\.includes\(status\)\) \{\s*order\.paymentStatus = "paid"/);
   assert.match(server, /function storeSaleLedgerOrderFromMessage[\s\S]{0,220}Legacy chat messages are not cryptographic proof of payment[\s\S]{0,80}return null;/);
 });
+
+test("one-time clean launch reset preserves profiles and the site owner", () => {
+  assert.match(server, /clean-marketplace-launch-2026-08-17-v167/);
+  assert.match(server, /maintenance_\$\{cleanLaunchResetId\}/);
+  assert.match(server, /await runCleanLaunchResetOnce\(\)/);
+  assert.match(server, /runCleanLaunchResetOnce\(\{ force: true, finalize: true \}\)/);
+  assert.match(server, /status: options\.finalize \? "completed" : "pending-final-pass"/);
+  assert.match(server, /deleteAllRowsForCleanLaunch\("stores", "id"\)/);
+  assert.match(server, /\.eq\("scope", "store"\)/);
+  assert.match(server, /\.eq\("scope", "site"\)[\s\S]{0,120}\.neq\("role", "owner"\)/);
+  assert.match(server, /deleteAllRowsForCleanLaunch\("audit_logs", "id"/);
+  assert.match(server, /!Array\.isArray\(primary\?\.exchangeCards\)[\s\S]{0,100}!Array\.isArray\(backup\?\.exchangeCards\)/);
+  const resetStart = server.indexOf("async function runCleanLaunchResetOnce");
+  const resetEnd = server.indexOf("\nfunction compactSettingsData", resetStart);
+  const resetBody = server.slice(resetStart, resetEnd);
+  assert.doesNotMatch(resetBody, /deleteAllRowsForCleanLaunch\("profiles"|deleteAllRowsForCleanLaunch\("sessions"/);
+  assert.doesNotMatch(resetBody, /from\("profiles"\)\.delete|from\("sessions"\)\.delete/);
+});

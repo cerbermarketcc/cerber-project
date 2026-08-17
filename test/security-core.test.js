@@ -6,6 +6,7 @@ import {
   boundedUserText,
   base32Decode,
   base32Encode,
+  cleanMarketplaceLaunchState,
   consumeRecoveryCode,
   generateRecoveryCodes,
   mergeSellerProductInput,
@@ -24,6 +25,41 @@ import {
   validIdempotencyKey,
   verifyTotpCode
 } from "../security-core.js";
+
+test("clean launch removes marketplace and money while preserving user-owned state", () => {
+  const source = {
+    ownerStores: [{ id: "store-1" }],
+    publicStoresCache: [{ id: "store-1" }],
+    stores: [{ id: "store-1" }],
+    exchangers: [{ id: "exchange-1" }],
+    exchangeCards: [{ id: "card-1" }],
+    orders: [{ id: "order-1" }],
+    walletTransactions: [{ id: "tx-1" }],
+    walletDeposits: [{ id: "deposit-1" }],
+    walletWithdrawals: [{ id: "withdrawal-1" }],
+    balances: { alice: 100 },
+    ltcBalances: { alice: 1.25 },
+    storeBalancesLtc: { "store-1": 0.5 },
+    ownerBalanceLtc: 0.25,
+    adminLogs: [{ id: "log-1" }],
+    groupMessages: [{ id: "group-1" }],
+    referralCodes: { alice: "SAFE-CODE" },
+    telegramBot: { users: { "1": { login: "alice" } } }
+  };
+  const cleaned = cleanMarketplaceLaunchState(source);
+  for (const key of [
+    "ownerStores", "publicStoresCache", "stores", "exchangers", "exchangeCards", "orders",
+    "walletTransactions", "walletDeposits", "walletWithdrawals", "adminLogs"
+  ]) assert.deepEqual(cleaned[key], [], key);
+  for (const key of ["balances", "ltcBalances", "storeBalancesLtc", "storeBalancesUsd"])
+    assert.deepEqual(cleaned[key], {}, key);
+  assert.equal(cleaned.ownerBalanceLtc, 0);
+  assert.equal(cleaned.ownerBalanceUsd, 0);
+  assert.deepEqual(cleaned.groupMessages, source.groupMessages);
+  assert.deepEqual(cleaned.referralCodes, source.referralCodes);
+  assert.deepEqual(cleaned.telegramBot, source.telegramBot);
+  assert.notEqual(cleaned, source);
+});
 
 test("oversized untrusted text is rejected instead of silently stored", () => {
   assert.equal(boundedUserText(" hello ", 10, "Message"), "hello");
