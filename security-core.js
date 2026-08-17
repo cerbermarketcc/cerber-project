@@ -105,6 +105,29 @@ export function validIdempotencyKey(value = "") {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(key) ? key : "";
 }
 
+export function normalizePublicBaseUrl(value = "", options = {}) {
+  const production = Boolean(options.production);
+  const fallback = String(options.fallback || "https://cerber.vip").replace(/\/+$/, "");
+  const allowedHosts = new Set((options.allowedHosts || ["cerber.vip", "cerber.to", "cerber.love"])
+    .map((host) => String(host || "").trim().toLowerCase())
+    .filter(Boolean));
+  let candidate = String(value || fallback).trim();
+  const embeddedUrl = candidate.match(/https?:\/\/[^\s\])}"']+/i)?.[0];
+  if (embeddedUrl) candidate = embeddedUrl;
+  else if (/^[a-z0-9.-]+(?::\d+)?(?:\/.*)?$/i.test(candidate)) {
+    candidate = `${production ? "https" : "http"}://${candidate}`;
+  }
+  try {
+    const parsed = new URL(candidate);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!['http:', 'https:'].includes(parsed.protocol)) return fallback;
+    if (production && (parsed.protocol !== 'https:' || !allowedHosts.has(hostname))) return fallback;
+    return parsed.origin;
+  } catch {
+    return fallback;
+  }
+}
+
 export function boundedUserText(value = "", maxLength = 5000, fieldName = "Text") {
   const limit = Math.min(100_000, Math.max(1, Number(maxLength) || 5000));
   const text = String(value ?? "").trim();

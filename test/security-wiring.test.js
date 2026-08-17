@@ -242,6 +242,7 @@ test("NOWPayments callbacks require HMAC, idempotency and trusted amount validat
   assert.match(payoutIpn, /rememberNowpaymentsIpn\(state, fingerprint, "payout"\)/);
   assert.match(payoutIpn, /validateProviderPayout\(req\.body/);
   assert.doesNotMatch(server, /amountLtcEstimate/);
+  assert.match(server, /normalizePublicBaseUrl\(process\.env\.PUBLIC_BASE_URL, \{ production: isProduction \}\)/);
 });
 
 test("Telegram webhooks require a secret, serialize state changes and reject replayed updates", () => {

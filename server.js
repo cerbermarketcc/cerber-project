@@ -19,6 +19,7 @@ import {
   generateTotpSecret,
   isBlockedStaticPath,
   mergeSellerProductInput,
+  normalizePublicBaseUrl,
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
@@ -37,7 +38,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "private-chat-stability-2026-08-17-v165";
+const cerberBuildVersion = "payment-callback-normalization-2026-08-17-v166";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const securityTokenVersion = "incident-2026-08-12-v1";
 const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
@@ -61,7 +62,7 @@ const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
-const publicBaseUrl = process.env.PUBLIC_BASE_URL || "https://cerber.vip";
+const publicBaseUrl = normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL, { production: isProduction });
 const referralPublicBaseUrl = publicBaseUrl;
 const mediaBucketName = process.env.SUPABASE_MEDIA_BUCKET || "cerber-media";
 const mainLtcWallet = String(process.env.NOWPAYMENTS_LTC_WALLET || "").trim();

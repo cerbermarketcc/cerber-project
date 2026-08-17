@@ -13,6 +13,7 @@ import {
   hashRecoveryCode,
   isBlockedStaticPath,
   mediaMagicMatches,
+  normalizePublicBaseUrl,
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
@@ -27,6 +28,15 @@ import {
 test("oversized untrusted text is rejected instead of silently stored", () => {
   assert.equal(boundedUserText(" hello ", 10, "Message"), "hello");
   assert.throws(() => boundedUserText("x".repeat(11), 10, "Message"), (error) => error.status === 400 && error.code === "TEXT_TOO_LONG");
+});
+
+test("public callback URLs are normalized to approved HTTPS origins", () => {
+  const production = { production: true };
+  assert.equal(normalizePublicBaseUrl("https://cerber.vip/", production), "https://cerber.vip");
+  assert.equal(normalizePublicBaseUrl("cerber.to/callback", production), "https://cerber.to");
+  assert.equal(normalizePublicBaseUrl("[https://cerber.love](https://cerber.love)", production), "https://cerber.love");
+  assert.equal(normalizePublicBaseUrl("https://attacker.example/callback", production), "https://cerber.vip");
+  assert.equal(normalizePublicBaseUrl("javascript:alert(1)", production), "https://cerber.vip");
 });
 
 test("static serving blocks secrets, browser profiles, source maps and backups", () => {
