@@ -16,11 +16,7 @@
 
 Обычные клиенты не получили 2FA: регистрация и вход клиентов используют прежний flow с captcha и server-side session. 2FA применяется только к `owner`, `admin`, `manager`, `moderator`, `support`, владельцам магазинов и сотрудникам магазинов с административным доступом.
 
-Кодовая ветка проходит build, 47 automated security tests, HTTP smoke checks и dependency audit без известных уязвимостей. Production нельзя считать защищённым этой версией, пока не выполнены обязательные внешние действия:
-
-1. Применить `supabase-security-2fa.sql` в production Supabase.
-2. Применить `supabase-auth-rate-limits.sql` для межпроцессной защиты административного входа.
-3. Заменить все секреты, которые ранее попадали в Git, логи или скриншоты, затем отозвать старые сессии.
+Production-сборка `payment-callback-normalization-2026-08-17-v166` развёрнута на `cerber.vip`, `cerber.to` и `cerber.love`. Код проходит build, 49 automated security/regression tests, production HTTP smoke checks и dependency audit без известных уязвимостей. Владелец сообщил о применении SQL-миграций и замене production-переменных; статус чувствительных значений и deep health нельзя независимо подтвердить без административной MFA-сессии, поэтому обязательная ротация ранее раскрытых секретов остаётся предметом ручной проверки.
 
 ## Architecture
 
@@ -284,6 +280,24 @@
 - Test: dangerous scheme/tag/attribute wiring regression plus existing upload/CSP tests.
 - Status: **FIXED WITH RESIDUAL TEMPLATE REVIEW RISK**.
 
+### SEC-022 - HIGH - Malformed public callback URL blocked payment creation
+
+- Affected: NOWPayments payment/deposit/payout callback construction in `server.js`.
+- Cause: `PUBLIC_BASE_URL` was concatenated without normalization, so an accidentally pasted Markdown link, path or malformed value reached NOWPayments.
+- Impact: wallet invoices and payment requests failed before an address was created.
+- Fix: normalize to an allowlisted HTTPS origin (`cerber.vip`, `cerber.to`, `cerber.love`) and fail safely to the canonical domain.
+- Test: URL normalization unit tests plus a live unpaid LTC invoice and idempotent replay against production.
+- Status: **FIXED AND VERIFIED IN PRODUCTION**.
+
+### SEC-023 - MEDIUM - Concurrent private-chat refresh requests
+
+- Affected: `loadPrivateMessagesRemote` in `app.js`.
+- Cause: route, realtime and interval refreshes could start overlapping API requests during a transient database delay.
+- Impact: unnecessary load, repeated client errors and delayed chat refresh.
+- Fix: all callers now share one in-flight request and release it in `finally`.
+- Test: regression wiring test plus repeated profile-to-private-chat navigation with clean production console.
+- Status: **FIXED AND VERIFIED IN PRODUCTION**.
+
 ## Admin 2FA Verification
 
 | Scenario | Result |
@@ -319,18 +333,18 @@
 | File Upload | PASS WITH RISK | Magic bytes/path/size; no AV scan or mandatory re-encode |
 | Path Traversal | PASS | Generated object names and blocked static path classes |
 | Secrets | FAIL UNTIL ROTATED | Current tree clean; historical/exposed values require provider rotation |
-| Dependencies | PASS | Production audit: no known vulnerabilities on 2026-08-14 |
+| Dependencies | PASS | Production audit: no known vulnerabilities on 2026-08-17 |
 | HTTP Configuration | PASS WITH RISK | Strong headers; CSP still permits inline styles |
 | CORS | PASS | Exact origins only; no credentialed wildcard |
 | Logging | PASS | Security events with redaction; audit deletion disabled |
-| Deployment | PENDING | Branch, migration and secret rotation not yet applied to production |
+| Deployment | PASS WITH MANUAL CHECK | v166 active on all domains; migration/secret status requires owner deep-health confirmation |
 | Backup/Recovery | NOT VERIFIED | Backup exists at provider level, restore drill not performed |
 
 ## Tests Performed
 
 ### Automated unit/regression tests
 
-- 47/47 passed with `node --test test/*.test.js`.
+- 49/49 passed with `node --test test/*.test.js`.
 - TOTP Base32/RFC 6238 behavior and replay step.
 - Recovery code entropy, hashing and one-time consumption.
 - Payment/order/currency/amount/address mismatch rejection.
@@ -345,6 +359,7 @@
 - Referral forgery, dispute payment forgery and unsafe order recovery.
 - Persistent admin/store account and IP lockouts, session lifecycle, error handling and migration wiring.
 - Public admin hash removal, server-only referral generation, password persistence and DOM XSS regressions.
+- Public payment callback normalization and private-message refresh deduplication.
 
 ### Build and dependency checks
 
@@ -355,7 +370,7 @@
 
 ### HTTP smoke checks
 
-- 19/19 passed against a local production-mode server.
+- 19/19 passed against live `cerber.vip` on build v166; mirror health/state checks passed on `.to` and `.love`.
 - Health and minimal anonymous state.
 - Captcha answer absent from client token.
 - Source and `node_modules` blocked.
@@ -367,16 +382,16 @@
 
 ### Not performed automatically
 
-- No real payment, payout or destructive production request was sent.
+- No real payment, payout or destructive production request was sent. One unpaid 10 USD LTC invoice was created on the isolated QA account and safely reused by the idempotency check.
 - No production secret was read or printed.
-- SQL migration was not applied automatically.
+- SQL migration was applied manually by the owner; deep-health verification still requires an authenticated owner MFA session.
 - No real Authenticator secret was generated for the owner by the audit process.
 - No external black-box pentest, WAF test, phishing simulation or Supabase restore drill was performed.
 
 ## Remaining Risks
 
-1. **Secret rotation is mandatory.** Replace Supabase service role/DB credentials, all admin/session/encryption secrets, NOWPayments API/IPN/payout credentials and TOTP secret, Telegram tokens/webhook secrets and Turnstile secret. Update Render atomically and revoke old sessions.
-2. **Migrations must be applied.** Until `supabase-security-2fa.sql` and `supabase-auth-rate-limits.sql` are active, admin 2FA/operation locks and cross-instance brute-force protection cannot work safely.
+1. **Secret rotation must be verified.** The owner reports replacing production variables, but every credential previously shown in Git, logs or screenshots must also be revoked at its provider, not merely changed in Render.
+2. **Migration status needs an owner deep-health check.** The SQL was applied manually, but the audit session had no owner MFA token to read the protected database readiness checks.
 3. **Backend still uses Supabase service role.** RLS blocks direct public access, but compromise of the Render service role remains high impact. A future architecture should move critical financial mutations into narrow SECURITY DEFINER RPCs and use a less privileged runtime role.
 4. **Financial state is partly stored as a large JSON document.** Locks prevent concurrent mutation, but normalized transactional tables would provide stronger constraints and recovery.
 5. **General non-privileged limits remain process-local.** Privileged password/MFA limits are Postgres-backed after migration; high-volume public endpoints still rely mainly on the current Render process and Cloudflare.
@@ -386,16 +401,16 @@
 9. **No customer password reset/email flow exists.** It was not added because the project does not currently implement those features and the user requested no client-auth redesign for 2FA.
 10. **No security guarantee is absolute.** Monitoring, provider-side MFA, Cloudflare/WAF rules and periodic external testing remain necessary.
 
-## Production Deployment Gate
+## Production Follow-up
 
-Do not expose the new admin flow until all steps are complete:
+The v166 deployment is live. Complete or periodically repeat these owner-side checks:
 
 1. Rotate compromised credentials listed in `INCIDENT_RESPONSE.md`.
 2. Set strong unique values (minimum 32 random bytes) for `ADMIN_JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `SELLER_ADMIN_SECRET`, `CAPTCHA_SECRET` and `IP_HASH_SECRET`.
 3. Set `SECURITY_TOKEN_EPOCH_MS` to invalidate all pre-incident customer/admin sessions.
 4. Apply `supabase-security-2fa.sql`, then `supabase-auth-rate-limits.sql`, and verify RLS/revokes/RPC functions.
 5. Keep `NOWPAYMENTS_PAYOUTS_ENABLED=false` until payment/payout smoke tests and provider whitelist settings pass.
-6. Deploy this branch and confirm all domains report the same build.
+6. Confirm all domains continue to report `payment-callback-normalization-2026-08-17-v166` or a newer approved build.
 7. Owner first login: enroll Authenticator and store recovery codes offline.
 8. Confirm every existing owner/staff/admin account is forced through enrollment.
 9. Run `SECURITY_SMOKE_URL=https://cerber.vip npm run test:security` without placing admin secrets in shell history.
@@ -403,10 +418,10 @@ Do not expose the new admin flow until all steps are complete:
 
 ## Final Security Score
 
-**86/100 for the remediated code branch.**
+**88/100 for the deployed v166 code and verified public flows.**
 
-The score is intentionally below 100 because privileged service-role architecture, JSON financial state, some public process-local limits, upload re-encoding, backup recovery and external penetration testing remain unresolved. Current production should not inherit the 86/100 score until secret rotation, both SQL migrations, deployment and live verification are complete.
+The score is intentionally below 100 because privileged service-role architecture, JSON financial state, some public process-local limits, upload re-encoding, backup recovery and external penetration testing remain unresolved. Provider-side secret revocation and protected deep-health checks still require owner confirmation.
 
 ## Final Conclusion
 
-Цикл `найти -> доказать -> исправить -> протестировать -> повторно проверить` выполнен для найденных code-level CRITICAL/HIGH проблем. Ветка собирается, security regression tests и HTTP smoke checks проходят. Остаточные production-блокеры не скрыты: секреты необходимо заменить у внешних провайдеров, а SQL-миграцию необходимо применить в Supabase до включения новой административной схемы.
+Цикл `найти -> доказать -> исправить -> протестировать -> повторно проверить` выполнен для найденных code-level CRITICAL/HIGH проблем и двух production-регрессий. Сборка v166 работает на трёх доменах, security regression tests и HTTP smoke checks проходят, а NOWPayments создаёт корректный неоплаченный LTC-счёт. Остаточные риски и ручные проверки владельца перечислены выше без заявления о недостижимой абсолютной безопасности.
