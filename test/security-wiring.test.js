@@ -59,7 +59,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=164/);
+  assert.match(indexHtml, /app\.js\?v=165/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -78,6 +78,14 @@ test("privileged login failures are locked by account and IP across server insta
   assert.match(authRateLimitMigration, /force row level security/i);
   assert.match(authRateLimitMigration, /revoke all privileges on table public\.auth_rate_limits from public, anon, authenticated/i);
   assert.match(authRateLimitMigration, /grant execute on function public\.record_auth_failure[\s\S]{0,100}service_role/i);
+  assert.match(adminLogin, /Неверный логин или пароль/);
+  assert.doesNotMatch(adminLogin, /Invalid login credentials/);
+});
+
+test("private message refreshes share one in-flight request", () => {
+  assert.match(appClient, /let privateMessagesLoadPromise = null/);
+  assert.match(appClient, /if \(privateMessagesLoadPromise\) return privateMessagesLoadPromise/);
+  assert.match(appClient, /finally \{\s*privateMessagesLoadPromise = null/);
 });
 
 test("public hash routes do not disclose an administrative entry point", () => {

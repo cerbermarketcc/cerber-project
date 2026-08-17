@@ -506,6 +506,7 @@ let privateVoiceRecorder = null;
 let privateVoiceChunks = [];
 let privateVoiceDraft = null;
 let privateRefreshTimer = null;
+let privateMessagesLoadPromise = null;
 
 const root = document.getElementById("app");
 
@@ -6556,20 +6557,26 @@ function rememberPrivateMessage(message = {}) {
 
 async function loadPrivateMessagesRemote() {
   if (!API_ENABLED || !apiSessionToken()) return false;
-  try {
-    const payload = await apiFetch("/api/private-messages", { timeoutMs: 10000 });
-    if (!Array.isArray(payload.messages)) return false;
-    db.messages = mergeMessageLists(payload.messages, db.messages);
-    saveDb({ localOnly: true, silentLocalStorageError: true });
-    return true;
-  } catch (error) {
-    if (error.sessionExpired || error.status === 401 || error.status === 403) {
-      clearApiSession();
+  if (privateMessagesLoadPromise) return privateMessagesLoadPromise;
+  privateMessagesLoadPromise = (async () => {
+    try {
+      const payload = await apiFetch("/api/private-messages", { timeoutMs: 10000 });
+      if (!Array.isArray(payload.messages)) return false;
+      db.messages = mergeMessageLists(payload.messages, db.messages);
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+      return true;
+    } catch (error) {
+      if (error.sessionExpired || error.status === 401 || error.status === 403) {
+        clearApiSession();
+        return false;
+      }
+      console.error("[private-chat] refresh failed", error);
       return false;
+    } finally {
+      privateMessagesLoadPromise = null;
     }
-    console.error("[private-chat] refresh failed", error);
-    return false;
-  }
+  })();
+  return privateMessagesLoadPromise;
 }
 
 function privateVisibleMessages(login = db.currentUser) {
