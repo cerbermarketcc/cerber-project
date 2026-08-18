@@ -108,7 +108,7 @@ export function validIdempotencyKey(value = "") {
 export function normalizePublicBaseUrl(value = "", options = {}) {
   const production = Boolean(options.production);
   const fallback = String(options.fallback || "https://cerber.vip").replace(/\/+$/, "");
-  const allowedHosts = new Set((options.allowedHosts || ["cerber.vip", "cerber.to", "cerber.love"])
+  const allowedHosts = new Set((options.allowedHosts || ["cerber.vip", "cerber.to", "cerber.love", "cerber.cc"])
     .map((host) => String(host || "").trim().toLowerCase())
     .filter(Boolean));
   let candidate = String(value || fallback).trim();

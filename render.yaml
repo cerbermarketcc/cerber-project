@@ -34,9 +34,9 @@ services:
       - key: TURNSTILE_SECRET_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        value: "https://cerber.to,https://www.cerber.to,https://cerber.love,https://www.cerber.love,https://cerber.vip,https://www.cerber.vip"
+        value: "https://cerber.to,https://www.cerber.to,https://cerber.love,https://www.cerber.love,https://cerber.vip,https://www.cerber.vip,https://cerber.cc,https://www.cerber.cc"
       - key: ALLOWED_HOSTS
-        value: "cerber-project.onrender.com,cerber-project,cerber.to,www.cerber.to,cerber.love,www.cerber.love,cerber.vip,www.cerber.vip"
+        value: "cerber-project.onrender.com,cerber-project,cerber.to,www.cerber.to,cerber.love,www.cerber.love,cerber.vip,www.cerber.vip,cerber.cc,www.cerber.cc"
       - key: USER_SESSION_TTL_HOURS
         value: "24"
       - key: BLOCK_DIRECT_RENDER_ORIGIN

@@ -71,6 +71,7 @@ test("public callback URLs are normalized to approved HTTPS origins", () => {
   assert.equal(normalizePublicBaseUrl("https://cerber.vip/", production), "https://cerber.vip");
   assert.equal(normalizePublicBaseUrl("cerber.to/callback", production), "https://cerber.to");
   assert.equal(normalizePublicBaseUrl("[https://cerber.love](https://cerber.love)", production), "https://cerber.love");
+  assert.equal(normalizePublicBaseUrl("https://cerber.cc/register.html", production), "https://cerber.cc");
   assert.equal(normalizePublicBaseUrl("https://attacker.example/callback", production), "https://cerber.vip");
   assert.equal(normalizePublicBaseUrl("javascript:alert(1)", production), "https://cerber.vip");
 });

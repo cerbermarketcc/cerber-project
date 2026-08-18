@@ -425,6 +425,8 @@ const allowedCorsOrigins = new Set([
   "https://www.cerber.love",
   "https://cerber.vip",
   "https://www.cerber.vip",
+  "https://cerber.cc",
+  "https://www.cerber.cc",
   ...configuredAllowedOrigins
 ]);
 const configuredAllowedHosts = String(process.env.ALLOWED_HOSTS || "")
@@ -440,6 +442,8 @@ const allowedRequestHosts = new Set([
   "www.cerber.love",
   "cerber.vip",
   "www.cerber.vip",
+  "cerber.cc",
+  "www.cerber.cc",
   ...configuredAllowedHosts
 ]);
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
@@ -485,7 +489,7 @@ const cspDirectives = [
   "font-src 'self' https://fonts.gstatic.com data:",
   `img-src 'self' data: blob: ${trustedMediaSources}`,
   `media-src 'self' data: blob: ${trustedMediaSources}`,
-  "connect-src 'self' https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://api.coingecko.com https://challenges.cloudflare.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip",
+  "connect-src 'self' https://cerber.to https://www.cerber.to https://cerber.love https://www.cerber.love https://cerber.vip https://www.cerber.vip https://cerber.cc https://www.cerber.cc https://api.coingecko.com https://challenges.cloudflare.com wss://cerber.to wss://www.cerber.to wss://cerber.love wss://www.cerber.love wss://cerber.vip wss://www.cerber.vip wss://cerber.cc wss://www.cerber.cc",
   "frame-src https://challenges.cloudflare.com",
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
@@ -13081,7 +13085,7 @@ const torLinks = [
   "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
   "ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
 ];
-const browserLinks = ["cerber.vip", "cerber.to", "cerber.love"];
+const browserLinks = ["cerber.vip", "cerber.to", "cerber.love", "cerber.cc"];
 
 function botHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => ({
