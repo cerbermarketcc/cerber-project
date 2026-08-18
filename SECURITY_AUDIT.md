@@ -1,6 +1,6 @@
 # CERBER Security Audit
 
-Дата повторной проверки: 2026-08-17
+Дата повторной проверки: 2026-08-18
 
 Ветка исправлений: `codex/security-audit-2fa`
 
@@ -16,7 +16,7 @@
 
 Обычные клиенты не получили 2FA: регистрация и вход клиентов используют прежний flow с captcha и server-side session. 2FA применяется только к `owner`, `admin`, `manager`, `moderator`, `support`, владельцам магазинов и сотрудникам магазинов с административным доступом.
 
-Production-сборка `payment-callback-normalization-2026-08-17-v166` развёрнута на `cerber.vip`, `cerber.to` и `cerber.love`. Код проходит build, 49 automated security/regression tests, production HTTP smoke checks и dependency audit без известных уязвимостей. Владелец сообщил о применении SQL-миграций и замене production-переменных; статус чувствительных значений и deep health нельзя независимо подтвердить без административной MFA-сессии, поэтому обязательная ротация ранее раскрытых секретов остаётся предметом ручной проверки.
+Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `cerber.to` и `cerber.love`. Все apex- и `www`-имена обслуживаются одним Cloudflare Worker Custom Domain gateway; gateway подтверждает запрос серверным секретом, а прямой адрес Render возвращает `404`. Код проходит build, targeted security/regression tests и production HTTP smoke checks. Владелец сообщил о применении SQL-миграций и замене production-переменных; статус чувствительных значений и deep health нельзя независимо подтвердить без административной MFA-сессии, поэтому обязательная ротация ранее раскрытых секретов остаётся предметом ручной проверки.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ Production-сборка `payment-callback-normalization-2026-08-17-v166` раз�
 | Payments | NOWPayments API/IPN/payout IPN | Доверие только после HMAC и сверки сохранённой операции |
 | Bots | Telegram main/site/proverka/mirror webhooks | Secret header, replay protection, serialized state changes |
 | Files | Supabase Storage | Только allowlisted media с magic-byte validation и generated object paths |
-| Deployment | Render + Cloudflare/custom domains | HTTPS, strict Host/Origin allowlists, Node.js 22 |
+| Deployment | Render + Cloudflare Worker Custom Domains | Four mirrored domains, HTTPS, strict Host/Origin allowlists, secret-authenticated origin gateway, Node.js 22 |
 
 ### Основные trust boundaries
 
@@ -285,7 +285,7 @@ Production-сборка `payment-callback-normalization-2026-08-17-v166` раз�
 - Affected: NOWPayments payment/deposit/payout callback construction in `server.js`.
 - Cause: `PUBLIC_BASE_URL` was concatenated without normalization, so an accidentally pasted Markdown link, path or malformed value reached NOWPayments.
 - Impact: wallet invoices and payment requests failed before an address was created.
-- Fix: normalize to an allowlisted HTTPS origin (`cerber.vip`, `cerber.to`, `cerber.love`) and fail safely to the canonical domain.
+- Fix: normalize to an allowlisted HTTPS origin (`cerber.cc`, `cerber.vip`, `cerber.to`, `cerber.love`) and fail safely to the canonical domain.
 - Test: URL normalization unit tests plus a live unpaid LTC invoice and idempotent replay against production.
 - Status: **FIXED AND VERIFIED IN PRODUCTION**.
 
@@ -296,6 +296,15 @@ Production-сборка `payment-callback-normalization-2026-08-17-v166` раз�
 - Impact: unnecessary load, repeated client errors and delayed chat refresh.
 - Fix: all callers now share one in-flight request and release it in `finally`.
 - Test: regression wiring test plus repeated profile-to-private-chat navigation with clean production console.
+- Status: **FIXED AND VERIFIED IN PRODUCTION**.
+
+### SEC-024 - HIGH - Direct Render origin bypassed Cloudflare
+
+- Affected: `cerber-project.onrender.com` and all public custom domains.
+- Cause: a public Render hostname allowed requests to bypass the domain-level Cloudflare controls.
+- Impact: WAF and edge rate limits could be bypassed by attacking Render directly.
+- Fix: all eight apex/`www` hostnames use `cerber-origin-gateway` Worker Custom Domains; the Worker adds a server-only proof header, Render validates it, and the direct Render hostname is denied. Legacy duplicate Worker Routes were removed.
+- Test: all four apex domains and all four `www` domains return `200` for public pages and health; hostile origins return `403`; direct Render returns `404`; forged custom `Host` requests to the Render hostname return `403`.
 - Status: **FIXED AND VERIFIED IN PRODUCTION**.
 
 ## Admin 2FA Verification
@@ -370,7 +379,9 @@ Production-сборка `payment-callback-normalization-2026-08-17-v166` раз�
 
 ### HTTP smoke checks
 
-- 19/19 passed against live `cerber.vip` on build v166; mirror health/state checks passed on `.to` and `.love`.
+- Public page/API matrix passed on `cerber.cc`, `cerber.vip`, `cerber.to`, `cerber.love` and every `www` hostname on commit `af73ec8`.
+- HTTP redirects to HTTPS, TLS minimum is 1.2, SSL mode is strict, HTTP/3 and Browser Integrity Check are enabled for every zone.
+- Hostile cross-origin requests return `403`; direct Render access returns `404`.
 - Health and minimal anonymous state.
 - Captcha answer absent from client token.
 - Source and `node_modules` blocked.
@@ -403,14 +414,14 @@ Production-сборка `payment-callback-normalization-2026-08-17-v166` раз�
 
 ## Production Follow-up
 
-The v166 deployment is live. Complete or periodically repeat these owner-side checks:
+Commit `af73ec8` is live on all four domains. Complete or periodically repeat these owner-side checks:
 
 1. Rotate compromised credentials listed in `INCIDENT_RESPONSE.md`.
 2. Set strong unique values (minimum 32 random bytes) for `ADMIN_JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `SELLER_ADMIN_SECRET`, `CAPTCHA_SECRET` and `IP_HASH_SECRET`.
 3. Set `SECURITY_TOKEN_EPOCH_MS` to invalidate all pre-incident customer/admin sessions.
 4. Apply `supabase-security-2fa.sql`, then `supabase-auth-rate-limits.sql`, and verify RLS/revokes/RPC functions.
 5. Keep `NOWPAYMENTS_PAYOUTS_ENABLED=false` until payment/payout smoke tests and provider whitelist settings pass.
-6. Confirm all domains continue to report `payment-callback-normalization-2026-08-17-v166` or a newer approved build.
+6. Confirm `cerber.cc`, `cerber.vip`, `cerber.to`, `cerber.love` and their `www` names continue to use the `cerber-origin-gateway` Custom Domain and an approved Render build.
 7. Owner first login: enroll Authenticator and store recovery codes offline.
 8. Confirm every existing owner/staff/admin account is forced through enrollment.
 9. Run `SECURITY_SMOKE_URL=https://cerber.vip npm run test:security` without placing admin secrets in shell history.
