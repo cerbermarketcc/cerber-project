@@ -156,8 +156,9 @@ test("direct Render origin is closed while health and signed provider callbacks 
   assert.match(server, /directRenderHosts\.has\(requestHostname\(req\)\)/);
   assert.match(server, /const cloudflareOriginSecret = String\(process\.env\.CLOUDFLARE_ORIGIN_SECRET/);
   assert.match(server, /hasVerifiedCloudflareOrigin\(req\)/);
-  assert.match(server, /server\.on\("upgrade",[\s\S]{0,500}directRenderHosts\.has\(requestHostname\(req\)\)/);
-  assert.match(server, /server\.on\("upgrade",[\s\S]{0,700}cloudflareOriginSecret && !hasVerifiedCloudflareOrigin\(req\)/);
+  assert.match(server, /directRenderHosts\.has\(requestHostname\(req\)\)[\s\S]{0,160}!verifiedCloudflareOrigin/);
+  assert.match(server, /server\.on\("upgrade",[\s\S]{0,500}directRenderRequest && !verifiedCloudflareOrigin/);
+  assert.match(server, /server\.on\("upgrade",[\s\S]{0,650}enforceCloudflareOriginSecret && cloudflareOriginSecret && !verifiedCloudflareOrigin/);
   assert.match(server, /pathname === "\/api\/health"/);
   assert.match(server, /"\/api\/payments\/nowpayments\/ipn"/);
   const connectDirective = server.match(/"connect-src[^\n]+/)?.[0] || "";

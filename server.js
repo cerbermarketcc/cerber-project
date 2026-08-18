@@ -604,11 +604,17 @@ app.use((req, res, next) => {
     return res.status(421).send("Misdirected Request");
   }
   const originBypassRoute = isOriginBypassRoute(req);
-  if (blockDirectRenderOrigin && directRenderHosts.has(requestHostname(req)) && !originBypassRoute) {
+  const verifiedCloudflareOrigin = hasVerifiedCloudflareOrigin(req);
+  if (
+    blockDirectRenderOrigin
+    && directRenderHosts.has(requestHostname(req))
+    && !originBypassRoute
+    && !verifiedCloudflareOrigin
+  ) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
-  if (enforceCloudflareOriginSecret && cloudflareOriginSecret && !originBypassRoute && !hasVerifiedCloudflareOrigin(req)) {
+  if (enforceCloudflareOriginSecret && cloudflareOriginSecret && !originBypassRoute && !verifiedCloudflareOrigin) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
@@ -15686,9 +15692,10 @@ publicRealtimeServer.on("connection", (socket) => {
 
 server.on("upgrade", (req, socket, head) => {
   const directRenderRequest = directRenderHosts.has(requestHostname(req));
+  const verifiedCloudflareOrigin = hasVerifiedCloudflareOrigin(req);
   if (
-    blockDirectRenderOrigin
-    && (directRenderRequest || (cloudflareOriginSecret && !hasVerifiedCloudflareOrigin(req)))
+    (blockDirectRenderOrigin && directRenderRequest && !verifiedCloudflareOrigin)
+    || (enforceCloudflareOriginSecret && cloudflareOriginSecret && !verifiedCloudflareOrigin)
   ) {
     socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
     socket.destroy();
