@@ -447,6 +447,8 @@ const localHostPattern = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 const directRenderHosts = new Set(["cerber-project.onrender.com"]);
 const blockDirectRenderOrigin = isProduction && String(process.env.BLOCK_DIRECT_RENDER_ORIGIN || "true").toLowerCase() !== "false";
 const cloudflareOriginSecret = String(process.env.CLOUDFLARE_ORIGIN_SECRET || "");
+const enforceCloudflareOriginSecret = isProduction
+  && String(process.env.ENFORCE_CLOUDFLARE_ORIGIN_SECRET || "true").toLowerCase() !== "false";
 const cloudflareOriginHeader = "x-cerber-origin-verify";
 if (cloudflareOriginSecret && cloudflareOriginSecret.length < 32) {
   throw new Error("CLOUDFLARE_ORIGIN_SECRET must contain at least 32 characters");
@@ -602,7 +604,7 @@ app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
-  if (isProduction && cloudflareOriginSecret && !originBypassRoute && !hasVerifiedCloudflareOrigin(req)) {
+  if (enforceCloudflareOriginSecret && cloudflareOriginSecret && !originBypassRoute && !hasVerifiedCloudflareOrigin(req)) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
