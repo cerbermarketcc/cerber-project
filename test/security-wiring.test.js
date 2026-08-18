@@ -163,6 +163,8 @@ test("direct Render origin is closed while health and signed provider callbacks 
   assert.match(server, /"\/api\/payments\/nowpayments\/ipn"/);
   const connectDirective = server.match(/"connect-src[^\n]+/)?.[0] || "";
   assert.doesNotMatch(connectDirective, /onrender\.com|api\.telegram\.org/);
+  assert.match(server, /configuredAllowedOrigins[\s\S]{0,260}productionPublicOrigins\.has/);
+  assert.match(server, /trustedMediaOrigins[\s\S]{0,260}!directRenderHosts\.has/);
   assert.match(renderConfig, /BLOCK_DIRECT_RENDER_ORIGIN[\s\S]{0,80}value: "true"/);
   assert.match(renderConfig, /CLOUDFLARE_ORIGIN_SECRET[\s\S]{0,80}sync: false/);
 });

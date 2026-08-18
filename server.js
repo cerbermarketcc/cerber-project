@@ -414,11 +414,7 @@ let settingsBackupMemoryAt = 0;
 const settingsBackupCacheMs = 15 * 1000;
 const disabledMirrorTables = new Set();
 const maxDataImageLength = 7_000_000;
-const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-const allowedCorsOrigins = new Set([
+const productionPublicOrigins = new Set([
   "https://cerber.to",
   "https://www.cerber.to",
   "https://cerber.love",
@@ -426,7 +422,14 @@ const allowedCorsOrigins = new Set([
   "https://cerber.vip",
   "https://www.cerber.vip",
   "https://cerber.cc",
-  "https://www.cerber.cc",
+  "https://www.cerber.cc"
+]);
+const configuredAllowedOrigins = String(process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter((origin) => origin && (!isProduction || productionPublicOrigins.has(origin)));
+const allowedCorsOrigins = new Set([
+  ...productionPublicOrigins,
   ...configuredAllowedOrigins
 ]);
 const configuredAllowedHosts = String(process.env.ALLOWED_HOSTS || "")
@@ -472,9 +475,13 @@ const allowedInlineAttachmentTypes = new Set([
   "video/mp4",
   "video/quicktime"
 ]);
-const trustedMediaOrigins = new Set([
-  ...allowedCorsOrigins
-]);
+const trustedMediaOrigins = new Set([...allowedCorsOrigins].filter((origin) => {
+  try {
+    return !directRenderHosts.has(new URL(origin).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}));
 try {
   if (supabaseUrl) trustedMediaOrigins.add(new URL(supabaseUrl).origin);
 } catch {}

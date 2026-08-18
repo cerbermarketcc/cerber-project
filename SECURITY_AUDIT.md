@@ -303,8 +303,8 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 - Affected: `cerber-project.onrender.com` and all public custom domains.
 - Cause: a public Render hostname allowed requests to bypass the domain-level Cloudflare controls.
 - Impact: WAF and edge rate limits could be bypassed by attacking Render directly.
-- Fix: all eight apex/`www` hostnames use `cerber-origin-gateway` Worker Custom Domains; the Worker adds a server-only proof header, Render validates it, and the direct Render hostname is denied. Legacy duplicate Worker Routes were removed.
-- Test: all four apex domains and all four `www` domains return `200` for public pages and health; hostile origins return `403`; direct Render returns `404`; forged custom `Host` requests to the Render hostname return `403`.
+- Fix: all eight apex/`www` hostnames use `cerber-origin-gateway` Worker Custom Domains; the Worker adds a server-only proof header, Render validates it, and the direct Render hostname is denied. Legacy duplicate Worker Routes were removed. The gateway strips Render-specific response headers and rewrites accidental origin redirects; production CORS and CSP media origins are limited to the four approved domains.
+- Test: all four apex domains and all four `www` domains return `200` for public pages and health; hostile origins return `403`; direct Render returns `404`; forged custom `Host` requests to the Render hostname return `403`; public responses no longer expose Render-specific headers.
 - Status: **FIXED AND VERIFIED IN PRODUCTION**.
 
 ## Admin 2FA Verification
