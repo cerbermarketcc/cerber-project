@@ -43,6 +43,8 @@ services:
         value: "true"
       - key: CLOUDFLARE_ORIGIN_SECRET
         sync: false
+      - key: ENFORCE_CLOUDFLARE_ORIGIN_SECRET
+        value: "true"
       - key: NOWPAYMENTS_API_KEY
         sync: false
       - key: NOWPAYMENTS_IPN_SECRET
