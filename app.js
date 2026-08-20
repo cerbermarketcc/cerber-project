@@ -13,6 +13,7 @@ const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messa
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
 const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v164";
+const CATALOG_FILTER_DEFAULTS_KEY = "cerber_catalog_filter_defaults_v2";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -359,8 +360,8 @@ const defaults = {
   },
   referralPeriod: {},
   filters: {
-    country: "moldova",
-    city: "chisinau",
+    country: "",
+    city: "",
     district: "",
     category: "Все товары",
     sort: "relevance",
@@ -1668,6 +1669,16 @@ function normalizeDb(next) {
   next.paymentSettings.platformCommissionPercent = Number(next.paymentSettings.platformCommissionPercent || 0);
   if (!next.referralPeriod) next.referralPeriod = {};
   if (!next.filters) next.filters = structuredClone(defaults.filters);
+  if (storageGet(CATALOG_FILTER_DEFAULTS_KEY) !== "done") {
+    const legacyImplicitLocation = next.filters.country === "moldova"
+      && next.filters.city === "chisinau"
+      && !next.filters.district
+      && categoryIsAll(next.filters.category)
+      && !String(next.filters.query || "").trim()
+      && (!next.filters.sort || next.filters.sort === "relevance");
+    if (legacyImplicitLocation) next.filters = structuredClone(defaults.filters);
+    storageSet(CATALOG_FILTER_DEFAULTS_KEY, "done");
+  }
   (next.users || []).forEach((user) => {
     if (!user.createdAt) user.createdAt = "2026-05-28";
     if (!next.balances[user.login]) next.balances[user.login] = 0;
@@ -3471,11 +3482,11 @@ function homeStores(tab = "all", filters = catalogFilters()) {
 }
 
 function userBalance(login = db.currentUser) {
-  return Number(db.balances?.[login] || 0);
+  return Number(db.balances?.[login] ?? db.balances?.[loginKey(login)] ?? 0);
 }
 
 function userLtcBalance(login = db.currentUser) {
-  return Number(db.ltcBalances?.[login] || 0);
+  return Number(db.ltcBalances?.[login] ?? db.ltcBalances?.[loginKey(login)] ?? 0);
 }
 
 function userLtcUsdBalance(login = db.currentUser) {
@@ -3860,9 +3871,8 @@ function bindShopLocationSelects(store, root = document) {
 
 function orderCanDispute(order) {
   if (!order || order.type !== "product" || order.paymentStatus !== "paid") return false;
-  if (order.disputeOpen || ["completed", "closed", "canceled"].includes(String(order.status || "").toLowerCase())) return false;
-  const autoReleaseAt = Number(order.autoReleaseAt || 0);
-  return !autoReleaseAt || Date.now() < autoReleaseAt;
+  if (order.disputeOpen || order.reviewLeft || order.disputeClosedAt || order.disputeChatClosed) return false;
+  return !["canceled", "cancelled", "refunded"].includes(String(order.status || "").toLowerCase());
 }
 
 function orderCanComplete(order) {
@@ -4293,8 +4303,8 @@ function supportRecipients() {
 function layout(content) {
   db.theme = "dark";
   document.body.dataset.theme = "dark";
+  const usdBalance = userBalance();
   const ltcBalance = userLtcBalance();
-  const ltcUsd = userLtcUsdBalance();
   const pendingOrders = pendingOrdersCount();
   const mobileNavItems = [
     ["wallet", "wallet", "Пополнить"],
@@ -4310,8 +4320,8 @@ function layout(content) {
           <span class="brand-lockup"><img class="logo" src="assets/cerber-neon-emblem.png" alt=""><span><strong>CERBER</strong><small>MARKETPLACE</small></span></span>
         </button>
         <button class="balance" data-account>
-          <strong>${ltcBalance.toFixed(6)} LTC</strong>
-          <span>${ltcUsd.toFixed(2)} $</span>
+          <strong>${usdBalance.toFixed(2)} $</strong>
+          <span>${ltcBalance.toFixed(6)} LTC</span>
           <img class="avatar" src="assets/user-avatar.png" alt="">
         </button>
         <button class="topbar-menu" data-menu aria-label="Открыть меню" title="Открыть меню"><span></span><span></span><span></span></button>
@@ -5021,7 +5031,7 @@ function showProductOrder(orderId) {
           }))}">Скопировать счет пополнения</button>
         ` : ""}
         ${orderPaymentUrl ? `<a class="primary link-button" href="${esc(orderPaymentUrl)}" target="_blank" rel="noopener">Открыть основную ссылку оплаты</a>` : ""}
-        ${userLtcBalance() >= ltcAmount ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
+        ${userBalance() >= Number(order.amountUsd || 0) ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
         ${order.sellerWallet || order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerWallet || order.sellerLtcWallet)}</strong></p>` : ""}
         <div class="row">
           <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || ""}\nСумма: ${orderDepositPayAmount.toFixed(8)} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать всё</button>
@@ -5267,8 +5277,8 @@ async function handleProductReview(event) {
 
 function renderFilters() {
   const filters = catalogFilters();
-  const country = filterOptions.countries[filters.country] || filterOptions.countries.moldova;
-  const city = country.cities[filters.city] || Object.values(country.cities)[0];
+  const country = filterOptions.countries[filters.country] || null;
+  const city = country?.cities?.[filters.city] || null;
   const resultCount = homeStores(activeHomeTab, filters).length;
   showModal(`
     <div class="filter-head">
@@ -5282,18 +5292,20 @@ function renderFilters() {
       </label>
       <label class="field">Страна
         <select name="country">
+          <option value="" ${!filters.country ? "selected" : ""}>Все страны</option>
           ${Object.entries(filterOptions.countries).map(([key, item]) => `<option value="${key}" ${filters.country === key ? "selected" : ""}>${item.label}</option>`).join("")}
         </select>
       </label>
       <label class="field">Город
         <select name="city">
-          ${Object.entries(country.cities).map(([key, item]) => `<option value="${key}" ${filters.city === key ? "selected" : ""}>${item.label}</option>`).join("")}
+          <option value="" ${!filters.city ? "selected" : ""}>Все города</option>
+          ${country ? Object.entries(country.cities).map(([key, item]) => `<option value="${key}" ${filters.city === key ? "selected" : ""}>${item.label}</option>`).join("") : ""}
         </select>
       </label>
       <label class="field">Район
         <select name="district">
           <option value="">Все районы</option>
-          ${city.districts.map((district) => `<option value="${esc(district)}" ${filters.district === district ? "selected" : ""}>${esc(district)}</option>`).join("")}
+          ${city ? city.districts.map((district) => `<option value="${esc(district)}" ${filters.district === district ? "selected" : ""}>${esc(district)}</option>`).join("") : ""}
         </select>
       </label>
       <label class="field">Категория товара
@@ -5312,7 +5324,7 @@ function renderFilters() {
   `, "filter-panel");
   document.querySelector("[name='country']").onchange = (event) => {
     const draft = new FormData(document.querySelector("[data-filter-form]"));
-    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, country: event.target.value, city: Object.keys(filterOptions.countries[event.target.value].cities)[0], district: "" };
+    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, country: event.target.value, city: "", district: "" };
     saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
@@ -5836,8 +5848,9 @@ function renderProductPayment(storeId, productId, positionId) {
   if (!product || !position) return renderStore(store.id, "positions");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  const balance = userLtcBalance();
-  const enough = balance >= ltcAmount && ltcAmount > 0;
+  const balanceUsd = userBalance();
+  const balanceLtc = userLtcBalance();
+  const enough = balanceUsd >= priceUsd && priceUsd > 0;
   layout(`
     <section class="screen product-payment-screen">
       <h1>Оплата</h1>
@@ -5850,16 +5863,16 @@ function renderProductPayment(storeId, productId, positionId) {
         </div>
       </article>
       <article class="panel payment-wallet">
-        <h3>Внутренний кошелек LTC</h3>
-        <p>Баланс: ${balance.toFixed(6)} LTC</p>
-        <p>${userLtcUsdBalance().toFixed(2)} $ по текущему курсу</p>
+        <h3>Внутренний кошелек CERBER</h3>
+        <p>Баланс: ${balanceUsd.toFixed(2)} $</p>
+        <p>${balanceLtc.toFixed(6)} LTC</p>
       </article>
       <article class="panel payment-summary">
         <p><span>Стоимость</span><strong>${priceUsd.toFixed(2)} $</strong></p>
         <p><span>Курс LTC</span><strong>1 LTC ≈ ${Number(ltcUsdCache || 0).toFixed(2)} $</strong></p>
         <p><span>Сумма к оплате</span><strong>${ltcAmount.toFixed(6)} LTC</strong></p>
       </article>
-      ${enough ? "" : `<article class="alert">Недостаточно средств на LTC балансе для оплаты этим способом</article>`}
+      ${enough ? "" : `<article class="alert">Недостаточно средств на балансе для оплаты этим способом</article>`}
       <button class="primary" data-confirm-product-pay ${enough ? "" : "disabled"}>Оплатить</button>
       <p class="desc center">Нажимая на кнопку оплаты, вы соглашаетесь с правилами площадки.</p>
     </section>
@@ -5879,8 +5892,8 @@ function renderProductPaymentView(storeId, productId, positionId) {
   if (!product || !position) return renderStore(store.id, "positions");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  const balance = userLtcBalance();
-  const enough = balance >= ltcAmount && ltcAmount > 0;
+  const balanceUsd = userBalance();
+  const enough = balanceUsd >= priceUsd && priceUsd > 0;
   layout(`
     <section class="screen product-payment-screen mega-payment-screen">
       <p class="breadcrumbs">Магазины &gt; ${esc(store.name)} &gt; Оплата</p>
@@ -5901,8 +5914,8 @@ function renderProductPaymentView(storeId, productId, positionId) {
       </div>
       <article class="wallet-card-ltc">
         <div>
-          <h3>Внутренний кошелек LTC</h3>
-          <p>Баланс: ${balance.toFixed(6)} LTC</p>
+          <h3>Внутренний кошелек CERBER</h3>
+          <p>Баланс: ${balanceUsd.toFixed(2)} $</p>
           <strong>${ltcAmount.toFixed(6)} LTC</strong>
         </div>
         <div class="ltc-coin">Ł</div>
@@ -5978,7 +5991,7 @@ async function handleProductPurchase(storeId, productId, positionId) {
   if (!storeIsActive(store) || store.salesBlocked) return showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  if (userLtcBalance() < ltcAmount) {
+  if (userBalance() < priceUsd) {
     showToast("У вас недостаточно средств");
     return;
   }
@@ -5991,7 +6004,8 @@ async function handleProductPurchase(storeId, productId, positionId) {
   const reservedDescription = issueRandomDeliveryItem(issuedItems);
   if (!reservedDescription && requiresIssuedDescription) return showToast("Нет доступных описаний для выдачи");
   position.stock = Math.max(0, Number(position.stock || 0) - 1);
-  db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
+  db.balances[db.currentUser] = userBalance() - priceUsd;
+  db.ltcBalances[db.currentUser] = Math.max(0, userLtcBalance() - ltcAmount);
   const order = {
     id: `order-${Date.now()}`,
     type: "product",
@@ -6031,17 +6045,19 @@ function payProductOrderFromBalance(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.status !== "pending_payment") return;
   const ltcAmount = productOrderLtcAmount(order);
-  if (userLtcBalance() < ltcAmount) {
+  const priceUsd = Number(order.amountUsd || 0);
+  if (userBalance() < priceUsd) {
     showToast("У вас недостаточно средств");
     return;
   }
-  db.ltcBalances[db.currentUser] = userLtcBalance() - ltcAmount;
+  db.balances[db.currentUser] = userBalance() - priceUsd;
+  db.ltcBalances[db.currentUser] = Math.max(0, userLtcBalance() - ltcAmount);
   markProductOrderPaid(order.id);
   addWalletTransaction({
     type: "purchase",
     title: `Покупка: ${order.product}`,
     amountLtc: -ltcAmount,
-    amountUsd: -Number(order.amountUsd || 0)
+    amountUsd: -priceUsd
   });
   saveDb();
   renderOrders("active");
@@ -6121,7 +6137,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
   }
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
   const ltcAmount = usdToLtc(priceUsd);
-  const enough = userLtcBalance() >= ltcAmount && ltcAmount > 0;
+  const enough = userBalance() >= priceUsd && priceUsd > 0;
   const allowedCoins = storeEnabledCoins(store);
   const defaultCoin = allowedCoins[0] || walletCoinById("ltc");
   showModal(`
@@ -6142,7 +6158,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       <button class="primary" data-checkout-balance ${enough ? "" : "disabled"}>Оплатить с баланса</button>
       <button class="primary" data-checkout-deposit>Пополнить и оплатить</button>
     </div>
-    ${enough ? `<p class="desc">На балансе достаточно средств. После оплаты описание товара появится в деталях заказа.</p>` : `<p class="notice">На балансе недостаточно средств. Пополните LTC на нужную сумму, заказ будет в обработке 40 минут.</p>`}
+    ${enough ? `<p class="desc">На балансе достаточно средств. После оплаты описание товара появится в деталях заказа.</p>` : `<p class="notice">На балансе недостаточно средств. Пополните баланс на нужную сумму, заказ будет в обработке 40 минут.</p>`}
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-checkout-balance]")?.addEventListener("click", async (event) => {
@@ -9125,14 +9141,14 @@ function renderExchangeChat(cardId) {
 function renderWallet() {
   route = "wallet";
   const ltc = userLtcBalance();
-  const usd = userLtcUsdBalance();
+  const usd = userBalance();
   const txs = walletTransactions();
   const withdrawals = walletWithdrawals();
   layout(`
     <section class="screen wallet-screen">
       <article class="wallet-hero">
         <h1>Баланс</h1>
-        <p>Все платежи поступают на ваш кошелек CERBER MARKET.<br>На платформе доступна монета LiteCoin - LTC.</p>
+        <p>Все платежи поступают на ваш кошелек CERBER MARKET.<br>Основной баланс хранится в фиксированной сумме USD.</p>
         <div class="coin-tabs">
           <button class="active"><span class="ltc-badge">Ł</span> LTC</button>
         </div>
@@ -9141,8 +9157,8 @@ function renderWallet() {
       <article class="wallet-balance-card">
         <p>Личный</p>
         <div class="wallet-balance-row">
-          <strong>${ltc.toFixed(6)} LTC</strong>
           <strong>${usd.toFixed(2)} USD</strong>
+          <strong>${ltc.toFixed(6)} LTC</strong>
         </div>
         <div class="wallet-actions">
           <button class="ghost-button" data-wallet-deposit-open>Пополнить +</button>
@@ -9306,7 +9322,7 @@ function showWalletDepositDetails(depositId) {
 function openWalletDepositModal() {
   showModal(`
     <h2>Пополнить баланс</h2>
-    <p>Выберите монету и сумму. После подтверждения платеж будет зачислен на внутренний баланс сайта в LTC-эквиваленте.</p>
+    <p>Выберите монету и сумму. После подтверждения на внутренний баланс зачислится указанная сумма в USD.</p>
     <form class="form" data-wallet-deposit-form>
       <label class="field">Сумма в USD<input name="amountUsd" type="number" min="1" step="0.01" value="10" required></label>
       <label class="field">Монета и сеть<select name="coinId" required>

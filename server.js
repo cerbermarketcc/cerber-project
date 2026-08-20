@@ -2569,8 +2569,8 @@ async function ensureSeed() {
       },
       referralPeriod: {},
       filters: {
-        country: "moldova",
-        city: "chisinau",
+        country: "",
+        city: "",
         district: "",
         category: "Все товары",
         sort: "relevance"
@@ -3363,9 +3363,10 @@ async function stateFor(user) {
     const userWalletWithdrawals = user
       ? (Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : []).filter((item) => sameUser(item.login))
       : [];
+    const fixedUsdBalance = user ? stateUserUsdBalance(settingsData, userLogin, userKey) : 0;
     const userBalances = user ? {
-      ...(settingsData.balances?.[userLogin] != null ? { [userLogin]: settingsData.balances[userLogin] } : {}),
-      ...(settingsData.balances?.[userKey] != null ? { [userKey]: settingsData.balances[userKey] } : {})
+      [userLogin]: fixedUsdBalance,
+      [userKey]: fixedUsdBalance
     } : {};
     const userLtcBalances = user ? {
       ...(settingsData.ltcBalances?.[userLogin] != null ? { [userLogin]: settingsData.ltcBalances[userLogin] } : {}),
@@ -3791,7 +3792,7 @@ function authStateForUser(user, state = {}) {
       referrals: Array.isArray(state.referrals) ? state.referrals.filter((item) => sameLogin(item.referrerLogin, login) || sameLogin(item.login, login)) : [],
       referralPayments: Array.isArray(state.referralPayments) ? state.referralPayments.filter((item) => sameLogin(item.referrerLogin, login)) : [],
       referralCodes: key && state.referralCodes?.[key] ? { [key]: state.referralCodes[key] } : {},
-      balances: key ? { [key]: Number(state.balances?.[key] || state.balances?.[login] || 0), [login]: Number(state.balances?.[login] || state.balances?.[key] || 0) } : {},
+      balances: key ? { [key]: stateUserUsdBalance(state, login, key), [login]: stateUserUsdBalance(state, login, key) } : {},
       ltcBalances: key ? { [key]: stateUserLtcBalance(state, login, key), [login]: stateUserLtcBalance(state, login, key) } : {},
       walletTransactions: [],
       walletDeposits: [],
@@ -3893,7 +3894,7 @@ async function telegramUserSummary(user) {
       name: user.name,
       role: user.role,
       registeredAt: user.created_at,
-      balanceUsd: Number(state.balances?.[login] || state.balances?.[key] || 0),
+      balanceUsd: stateUserUsdBalance(state, login, key),
       balanceLtc: stateUserLtcBalance(state, login, key),
       totalPurchases: allPurchases.length,
       totalPurchaseUsd,
@@ -6703,7 +6704,7 @@ app.get("/api/admin/users/:login", async (req, res, next) => {
     const messages = data.messages.filter((message) => sameLogin(message.fromLogin, login) || sameLogin(message.toLogin, login));
     const bonusBalanceUsd = adminMoney(data.state.balances?.[login] || data.state.balances?.[user.login_key]);
     const balanceLtc = stateUserLtcBalance(data.state, user.login, user.login_key);
-    const balanceUsd = litecoinToUsd(balanceLtc);
+    const balanceUsd = stateUserUsdBalance(data.state, user.login, user.login_key);
     const userBots = adminCollectBots(data.state).filter((bot) => (
       sameLogin(bot.loginKey, login) ||
       sameLogin(bot.login, login) ||
@@ -6931,24 +6932,25 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
         ok: true,
         reused: true,
         balanceLtc: existingBalanceLtc,
-        balanceUsd: existingBalanceLtc * rate,
+        balanceUsd: stateUserUsdBalance(state, user.login, user.login_key),
         rate,
         transaction: existingTransaction
       });
     }
 
     const previousLtc = stateUserLtcBalance(state, user.login, user.login_key);
-    const requestedLtc = Number((amountUsd / rate).toFixed(8));
-    let nextLtc = previousLtc;
-    if (action === "credit") nextLtc = previousLtc + requestedLtc;
+    const previousUsd = stateUserUsdBalance(state, user.login, user.login_key);
+    let nextUsd = previousUsd;
+    if (action === "credit") nextUsd = previousUsd + amountUsd;
     if (action === "debit") {
-      if (requestedLtc > previousLtc + 0.000000001) return res.status(400).json({ error: "На балансе пользователя недостаточно средств" });
-      nextLtc = previousLtc - requestedLtc;
+      if (amountUsd > previousUsd + 0.000000001) return res.status(400).json({ error: "На балансе пользователя недостаточно средств" });
+      nextUsd = previousUsd - amountUsd;
     }
-    if (action === "set") nextLtc = requestedLtc;
-    nextLtc = Number(Math.max(0, nextLtc).toFixed(8));
-    const deltaLtc = Number((nextLtc - previousLtc).toFixed(8));
-    const deltaUsd = Number((deltaLtc * rate).toFixed(2));
+    if (action === "set") nextUsd = amountUsd;
+    nextUsd = Number(Math.max(0, nextUsd).toFixed(2));
+    const deltaUsd = Number((nextUsd - previousUsd).toFixed(2));
+    const deltaLtc = Number((deltaUsd / rate).toFixed(8));
+    const nextLtc = Number(Math.max(0, previousLtc + deltaLtc).toFixed(8));
     setStateUserLtcBalance(state, user.login, nextLtc, user.login_key);
 
     const now = Date.now();
@@ -6970,6 +6972,8 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
       amountLtc: deltaLtc,
       amountUsd: deltaUsd,
       requestedAmountUsd: amountUsd,
+      balanceBeforeUsd: previousUsd,
+      balanceAfterUsd: nextUsd,
       balanceBeforeLtc: previousLtc,
       balanceAfterLtc: nextLtc,
       ltcUsdRate: rate,
@@ -6981,11 +6985,12 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
       status: "completed"
     };
     state.walletTransactions.unshift(transaction);
+    const fixedBalanceUsd = stateUserUsdBalance(state, user.login, user.login_key);
     pushSiteNotification(state, user.login, {
       id: `notice-${transactionId}`,
       eventType: "wallet_balance_adjusted",
       title: deltaLtc >= 0 ? "Баланс пополнен" : "Баланс изменён",
-      body: `${actionTitles[action]}. Новый баланс: ${(nextLtc * rate).toFixed(2)} $ · ${nextLtc.toFixed(8)} LTC. Причина: ${reason}`
+      body: `${actionTitles[action]}. Новый баланс: ${fixedBalanceUsd.toFixed(2)} $ · ${nextLtc.toFixed(8)} LTC. Причина: ${reason}`
     });
     await saveSettingsState(state);
     await appendAdminLog("user_balance_adjusted", admin.login, {
@@ -7001,7 +7006,7 @@ app.post("/api/admin/users/:login/balance", async (req, res, next) => {
     res.json({
       ok: true,
       balanceLtc: nextLtc,
-      balanceUsd: Number((nextLtc * rate).toFixed(2)),
+      balanceUsd: fixedBalanceUsd,
       previousBalanceLtc: previousLtc,
       deltaLtc,
       deltaUsd,
@@ -10071,6 +10076,26 @@ function walletTransactionAffectsUserLtcBalance(transaction = {}) {
     && !["failed", "cancelled", "canceled", "rejected"].includes(status);
 }
 
+function walletTransactionAffectsUserUsdBalance(transaction = {}) {
+  if (!walletTransactionAffectsUserLtcBalance(transaction)) return false;
+  return Number.isFinite(Number(transaction.amountUsd));
+}
+
+function userUsdBalanceFromLedger(state = {}, login = "") {
+  return (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+    .filter((transaction) => sameLogin(transaction.login || transaction.loginKey, login))
+    .filter(walletTransactionAffectsUserUsdBalance)
+    .reduce((sum, transaction) => sum + Number(transaction.amountUsd || 0), 0);
+}
+
+function stateUserUsdBalance(state = {}, login = "", key = loginKey(login)) {
+  const balances = state?.balances && typeof state.balances === "object" ? state.balances : {};
+  const exact = login && Object.prototype.hasOwnProperty.call(balances, login) ? balances[login] : undefined;
+  const normalized = key && Object.prototype.hasOwnProperty.call(balances, key) ? balances[key] : undefined;
+  const bonusUsd = Number(exact ?? normalized ?? 0) || 0;
+  return Math.max(0, Number((bonusUsd + userUsdBalanceFromLedger(state, login)).toFixed(2)));
+}
+
 function userLtcBalanceFromLedger(state = {}, login = "") {
   return roundLtc((Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
     .filter((transaction) => sameLogin(transaction.login || transaction.loginKey, login))
@@ -11697,7 +11722,7 @@ function adminBuildOverview(data) {
       purchaseUsd: userCompleted.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       balance: adminMoney(state.balances?.[login] || state.balances?.[user.login_key]),
       balanceLtc: stateUserLtcBalance(state, login, user.login_key),
-      walletBalanceUsd: litecoinToUsd(stateUserLtcBalance(state, login, user.login_key)),
+      walletBalanceUsd: stateUserUsdBalance(state, login, user.login_key),
       invitedBy,
       invitedCount: invitedUsers.length,
       referralEarned,
@@ -12286,7 +12311,7 @@ async function completeWalletDeposit(deposit, state, providerPayload = {}, optio
       id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(deposit.login)}`,
       eventType: "wallet_deposit_completed",
       title: "Баланс пополнен",
-      body: `Пополнение на ${Number(paidLtc || 0).toFixed(8)} LTC подтверждено. Баланс: ${Number(balanceAfter || 0).toFixed(8)} LTC.`
+      body: `Пополнение на ${Number(paidUsd || 0).toFixed(2)} $ подтверждено. Эта сумма зафиксирована на балансе.`
     });
   }
   if (referralPayment && options.notify !== false) {
@@ -12359,8 +12384,10 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const ltcUsdRate = Number((await loadLitecoinUsdRate()).rate || 0);
     const ltcAmount = ltcUsdRate > 0 ? priceUsd / ltcUsdRate : 0;
     const balance = stateUserLtcBalance(state, user.login, user.login_key);
+    const balanceUsd = stateUserUsdBalance(state, user.login, user.login_key);
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
-    if (balance + 0.00000001 < ltcAmount) return res.status(400).json({ error: "Недостаточно LTC на балансе" });
+    if (!Number.isFinite(ltcUsdRate) || ltcUsdRate <= 0) return res.status(503).json({ error: "Курс LTC временно недоступен" });
+    if (balanceUsd + 0.00000001 < priceUsd) return res.status(400).json({ error: "Недостаточно средств на балансе" });
 
     const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
     const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
@@ -12404,7 +12431,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     applyProductOrderCommission(order, state, store);
     applyProductOrderLtcSettlement(order, state, store);
     recordProductOrderLedger(order, state, store);
-    setStateUserLtcBalance(state, user.login, balance - ltcAmount, user.login_key);
+    setStateUserLtcBalance(state, user.login, Math.max(0, balance - ltcAmount), user.login_key);
     state.orders.unshift(order);
     state.walletTransactions.unshift({
       id: `tx-${order.id}`,
@@ -13563,7 +13590,7 @@ function botUserStats(state, login) {
     totalPurchaseUsd: paidOrders.reduce((sum, order) => sum + Number(order.amountUsd || order.priceUsd || 0), 0),
     disputes: orderDisputes.length + exchangeDisputes.length,
     balanceLtc: stateUserLtcBalance(state, login),
-    balanceUsd: Number(state.balances?.[login] || state.balances?.[loginKey(login)] || 0),
+    balanceUsd: stateUserUsdBalance(state, login),
     totalDepositsUsd: completedDeposits.reduce((sum, tx) => sum + Number(tx.amountUsd || 0), 0),
     orders: productOrders,
     exchangeRequests,
@@ -14285,7 +14312,11 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     const order = orders.find((item) => item.id === req.params.id && item.type === "product");
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
     if (String(order.paymentStatus || "").toLowerCase() !== "paid") return res.status(400).json({ error: "Заказ ещё не оплачен" });
-    if (["completed", "closed", "canceled"].includes(String(order.status || "").toLowerCase()) && !order.disputeOpen) {
+    if (order.reviewLeft) return res.status(400).json({ error: "После отзыва диспут по этому заказу уже нельзя открыть" });
+    if (order.disputeClosedAt || order.disputeChatClosed) {
+      return res.status(400).json({ error: "Закрытый диспут нельзя открыть повторно" });
+    }
+    if (["canceled", "cancelled", "refunded"].includes(String(order.status || "").toLowerCase()) && !order.disputeOpen) {
       return res.status(400).json({ error: "Диспут по этому заказу уже нельзя открыть" });
     }
     const store = await loadStoreWithFallback(order.storeId);
