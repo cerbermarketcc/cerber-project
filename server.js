@@ -188,6 +188,16 @@ function requestNeedsFinancialLock(req = {}) {
   ].some((pattern) => pattern.test(pathname));
 }
 
+function financialWebhookKind(req = {}) {
+  if (String(req.method || "GET").toUpperCase() !== "POST") return "";
+  const pathname = String(req.path || "");
+  if (["/api/payments/nowpayments/ipn", "/api/payments/nowpayments/payout-ipn"].includes(pathname)) return "nowpayments";
+  if (pathname === "/api/site-notify-bot/webhook") return "site-notify";
+  if (pathname === "/api/telegram/webhook" || /^\/api\/telegram\/mirror\/[a-zA-Z0-9_-]{1,160}$/.test(pathname)) return "telegram";
+  if (pathname === "/api/proverka-bot/webhook") return "proverka";
+  return "";
+}
+
 async function translateUiPhrase(value, target) {
   const source = String(value || "").trim();
   if (!source || target === "ru") return source;
@@ -785,6 +795,25 @@ app.use(async (req, res, next) => {
     next(error);
   }
 });
+app.use((req, res, next) => {
+  try {
+    const webhookKind = financialWebhookKind(req);
+    if (!webhookKind) return next();
+    if (webhookKind === "nowpayments") {
+      if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
+    } else if (webhookKind === "site-notify") {
+      requireTelegramWebhookSecret(req, siteNotifyWebhookSecret, "Site notify webhook");
+    } else if (webhookKind === "proverka") {
+      requireTelegramWebhookSecret(req, proverkaWebhookSecret, "Proverka webhook");
+    } else {
+      requireTelegramWebhookSecret(req, telegramWebhookSecret, "Telegram webhook");
+    }
+    req.verifiedFinancialWebhook = webhookKind;
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 app.use(async (req, res, next) => {
   if (!requestNeedsFinancialLock(req)) return next();
   try {
@@ -1053,19 +1082,25 @@ function decryptStoredSecret(value = "") {
 }
 
 function settingsStateForStorage(state = {}) {
+  const storedState = { ...state };
+  delete storedState.restoredFromBackup;
+  delete storedState.restoredFromMemory;
   return {
-    ...state,
-    mirrorBots: Array.isArray(state.mirrorBots)
-      ? state.mirrorBots.map((bot) => ({ ...bot, token: encryptStoredSecret(bot?.token) }))
+    ...storedState,
+    mirrorBots: Array.isArray(storedState.mirrorBots)
+      ? storedState.mirrorBots.map((bot) => ({ ...bot, token: encryptStoredSecret(bot?.token) }))
       : []
   };
 }
 
 function settingsStateForRuntime(state = {}) {
+  const runtimeState = { ...state };
+  delete runtimeState.restoredFromBackup;
+  delete runtimeState.restoredFromMemory;
   return {
-    ...state,
-    mirrorBots: Array.isArray(state.mirrorBots)
-      ? state.mirrorBots.map((bot) => ({ ...bot, token: decryptStoredSecret(bot?.token) }))
+    ...runtimeState,
+    mirrorBots: Array.isArray(runtimeState.mirrorBots)
+      ? runtimeState.mirrorBots.map((bot) => ({ ...bot, token: decryptStoredSecret(bot?.token) }))
       : []
   };
 }
@@ -9263,15 +9298,20 @@ async function saveSettingsBackupState(state = {}) {
 
 function durableFinanceRecordRank(record = {}) {
   const status = String(record.status || record.paymentStatus || "").toLowerCase();
-  if (["completed", "paid", "finished"].includes(status)) return 4;
-  if (["cancelled", "canceled", "failed", "expired", "refunded", "rejected"].includes(status)) return 3;
-  if (["processing", "pending", "waiting", "queued"].includes(status)) return 2;
+  if (["completed", "paid", "finished"].includes(status)) return 5;
+  if (["cancelled", "canceled", "failed", "expired", "refunded", "rejected", "manual_review", "underpaid"].includes(status)) return 4;
+  if (["processing", "sending", "creating", "submitting"].includes(status)) return 3;
+  if (["pending", "waiting", "queued"].includes(status)) return 2;
   return 1;
 }
 
 function durableFinanceRecordTimestamp(record = {}) {
   return Number(
     record.updatedAt
+    || record.providerStatusCheckedAt
+    || record.providerUpdatedAt
+    || record.payoutSubmissionFinishedAt
+    || record.payoutSubmissionStartedAt
     || record.completedAt
     || record.paidAt
     || record.cancelledAt
@@ -9368,6 +9408,12 @@ async function saveSettingsStateNow(state, options = {}) {
   next.walletTransactions = allowEmptyKeys.has("walletTransactions")
     ? (Array.isArray(state?.walletTransactions) ? state.walletTransactions : [])
     : mergeDurableFinanceRecords(currentData.walletTransactions, state?.walletTransactions);
+  next.walletWithdrawals = allowEmptyKeys.has("walletWithdrawals")
+    ? (Array.isArray(state?.walletWithdrawals) ? state.walletWithdrawals : [])
+    : mergeDurableFinanceRecords(currentData.walletWithdrawals, state?.walletWithdrawals);
+  next.orders = allowEmptyKeys.has("orders")
+    ? (Array.isArray(state?.orders) ? state.orders : [])
+    : mergeDurableFinanceRecords(currentData.orders, state?.orders);
   const storedNext = settingsStateForStorage(next);
   const { error: settingsSaveError } = await withTimeout(
     supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: storedNext }, { onConflict: "id" }),
@@ -10081,12 +10127,16 @@ async function loadSettingsState() {
   if (settingsError) throw settingsError;
   let state = settings?.data || {};
   const backupState = await loadSettingsBackupState();
+  let restoredFromBackup = false;
   if (!stateHasDurableContent(state)) {
-    if (stateHasDurableContent(backupState)) state = { ...state, ...backupState, restoredFromBackup: true };
+    if (stateHasDurableContent(backupState)) {
+      state = { ...state, ...backupState };
+      restoredFromBackup = true;
+    }
   } else {
     state = restoreMissingStateCollections(state, backupState);
   }
-  if (state.restoredFromBackup) {
+  if (restoredFromBackup) {
     console.warn("[settings] using main backup state", {
       ownerStores: state.ownerStores?.length || 0,
       publicStoresCache: state.publicStoresCache?.length || 0,
@@ -15972,7 +16022,6 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
     }
     res.json({ ok: true });
   } catch (error) {
-    console.error("Proverka webhook error", sanitizeErrorForLog(error));
     next(error);
   }
 });
@@ -15993,8 +16042,8 @@ app.get("*", (_req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
-  console.error("[request-error]", sanitizeErrorForLog(error));
   const status = Number(error.status || 500);
+  if (status >= 500) console.error("[request-error]", sanitizeErrorForLog(error));
   const internalMessage = String(error.message || "");
   let message = status >= 500 ? "Сервер временно недоступен" : String(error.message || "Ошибка запроса");
   if (/nowpayments/i.test(internalMessage)) message = "Платежный шлюз не настроен или временно недоступен";
@@ -16030,6 +16079,11 @@ const server = app.listen(port, () => {
   setTimeout(() => {
     resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue startup error", sanitizeErrorForLog(error)));
   }, 3500);
+  setTimeout(() => {
+    loadSettingsState()
+      .then((state) => mirrorFinanceStateToTables(state))
+      .catch((error) => console.error("Finance mirror startup backfill error", sanitizeErrorForLog(error)));
+  }, 5000);
 });
 
 const paymentReconcileTimer = setInterval(() => {

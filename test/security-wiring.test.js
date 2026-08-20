@@ -12,6 +12,7 @@ const authRateLimitMigration = readFileSync(new URL("../supabase-auth-rate-limit
 const legacyStateLockdown = readFileSync(new URL("../supabase-legacy-state-lockdown.sql", import.meta.url), "utf8");
 const lockdownVerification = readFileSync(new URL("../supabase-verify-lockdown.sql", import.meta.url), "utf8");
 const schema = readFileSync(new URL("../supabase-schema.sql", import.meta.url), "utf8");
+const financeMirrors = readFileSync(new URL("../supabase-finance-mirrors.sql", import.meta.url), "utf8");
 const renderConfig = readFileSync(new URL("../render.yaml", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 
@@ -307,6 +308,28 @@ test("financial background jobs use the cross-instance database lock", () => {
   assert.match(server, /async function resumeQueuedWithdrawalPayouts[\s\S]{0,500}withOperationLocks\([\s\S]{0,200}"finance:state"/);
 });
 
+test("signed provider webhooks are authenticated before taking the global finance lock", () => {
+  const authentication = server.indexOf("const webhookKind = financialWebhookKind(req)");
+  const lock = server.indexOf("if (!requestNeedsFinancialLock(req)) return next()");
+  assert.ok(authentication >= 0 && lock > authentication);
+  assert.match(server.slice(authentication, lock), /verifyNowpaymentsSignature\(req\)/);
+  assert.match(server.slice(authentication, lock), /requireTelegramWebhookSecret\(req/);
+});
+
+test("settings recovery markers and stale finance snapshots cannot regress durable state", () => {
+  assert.match(server, /delete storedState\.restoredFromBackup/);
+  assert.match(server, /delete runtimeState\.restoredFromBackup/);
+  assert.match(server, /let restoredFromBackup = false/);
+  assert.match(server, /next\.walletWithdrawals[\s\S]{0,180}mergeDurableFinanceRecords\(currentData\.walletWithdrawals/);
+  assert.match(server, /next\.orders[\s\S]{0,180}mergeDurableFinanceRecords\(currentData\.orders/);
+  assert.match(server, /"manual_review", "underpaid"/);
+});
+
+test("finance mirror tables are backfilled from the authoritative state after startup", () => {
+  assert.match(server, /loadSettingsState\(\)[\s\S]{0,160}mirrorFinanceStateToTables\(state\)/);
+  assert.match(server, /Finance mirror startup backfill error/);
+});
+
 test("store payout settings use a dedicated verified save path", () => {
   const route = routeBody("put", "/api/store-admin/settings");
   assert.match(route, /token\.role !== "owner"/);
@@ -324,6 +347,11 @@ test("database migrations enforce private tables and per-admin 2FA state", () =>
   assert.match(migration, /create or replace function public\.acquire_operation_locks/i);
   assert.match(`${schema}\n${migration}`, /force row level security/i);
   assert.match(`${schema}\n${migration}`, /revoke all privileges on table public\.admin_accounts, public\.operation_locks from public, anon, authenticated/i);
+  assert.match(financeMirrors, /create table if not exists wallet_withdrawals/i);
+  assert.match(financeMirrors, /create table if not exists payment_ipn_events/i);
+  assert.match(financeMirrors, /force row level security/i);
+  assert.match(financeMirrors, /revoke all privileges on table public\.%I from public, anon, authenticated/i);
+  assert.match(financeMirrors, /grant all privileges on table public\.%I to service_role/i);
 });
 
 test("customer sessions are server-side, expiring and device-bound", () => {
