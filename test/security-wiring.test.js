@@ -142,6 +142,15 @@ test("browser clients never connect directly to Supabase or fall back to the Ren
   assert.doesNotMatch(server, /NOWPAYMENTS_LTC_WALLET\s*\|\|\s*["']ltc1/i);
 });
 
+test("visual marketplace cleanup never clears a confirmed client wallet balance", () => {
+  const resetStart = appClient.indexOf("function applyVisualMarketplaceReset(next = {})");
+  const resetEnd = appClient.indexOf("\nfunction normalizeDb", resetStart);
+  const reset = appClient.slice(resetStart, resetEnd);
+  assert.ok(resetStart >= 0 && resetEnd > resetStart);
+  assert.match(reset, /walletTransactions[\s\S]{0,250}\.filter\(isMarketplaceRecordAfterVisualReset\)/);
+  assert.doesNotMatch(reset, /next\.(?:balances|ltcBalances)\s*=\s*\{\}/);
+});
+
 test("registration captcha survives Cloudflare proxy changes without weakening request rate limits", () => {
   const fingerprint = server.match(/function internalCaptchaFingerprint\(req = \{\}\) \{[\s\S]{0,500}?\n\}/)?.[0] || "";
   const clientAddress = server.match(/function clientIp\(req\) \{[\s\S]{0,500}?\n\}/)?.[0] || "";

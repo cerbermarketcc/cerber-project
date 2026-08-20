@@ -1599,8 +1599,8 @@ function applyVisualMarketplaceReset(next = {}) {
   ["stores", "exchangers", "exchangeRequests", "storeApplications", "orders", "walletTransactions", "walletDeposits", "walletWithdrawals", "referralPayments", "siteNotifications"].forEach((key) => {
     if (Array.isArray(next[key])) next[key] = next[key].filter(isMarketplaceRecordAfterVisualReset);
   });
-  next.balances = {};
-  next.ltcBalances = {};
+  // The server owns financial resets. Clearing balances in the client erased
+  // a confirmed wallet credit immediately after an otherwise successful sync.
   return next;
 }
 
