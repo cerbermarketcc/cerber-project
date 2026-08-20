@@ -2058,6 +2058,34 @@ function publicProductForState(product = {}, store = {}, options = {}) {
   return stripPrivateInventory(item);
 }
 
+function serverOrderBooleanFlag(value) {
+  return value === true || value === 1 || ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
+}
+
+function isProductOrderRecord(order = {}) {
+  if (String(order.type || "").toLowerCase() === "product") return true;
+  return Boolean(order.storeId && (order.productId || order.positionId || order.product) && !order.exchangeRequestId);
+}
+
+function productOrderPaymentConfirmed(order = {}) {
+  if (!isProductOrderRecord(order)) return false;
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  const status = String(order.status || "").toLowerCase();
+  return ["paid", "finished"].includes(paymentStatus)
+    || ["active", "paid", "completed", "closed", "dispute"].includes(status);
+}
+
+function productOrderReviewLeft(order = {}) {
+  return Boolean(order.reviewId) || serverOrderBooleanFlag(order.reviewLeft);
+}
+
+function productOrderDisputeClosed(order = {}) {
+  const closedAt = order.disputeClosedAt;
+  const hasClosedAt = Boolean(closedAt && !["0", "false", "null"].includes(String(closedAt).trim().toLowerCase()));
+  const hasDisputeHistory = Boolean(order.disputeThreadId || order.disputeOpenedAt || order.disputeNumber || order.disputeNo || hasClosedAt);
+  return hasClosedAt || (serverOrderBooleanFlag(order.disputeChatClosed) && hasDisputeHistory);
+}
+
 function publicOrderForUser(order = {}) {
   const item = { ...order };
   const providerPayload = item.paymentProviderPayload && typeof item.paymentProviderPayload === "object"
@@ -2072,6 +2100,10 @@ function publicOrderForUser(order = {}) {
   const paymentStatus = String(item.paymentStatus || "").toLowerCase();
   const paid = ["paid", "finished"].includes(paymentStatus)
     || ["active", "paid", "completed", "closed", "dispute"].includes(status);
+  if (isProductOrderRecord(item) && !item.type) item.type = "product";
+  if (paid && isProductOrderRecord(item)) item.paymentStatus = "paid";
+  if (!productOrderReviewLeft(item)) item.reviewLeft = false;
+  if (!productOrderDisputeClosed(item)) item.disputeChatClosed = false;
   [
     "sellerWallet",
     "platformCommissionUsd",
@@ -14210,13 +14242,13 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
-    const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    const found = await findProductOrderForDispute(state, req.params.id);
+    const order = found.order;
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
-    if (order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") {
+    if (serverOrderBooleanFlag(order.disputeOpen) || String(order.status || "").toLowerCase() === "dispute") {
       return res.status(409).json({ error: "Нельзя завершить заказ с открытым диспутом" });
     }
-    if (String(order.paymentStatus || "").toLowerCase() !== "paid") {
+    if (!productOrderPaymentConfirmed(order)) {
       return res.status(400).json({ error: "Заказ ещё не оплачен" });
     }
     order.status = "completed";
@@ -14224,7 +14256,7 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
     order.completedAt = Date.now();
     order.closedAt = order.completedAt;
     order.closeReason = "Завершено клиентом";
-    const store = await loadStoreWithFallback(order.storeId);
+    const store = found.store || await loadStoreWithFallback(order.storeId);
     await ensureProductOrderSettlement(state, order, store);
     await notifySiteUser(state, user.login, {
       id: `notice-order-completed-${order.id}-${loginKey(user.login)}`,
@@ -14242,7 +14274,8 @@ app.post("/api/orders/:id/complete", async (req, res, next) => {
       title: "Заказ завершён",
       body: `Клиент ${user.login} завершил заказ ${order.product || order.id}.`
     });
-    await saveSettingsState({ ...state, orders });
+    await syncProductOrderEverywhere(state, order, store);
+    await saveSettingsState({ ...state, orders: state.orders });
     notifyRealtime("order_completed", { orderId: order.id, storeId: order.storeId });
     res.json({ order: publicOrderForUser(order), ...(await stateFor(user)) });
   } catch (error) {
@@ -14256,18 +14289,17 @@ app.post("/api/orders/:id/review", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
-    const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    const found = await findProductOrderForDispute(state, req.params.id);
+    const order = found.order;
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
     if (!["completed", "closed"].includes(String(order.status || "").toLowerCase())) {
       return res.status(400).json({ error: "Отзыв можно оставить после завершения сделки" });
     }
-    if (order.reviewLeft) return res.status(409).json({ error: "Отзыв уже оставлен" });
+    if (productOrderReviewLeft(order)) return res.status(409).json({ error: "Отзыв уже оставлен" });
     const text = boundedUserText(req.body.text || "", 1000, "Review");
     const rating = Math.max(1, Math.min(5, Number(req.body.rating || 5)));
     if (!text) return res.status(400).json({ error: "Напишите отзыв" });
-    const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
-    const store = row?.data || await loadStoreWithFallback(order.storeId);
+    const store = found.store || await loadStoreWithFallback(order.storeId);
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
     const review = {
       id: `review-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
@@ -14294,7 +14326,8 @@ app.post("/api/orders/:id/review", async (req, res, next) => {
     order.reviewId = review.id;
     await saveStoreRow(store, "product review store save");
     await saveOwnerStoreFallback(store);
-    await saveSettingsState({ ...state, orders });
+    await syncProductOrderEverywhere(state, order, store);
+    await saveSettingsState({ ...state, orders: state.orders });
     notifyRealtime("order_review_created", { orderId: order.id, storeId: order.storeId });
     res.json({ review, order: publicOrderForUser(order), ...(await stateFor(user)) });
   } catch (error) {
@@ -14308,23 +14341,27 @@ app.post("/api/orders/:id/dispute/open", async (req, res, next) => {
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     const state = await loadSettingsState();
-    const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === req.params.id && item.type === "product");
+    const found = await findProductOrderForDispute(state, req.params.id);
+    const order = found.order;
     if (!order || !sameLogin(order.login, user.login)) return res.status(404).json({ error: "Заказ не найден" });
-    if (String(order.paymentStatus || "").toLowerCase() !== "paid") return res.status(400).json({ error: "Заказ ещё не оплачен" });
-    if (order.reviewLeft) return res.status(400).json({ error: "После отзыва диспут по этому заказу уже нельзя открыть" });
-    if (order.disputeClosedAt || order.disputeChatClosed) {
+    if (!productOrderPaymentConfirmed(order)) return res.status(400).json({ error: "Заказ ещё не оплачен" });
+    if (productOrderReviewLeft(order)) return res.status(400).json({ error: "После отзыва диспут по этому заказу уже нельзя открыть" });
+    if (serverOrderBooleanFlag(order.disputeOpen) || String(order.status || "").toLowerCase() === "dispute") {
+      return res.status(409).json({ error: "Диспут по этому заказу уже открыт" });
+    }
+    if (productOrderDisputeClosed(order)) {
       return res.status(400).json({ error: "Закрытый диспут нельзя открыть повторно" });
     }
     if (["canceled", "cancelled", "refunded"].includes(String(order.status || "").toLowerCase()) && !order.disputeOpen) {
       return res.status(400).json({ error: "Диспут по этому заказу уже нельзя открыть" });
     }
-    const store = await loadStoreWithFallback(order.storeId);
+    const store = found.store || await loadStoreWithFallback(order.storeId);
     if (!store) return res.status(404).json({ error: "Магазин не найден" });
     const now = Date.now();
     const threadId = order.disputeThreadId || `dispute-${order.id}-${now}`;
     const publicNumber = ensureDisputeNumber(state, order);
     order.status = "dispute";
+    order.paymentStatus = "paid";
     order.disputeOpen = true;
     order.disputeOpenedAt = order.disputeOpenedAt || now;
     order.disputeThreadId = threadId;

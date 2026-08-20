@@ -3869,16 +3869,45 @@ function bindShopLocationSelects(store, root = document) {
   });
 }
 
+function orderBooleanFlag(value) {
+  return value === true || value === 1 || ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
+}
+
+function isProductOrder(order) {
+  if (!order) return false;
+  if (String(order.type || "").toLowerCase() === "product") return true;
+  return Boolean(order.storeId && (order.productId || order.positionId || order.product) && !order.exchangeRequestId);
+}
+
+function productOrderIsPaid(order) {
+  if (!isProductOrder(order)) return false;
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  const status = String(order.status || "").toLowerCase();
+  return ["paid", "finished"].includes(paymentStatus)
+    || ["active", "paid", "completed", "closed", "dispute"].includes(status);
+}
+
+function orderHasReview(order) {
+  return Boolean(order?.reviewId) || orderBooleanFlag(order?.reviewLeft);
+}
+
+function orderHasClosedDispute(order) {
+  if (!order) return false;
+  const closedAt = order.disputeClosedAt;
+  const hasClosedAt = Boolean(closedAt && !["0", "false", "null"].includes(String(closedAt).trim().toLowerCase()));
+  const hasDisputeHistory = Boolean(order.disputeThreadId || order.disputeOpenedAt || order.disputeNumber || order.disputeNo || hasClosedAt);
+  return hasClosedAt || (orderBooleanFlag(order.disputeChatClosed) && hasDisputeHistory);
+}
+
 function orderCanDispute(order) {
-  if (!order || order.type !== "product" || order.paymentStatus !== "paid") return false;
-  if (order.disputeOpen || order.reviewLeft || order.disputeClosedAt || order.disputeChatClosed) return false;
+  if (!productOrderIsPaid(order)) return false;
+  if (orderBooleanFlag(order.disputeOpen) || orderHasReview(order) || orderHasClosedDispute(order)) return false;
   return !["canceled", "cancelled", "refunded"].includes(String(order.status || "").toLowerCase());
 }
 
 function orderCanComplete(order) {
-  if (!order || order.type !== "product") return false;
-  if (String(order.paymentStatus || "").toLowerCase() !== "paid") return false;
-  if (order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") return false;
+  if (!productOrderIsPaid(order)) return false;
+  if (orderBooleanFlag(order.disputeOpen) || String(order.status || "").toLowerCase() === "dispute") return false;
   return ["active", "paid"].includes(String(order.status || "").toLowerCase());
 }
 
@@ -3889,7 +3918,7 @@ function orderCanCloseDispute(order) {
 }
 
 function orderNeedsReview(order) {
-  if (!order || order.type !== "product" || order.reviewLeft) return false;
+  if (!isProductOrder(order) || orderHasReview(order)) return false;
   return ["completed", "closed"].includes(String(order.status || "").toLowerCase());
 }
 
@@ -4886,7 +4915,7 @@ function renderOrders(tab = activeOrdersTab) {
   document.querySelectorAll("[data-order-open]").forEach((button) => {
     button.onclick = () => {
       const order = db.orders.find((item) => item.id === button.dataset.orderOpen);
-      if (order?.type === "product") return showProductOrder(order.id);
+      if (isProductOrder(order)) return showProductOrder(order.id);
       renderExchangeOrderDetail(button.dataset.orderOpen);
     };
   });
@@ -4924,7 +4953,7 @@ function orderCard(order) {
         <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
-        ${order.paymentStatus === "paid" ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
+        ${productOrderIsPaid(order) ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -4934,8 +4963,8 @@ function orderCard(order) {
         ${orderCanComplete(order) ? `<button data-order-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
         ${orderCanCloseDispute(order) ? `<button data-order-close-dispute="${esc(order.id)}">Закрыть диспут</button>` : ""}
         ${orderNeedsReview(order) ? `<button data-order-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
-        ${order.reviewLeft ? `<small>Отзыв оставлен</small>` : ""}
-        ${orderCanDispute(order) ? `<button data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+        ${orderHasReview(order) ? `<small>Отзыв оставлен</small>` : ""}
+        ${orderCanDispute(order) ? `<button class="order-dispute-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
       </div>
     </article>
   `;
@@ -4996,8 +5025,8 @@ function showProductOrder(orderId) {
     <p>${esc(order.location || "")}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
     <p>Статус: ${productOrderStatus(order)}</p>
-    ${order.paymentStatus === "paid" ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
-    ${["completed", "closed"].includes(order.status) && !order.reviewLeft ? `
+    ${productOrderIsPaid(order) ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
+    ${["completed", "closed"].includes(order.status) && !orderHasReview(order) ? `
       <form class="form" data-review-form="${esc(order.id)}">
         <label class="field">Оценка
           <select name="rating">
@@ -5046,8 +5075,8 @@ function showProductOrder(orderId) {
     ${orderCanComplete(order) ? `<button class="primary" data-product-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
     ${orderCanCloseDispute(order) ? `<button class="primary" data-product-close-dispute="${esc(order.id)}">Закрыть диспут и оставить отзыв</button>` : ""}
     ${orderNeedsReview(order) ? `<button class="primary" data-product-review="${esc(order.id)}">Оставить отзыв</button>` : ""}
-    ${order.reviewLeft ? `<p class="notice">Отзыв по этому заказу уже оставлен. Детали заказа сохранены.</p>` : ""}
-    ${orderCanDispute(order) ? `<button class="ghost-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
+    ${orderHasReview(order) ? `<p class="notice">Отзыв по этому заказу уже оставлен. Детали заказа сохранены.</p>` : ""}
+    ${orderCanDispute(order) ? `<button class="ghost-button order-dispute-button" data-order-dispute="${esc(order.id)}">Открыть спор</button>` : ""}
     ${productOrderDisputeChat(order)}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);

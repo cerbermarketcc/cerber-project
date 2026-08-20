@@ -5,6 +5,7 @@ import test from "node:test";
 const server = readFileSync(new URL("../server.js", import.meta.url), "utf8");
 const appClient = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 function functionBody(source, name) {
   const start = source.indexOf(`function ${name}`);
@@ -29,17 +30,37 @@ test("catalog starts without an implicit location and offers explicit all-locati
   assert.match(appClient, /country: event\.target\.value, city: "", district: ""/);
 });
 
-test("a paid auto-completed order remains disputable until review or a prior dispute closure", () => {
+test("paid and legacy product orders expose disputes until review or a real dispute closure", () => {
   const clientRule = functionBody(appClient, "orderCanDispute");
   const openRoute = routeBody("post", "/api/orders/:id/dispute/open");
   const closeRoute = routeBody("post", "/api/orders/:id/dispute/close");
-  assert.doesNotMatch(clientRule, /completed/);
-  assert.match(clientRule, /order\.reviewLeft/);
-  assert.match(clientRule, /order\.disputeClosedAt/);
-  assert.doesNotMatch(openRoute, /\["completed", "closed"/);
-  assert.match(openRoute, /order\.reviewLeft/);
-  assert.match(openRoute, /order\.disputeClosedAt \|\| order\.disputeChatClosed/);
+  const canDispute = new Function(`
+    ${functionBody(appClient, "orderBooleanFlag")}
+    ${functionBody(appClient, "isProductOrder")}
+    ${functionBody(appClient, "productOrderIsPaid")}
+    ${functionBody(appClient, "orderHasReview")}
+    ${functionBody(appClient, "orderHasClosedDispute")}
+    ${clientRule}
+    return orderCanDispute;
+  `)();
+
+  assert.equal(canDispute({ type: "product", status: "active", paymentStatus: "paid" }), true);
+  assert.equal(canDispute({ storeId: "shop", product: "Legacy", status: "completed", paymentStatus: "finished", reviewLeft: "false", disputeChatClosed: "false" }), true);
+  assert.equal(canDispute({ storeId: "shop", product: "Recovered", status: "completed", paymentStatus: "paid", disputeChatClosed: true }), true);
+  assert.equal(canDispute({ type: "product", status: "completed", paymentStatus: "paid", reviewLeft: true }), false);
+  assert.equal(canDispute({ type: "product", status: "completed", paymentStatus: "paid", disputeClosedAt: Date.now() }), false);
+  assert.equal(canDispute({ type: "product", status: "completed", paymentStatus: "paid", disputeThreadId: "thread", disputeChatClosed: true }), false);
+  assert.equal(canDispute({ type: "product", status: "refunded", paymentStatus: "paid" }), false);
+
+  assert.match(openRoute, /findProductOrderForDispute/);
+  assert.match(openRoute, /productOrderPaymentConfirmed/);
+  assert.match(openRoute, /productOrderReviewLeft/);
+  assert.match(openRoute, /productOrderDisputeClosed/);
+  assert.match(openRoute, /syncProductOrderEverywhere/);
+  assert.match(closeRoute, /order\.paymentStatus/);
   assert.match(closeRoute, /order\.status = "completed"/);
+  assert.match(styles, /\.order-side \.order-dispute-button/);
+  assert.match(styles, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
 });
 
 test("customer USD balance is ledger-based and independent from the live LTC rate", () => {
@@ -81,5 +102,5 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /app\.js\?v=166/);
+  assert.match(indexHtml, /app\.js\?v=167/);
 });
