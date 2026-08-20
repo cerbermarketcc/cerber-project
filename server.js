@@ -39,7 +39,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "clean-marketplace-launch-2026-08-17-v168";
+const cerberBuildVersion = "clean-marketplace-launch-2026-08-17-v169";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v2";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -5193,6 +5193,76 @@ app.put("/api/store-admin/store", async (req, res, next) => {
   }
 });
 
+app.put("/api/store-admin/settings", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token?.storeId) return res.status(401).json({ error: "Нет доступа к этой админке" });
+    if (token.role !== "owner") return res.status(403).json({ error: "Настройки выплат доступны только владельцу магазина" });
+
+    const existing = await loadStoreWithFallback(token.storeId);
+    if (!existing) return res.status(404).json({ error: "Магазин не найден" });
+    const requestedWallets = req.body.wallets && typeof req.body.wallets === "object" ? req.body.wallets : {};
+    const wallets = { ...(existing.wallets && typeof existing.wallets === "object" ? existing.wallets : {}) };
+    walletCoins.forEach(({ id }) => {
+      if (Object.prototype.hasOwnProperty.call(requestedWallets, id)) {
+        wallets[id] = boundedUserText(requestedWallets[id], 200, "Wallet address");
+      }
+    });
+    const ltcWallet = boundedUserText(req.body.ltcWallet ?? requestedWallets.ltc ?? existing.ltcWallet ?? wallets.ltc ?? "", 200, "LTC wallet");
+    if (ltcWallet && !isValidLitecoinAddress(ltcWallet)) {
+      return res.status(400).json({ error: "Укажите корректный LTC кошелек магазина" });
+    }
+    wallets.ltc = ltcWallet;
+    const autoReleaseHours = Math.min(168, Math.max(0, Number(req.body.autoReleaseHours ?? existing.autoReleaseHours ?? 24)));
+    const nextPanelPassword = String(req.body.adminPassword || "").trim();
+    if (nextPanelPassword && (nextPanelPassword.length < 10 || nextPanelPassword.length > 128)) {
+      return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
+    }
+    const nextPanelPasswordHash = nextPanelPassword ? await hashPanelPassword(nextPanelPassword) : "";
+    const mergedStore = await normalizeStoreSecrets({
+      ...existing,
+      wallets,
+      ltcWallet,
+      autoReleaseHours,
+      ...(nextPanelPassword ? { adminPassword: nextPanelPassword, adminPasswordHash: "" } : {}),
+      updatedAt: Date.now()
+    }, { adminPasswordHash: nextPanelPasswordHash });
+    const canonicalPanelPasswordHash = nextPanelPasswordHash || String(mergedStore.adminPasswordHash || "").trim();
+    if (mergedStore.ownerLogin && canonicalPanelPasswordHash) {
+      const profileSync = withTimeout(
+        adminEnsureSellerProfile(mergedStore.ownerLogin, "", mergedStore.ownerLogin, { passwordHash: canonicalPanelPasswordHash }),
+        "store-admin settings profile sync",
+        10000
+      );
+      if (nextPanelPassword) {
+        await profileSync;
+      } else {
+        profileSync.catch((error) => {
+          console.error("[store-admin] settings profile sync skipped", { storeId: mergedStore.id, message: error.message });
+        });
+      }
+    }
+    const savedStore = await saveStoreRow(mergedStore, "store-admin settings save");
+    if (String(savedStore.ltcWallet || "") !== ltcWallet || String(savedStore.wallets?.ltc || "") !== ltcWallet) {
+      const error = new Error("Сервер не подтвердил сохранение LTC кошелька");
+      error.status = 500;
+      throw error;
+    }
+    await synchronizeStoreAdminAccess(existing, savedStore);
+    scheduleStorePublication(savedStore, "store-admin settings save");
+    await appendAdminLog("store_settings_updated", mergedStore.ownerLogin || token.storeId, {
+      storeId: token.storeId,
+      hasLtcWallet: Boolean(ltcWallet),
+      autoReleaseHours
+    });
+    notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-settings" });
+    res.json({ ok: true, store: storeForAdminState(savedStore, token) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.put("/api/store-admin/products", async (req, res, next) => {
   try {
     requireDb();
@@ -7777,11 +7847,21 @@ app.delete("/api/admin/stores/:id/products/:productId", async (req, res, next) =
 app.put("/api/admin/settings", async (req, res, next) => {
   try {
     const admin = requireOwnerAdmin(req);
-    const state = await loadSettingsState();
-    state.ownerSettings = { ...(state.ownerSettings || {}), ...(req.body.ownerSettings || {}) };
-    state.paymentSettings = { ...(state.paymentSettings || {}), ...(req.body.paymentSettings || {}) };
-    state.userFilters = Array.isArray(req.body.userFilters) ? req.body.userFilters : (state.userFilters || []);
-    await saveSettingsState(state);
+    const requestedPlatformWallet = Object.prototype.hasOwnProperty.call(req.body.paymentSettings || {}, "platformLtcWallet")
+      ? String(req.body.paymentSettings.platformLtcWallet || "").trim()
+      : null;
+    if (requestedPlatformWallet && !isValidLitecoinAddress(requestedPlatformWallet)) {
+      return res.status(400).json({ error: "Укажите корректный LTC кошелек владельца" });
+    }
+    await mutateSettingsState(async (state) => {
+      state.ownerSettings = { ...(state.ownerSettings || {}), ...(req.body.ownerSettings || {}) };
+      state.paymentSettings = {
+        ...(state.paymentSettings || {}),
+        ...(req.body.paymentSettings || {}),
+        ...(requestedPlatformWallet !== null ? { platformLtcWallet: requestedPlatformWallet } : {})
+      };
+      state.userFilters = Array.isArray(req.body.userFilters) ? req.body.userFilters : (state.userFilters || []);
+    });
     await appendAdminLog("settings_updated", admin.login, { sections: Object.keys(req.body || {}) });
     res.json(adminBuildOverview(await adminLoadMarketplace()));
   } catch (error) {
@@ -7857,6 +7937,17 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
   }
 });
 
+app.post("/api/admin/withdrawals/:id/sync", async (req, res, next) => {
+  try {
+    const admin = requireOwnerAdmin(req);
+    assertClientRateLimit(req, "withdrawal-provider-sync", { limit: 20, windowMs: 60 * 1000, identity: admin.login });
+    await reconcileNowpaymentsWithdrawalPayout(req.params.id, { force: true, actor: admin.login });
+    res.json(adminBuildOverview(await adminLoadMarketplace()));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
   try {
     const admin = requireOwnerAdmin(req);
@@ -7870,8 +7961,8 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
     if (!["pending", "processing", "paid", "completed", "rejected", "cancelled", "canceled"].includes(nextStatus)) {
       return res.status(400).json({ error: "Неверный статус вывода" });
     }
-    if (withdrawal.provider === "nowpayments" && withdrawal.providerPayoutId) {
-      return res.status(409).json({ error: "NOWPayments payout status is controlled only by a verified provider callback" });
+    if (withdrawal.provider === "nowpayments") {
+      return res.status(409).json({ error: "NOWPayments payout status is controlled only by verified provider status" });
     }
     const prevStatus = String(withdrawal.status || "pending").toLowerCase();
     withdrawal.status = nextStatus;
@@ -8343,6 +8434,150 @@ function withdrawalMatchesNowpaymentsPayoutIds(withdrawal = {}, payoutIds = new 
   return storedIds.some((id) => payoutIds.has(id));
 }
 
+function nowpaymentsPayoutLookupIds(withdrawal = {}) {
+  return [...new Set([
+    ...(Array.isArray(withdrawal.providerWithdrawalIds) ? withdrawal.providerWithdrawalIds : []),
+    withdrawal.providerPayoutId,
+    withdrawal.providerPayload?.payoutId,
+    withdrawal.providerPayload?.payout?.id,
+    withdrawal.providerPayload?.payout?.batch_id
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function nowpaymentsPayoutRecords(payload = {}) {
+  const roots = [
+    payload,
+    ...(Array.isArray(payload?.data) ? payload.data : [payload?.data]),
+    ...(Array.isArray(payload?.items) ? payload.items : [])
+  ].filter((value) => value && typeof value === "object" && !Array.isArray(value));
+  return roots.flatMap((root) => [
+    ...(Array.isArray(root.withdrawals) ? root.withdrawals : []),
+    root
+  ]);
+}
+
+function nowpaymentsPayoutRecord(payload = {}, withdrawal = {}) {
+  const records = nowpaymentsPayoutRecords(payload);
+  const ids = new Set(nowpaymentsPayoutLookupIds(withdrawal));
+  const recordIds = (record = {}) => [
+    record.id,
+    record.payout_id,
+    record.withdrawal_id,
+    record.batch_withdrawal_id,
+    record.batch_id,
+    record.batchId
+  ].map((value) => String(value || "")).filter(Boolean);
+  return records.find((record) => recordIds(record).some((id) => ids.has(id)))
+    || records.find((record) => record !== payload && record !== payload?.data)
+    || records[0]
+    || {};
+}
+
+function nowpaymentsPayoutStatusValue(payload = {}, withdrawal = {}) {
+  const record = nowpaymentsPayoutRecord(payload, withdrawal);
+  return String(record.status || record.payout_status || payload.status || payload.payout_status || "").trim().toLowerCase();
+}
+
+async function fetchNowpaymentsPayoutStatus(withdrawal = {}) {
+  const ids = nowpaymentsPayoutLookupIds(withdrawal);
+  if (!ids.length) {
+    const error = new Error("NOWPayments payout ID отсутствует");
+    error.status = 409;
+    throw error;
+  }
+  let lastError;
+  for (const id of ids) {
+    try {
+      const payload = await nowpaymentsRequest(`payout/${encodeURIComponent(id)}`, { method: "GET" });
+      return { id, payload };
+    } catch (error) {
+      lastError = error;
+      if (Number(error?.status || 0) !== 404) throw error;
+    }
+  }
+  const batchId = String(withdrawal.providerPayoutId || withdrawal.providerPayload?.payoutId || "").trim();
+  if (batchId) {
+    try {
+      const payload = await nowpaymentsRequest(`payout?batch_id=${encodeURIComponent(batchId)}&limit=20&page=0`, { method: "GET" });
+      if (nowpaymentsPayoutRecords(payload).length) return { id: batchId, payload };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("NOWPayments payout не найден");
+}
+
+function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
+  const payload = statusResult.payload || statusResult;
+  const record = nowpaymentsPayoutRecord(payload, withdrawal);
+  const status = nowpaymentsPayoutStatusValue(payload, withdrawal);
+  if (!status) {
+    const error = new Error("NOWPayments не вернул статус payout");
+    error.status = 502;
+    throw error;
+  }
+  const validation = validateProviderPayout(record, {
+    currency: withdrawal.payCurrency || withdrawal.coinId || "ltc",
+    amount: withdrawal.amountLtc,
+    address: withdrawal.address
+  });
+  withdrawal.provider = "nowpayments";
+  withdrawal.providerStatus = status;
+  withdrawal.providerStatusPayload = payload;
+  withdrawal.providerStatusId = String(statusResult.id || record.id || record.payout_id || "");
+  withdrawal.providerStatusCheckedAt = Date.now();
+  withdrawal.providerUpdatedAt = Date.now();
+
+  if (!validation.ok) {
+    withdrawal.status = "manual_review";
+    withdrawal.requiresManualReview = true;
+    withdrawal.providerVerificationError = validation.reason;
+    return { status, validation, terminal: false };
+  }
+  delete withdrawal.providerVerificationError;
+
+  if (status === "finished") {
+    withdrawal.status = "paid";
+    withdrawal.processedAt = Date.now();
+    withdrawal.processedBy = "nowpayments";
+    withdrawal.requiresManualReview = false;
+    withdrawal.requiresProviderVerification = false;
+    delete withdrawal.autoPayoutError;
+    delete withdrawal.autoPayoutErrorCode;
+    delete withdrawal.autoPayoutStage;
+    delete withdrawal.payoutFailureMessage;
+    return { status, validation, terminal: true };
+  }
+  if (["rejected", "cancelled", "canceled"].includes(status)) {
+    withdrawal.status = "rejected";
+    withdrawal.failedAt = Date.now();
+    withdrawal.requiresManualReview = false;
+    withdrawal.autoPayoutError = String(record.error || record.message || "NOWPayments payout rejected").slice(0, 500);
+    withdrawal.autoPayoutErrorCode = nowpaymentsPayoutErrorCode({ message: withdrawal.autoPayoutError, body: record });
+    withdrawal.autoPayoutStage = "provider_status";
+    withdrawal.payoutFailureMessage = "NOWPayments отклонил выплату. Средства снова доступны; проверьте Whitelist, адрес и 2FA перед новой заявкой.";
+    return { status, validation, terminal: true };
+  }
+  if (status === "failed") {
+    withdrawal.status = "manual_review";
+    withdrawal.failedAt = Date.now();
+    withdrawal.requiresManualReview = true;
+    withdrawal.autoPayoutError = String(record.error || record.message || "NOWPayments payout failed").slice(0, 500);
+    withdrawal.autoPayoutErrorCode = nowpaymentsPayoutErrorCode({ message: withdrawal.autoPayoutError, body: record });
+    withdrawal.autoPayoutStage = "provider_status";
+    withdrawal.payoutFailureMessage = "NOWPayments сообщил failed. Не создавайте повторную выплату, пока транзакцию не проверит поддержка NOWPayments.";
+    return { status, validation, terminal: false };
+  }
+  if (["creating", "waiting", "processing", "sending"].includes(status)) {
+    withdrawal.status = status;
+    withdrawal.requiresManualReview = false;
+    return { status, validation, terminal: false };
+  }
+  withdrawal.status = "manual_review";
+  withdrawal.requiresManualReview = true;
+  return { status, validation, terminal: false };
+}
+
 function normalizeNowpaymentsPayoutAmount(value = 0) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
@@ -8535,8 +8770,27 @@ async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", descrip
     error.providerPayload = { payoutId, payout };
     throw error;
   }
+  let statusResult = null;
+  let statusCheckError = "";
+  try {
+    statusResult = await fetchNowpaymentsPayoutStatus({
+      providerPayoutId: payoutId,
+      providerWithdrawalIds: nowpaymentsPayoutWithdrawalIds(payout),
+      providerPayload: { payoutId, payout }
+    });
+  } catch (error) {
+    statusCheckError = String(error?.message || error).slice(0, 500);
+  }
   nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
-  return { payout, payoutId, verification, amountLtc: payoutAmount, withdrawalIds: nowpaymentsPayoutWithdrawalIds(payout) };
+  return {
+    payout,
+    payoutId,
+    verification,
+    amountLtc: payoutAmount,
+    withdrawalIds: nowpaymentsPayoutWithdrawalIds(payout),
+    statusResult,
+    statusCheckError
+  };
 }
 
 async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", description = "" } = {}) {
@@ -8549,7 +8803,7 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
       address: address || withdrawal.address || "",
       description
     });
-    withdrawal.status = payoutResult.verification ? "processing" : "creating";
+    withdrawal.status = "processing";
     withdrawal.provider = "nowpayments";
     withdrawal.providerPayoutId = payoutResult.payoutId;
     withdrawal.providerWithdrawalIds = payoutResult.withdrawalIds;
@@ -8560,7 +8814,13 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
       verification: payoutResult.verification
     };
     withdrawal.autoPayoutAt = Date.now();
-    withdrawal.requiresProviderVerification = !payoutResult.verification;
+    withdrawal.requiresProviderVerification = false;
+    if (payoutResult.statusResult) {
+      applyNowpaymentsPayoutStatus(withdrawal, payoutResult.statusResult);
+    } else if (payoutResult.statusCheckError) {
+      withdrawal.providerStatusCheckError = payoutResult.statusCheckError;
+      withdrawal.providerStatusCheckedAt = Date.now();
+    }
   } catch (error) {
     const failureCode = nowpaymentsPayoutErrorCode(error);
     const uncertainSubmission = Boolean(error?.providerPayoutId) || (error?.payoutStage === "create_payout" && failureCode === "timeout");
@@ -8610,6 +8870,12 @@ async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
     "status",
     "provider",
     "providerStatus",
+    "providerStatusPayload",
+    "providerStatusId",
+    "providerStatusCheckedAt",
+    "providerStatusCheckError",
+    "providerStatusCheckErrorAt",
+    "providerUpdatedAt",
     "providerPayoutId",
     "providerWithdrawalIds",
     "providerPayload",
@@ -8621,11 +8887,17 @@ async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
     "payoutFailureMessage",
     "requiresProviderVerification",
     "requiresManualReview",
+    "providerVerificationError",
+    "processedAt",
+    "processedBy",
+    "failedAt",
     "payoutSubmissionFinishedAt"
   ].forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(payoutDraft, key)) latestWithdrawal[key] = payoutDraft[key];
   });
 
+  const payoutPaid = latestWithdrawal.status === "paid";
+  const payoutRejected = latestWithdrawal.status === "rejected";
   const payoutFailed = latestWithdrawal.status === "failed";
   const payoutNeedsReview = latestWithdrawal.status === "manual_review";
   await notifySiteUser(latestState, latestWithdrawal.login || latestWithdrawal.storeId || "admin", {
@@ -8633,8 +8905,20 @@ async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
     eventType: "withdrawal_provider_status",
     withdrawalId: latestWithdrawal.id,
     storeId: latestWithdrawal.storeId || "",
-    title: payoutFailed ? "Не удалось отправить выплату" : payoutNeedsReview ? "Выплата требует проверки" : "Выплата отправлена в обработку",
-    body: payoutFailed
+    title: payoutPaid
+      ? "Выплата завершена"
+      : payoutRejected
+        ? "Выплата отклонена"
+        : payoutFailed
+          ? "Не удалось отправить выплату"
+          : payoutNeedsReview
+            ? "Выплата требует проверки"
+            : "Выплата отправлена в обработку",
+    body: payoutPaid
+      ? `NOWPayments подтвердил завершение заявки ${latestWithdrawal.id}.`
+      : payoutRejected
+        ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments отклонил выплату."}`
+        : payoutFailed
       ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments отклонил выплату."} Средства снова доступны для вывода.`
       : payoutNeedsReview
         ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments не подтвердил результат."} Новую заявку пока не создавайте.`
@@ -8678,12 +8962,90 @@ function scheduleNowpaymentsWithdrawalPayout(withdrawalId = "") {
   timer.unref?.();
 }
 
+async function reconcileNowpaymentsWithdrawalInState(state, withdrawal, { force = false } = {}) {
+  if (!withdrawal || withdrawal.provider !== "nowpayments" || !nowpaymentsPayoutLookupIds(withdrawal).length) {
+    return { changed: false, skipped: true };
+  }
+  const now = Date.now();
+  if (!force && now - Number(withdrawal.providerStatusCheckedAt || 0) < 45 * 1000) {
+    return { changed: false, skipped: true };
+  }
+  const previousStatus = String(withdrawal.status || "").toLowerCase();
+  try {
+    const statusResult = await fetchNowpaymentsPayoutStatus(withdrawal);
+    const outcome = applyNowpaymentsPayoutStatus(withdrawal, statusResult);
+    delete withdrawal.providerStatusCheckError;
+    delete withdrawal.providerStatusCheckErrorAt;
+    const nextStatus = String(withdrawal.status || "").toLowerCase();
+    if (nextStatus !== previousStatus && ["paid", "rejected", "manual_review"].includes(nextStatus)) {
+      await notifySiteUser(state, withdrawal.login || withdrawal.storeId || "admin", {
+        id: `notice-withdrawal-reconciled-${withdrawal.id}-${nextStatus}`,
+        eventType: "withdrawal_provider_status",
+        withdrawalId: withdrawal.id,
+        storeId: withdrawal.storeId || "",
+        title: nextStatus === "paid" ? "Выплата завершена" : nextStatus === "rejected" ? "Выплата отклонена" : "Выплата требует проверки",
+        body: nextStatus === "paid"
+          ? `NOWPayments подтвердил статус finished для заявки ${withdrawal.id}.`
+          : withdrawal.payoutFailureMessage || `NOWPayments вернул статус ${withdrawal.providerStatus || nextStatus}.`
+      });
+    }
+    return { changed: true, previousStatus, nextStatus, outcome };
+  } catch (error) {
+    withdrawal.providerStatusCheckedAt = now;
+    withdrawal.providerStatusCheckErrorAt = now;
+    withdrawal.providerStatusCheckError = String(error?.message || error).slice(0, 500);
+    return { changed: true, previousStatus, nextStatus: previousStatus, error };
+  }
+}
+
+async function reconcileNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "", options = {}) {
+  const state = await loadSettingsState();
+  state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
+  const withdrawal = state.walletWithdrawals.find((item) => String(item.id || "") === String(withdrawalId || ""));
+  if (!withdrawal) {
+    const error = new Error("Заявка на вывод не найдена");
+    error.status = 404;
+    throw error;
+  }
+  if (withdrawal.provider !== "nowpayments" || !nowpaymentsPayoutLookupIds(withdrawal).length) {
+    const error = new Error("У заявки нет NOWPayments payout ID для проверки");
+    error.status = 409;
+    throw error;
+  }
+  const result = await reconcileNowpaymentsWithdrawalInState(state, withdrawal, options);
+  if (result.changed) await saveSettingsState(state);
+  await appendAdminLog("withdrawal_provider_reconciled", options.actor || "system", {
+    id: withdrawal.id,
+    scope: withdrawal.scope || "user",
+    status: withdrawal.status,
+    providerStatus: withdrawal.providerStatus || "",
+    providerPayoutId: withdrawal.providerPayoutId || "",
+    error: withdrawal.providerStatusCheckError || ""
+  });
+  notifyRealtime("wallet_withdrawal_status_updated", {
+    id: withdrawal.id,
+    status: withdrawal.status,
+    scope: withdrawal.scope || "user"
+  });
+  return withdrawal;
+}
+
+async function reconcileNowpaymentsWithdrawalPayout(withdrawalId = "", options = {}) {
+  const id = String(withdrawalId || "");
+  if (!id) return null;
+  return withOperationLocks(
+    ["finance:state", `withdrawal:${id}`],
+    () => reconcileNowpaymentsWithdrawalPayoutUnlocked(id, options),
+    { waitMs: 30000, ttlSeconds: 90 }
+  );
+}
+
 async function resumeQueuedWithdrawalPayoutsUnlocked() {
   if (!nowpaymentsPayoutsEnabled) return;
   const state = await loadSettingsState();
   const withdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
   let changed = false;
-  withdrawals.forEach((withdrawal) => {
+  for (const withdrawal of withdrawals) {
     const status = String(withdrawal.status || "").toLowerCase();
     if (status === "queued") scheduleNowpaymentsWithdrawalPayout(withdrawal.id);
     if (status === "submitting" && !withdrawal.providerPayoutId && Date.now() - Number(withdrawal.payoutSubmissionStartedAt || 0) > 5 * 60 * 1000) {
@@ -8692,7 +9054,15 @@ async function resumeQueuedWithdrawalPayoutsUnlocked() {
       withdrawal.requiresManualReview = true;
       changed = true;
     }
-  });
+    const canReconcile = withdrawal.provider === "nowpayments"
+      && nowpaymentsPayoutLookupIds(withdrawal).length
+      && !["finished", "failed", "rejected"].includes(String(withdrawal.providerStatus || "").toLowerCase())
+      && ["creating", "waiting", "processing", "sending", "manual_review", "submitting"].includes(status);
+    if (canReconcile) {
+      const result = await reconcileNowpaymentsWithdrawalInState(state, withdrawal);
+      changed = result.changed || changed;
+    }
+  }
   if (changed) await saveSettingsState(state);
 }
 
@@ -13089,7 +13459,6 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
     if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
     const fingerprint = nowpaymentsIpnFingerprint(req, "payout");
     const payoutIds = nowpaymentsPayoutCallbackIds(req.body);
-    const status = String(req.body.status || req.body.payout_status || "").toLowerCase();
     if (!payoutIds.size) return res.status(400).json({ error: "Unsupported payout callback" });
     const state = await loadSettingsState();
     if (!rememberNowpaymentsIpn(state, fingerprint, "payout")) return res.json({ ok: true, duplicate: true });
@@ -13099,49 +13468,14 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
     state.walletWithdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     const withdrawal = state.walletWithdrawals.find((item) => withdrawalMatchesNowpaymentsPayoutIds(item, payoutIds));
     if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found" });
-    const payoutValidation = validateProviderPayout(req.body, {
-      currency: withdrawal.payCurrency || withdrawal.coinId || "ltc",
-      amount: withdrawal.amountLtc,
-      address: withdrawal.address
-    });
-    if (!payoutValidation.ok) {
-      withdrawal.status = "manual_review";
-      withdrawal.requiresManualReview = true;
-      withdrawal.providerStatus = "verification_failed";
-      withdrawal.providerVerificationError = payoutValidation.reason;
-      withdrawal.providerUpdatedAt = Date.now();
+    const outcome = applyNowpaymentsPayoutStatus(withdrawal, req.body);
+    if (!outcome.validation.ok) {
       await saveSettingsState(state);
       await appendAdminLog("payout_verification_failed", "nowpayments", {
         withdrawalId: withdrawal.id,
-        reason: payoutValidation.reason
+        reason: outcome.validation.reason
       });
       return res.status(409).json({ error: "Payout verification failed" });
-    }
-    withdrawal.providerStatus = status || withdrawal.providerStatus || "";
-    withdrawal.providerStatusPayload = req.body;
-    withdrawal.providerUpdatedAt = Date.now();
-    if (status === "finished") {
-      withdrawal.status = "paid";
-      withdrawal.processedAt = Date.now();
-      withdrawal.processedBy = "nowpayments";
-      withdrawal.requiresManualReview = false;
-      withdrawal.requiresProviderVerification = false;
-      delete withdrawal.autoPayoutError;
-      delete withdrawal.autoPayoutErrorCode;
-      delete withdrawal.autoPayoutStage;
-      delete withdrawal.payoutFailureMessage;
-    } else if (["failed", "rejected", "cancelled", "canceled"].includes(status)) {
-      withdrawal.status = status === "rejected" ? "rejected" : "failed";
-      withdrawal.failedAt = Date.now();
-      withdrawal.autoPayoutError = String(req.body.error || req.body.message || `NOWPayments payout ${status}`).slice(0, 500);
-      withdrawal.autoPayoutErrorCode = nowpaymentsPayoutErrorCode({
-        message: withdrawal.autoPayoutError,
-        body: req.body
-      });
-      withdrawal.autoPayoutStage = "provider_status";
-      withdrawal.payoutFailureMessage = nowpaymentsPayoutFailureMessage(withdrawal.autoPayoutErrorCode);
-    } else if (status) {
-      withdrawal.status = status;
     }
     await saveSettingsState(state);
     notifyRealtime("wallet_withdrawal_status_updated", { id: withdrawal.id, status: withdrawal.status, scope: withdrawal.scope || "user" });

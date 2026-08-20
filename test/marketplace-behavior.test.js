@@ -102,5 +102,5 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /app\.js\?v=167/);
+  assert.match(indexHtml, /app\.js\?v=168/);
 });

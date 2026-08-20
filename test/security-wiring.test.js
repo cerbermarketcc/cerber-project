@@ -59,7 +59,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=167/);
+  assert.match(indexHtml, /app\.js\?v=168/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -235,13 +235,15 @@ test("critical owner finance and repair routes require the owner role", () => {
     ["post", "/api/admin/orders/repair-missing"],
     ["put", "/api/admin/settings"],
     ["post", "/api/admin/withdrawals/owner"],
+    ["post", "/api/admin/withdrawals/:id/sync"],
     ["post", "/api/admin/withdrawals/:id/status"]
   ];
   for (const [method, route] of criticalRoutes) {
     assert.match(routeBody(method, route), /requireOwnerAdmin\(req\)/, `${route} must be owner-only`);
   }
   assert.match(routeBody("post", "/api/admin/users/:login/balance"), /requestIdempotencyKey\(req, "Balance adjustment"\)/);
-  assert.match(routeBody("post", "/api/admin/withdrawals/:id/status"), /controlled only by a verified provider callback/);
+  assert.match(routeBody("post", "/api/admin/withdrawals/:id/status"), /controlled only by verified provider status/);
+  assert.match(routeBody("post", "/api/admin/withdrawals/:id/sync"), /reconcileNowpaymentsWithdrawalPayout/);
 });
 
 test("NOWPayments callbacks require HMAC, idempotency and trusted amount validation", () => {
@@ -252,7 +254,10 @@ test("NOWPayments callbacks require HMAC, idempotency and trusted amount validat
   assert.match(paymentIpn, /validateProviderPayment\(req\.body, (?:deposit|order)\)/);
   assert.match(payoutIpn, /verifyNowpaymentsSignature\(req\)/);
   assert.match(payoutIpn, /rememberNowpaymentsIpn\(state, fingerprint, "payout"\)/);
-  assert.match(payoutIpn, /validateProviderPayout\(req\.body/);
+  assert.match(payoutIpn, /applyNowpaymentsPayoutStatus\(withdrawal, req\.body\)/);
+  assert.match(server, /function applyNowpaymentsPayoutStatus[\s\S]{0,900}validateProviderPayout\(record/);
+  assert.match(server, /nowpaymentsRequest\(`payout\/\$\{encodeURIComponent\(id\)\}`,[\s\S]{0,80}method: "GET"/);
+  assert.match(server, /\["creating", "waiting", "processing", "sending", "manual_review", "submitting"\]/);
   assert.doesNotMatch(server, /amountLtcEstimate/);
   assert.match(server, /normalizePublicBaseUrl\(process\.env\.PUBLIC_BASE_URL, \{ production: isProduction \}\)/);
 });
@@ -300,6 +305,16 @@ test("production CORS and Host validation do not trust localhost", () => {
 test("financial background jobs use the cross-instance database lock", () => {
   assert.match(server, /async function processNowpaymentsWithdrawalPayout[\s\S]{0,500}withOperationLocks\([\s\S]{0,200}"finance:state"/);
   assert.match(server, /async function resumeQueuedWithdrawalPayouts[\s\S]{0,500}withOperationLocks\([\s\S]{0,200}"finance:state"/);
+});
+
+test("store payout settings use a dedicated verified save path", () => {
+  const route = routeBody("put", "/api/store-admin/settings");
+  assert.match(route, /token\.role !== "owner"/);
+  assert.match(route, /isValidLitecoinAddress\(ltcWallet\)/);
+  assert.match(route, /saveStoreRow\(mergedStore, "store-admin settings save"\)/);
+  assert.match(route, /savedStore\.wallets\?\.ltc/);
+  assert.match(appClient, /apiFetch\("\/api\/store-admin\/settings"/);
+  assert.doesNotMatch(appClient, /products persist failed[\s\S]{0,300}return true/);
 });
 
 test("database migrations enforce private tables and per-admin 2FA state", () => {
@@ -454,7 +469,7 @@ test("legacy order recovery cannot manufacture a paid order or settlement", () =
 });
 
 test("one-time clean launch reset preserves profiles and the site owner", () => {
-  assert.match(server, /clean-marketplace-launch-2026-08-17-v168/);
+  assert.match(server, /clean-marketplace-launch-2026-08-17-v169/);
   assert.match(server, /maintenance_\$\{cleanLaunchResetId\}/);
   assert.match(server, /await runCleanLaunchResetOnce\(\)/);
   assert.match(server, /runCleanLaunchResetOnce\(\{ force: true, finalize: true \}\)/);

@@ -3016,18 +3016,6 @@ async function persistSellerAdminStore() {
     return true;
   } catch (error) {
     console.error("[store-admin] persist failed", error);
-    if (Array.isArray(store?.products) && store.products.length) {
-      try {
-        const productPayload = await persistSellerAdminProducts(localStore || store, token);
-        applyRemoteState(productPayload);
-        restoreShopPanelStore(productPayload.store || localStore);
-        return true;
-      } catch (productError) {
-        console.error("[store-admin] products persist failed", productError);
-        showToast(productError.message || error.message || "Админка магазина временно не сохранила товары в базе");
-        return false;
-      }
-    }
     showToast(error.message || "Админка магазина временно не сохранила изменения в базе");
     return false;
   }
@@ -12203,6 +12191,31 @@ async function shopPersistAndRender(tab = "dashboard") {
   renderShopPanel(tab);
 }
 
+async function persistShopSettings(store, data) {
+  const token = sellerAdminApiSessionToken();
+  if (!store?.id || !token) throw new Error("Войдите в Shop Admin заново");
+  const wallets = { ...storeWallets(store) };
+  storeEnabledCoins(store).forEach((coin) => {
+    wallets[coin.id] = String(data.get(`wallet_${coin.id}`) || "").trim();
+  });
+  const ltcWallet = String(wallets.ltc ?? store.ltcWallet ?? "").trim();
+  wallets.ltc = ltcWallet;
+  const payload = await apiFetch("/api/store-admin/settings", {
+    method: "PUT",
+    timeoutMs: 30000,
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      wallets,
+      ltcWallet,
+      autoReleaseHours: Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24))),
+      adminPassword: String(data.get("adminPassword") || "").trim()
+    })
+  });
+  applyRemoteState(payload);
+  restoreShopPanelStore(payload.store || store);
+  return payload;
+}
+
 function bindShopPanelActions(store, activeTab) {
   console.log("[shop-admin] bind actions", { storeId: store?.id, activeTab });
   bindLocationSelects();
@@ -12556,16 +12569,9 @@ function bindShopPanelActions(store, activeTab) {
     const form = event.currentTarget;
     await runShopFormSubmit(form, "Сохраняю...", async () => {
       const data = new FormData(form);
-      store.wallets = storeWallets(store);
-      storeEnabledCoins(store).forEach((coin) => {
-        const value = String(data.get(`wallet_${coin.id}`) || "").trim();
-        store.wallets[coin.id] = value;
-        if (coin.id === "ltc") store.ltcWallet = value;
-      });
-      store.autoReleaseHours = Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24)));
-      const nextPassword = String(data.get("adminPassword") || "").trim();
-      if (nextPassword) store.adminPassword = nextPassword;
-      await shopPersistAndRender("settings");
+      await persistShopSettings(store, data);
+      showToast("LTC кошелек и настройки сохранены");
+      renderShopPanel("settings");
     });
   });
 
@@ -12678,7 +12684,7 @@ async function requestShopPayout(event) {
     });
     applyRemoteState(payload);
     document.querySelector("[data-modal]")?.classList.remove("open");
-    showToast("Заявка сохранена. Выплата отправляется");
+    showToast("Заявка создана. Ожидайте статус finished от NOWPayments");
     renderShopPanel("finances");
   } catch (error) {
     showToast(error.message || "Не удалось создать заявку на вывод");
