@@ -141,10 +141,16 @@ test("shop admin exposes employee logs and hides store and product availability 
   assert.doesNotMatch(appClient, /product\.status = String\(data\.get\("status"\)/);
 });
 
+test("home content has no empty brand spacer between mirrors and the store list", () => {
+  assert.doesNotMatch(appClient, /market-brand-spacer/);
+  assert.doesNotMatch(styles, /market-brand-spacer/);
+});
+
 test("SOL and USDT Solana payment models remain available", () => {
   for (const source of [appClient, server]) {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /app\.js\?v=170/);
+  assert.match(indexHtml, /styles\.css\?v=109/);
+  assert.match(indexHtml, /app\.js\?v=171/);
 });

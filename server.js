@@ -41,7 +41,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "cloudflare-root-post-recovery-2026-08-22-v172";
+const cerberBuildVersion = "mobile-home-spacing-cleanup-2026-08-22-v173";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v2";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;

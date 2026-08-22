@@ -159,11 +159,6 @@ select:focus-visible {
   box-shadow: inset 0 0 18px rgba(177, 23, 18, .05);
 }
 
-.market-brand-spacer {
-  min-height: 160px;
-  margin: 12px 20px 6px;
-}
-
 .hero,
 .feed,
 .screen {
@@ -542,11 +537,6 @@ select {
 }
 
 @media (max-width: 899px) {
-  .market-brand-spacer {
-    min-height: 116px;
-    margin: 10px 8px 4px;
-  }
-
   .brand-lockup {
     gap: 7px;
   }
@@ -680,11 +670,6 @@ select {
 @media (max-width: 420px) {
   .brand-lockup > span > span {
     display: none;
-  }
-
-  .market-brand-spacer {
-    height: 104px;
-    min-height: 104px;
   }
 
   .product-catalog-grid .product-card .product-click {
