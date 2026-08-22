@@ -41,7 +41,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "shop-admin-logs-status-cleanup-2026-08-22-v171";
+const cerberBuildVersion = "cloudflare-root-post-recovery-2026-08-22-v172";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v2";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -16311,6 +16311,13 @@ app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
 app.get(["/market-admin", "/market-admin.html"], (_req, res) => {
   res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.sendFile(path.join(__dirname, "market-admin.html"));
+});
+
+// A Cloudflare managed challenge can occasionally leave mobile browsers
+// replaying the root navigation as POST. Convert it back to a normal page load.
+app.post("/", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.redirect(303, "/");
 });
 
 app.get("*", (_req, res) => {

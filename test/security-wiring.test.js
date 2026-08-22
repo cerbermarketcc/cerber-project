@@ -513,3 +513,7 @@ test("one-time clean launch reset preserves profiles and the site owner", () => 
   assert.doesNotMatch(resetBody, /deleteAllRowsForCleanLaunch\("profiles"|deleteAllRowsForCleanLaunch\("sessions"/);
   assert.doesNotMatch(resetBody, /from\("profiles"\)\.delete|from\("sessions"\)\.delete/);
 });
+
+test("root POST navigation recovers from a Cloudflare challenge replay", () => {
+  assert.match(server, /app\.post\("\/", \(_req, res\) => \{[\s\S]{0,180}res\.redirect\(303, "\/"\);/);
+});
