@@ -60,7 +60,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=169/);
+  assert.match(indexHtml, /app\.js\?v=170/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -497,7 +497,7 @@ test("legacy order recovery cannot manufacture a paid order or settlement", () =
 });
 
 test("one-time clean launch reset preserves profiles and the site owner", () => {
-  assert.match(server, /clean-marketplace-launch-2026-08-17-v169/);
+  assert.match(server, /cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v2"/);
   assert.match(server, /maintenance_\$\{cleanLaunchResetId\}/);
   assert.match(server, /await runCleanLaunchResetOnce\(\)/);
   assert.match(server, /runCleanLaunchResetOnce\(\{ force: true, finalize: true \}\)/);

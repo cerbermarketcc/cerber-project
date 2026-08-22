@@ -10895,7 +10895,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           <header class="seller-dashboard-top">
             <div>
               <strong>${esc(store.name)}</strong>
-              <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
+              <span>${esc(store.tag || store.id)}</span>
             </div>
             <div class="seller-dashboard-actions">
               ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
@@ -10925,7 +10925,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         <header class="seller-dashboard-top">
           <div>
             <strong>${esc(store.name)}</strong>
-            <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
+            <span>${esc(store.tag || store.id)}</span>
           </div>
           <div class="seller-dashboard-actions">
             ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
@@ -11176,10 +11176,9 @@ function shopPanelTabContent(tab, data) {
   }
   if (tab === "shop") {
     return `
-      <section class="seller-dashboard-hero"><div><h2>Магазин</h2><p>Профиль витрины, описание, статус, баланс и основные показатели.</p></div></section>
+      <section class="seller-dashboard-hero"><div><h2>Магазин</h2><p>Профиль витрины, описание, баланс и основные показатели.</p></div></section>
       <section class="seller-dashboard-grid">
         ${sellerDashStat("Название", store.name || "Shop", store.tag || store.id)}
-        ${sellerDashStat("Статус", storeStatusLabel(store), "Доступность витрины")}
         ${sellerDashStat("Доход", `${salesUsd.toFixed(2)} $`, `${salesLtc.toFixed(8)} LTC`)}
         <div class="seller-dashboard-card seller-wide-card">
           <div class="seller-card-head"><h3>Описание магазина</h3></div>
@@ -11282,10 +11281,7 @@ function shopCardsTab(store, products) {
           <label class="field">Главная фотография (обязательно для новой карточки)<input name="mainImage" type="file" accept="image/*"></label>
           <label class="field">Дополнительно до 4 фото<input name="images" type="file" accept="image/*" multiple></label>
         </div>
-        <div class="row">
-          <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${products.length + 1}"></label>
-          <label class="field">Статус<select name="status"><option value="active">active</option><option value="disabled">disabled</option></select></label>
-        </div>
+        <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${products.length + 1}"></label>
         <button class="primary">Сохранить карточку и фасовку</button>
       </form>
     </section>
@@ -11295,7 +11291,7 @@ function shopCardsTab(store, products) {
         <details class="seller-source shop-card-editor">
           <summary>
             <span>${esc([product.title, product.subtype].filter(Boolean).join(" · "))} · ${productVariants(product).length} фас. · ${productStockSummary(product).stock} шт.</span>
-            <strong>${esc(product.status || "active")}</strong>
+            <strong>Открыть</strong>
           </summary>
           <form class="form" data-shop-card-edit data-card-id="${esc(product.id)}">
             <div class="row">
@@ -11307,10 +11303,7 @@ function shopCardsTab(store, products) {
               <label class="field">Новая главная фотография<input name="mainImage" type="file" accept="image/*"></label>
               <label class="field">Новые дополнительные фото<input name="images" type="file" accept="image/*" multiple></label>
             </div>
-            <div class="row">
-              <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(product.position || index + 1)}"></label>
-              <label class="field">Статус<select name="status"><option value="active" ${product.status !== "disabled" ? "selected" : ""}>active</option><option value="disabled" ${product.status === "disabled" ? "selected" : ""}>disabled</option></select></label>
-            </div>
+            <label class="field">Позиция<input name="position" type="number" min="0" step="1" value="${esc(product.position || index + 1)}"></label>
             <div class="shop-variant-list">${productVariants(product).map((variant) => `<span>${esc(productVariantLabel(product, variant))}</span>`).join("")}</div>
             <div class="row shop-card-actions">
               <button class="primary" type="submit">Сохранить карточку</button>
@@ -12475,7 +12468,7 @@ function bindShopPanelActions(store, activeTab) {
           image: images[0],
           images,
           position: Number(data.get("position") || store.products.length + 1),
-          status: String(data.get("status") || "active"),
+          status: "active",
           sellerManaged: true,
           variants: [{ id: `variant-${Date.now()}`, subtype, weight, priceUsd }],
           positions: [],
@@ -12488,7 +12481,6 @@ function bindShopPanelActions(store, activeTab) {
         product.image = mainImage;
         product.images = images;
         product.position = Number(data.get("position") || product.position || 1);
-        product.status = String(data.get("status") || product.status || "active");
         product.variants = productVariants(product);
         const variant = product.variants.find((item) => normalizedShopKey(item.weight) === normalizedShopKey(weight));
         if (variant) {
@@ -12518,7 +12510,6 @@ function bindShopPanelActions(store, activeTab) {
       product.subtype = subtype;
       product.description = String(data.get("description") || "").trim();
       product.position = Number(data.get("position") || product.position || 1);
-      product.status = String(data.get("status") || "active");
       product.variants = productVariants(product).map((variant) => ({ ...variant, subtype }));
       (product.positions || []).forEach((position) => { position.subtype = subtype; });
       const mainFile = data.get("mainImage");
@@ -12918,7 +12909,6 @@ function renderSeller() {
       <article class="panel">
         <h2>${standalone ? "Админка магазина" : tr("seller")}: ${esc(store.name)}</h2>
         ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти из админки</button>` : ""}
-        <p class="status-pill">${storeStatusLabel(store)}</p>
         <div class="stats">
           ${ownerStatCard("заказов", risk.orders)}
           ${ownerStatCard("споров", risk.disputes)}

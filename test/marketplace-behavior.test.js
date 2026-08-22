@@ -128,10 +128,23 @@ test("shop inventory keeps delimiters, supports custom districts and renders a d
   assert.match(settings, /data-shop-password-form/);
 });
 
+test("shop admin exposes employee logs and hides store and product availability statuses", () => {
+  const cards = functionBody(appClient, "shopCardsTab");
+  const shell = functionBody(appClient, "sellerDashboardShell");
+  const logs = functionBody(appClient, "shopActivityLogsTab");
+  assert.match(appClient, /\["logs", "L", "Логи"\]/);
+  assert.match(logs, /store_staff_cards_added/);
+  assert.match(logs, /store_staff_inventory_added/);
+  assert.match(server, /loadStoreAuditLogs\(id, 500\)/);
+  assert.doesNotMatch(cards, /name="status"|>active<|>disabled<|product\.status/);
+  assert.doesNotMatch(shell, /storeStatusLabel\(store\)/);
+  assert.doesNotMatch(appClient, /product\.status = String\(data\.get\("status"\)/);
+});
+
 test("SOL and USDT Solana payment models remain available", () => {
   for (const source of [appClient, server]) {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /app\.js\?v=169/);
+  assert.match(indexHtml, /app\.js\?v=170/);
 });
