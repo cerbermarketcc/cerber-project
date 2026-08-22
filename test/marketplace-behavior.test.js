@@ -151,11 +151,22 @@ test("mobile product cards show complete three-by-four artwork", () => {
   assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: contain;/);
 });
 
+test("top stores title uses a one-shot animated Cerberus instead of fire", () => {
+  const title = functionBody(appClient, "topTitleView");
+  assert.doesNotMatch(appClient, /storesTop: "[^"]*🔥/);
+  assert.doesNotMatch(title, /🔥|top-fire-sticker/);
+  assert.match(title, /topCerberusView\(\)/);
+  assert.match(appClient, /class="top-cerberus"/);
+  assert.match(styles, /animation: topCerberusBarkMouth [^;]+ 1 both;/);
+  assert.match(styles, /@media \(max-width: 360px\)[\s\S]{0,180}\.top-cerberus/);
+  assert.doesNotMatch(styles, /topFireFlicker|fireSpark|top-fire-sticker/);
+});
+
 test("SOL and USDT Solana payment models remain available", () => {
   for (const source of [appClient, server]) {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=110/);
-  assert.match(indexHtml, /app\.js\?v=171/);
+  assert.match(indexHtml, /styles\.css\?v=111/);
+  assert.match(indexHtml, /app\.js\?v=172/);
 });

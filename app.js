@@ -525,7 +525,7 @@ const text = {
     success: "Успешно зарегистрировались, войдите",
     badLogin: "Неверный логин или пароль",
     needCaptcha: "Подтвердите, что вы не робот",
-    storesTop: "Магазины TOP 10 🔥",
+    storesTop: "Магазины TOP 10",
     search: "Поиск",
     all: "Все",
     top: "ТОП",
@@ -579,7 +579,7 @@ const text = {
     success: "Inregistrare reusita, intrati",
     badLogin: "Login sau parola gresita",
     needCaptcha: "Confirmati ca nu sunteti robot",
-    storesTop: "Magazine TOP 10 🔥",
+    storesTop: "Magazine TOP 10",
     search: "Cautare",
     all: "Toate",
     top: "TOP",
@@ -633,7 +633,7 @@ const text = {
     success: "Registered successfully, please sign in",
     badLogin: "Wrong username or password",
     needCaptcha: "Confirm you are not a robot",
-    storesTop: "Stores TOP 10 🔥",
+    storesTop: "Stores TOP 10",
     search: "Search",
     all: "All",
     top: "TOP",
@@ -4882,8 +4882,38 @@ function renderHome() {
   if (activeHomeTab === "exchange") bindExchangeCatalogCards();
 }
 
+function topCerberusHeadView(positionClass) {
+  return `
+    <g class="top-cerberus-head ${positionClass}">
+      <path class="top-cerberus-skull" d="M3 11 4 2 10 8Q13 6 16 8L22 2 23 11Q26 15 24 23 22 30 13 31 4 30 2 23 0 15 3 11Z"></path>
+      <path class="top-cerberus-muzzle" d="M6 20.5Q13 18 20 20.5L19 25Q13 28 7 25Z"></path>
+      <path class="top-cerberus-brow" d="M6 14 11 16M20 14 15 16"></path>
+      <circle class="top-cerberus-eye" cx="9.5" cy="17.2" r="1.35"></circle>
+      <circle class="top-cerberus-eye" cx="16.5" cy="17.2" r="1.35"></circle>
+      <path class="top-cerberus-nose" d="M10.5 20Q13 18.4 15.5 20L13 22Z"></path>
+      <g class="top-cerberus-mouth">
+        <path class="top-cerberus-mouth-shape" d="M7.5 23.7Q13 30 18.5 23.7Q13 26 7.5 23.7Z"></path>
+        <path class="top-cerberus-fangs" d="M9 24 11.5 24 10.3 26.8ZM17 24 14.5 24 15.7 26.8Z"></path>
+      </g>
+    </g>
+  `;
+}
+
+function topCerberusView() {
+  return `
+    <span class="top-cerberus" aria-hidden="true">
+      <svg viewBox="0 0 72 42" focusable="false">
+        <path class="top-cerberus-neck" d="M14 41Q18 31 28 32L36 27 44 32Q54 31 58 41Z"></path>
+        <g transform="translate(1 8) scale(.8)">${topCerberusHeadView("top-cerberus-head-left")}</g>
+        <g transform="translate(50 8) scale(.8)">${topCerberusHeadView("top-cerberus-head-right")}</g>
+        <g transform="translate(23 1)">${topCerberusHeadView("top-cerberus-head-center")}</g>
+      </svg>
+    </span>
+  `;
+}
+
 function topTitleView() {
-  return esc(tr("storesTop")).replace("🔥", `<span class="top-fire-sticker" aria-hidden="true">🔥<i></i><i></i><i></i></span>`);
+  return `${esc(tr("storesTop"))}${topCerberusView()}`;
 }
 
 function mirrorRow(url) {

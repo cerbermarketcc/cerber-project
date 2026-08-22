@@ -3371,72 +3371,123 @@ body[data-theme="dark"] .mirror-row {
   font-size: 38px;
 }
 
-.top-fire-sticker {
-  display: inline-block;
-  position: relative;
+.top-cerberus {
+  display: inline-grid;
+  width: 1.5em;
+  height: 1.08em;
   margin-left: 8px;
-  font-size: 0.95em;
+  vertical-align: -.15em;
+  place-items: center;
   line-height: 1;
-  animation: topFireFlicker 0.95s ease-in-out infinite;
-  transform-origin: 50% 85%;
 }
 
-.top-fire-sticker i {
-  position: absolute;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #ffb12d;
-  opacity: 0;
-  animation: fireSpark 1.35s ease-out infinite;
+.top-cerberus svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 5px rgba(239, 61, 53, .38));
+  transform-origin: 50% 78%;
+  animation: topCerberusBarkNod .78s ease-out 1 both;
 }
 
-.top-fire-sticker i:nth-child(1) {
-  left: 4px;
-  top: 4px;
+.top-cerberus-neck,
+.top-cerberus-skull {
+  fill: #151518;
+  stroke: #f04a42;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
 }
 
-.top-fire-sticker i:nth-child(2) {
-  right: 2px;
-  top: 7px;
-  animation-delay: 0.32s;
+.top-cerberus-muzzle {
+  fill: #291719;
+  stroke: #9d2c28;
+  stroke-width: .8;
 }
 
-.top-fire-sticker i:nth-child(3) {
-  left: 50%;
-  top: 2px;
-  animation-delay: 0.68s;
+.top-cerberus-brow {
+  fill: none;
+  stroke: #f4f4f5;
+  stroke-width: 1.2;
+  stroke-linecap: round;
 }
 
-@keyframes topFireFlicker {
-  0%, 100% {
-    transform: translateY(0) rotate(-2deg) scale(1);
+.top-cerberus-eye {
+  fill: #ff3d33;
+  filter: drop-shadow(0 0 1.5px #ff3d33);
+}
+
+.top-cerberus-nose {
+  fill: #050506;
+}
+
+.top-cerberus-mouth {
+  transform-box: fill-box;
+  transform-origin: center top;
+  animation: topCerberusBarkMouth .72s cubic-bezier(.3, 0, .25, 1) 1 both;
+}
+
+.top-cerberus-head-center .top-cerberus-mouth {
+  animation-delay: .04s;
+}
+
+.top-cerberus-head-right .top-cerberus-mouth {
+  animation-delay: .08s;
+}
+
+.top-cerberus-mouth-shape {
+  fill: #050506;
+  stroke: #f04a42;
+  stroke-width: .8;
+}
+
+.top-cerberus-fangs {
+  fill: #f4f4f5;
+}
+
+@keyframes topCerberusBarkNod {
+  0%, 20%, 100% {
+    transform: translateY(0) scale(1);
   }
 
-  50% {
-    transform: translateY(-2px) rotate(4deg) scale(1.08);
+  38% {
+    transform: translateY(-1px) scale(1.035);
+  }
+
+  62% {
+    transform: translateY(1px) scale(.99);
   }
 }
 
-@keyframes fireSpark {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.6);
+@keyframes topCerberusBarkMouth {
+  0%, 20%, 72%, 100% {
+    transform: scaleY(.12);
   }
 
-  25% {
-    opacity: 1;
-  }
-
-  100% {
-    opacity: 0;
-    transform: translate(var(--spark-x, 8px), -18px) scale(0.2);
+  38%, 56% {
+    transform: scaleY(1);
   }
 }
 
-.top-fire-sticker i:nth-child(1) { --spark-x: -7px; }
-.top-fire-sticker i:nth-child(2) { --spark-x: 9px; }
-.top-fire-sticker i:nth-child(3) { --spark-x: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .top-cerberus svg,
+  .top-cerberus-mouth {
+    animation: none;
+  }
+
+  .top-cerberus-mouth {
+    transform: scaleY(.12);
+  }
+}
+
+@media (max-width: 360px) {
+  .top-cerberus {
+    width: 1.23em;
+    height: .92em;
+    margin-left: 4px;
+    vertical-align: -.12em;
+  }
+}
 
 .wallet-card-ltc {
   display: grid;
