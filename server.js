@@ -25,6 +25,8 @@ import {
   recoveryCodeHashes,
   sanitizeAuditDetails,
   sanitizeErrorForLog,
+  sellerDeliveryDuplicateReport,
+  sellerDeliveryItemKey,
   totpCodeForStep,
   trustedWalletCreditLtc,
   validateProviderPayout,
@@ -2386,6 +2388,154 @@ function sellerProductPatch(existing = {}, input = {}) {
   return item;
 }
 
+function storeAdminActor(token = {}, store = {}) {
+  return token.role === "staff"
+    ? String(token.staffLogin || token.account?.login || "staff")
+    : String(store.ownerLogin || token.account?.login || token.storeId || "store-owner");
+}
+
+function storeAdminAuditDetails(req, token = {}, details = {}) {
+  return {
+    storeId: String(token.storeId || details.storeId || ""),
+    role: token.role === "staff" ? "staff" : "owner",
+    ...details,
+    ...requestSource(req)
+  };
+}
+
+function staffCardSignature(product = {}) {
+  const variants = (Array.isArray(product.variants) ? product.variants : []).map((variant) => ({
+    id: String(variant?.id || ""),
+    subtype: String(variant?.subtype || ""),
+    weight: String(variant?.weight || ""),
+    priceUsd: Number(variant?.priceUsd || 0)
+  }));
+  return JSON.stringify({
+    id: String(product.id || ""),
+    title: String(product.title || product.name || ""),
+    description: String(product.description || ""),
+    category: String(product.category || ""),
+    subtype: String(product.subtype || ""),
+    status: String(product.status || "active"),
+    active: product.active !== false,
+    position: Number(product.position || 1),
+    priceUsd: Number(product.priceUsd || 0),
+    image: String(product.image || ""),
+    images: Array.isArray(product.images) ? product.images.map(String) : [],
+    variants
+  });
+}
+
+function staffPositionSignature(position = {}) {
+  return JSON.stringify({
+    id: String(position.id || ""),
+    variantId: String(position.variantId || ""),
+    subtype: String(position.subtype || ""),
+    title: String(position.title || ""),
+    description: String(position.description || ""),
+    priceUsd: Number(position.priceUsd || 0),
+    country: String(position.country || ""),
+    city: String(position.city || ""),
+    district: String(position.district || ""),
+    deliveryType: String(position.deliveryType || ""),
+    saleMode: String(position.saleMode || "ready"),
+    weight: String(position.weight || "")
+  });
+}
+
+function storeDeliveryItems(store = {}) {
+  return (Array.isArray(store.products) ? store.products : []).flatMap((product) => (
+    (Array.isArray(product?.positions) ? product.positions : []).flatMap((position) => (
+      Array.isArray(position?.deliveryItems) ? position.deliveryItems : []
+    ))
+  ));
+}
+
+function duplicateDeliveryItems(items = [], existingItems = []) {
+  const report = sellerDeliveryDuplicateReport(items, existingItems);
+  return report.filter((item) => item.duplicate && item.reason !== "empty");
+}
+
+function additionalDeliveryItems(requestedItems = [], existingItems = []) {
+  const remaining = new Map();
+  (Array.isArray(existingItems) ? existingItems : []).forEach((item) => {
+    const key = sellerDeliveryItemKey(item);
+    if (key) remaining.set(key, Number(remaining.get(key) || 0) + 1);
+  });
+  return (Array.isArray(requestedItems) ? requestedItems : []).filter((item) => {
+    const key = sellerDeliveryItemKey(item);
+    const count = Number(remaining.get(key) || 0);
+    if (!key || count <= 0) return Boolean(key);
+    remaining.set(key, count - 1);
+    return false;
+  });
+}
+
+function staffProductAdditions(existing = {}, productsInput = []) {
+  const existingProducts = Array.isArray(existing.products) ? existing.products : [];
+  const existingById = new Map(existingProducts.map((product) => [String(product?.id || ""), product]));
+  const inputById = new Map(productsInput.map((product) => [String(product?.id || ""), product]));
+  const removedIds = Array.from(existingById.keys()).filter((id) => id && !inputById.has(id));
+  const modifiedIds = Array.from(existingById.entries())
+    .filter(([id, product]) => (
+      id
+      && inputById.has(id)
+      && staffCardSignature(publicProductForState(product, existing)) !== staffCardSignature(inputById.get(id))
+    ))
+    .map(([id]) => id);
+  const additions = productsInput.filter((product) => {
+    const id = String(product?.id || "");
+    return id && !existingById.has(id);
+  });
+  return { removedIds, modifiedIds, additions };
+}
+
+function staffPositionAdditions(store = {}, product = {}, positionsInput = []) {
+  const existingPositions = Array.isArray(product.positions) ? product.positions : [];
+  const existingById = new Map(existingPositions.map((position) => [String(position?.id || ""), position]));
+  const inputById = new Map(positionsInput.map((position) => [String(position?.id || ""), position]));
+  const removedIds = Array.from(existingById.keys()).filter((id) => id && !inputById.has(id));
+  const modifiedIds = Array.from(existingById.entries())
+    .filter(([id, position]) => id && inputById.has(id) && staffPositionSignature(position) !== staffPositionSignature(inputById.get(id)))
+    .map(([id]) => id);
+  const existingItems = storeDeliveryItems(store);
+  const pendingItems = [];
+  const appendedById = new Map();
+  positionsInput.forEach((position) => {
+    const id = String(position?.id || "");
+    if (!id || !existingById.has(id)) return;
+    const items = Array.isArray(position.deliveryItems) ? position.deliveryItems.map(String).filter((item) => sellerDeliveryItemKey(item)) : [];
+    if (items.length) appendedById.set(id, items);
+    pendingItems.push(...items);
+  });
+  const newPositionsInput = positionsInput.filter((position) => {
+    const id = String(position?.id || "");
+    return id && !existingById.has(id);
+  });
+  newPositionsInput.forEach((position) => pendingItems.push(...(Array.isArray(position.deliveryItems) ? position.deliveryItems : [])));
+  const duplicates = duplicateDeliveryItems(pendingItems, existingItems);
+  if (duplicates.length) return { removedIds, modifiedIds, duplicates, addedAddressCount: 0, positions: existingPositions };
+
+  const positions = existingPositions.map((position) => {
+    const additions = appendedById.get(String(position.id || "")) || [];
+    if (!additions.length) return position;
+    const deliveryItems = [...(Array.isArray(position.deliveryItems) ? position.deliveryItems : []), ...additions];
+    return { ...position, deliveryItems, stock: deliveryItems.length };
+  });
+  const normalizedNewPositions = newPositionsInput.length
+    ? mergeSellerProductInput(product, { positions: newPositionsInput }).positions
+    : [];
+  positions.push(...normalizedNewPositions);
+  return {
+    removedIds,
+    modifiedIds,
+    duplicates: [],
+    addedAddressCount: pendingItems.length,
+    newPositionCount: normalizedNewPositions.length,
+    positions
+  };
+}
+
 function requireDb() {
   if (!supabase) {
     const error = new Error("Supabase is not configured");
@@ -4041,8 +4191,8 @@ function sellerTokenCanAccess(token = {}, ...permissions) {
 
 function storeForAdminState(store = {}, token = {}) {
   return publicStoreForState(store, {
-    includeStaff: true,
-    includePrivate: token?.role !== "staff" || sellerTokenCanAccess(token, "storage")
+    includeStaff: token?.role !== "staff",
+    includePrivate: token?.role !== "staff"
   });
 }
 
@@ -4211,6 +4361,9 @@ async function stateForStoreAdmin(storeId, token = {}) {
       .map(storeAdminWithdrawalForState)
     : [];
   const responseStore = payload.state.stores[0] || (store ? storeForAdminState(store, token) : null);
+  if (responseStore && token?.role !== "staff") {
+    responseStore.activityLogs = await loadStoreAuditLogs(id, 500).catch(() => []);
+  }
   payload.state.stores = [];
   return { ...payload, store: responseStore };
 }
@@ -4677,9 +4830,6 @@ function sellerStoreInputForToken(existing = {}, input = {}, token = {}) {
     ["name", "short", "description", "image", "avatar", "cover", "banner", "gallery"].forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(input, key)) allowed[key] = input[key];
     });
-  }
-  if (permissions.some((key) => ["cards", "products", "storage"].includes(key)) && Array.isArray(input.products)) {
-    allowed.products = input.products;
   }
   return { ...existing, ...allowed, id: existing.id || input.id };
 }
@@ -5166,7 +5316,14 @@ app.get("/api/store-admin/state", async (req, res, next) => {
       if (!staff) return res.status(401).json({ error: "Доступ сотрудника удалён" });
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
-    res.json({ store: storeForAdminState(store, token), ...(await stateForStoreAdmin(token.storeId, token)) });
+    const staffSession = token.role === "staff"
+      ? {
+          role: "staff",
+          login: token.staffLogin || token.account?.login || "",
+          permissions: Array.isArray(token.permissions) ? token.permissions : []
+        }
+      : { role: "owner", permissions: null };
+    res.json({ store: storeForAdminState(store, token), staff: staffSession, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
     next(error);
   }
@@ -5187,6 +5344,10 @@ app.put("/api/store-admin/store", async (req, res, next) => {
       token.permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
     }
     const allowedStoreInput = sellerStoreInputForToken(existing, store, token);
+    allowedStoreInput.autoReleaseHours = existing.autoReleaseHours;
+    allowedStoreInput.wallets = existing.wallets;
+    allowedStoreInput.ltcWallet = existing.ltcWallet;
+    delete allowedStoreInput.adminPassword;
     const nextPanelPassword = token.role === "staff" ? "" : String(allowedStoreInput.adminPassword || "").trim();
     if (nextPanelPassword && (nextPanelPassword.length < 10 || nextPanelPassword.length > 128)) {
       return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
@@ -5221,6 +5382,9 @@ app.put("/api/store-admin/store", async (req, res, next) => {
         : 0,
       productTitles: Array.isArray(savedStore.products) ? savedStore.products.map((product) => product.title).slice(0, 10) : []
     });
+    await appendAdminLog(token.role === "staff" ? "store_staff_profile_updated" : "store_profile_updated", storeAdminActor(token, savedStore), storeAdminAuditDetails(req, token, {
+      staffCount: Array.isArray(savedStore.staff) ? savedStore.staff.length : 0
+    }));
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin" });
     res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
@@ -5249,7 +5413,7 @@ app.put("/api/store-admin/settings", async (req, res, next) => {
       return res.status(400).json({ error: "Укажите корректный LTC кошелек магазина" });
     }
     wallets.ltc = ltcWallet;
-    const autoReleaseHours = Math.min(168, Math.max(0, Number(req.body.autoReleaseHours ?? existing.autoReleaseHours ?? 24)));
+    const autoReleaseHours = Math.min(168, Math.max(0, Number(existing.autoReleaseHours ?? 24)));
     const nextPanelPassword = String(req.body.adminPassword || "").trim();
     if (nextPanelPassword && (nextPanelPassword.length < 10 || nextPanelPassword.length > 128)) {
       return res.status(400).json({ error: "Пароль панели магазина должен содержать от 10 до 128 символов" });
@@ -5286,11 +5450,10 @@ app.put("/api/store-admin/settings", async (req, res, next) => {
     }
     await synchronizeStoreAdminAccess(existing, savedStore);
     scheduleStorePublication(savedStore, "store-admin settings save");
-    await appendAdminLog("store_settings_updated", mergedStore.ownerLogin || token.storeId, {
-      storeId: token.storeId,
+    await appendAdminLog(nextPanelPassword ? "store_panel_password_updated" : "store_payout_wallet_updated", storeAdminActor(token, mergedStore), storeAdminAuditDetails(req, token, {
       hasLtcWallet: Boolean(ltcWallet),
-      autoReleaseHours
-    });
+      passwordChanged: Boolean(nextPanelPassword)
+    }));
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-settings" });
     res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
@@ -5305,18 +5468,36 @@ app.put("/api/store-admin/products", async (req, res, next) => {
     if (!token || !token.storeId) {
       return res.status(401).json({ error: "Нет доступа к этой админке" });
     }
-    if (!sellerTokenCanAccess(token, "cards", "products", "storage")) return sellerForbidden(res);
+    if (!sellerTokenCanAccess(token, "cards")) return sellerForbidden(res);
     const productsInput = Array.isArray(req.body.products) ? req.body.products : (Array.isArray(req.body.store?.products) ? req.body.store.products : null);
     if (!productsInput) return res.status(400).json({ error: "Нет товаров для сохранения" });
     const existing = await loadStoreWithFallback(token.storeId) || {};
     const existingProducts = Array.isArray(existing.products) ? existing.products : [];
+    let nextProducts;
+    let addedCards = [];
+    if (token.role === "staff") {
+      const staffChanges = staffProductAdditions(existing, productsInput);
+      if (staffChanges.removedIds.length || staffChanges.modifiedIds.length) {
+        await appendAdminLog("store_staff_mutation_rejected", storeAdminActor(token, existing), storeAdminAuditDetails(req, token, {
+          section: "cards",
+          removedIds: staffChanges.removedIds.slice(0, 30),
+          modifiedIds: staffChanges.modifiedIds.slice(0, 30)
+        }));
+        return res.status(403).json({ error: "Сотрудник может только добавлять новые карточки. Изменение и удаление запрещены." });
+      }
+      if (!staffChanges.additions.length) return res.status(400).json({ error: "Новых карточек для добавления нет" });
+      addedCards = staffChanges.additions.map((product) => sellerProductPatch({}, product));
+      nextProducts = [...existingProducts, ...addedCards];
+    } else {
+      nextProducts = productsInput.map((product) => sellerProductPatch(
+        existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {},
+        product
+      ));
+    }
     const mergedStore = await normalizeStoreSecrets({
       ...existing,
       id: existing.id || token.storeId,
-      products: productsInput.map((product) => sellerProductPatch(
-        existingProducts.find((item) => String(item?.id || "") === String(product?.id || "")) || {},
-        product
-      )),
+      products: nextProducts,
       updatedAt: Date.now()
     });
     const savedStore = await saveStoreRow(mergedStore, "store-admin products save");
@@ -5335,8 +5516,34 @@ app.put("/api/store-admin/products", async (req, res, next) => {
         ? savedStore.products.reduce((sum, product) => sum + (Array.isArray(product.positions) ? product.positions.length : 0), 0)
         : 0
     });
+    await appendAdminLog(token.role === "staff" ? "store_staff_cards_added" : "store_cards_updated", storeAdminActor(token, savedStore), storeAdminAuditDetails(req, token, {
+      cardIds: (token.role === "staff" ? addedCards : savedProducts).map((product) => String(product?.id || "")).filter(Boolean).slice(0, 50),
+      addedCount: token.role === "staff" ? addedCards.length : 0,
+      totalCount: savedProducts.length
+    }));
     notifyRealtime("store_updated", { storeId: savedStore.id, source: "store-admin-products" });
     res.json({ ok: true, store: storeForAdminState(savedStore, token) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/store-admin/inventory/preview", async (req, res, next) => {
+  try {
+    requireDb();
+    const token = verifySellerAdminToken(req);
+    if (!token?.storeId) return res.status(401).json({ error: "Нет доступа к этой админке" });
+    if (!sellerTokenCanAccess(token, "products", "storage")) return sellerForbidden(res);
+    assertClientRateLimit(req, "store-inventory-preview", { limit: 120, windowMs: 60 * 1000, identity: `${token.storeId}:${token.staffLogin || token.role}` });
+    const items = (Array.isArray(req.body.items) ? req.body.items : []).slice(0, 5000).map((item) => boundedUserText(item, 4000, "Delivery item"));
+    const store = await loadStoreWithFallback(token.storeId);
+    if (!store) return res.status(404).json({ error: "Магазин не найден" });
+    const report = sellerDeliveryDuplicateReport(items, storeDeliveryItems(store));
+    res.json({
+      total: items.length,
+      duplicateCount: report.filter((item) => item.duplicate && item.reason !== "empty").length,
+      duplicates: report.filter((item) => item.duplicate && item.reason !== "empty")
+    });
   } catch (error) {
     next(error);
   }
@@ -5356,7 +5563,37 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
     const products = Array.isArray(existing.products) ? existing.products : [];
     const product = products.find((item) => String(item?.id || "") === String(req.params.productId || ""));
     if (!product) return res.status(404).json({ error: "Карточка не найдена" });
-    product.positions = mergeSellerProductInput(product, { positions: positionsInput }).positions;
+    let addedAddressCount = 0;
+    let newPositionCount = 0;
+    if (token.role === "staff") {
+      const staffChanges = staffPositionAdditions(existing, product, positionsInput);
+      if (staffChanges.removedIds.length || staffChanges.modifiedIds.length) {
+        await appendAdminLog("store_staff_mutation_rejected", storeAdminActor(token, existing), storeAdminAuditDetails(req, token, {
+          section: "products",
+          productId: product.id,
+          removedIds: staffChanges.removedIds.slice(0, 30),
+          modifiedIds: staffChanges.modifiedIds.slice(0, 30)
+        }));
+        return res.status(403).json({ error: "Сотрудник может только добавлять адреса. Изменение и удаление существующих товаров запрещены." });
+      }
+      if (staffChanges.duplicates.length) {
+        return res.status(409).json({ error: `Найдены дубликаты адресов: ${staffChanges.duplicates.length}`, duplicates: staffChanges.duplicates });
+      }
+      if (!staffChanges.addedAddressCount) return res.status(400).json({ error: "Новых адресов для добавления нет" });
+      product.positions = staffChanges.positions;
+      addedAddressCount = staffChanges.addedAddressCount;
+      newPositionCount = staffChanges.newPositionCount || 0;
+    } else {
+      const currentProductItems = (Array.isArray(product.positions) ? product.positions : [])
+        .flatMap((position) => (Array.isArray(position?.deliveryItems) ? position.deliveryItems : []));
+      const requestedItems = positionsInput.flatMap((position) => Array.isArray(position?.deliveryItems) ? position.deliveryItems : []);
+      const addedItems = additionalDeliveryItems(requestedItems, currentProductItems);
+      const duplicates = duplicateDeliveryItems(addedItems, storeDeliveryItems(existing));
+      if (duplicates.length) {
+        return res.status(409).json({ error: `Найдены дубликаты адресов: ${duplicates.length}`, duplicates });
+      }
+      product.positions = mergeSellerProductInput(product, { positions: positionsInput }).positions;
+    }
     if (product.positions.length) {
       const firstReady = product.positions.find((position) => position.status !== "disabled") || product.positions[0];
       product.priceUsd = Number(product.priceUsd || firstReady.priceUsd || 0);
@@ -5372,6 +5609,12 @@ app.put("/api/store-admin/products/:productId/positions", async (req, res, next)
     }
     scheduleStorePublication(savedStore, "store-admin positions save");
     console.log("[store-admin] positions saved", { storeId: savedStore.id, productId: product.id, positions: savedPositions.length });
+    await appendAdminLog(token.role === "staff" ? "store_staff_inventory_added" : "store_inventory_updated", storeAdminActor(token, savedStore), storeAdminAuditDetails(req, token, {
+      productId: product.id,
+      addedAddressCount,
+      newPositionCount,
+      totalPositions: savedPositions.length
+    }));
     notifyRealtime("store_updated", { storeId: savedStore.id, productId: product.id, source: "store-admin-positions" });
     res.json({ ok: true, store: storeForAdminState(savedStore, token) });
   } catch (error) {
@@ -5583,7 +5826,11 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
     });
     await saveSettingsState(state);
     scheduleNowpaymentsWithdrawalPayout(request.id);
-    await appendAdminLog("store_withdrawal_requested", store.ownerLogin || store.id, { storeId, amountUsd, amountLtc: request.amountLtc, address });
+    await appendAdminLog("store_withdrawal_requested", storeAdminActor(sellerToken, store), storeAdminAuditDetails(req, sellerToken, {
+      amountUsd,
+      amountLtc: request.amountLtc,
+      address
+    }));
     notifyRealtime("wallet_withdrawal_created", { id: request.id, storeId, scope: "store" });
     res.json({ withdrawal: storeAdminWithdrawalForState(request), ...(await stateForStoreAdmin(storeId, sellerToken)) });
   } catch (error) {
@@ -10444,7 +10691,9 @@ app.patch("/api/store-admin/messages/:id", async (req, res, next) => {
     if (![store?.ownerLogin, store?.id].some((value) => sameLogin(message.fromLogin, value))) return res.status(403).json({ error: "Можно изменить только сообщение магазина" });
     const body = boundedUserText(req.body.body || "", 5000, "Dispute message");
     if (!body) return res.status(400).json({ error: "Введите сообщение" });
-    res.json({ message: await updateDisputeMessage(req.params.id, body, false) });
+    const updated = await updateDisputeMessage(req.params.id, body, false);
+    await appendAdminLog("store_dispute_message_edited", storeAdminActor(token, store), storeAdminAuditDetails(req, token, { messageId: req.params.id, orderId: message.orderId || "" }));
+    res.json({ message: updated });
   } catch (error) {
     next(error);
   }
@@ -10459,7 +10708,9 @@ app.delete("/api/store-admin/messages/:id", async (req, res, next) => {
     if (!editableDisputeMessage(message) || String(message.storeId || "") !== String(token.storeId)) return res.status(404).json({ error: "Сообщение не найдено" });
     const store = await loadStoreWithFallback(token.storeId);
     if (![store?.ownerLogin, store?.id].some((value) => sameLogin(message.fromLogin, value))) return res.status(403).json({ error: "Можно удалить только сообщение магазина" });
-    res.json({ message: await updateDisputeMessage(req.params.id, "", true) });
+    const updated = await updateDisputeMessage(req.params.id, "", true);
+    await appendAdminLog("store_dispute_message_deleted", storeAdminActor(token, store), storeAdminAuditDetails(req, token, { messageId: req.params.id, orderId: message.orderId || "" }));
+    res.json({ message: updated });
   } catch (error) {
     next(error);
   }
@@ -10526,6 +10777,29 @@ function walletTransactionAffectsUserLtcBalance(transaction = {}) {
   if (type === "withdrawal") return !["failed", "expired", "cancelled", "canceled", "rejected", "refunded"].includes(status);
   return ["purchase", "withdrawal_refund", "admin_adjustment"].includes(type)
     && !["failed", "cancelled", "canceled", "rejected"].includes(status);
+}
+
+async function loadStoreAuditLogs(storeId, limit = 500) {
+  const id = String(storeId || "").trim();
+  if (!id || !supabase || disabledMirrorTables.has("audit_logs")) return [];
+  const { data, error } = await supabase
+    .from("audit_logs")
+    .select("id,action,actor,details,created_at")
+    .contains("details", { storeId: id })
+    .order("created_at", { ascending: false })
+    .limit(Math.min(1000, Math.max(1, Number(limit || 500))));
+  if (error) {
+    if (mirrorTableUnavailable(error)) disabledMirrorTables.add("audit_logs");
+    else console.warn("[audit-log] store read skipped", { storeId: id, message: error.message, code: error.code || "" });
+    return [];
+  }
+  return (Array.isArray(data) ? data : []).map((row) => ({
+    id: row.id,
+    action: row.action,
+    actor: row.actor,
+    details: row.details || {},
+    createdAt: Date.parse(row.created_at) || 0
+  }));
 }
 
 function walletTransactionAffectsUserUsdBalance(transaction = {}) {
@@ -14900,6 +15174,7 @@ app.post("/api/store-admin/disputes/:id/join", async (req, res, next) => {
       orderId: order.id,
       disputeThreadId: threadId
     }, order, store));
+    await appendAdminLog("store_dispute_joined", storeAdminActor(token, store), storeAdminAuditDetails(req, token, { orderId: order.id, disputeNumber: publicNumber }));
     notifyRealtime("dispute_joined", { orderId: order.id, storeId: order.storeId });
     res.json({ order, ...(await stateForStoreAdmin(token.storeId, token)) });
   } catch (error) {
@@ -14944,6 +15219,7 @@ app.post("/api/store-admin/disputes/:id/reply", async (req, res, next) => {
       disputeThreadId: order.disputeThreadId || `dispute-${order.id}`
     }, order, store);
     await upsertPrivateMessage(replyMessage);
+    await appendAdminLog("store_dispute_replied", storeAdminActor(token, store), storeAdminAuditDetails(req, token, { orderId: order.id, messageId: replyMessage.id }));
     notifyRealtime("dispute_replied", { orderId: order.id, storeId: order.storeId });
     res.json({ order, message: replyMessage });
     Promise.resolve().then(async () => {

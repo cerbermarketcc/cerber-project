@@ -18,6 +18,7 @@ import {
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
+  sellerDeliveryDuplicateReport,
   totpCodeForStep,
   trustedWalletCreditLtc,
   validateProviderPayout,
@@ -147,6 +148,19 @@ test("store product input cannot overwrite trusted sales and review metrics", ()
   assert.equal(merged.priceUsd, 0);
   assert.equal(merged.positions[0].stock, 1);
   assert.doesNotMatch(merged.positions[0].id, /[./]/);
+});
+
+test("delivery preview reports duplicates from the current batch and existing inventory", () => {
+  const report = sellerDeliveryDuplicateReport(
+    ["Address 1", " address   1 ", "Address 2", "Existing address"],
+    ["existing ADDRESS"]
+  );
+  assert.deepEqual(report, [
+    { index: 0, duplicate: false, reason: "" },
+    { index: 1, duplicate: true, reason: "batch" },
+    { index: 2, duplicate: false, reason: "" },
+    { index: 3, duplicate: true, reason: "existing" }
+  ]);
 });
 
 test("base32 round trip and RFC 6238-compatible TOTP", () => {

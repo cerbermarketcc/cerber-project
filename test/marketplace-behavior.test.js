@@ -97,10 +97,41 @@ test("customer USD balance is ledger-based and independent from the live LTC rat
   assert.equal(calculate(state, "client"), 9);
 });
 
+test("shop staff can add inventory but cannot modify or delete existing data", () => {
+  const cardsRoute = routeBody("put", "/api/store-admin/products");
+  const positionsRoute = routeBody("put", "/api/store-admin/products/:productId/positions");
+  const previewRoute = routeBody("post", "/api/store-admin/inventory/preview");
+  assert.match(cardsRoute, /staffProductAdditions/);
+  assert.match(cardsRoute, /store_staff_mutation_rejected/);
+  assert.match(cardsRoute, /может только добавлять новые карточки/);
+  assert.match(positionsRoute, /staffPositionAdditions/);
+  assert.match(positionsRoute, /additionalDeliveryItems/);
+  assert.match(positionsRoute, /Изменение и удаление существующих товаров запрещены/);
+  assert.match(previewRoute, /sellerDeliveryDuplicateReport/);
+  assert.match(appClient, /is-staff-panel/);
+  assert.match(styles, /\.is-staff-panel \[data-shop-position-delete\]/);
+});
+
+test("shop inventory keeps delimiters, supports custom districts and renders a duplicate preview", () => {
+  const storage = functionBody(appClient, "shopStorageTab");
+  const products = functionBody(appClient, "shopProductsTab");
+  const settings = functionBody(appClient, "shopSettingsTab");
+  assert.match(storage, /join\(position\.delimiter \|\| "\\n"\)/);
+  assert.match(storage, /<strong>Открыть<\/strong>/);
+  assert.doesNotMatch(storage, /name="status"/);
+  assert.match(products, /data-shop-delivery-preview/);
+  assert.match(appClient, /function shopDistrictField/);
+  assert.match(appClient, /Введите свой район или выберите из списка/);
+  assert.match(appClient, /function bindShopDeliveryPreview/);
+  assert.doesNotMatch(settings, /autoReleaseHours/);
+  assert.match(settings, /data-shop-wallet-form/);
+  assert.match(settings, /data-shop-password-form/);
+});
+
 test("SOL and USDT Solana payment models remain available", () => {
   for (const source of [appClient, server]) {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /app\.js\?v=168/);
+  assert.match(indexHtml, /app\.js\?v=169/);
 });

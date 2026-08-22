@@ -2556,8 +2556,11 @@ async function refreshShopPanelState(force = false) {
     timeoutMs: 15000,
     headers: { Authorization: `Bearer ${token}` }
   }).then((payload) => {
+    if (payload.staff?.role === "staff") storageSet(SHOP_PANEL_STAFF_SESSION_KEY, JSON.stringify(payload.staff));
+    else if (payload.staff?.role === "owner") storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
     applyRemoteState(payload);
-    if (payload.store) restoreShopPanelStore(payload.store);
+    if (shopIsStaffSession()) applyStaffShopPayload(payload);
+    if (payload.store) restoreShopPanelStore(payload.store, { replace: shopIsStaffSession() });
     shopPanelLastStateRefreshAt = Date.now();
     return true;
   }).finally(() => {
@@ -2604,14 +2607,48 @@ function richerShopPanelStore(localStore = null, remoteStore = null) {
   };
 }
 
-function restoreShopPanelStore(store) {
+function staffSafeShopStore(store = {}) {
+  const next = cloneStoreSnapshot(store || {});
+  [
+    "wallets", "ltcWallet", "productOrders", "orders", "storeFinanceRows", "storeBalanceChart",
+    "storeGrossUsd", "storeCommissionUsd", "storeBalanceUsd", "storeHeldUsd", "storeGrossLtc",
+    "storeCommissionLtc", "storeBalanceLtc", "storeHeldLtc", "storeAvailableBalanceLtc",
+    "storeAvailableBalanceUsd", "activityLogs"
+  ].forEach((key) => delete next[key]);
+  next.staff = [];
+  next.products = (Array.isArray(next.products) ? next.products : []).map((product) => ({
+    ...product,
+    positions: (Array.isArray(product.positions) ? product.positions : []).map((position) => {
+      const item = { ...position };
+      delete item.deliveryItems;
+      delete item.deliveryItemsText;
+      delete item.addresses;
+      return item;
+    })
+  }));
+  return next;
+}
+
+function applyStaffShopPayload(payload = {}) {
+  const state = payload.state || {};
+  db.orders = Array.isArray(state.orders) ? state.orders : [];
+  db.messages = Array.isArray(state.messages) ? state.messages : [];
+  db.walletWithdrawals = [];
+  db.walletTransactions = [];
+  db.walletDeposits = [];
+  db.ownerSettings = {};
+}
+
+function restoreShopPanelStore(store, options = {}) {
   if (!store?.id) return;
-  if (Number(store.storeLtcUsdRate || 0) > 0) ltcUsdCache = Number(store.storeLtcUsdRate);
+  const replace = Boolean(options.replace || shopIsStaffSession());
+  const incoming = replace ? staffSafeShopStore(store) : store;
+  if (Number(incoming.storeLtcUsdRate || 0) > 0) ltcUsdCache = Number(incoming.storeLtcUsdRate);
   const index = db.stores.findIndex((item) => item.id === store.id);
   if (index >= 0) {
-    db.stores[index] = { ...db.stores[index], ...store };
+    db.stores[index] = replace ? incoming : { ...db.stores[index], ...incoming };
   } else {
-    db.stores.push(store);
+    db.stores.push(incoming);
   }
   normalizeDb(db);
   try {
@@ -3682,12 +3719,31 @@ function scopedCitySelectOptions(store, country = "moldova", selected = "") {
 }
 
 function scopedDistrictSelectOptions(store, country = "moldova", city = "chisinau", selected = "") {
-  const cityInfo = filterOptions.countries[country]?.cities?.[city] || filterOptions.countries.moldova.cities.chisinau;
-  const allowed = Array.isArray(store.districts) && store.districts.length ? store.districts : (cityInfo?.districts || []);
+  const allowed = shopKnownDistricts(store, country, city);
   return [
     `<option value="">Любой район</option>`,
     ...allowed.map((district) => `<option value="${esc(district)}" ${district === selected ? "selected" : ""}>${esc(district)}</option>`)
   ].join("");
+}
+
+function shopKnownDistricts(store, country = "moldova", city = "chisinau") {
+  const cityInfo = filterOptions.countries[country]?.cities?.[city] || filterOptions.countries.moldova.cities.chisinau;
+  const configured = Array.isArray(store.districts) ? store.districts : [];
+  const used = (Array.isArray(store.products) ? store.products : []).flatMap((product) => (
+    (Array.isArray(product?.positions) ? product.positions : [])
+      .filter((position) => (!position.country || position.country === country) && (!position.city || position.city === city))
+      .map((position) => String(position.district || "").trim())
+  ));
+  return Array.from(new Set([...(cityInfo?.districts || []), ...configured, ...used].map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+function shopDistrictField(store, country, city, selected = "", suffix = "new") {
+  const listId = `shop-districts-${String(suffix || "new").replace(/[^a-z0-9_-]/gi, "-")}`;
+  const options = shopKnownDistricts(store, country, city).map((district) => `<option value="${esc(district)}"></option>`).join("");
+  return `<label class="field">Район
+    <input name="district" value="${esc(selected)}" list="${esc(listId)}" data-shop-location-district placeholder="Введите свой район или выберите из списка">
+    <datalist id="${esc(listId)}" data-shop-location-district-list>${options}</datalist>
+  </label>`;
 }
 
 function selectedCheckboxValues(container) {
@@ -3840,10 +3896,17 @@ function bindShopLocationSelects(store, root = document) {
     const country = countrySelect?.value || group.querySelector("input[name='country']")?.value || shopDefaultCountry(store);
     const citySelect = group.querySelector("[data-shop-location-city]");
     const districtSelect = group.querySelector("[data-shop-location-district]");
+    const districtList = group.querySelector("[data-shop-location-district-list]");
     if (!citySelect || !districtSelect) return;
     const refreshDistricts = () => {
       const selectedCountry = countrySelect?.value || country;
-      districtSelect.innerHTML = scopedDistrictSelectOptions(store, selectedCountry, citySelect.value, districtSelect.value);
+      if (districtList) {
+        districtList.innerHTML = shopKnownDistricts(store, selectedCountry, citySelect.value)
+          .map((district) => `<option value="${esc(district)}"></option>`)
+          .join("");
+      } else {
+        districtSelect.innerHTML = scopedDistrictSelectOptions(store, selectedCountry, citySelect.value, districtSelect.value);
+      }
     };
     const refreshCities = () => {
       const selectedCountry = countrySelect?.value || country;
@@ -10834,13 +10897,14 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
               <strong>${esc(store.name)}</strong>
               <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
             </div>
-            <div class="seller-dashboard-balance">
-              <span>Баланс магазина</span>
-              <strong>${availableUsd.toFixed(2)} $</strong>
-              <small>${availableLtc.toFixed(8)} LTC</small>
+            <div class="seller-dashboard-actions">
+              ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
+                <span>Баланс магазина</span>
+                <strong>${availableUsd.toFixed(2)} $ · ${availableLtc.toFixed(8)} LTC</strong>
+              </div>`}
+              <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
+              <button class="ghost-button" data-shop-panel-logout>Выйти</button>
             </div>
-            <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
-            <button class="ghost-button" data-shop-panel-logout>Выйти</button>
           </header>
           ${shopPanelTabContent(activeTab, { store, orders, paidOrders, todayOrders, products, positions, productRows, districts, recentOrders, txRows, financeRows, messageRows, clients, salesLtc, salesUsd, availableLtc, availableUsd, todaySalesLtc, todaySalesUsd, stockTotal })}
         </div>
@@ -10863,13 +10927,14 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             <strong>${esc(store.name)}</strong>
             <span>${esc(store.tag || store.id)} · ${storeStatusLabel(store)}</span>
           </div>
-          <div class="seller-dashboard-balance">
-            <span>Баланс магазина</span>
-            <strong>${availableUsd.toFixed(2)} $</strong>
-            <small>${availableLtc.toFixed(8)} LTC</small>
+          <div class="seller-dashboard-actions">
+            ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
+              <span>Баланс магазина</span>
+              <strong>${availableUsd.toFixed(2)} $ · ${availableLtc.toFixed(8)} LTC</strong>
+            </div>`}
+            <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
+            ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : `<button class="ghost-button" data-shop-panel-logout>Выйти</button>`}
           </div>
-          <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
-          ${standalone ? `<button class="ghost-button" data-seller-admin-logout>Выйти</button>` : `<button class="ghost-button" data-shop-panel-logout>Выйти</button>`}
         </header>
 
         <section class="seller-dashboard-hero">
@@ -10980,11 +11045,12 @@ const SHOP_PANEL_TABS = [
   ["finances", "$", "Финансы"],
   ["connect", "M", "Связь"],
   ["staff", "A", "Персонал"],
+  ["logs", "L", "Логи"],
   ["security", "2", "Безопасность"],
   ["settings", "*", "Настройки"]
 ];
 
-const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "staff", "security", "settings"].includes(id));
+const SHOP_STAFF_ACCESS_TABS = SHOP_PANEL_TABS.filter(([id]) => !["dashboard", "staff", "logs", "security", "settings"].includes(id));
 
 function shopStaffSession() {
   try {
@@ -11000,10 +11066,13 @@ function shopStaffPermissions() {
   return session?.role === "staff" && Array.isArray(session.permissions) ? session.permissions : null;
 }
 
+function shopIsStaffSession() {
+  return shopStaffSession()?.role === "staff";
+}
+
 function canAccessShopTab(tab) {
   const permissions = shopStaffPermissions();
   if (!permissions) return true;
-  if (tab === "security") return true;
   return permissions.includes(tab);
 }
 
@@ -11090,6 +11159,7 @@ function shopPanelTabContent(tab, data) {
   }
   if (tab === "settings") return shopSettingsTab(store);
   if (tab === "security") return shopSecurityTab();
+  if (tab === "logs") return shopActivityLogsTab(store);
   if (tab === "orders") {
     return `
       <section class="seller-dashboard-hero"><div><h2>Заказы</h2><p>Таблица заявок клиентов, статусы оплат и быстрый контроль выдачи.</p></div></section>
@@ -11312,7 +11382,7 @@ function shopStorageTab(store, products, stats = {}) {
     : `<label class="field muted">Страна<input value="${esc(filterOptions.countries[country]?.label || country)}" disabled><input name="country" type="hidden" value="${esc(country)}"></label>`;
 
   return `
-    <section class="seller-dashboard-hero"><div><h2>Склад</h2><p>Все субтовары магазина в одном месте: редактирование выдачи, цены, локации, остатка и статуса.</p></div></section>
+    <section class="seller-dashboard-hero"><div><h2>Склад</h2><p>Все субтовары магазина в одном месте: выдача, цена, локация и остаток.</p></div></section>
     <section class="seller-dashboard-stats">
       ${sellerDashStat("Остаток", `${stockTotal} шт.`, "доступно к продаже")}
       ${sellerDashStat("Карточки", `${products.length}`, "товарные карточки")}
@@ -11330,12 +11400,12 @@ function shopStorageTab(store, products, stats = {}) {
             const country = String(position.country || shopDefaultCountry(store));
             const city = String(position.city || shopDefaultCity(store));
             const district = String(position.district || "");
-            const deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems.join("\n") : "";
+            const deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems.join(position.delimiter || "\n") : "";
             return `
               <details class="seller-source" data-shop-storage-item>
                 <summary>
                   <span>${esc(position.title || product.title || "Товар")} · ${esc(locationLabel(position))} · ${esc(positionWeightLabel(position))} · ${Number(position.priceUsd || 0).toFixed(2)} $ · ${Number(position.stock || 0)} шт.</span>
-                  <strong>${esc(position.status || "ready")}</strong>
+                  <strong>Открыть</strong>
                 </summary>
                 <form class="form" data-shop-position-edit data-card-id="${esc(product.id)}" data-position-id="${esc(position.id)}">
                   <div class="row">
@@ -11351,15 +11421,11 @@ function shopStorageTab(store, products, stats = {}) {
                       <option value="ready" ${positionSaleMode(position) === "ready" ? "selected" : ""}>Готовый</option>
                       <option value="preorder" ${positionSaleMode(position) === "preorder" ? "selected" : ""}>Предзаказ</option>
                     </select></label>
-                    <label class="field">Статус<select name="status">
-                      <option value="ready" ${String(position.status || "ready") === "ready" ? "selected" : ""}>ready</option>
-                      <option value="disabled" ${String(position.status || "") === "disabled" ? "selected" : ""}>disabled</option>
-                    </select></label>
                   </div>
                   <div class="row" data-location-group>
                     ${countryFieldFor(country)}
                     <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
-                    <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, district)}</select></label>
+                    ${shopDistrictField(store, country, city, district, position.id)}
                   </div>
                   <label class="field">Разделитель адресов<input name="delimiter" value="${esc(position.delimiter === "\n" ? "новая строка" : position.delimiter || "новая строка")}"></label>
                   <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом">${esc(deliveryItems)}</textarea></label>
@@ -11398,11 +11464,12 @@ function shopProductsTab(store, products) {
         <div class="row" data-location-group>
           ${countryField}
           <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
-          <label class="field">Район<select name="district" data-shop-location-district>${scopedDistrictSelectOptions(store, country, city, "")}</select></label>
+          ${shopDistrictField(store, country, city, "", "new-product")}
         </div>
         <label class="field">Разделитель адресов<input name="delimiter" value="новая строка" placeholder="Например: . или |"></label>
         <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом" required></textarea></label>
-        <button class="primary">Добавить адреса на склад</button>
+        <div class="shop-delivery-preview" data-shop-delivery-preview></div>
+        <button class="primary">Проверить и добавить адреса</button>
       </form>` : `<p>Сначала создайте карточку.</p>`}
     </section>
     <section class="seller-dashboard-card seller-wide-card">
@@ -11713,7 +11780,7 @@ function shopStaffTab(store) {
     <label class="check-pill"><input name="permissions" type="checkbox" value="${esc(id)}"> ${esc(label)}</label>
   `).join("");
   return `
-    <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Создавайте сотрудников магазина и выбирайте, какие разделы панели они могут менять.</p></div></section>
+    <section class="seller-dashboard-hero"><div><h2>Персонал</h2><p>Выберите только нужные разделы. В карточках и товарах сотрудник сможет добавлять новое, но не изменять и не удалять существующее.</p></div></section>
     <section class="seller-dashboard-card seller-wide-card">
       <form class="form" data-shop-staff-form>
         <div class="row">
@@ -11753,13 +11820,56 @@ function shopSettingsTab(store) {
       <input name="wallet_${esc(coin.id)}" value="${esc(coin.id === "ltc" ? (store.ltcWallet || wallets.ltc || "") : (wallets[coin.id] || ""))}" placeholder="${esc(coin.payCurrency)} address">
     </label>
   `).join("");
-  return `<section class="seller-dashboard-hero"><div><h2>Настройки</h2><p>Пароль панели, кошелёк и автозакрытие сделок.</p></div></section>
-  <section class="seller-dashboard-card seller-wide-card"><form class="form" data-shop-settings-form>
-    <div class="row"><label class="field">Автозакрытие, часов<input name="autoReleaseHours" type="number" min="0" max="168" value="${esc(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)}"></label></div>
-    <div class="row">${coinFields}</div>
-    <label class="field">Новый пароль панели<input name="adminPassword" type="password" placeholder="оставить пустым"></label>
-    <button class="primary">Сохранить настройки</button>
-  </form></section>`;
+  return `<section class="seller-dashboard-hero"><div><h2>Настройки</h2><p>Кошелёк выплат и пароль панели сохраняются независимо.</p></div></section>
+  <section class="seller-dashboard-card seller-wide-card">
+    <div class="seller-card-head"><h3>Кошелёк выплат</h3><span>отдельное сохранение</span></div>
+    <form class="form" data-shop-wallet-form>
+      <div class="row">${coinFields}</div>
+      <button class="primary">Сохранить LTC кошелёк</button>
+    </form>
+  </section>
+  <section class="seller-dashboard-card seller-wide-card">
+    <div class="seller-card-head"><h3>Пароль Shop Admin</h3><span>отдельное изменение</span></div>
+    <form class="form" data-shop-password-form>
+      <label class="field">Новый пароль панели<input name="adminPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+      <label class="field">Повторите новый пароль<input name="adminPasswordConfirm" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+      <button class="primary">Изменить пароль админки</button>
+    </form>
+  </section>`;
+}
+
+function shopActivityLogsTab(store) {
+  const labels = {
+    store_staff_login: "Вход сотрудника",
+    store_staff_cards_added: "Добавлены карточки",
+    store_staff_inventory_added: "Добавлены адреса",
+    store_staff_profile_updated: "Изменён профиль",
+    store_staff_mutation_rejected: "Заблокирована попытка изменения или удаления",
+    store_dispute_joined: "Вход в диспут",
+    store_dispute_replied: "Ответ в диспуте",
+    store_dispute_message_edited: "Изменено сообщение",
+    store_dispute_message_deleted: "Удалено сообщение",
+    store_profile_updated: "Изменён профиль магазина",
+    store_cards_updated: "Изменены карточки",
+    store_inventory_updated: "Изменён склад",
+    store_payout_wallet_updated: "Изменён кошелёк",
+    store_panel_password_updated: "Изменён пароль панели",
+    store_withdrawal_requested: "Запрошен вывод"
+  };
+  const logs = Array.isArray(store.activityLogs) ? store.activityLogs : [];
+  return `<section class="seller-dashboard-hero"><div><h2>Логи действий</h2><p>Полная история действий владельца и сотрудников магазина.</p></div></section>
+    <section class="seller-dashboard-card seller-wide-card">
+      <div class="seller-card-head"><h3>Журнал магазина</h3><span>${logs.length}</span></div>
+      ${logs.length ? logs.map((entry) => {
+        const details = entry.details || {};
+        const context = [details.section, details.productId, details.orderId, details.messageId]
+          .map((item) => String(item || "").trim()).filter(Boolean).join(" · ");
+        return `<div class="seller-source shop-activity-log">
+          <span><strong>${esc(labels[entry.action] || entry.action || "Действие")}</strong><br><small>${esc(entry.actor || "system")}${context ? ` · ${esc(context)}` : ""}</small></span>
+          <time>${esc(new Date(Number(entry.createdAt || 0)).toLocaleString("ru-RU"))}</time>
+        </div>`;
+      }).join("") : `<p>Действий пока нет.</p>`}
+    </section>`;
 }
 
 function shopSecurityTab() {
@@ -11817,8 +11927,9 @@ function completeStoreAdminLogin(payload = {}, fallbackStoreId = "", destination
   else storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
   sellerAdminStoreId = nextStoreId;
   applyRemoteState(payload);
+  if (payload.staff?.role === "staff") applyStaffShopPayload(payload);
   const store = payload.store || db.stores.find((item) => item.id === nextStoreId) || null;
-  if (store) restoreShopPanelStore(store);
+  if (store) restoreShopPanelStore(store, { replace: payload.staff?.role === "staff" });
   if (destination === "seller") {
     route = "seller";
     location.hash = `seller-${nextStoreId}`;
@@ -12061,7 +12172,7 @@ function renderShopPanel(activeTab = "dashboard") {
   const html = sellerDashboardShell(store, false, activeTab);
   document.body.dataset.theme = "dark";
   root.innerHTML = `
-    <main class="shop-panel-page">
+    <main class="shop-panel-page ${shopIsStaffSession() ? "is-staff-panel" : ""}">
       ${html}
     </main>
     <div class="modal-backdrop" data-modal></div>
@@ -12116,6 +12227,83 @@ function shopSplitDeliveryItems(value, delimiter = "новая строка") {
   const separator = String(delimiter || "").trim();
   if (!separator || normalizedShopKey(separator) === "новая строка") return shopLines(text);
   return text.split(separator).map((item) => item.trim()).filter(Boolean);
+}
+
+function shopDeliveryItemKey(value = "") {
+  return String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("ru-RU");
+}
+
+function shopDeliveryItemsFromForm(form) {
+  const data = new FormData(form);
+  return shopSplitDeliveryItems(data.get("deliveryItems"), String(data.get("delimiter") || "новая строка"));
+}
+
+function paintShopDeliveryPreview(form, remoteDuplicates = []) {
+  const preview = form.querySelector("[data-shop-delivery-preview]");
+  if (!preview) return;
+  const items = shopDeliveryItemsFromForm(form);
+  const seen = new Map();
+  const errors = new Map(remoteDuplicates.map((item) => [Number(item.index), item.reason === "existing" ? "Уже есть на складе" : "Дубликат в списке"]));
+  items.forEach((item, index) => {
+    const key = shopDeliveryItemKey(item);
+    if (seen.has(key)) {
+      errors.set(index, "Дубликат в списке");
+      errors.set(seen.get(key), "Дубликат в списке");
+    } else {
+      seen.set(key, index);
+    }
+  });
+  const duplicateCount = new Set(Array.from(errors.keys())).size;
+  preview.innerHTML = `
+    <div class="shop-delivery-preview-head">
+      <strong>Предпросмотр: ${items.length} шт.</strong>
+      <span class="${duplicateCount ? "has-errors" : ""}">${duplicateCount ? `Дубликатов: ${duplicateCount}` : "Дубликатов нет"}</span>
+    </div>
+    ${items.length ? `<div class="shop-delivery-preview-table">
+      <div class="shop-delivery-preview-row head"><strong>№</strong><strong>Описание</strong><strong>Проверка</strong></div>
+      ${items.slice(0, 200).map((item, index) => `<div class="shop-delivery-preview-row ${errors.has(index) ? "duplicate" : ""}"><span>${index + 1}</span><span>${esc(item)}</span><strong>${esc(errors.get(index) || "OK")}</strong></div>`).join("")}
+      ${items.length > 200 ? `<p class="desc">Показаны первые 200 из ${items.length} строк.</p>` : ""}
+    </div>` : `<p class="desc">Введите адреса, чтобы увидеть список и количество.</p>`}
+  `;
+  form.dataset.deliveryDuplicateCount = String(duplicateCount);
+  const submit = form.querySelector('button[type="submit"], button.primary:not([type])');
+  if (submit) submit.disabled = duplicateCount > 0 || items.length === 0;
+}
+
+async function shopInventoryDuplicatePreview(items = []) {
+  const token = sellerAdminApiSessionToken();
+  if (!token || !items.length) return { duplicates: [] };
+  return apiFetch("/api/store-admin/inventory/preview", {
+    method: "POST",
+    timeoutMs: 15000,
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ items })
+  });
+}
+
+function bindShopDeliveryPreview(form) {
+  if (!form) return;
+  let timer = null;
+  let sequence = 0;
+  const update = () => {
+    sequence += 1;
+    const currentSequence = sequence;
+    clearTimeout(timer);
+    paintShopDeliveryPreview(form);
+    const items = shopDeliveryItemsFromForm(form);
+    if (!items.length || Number(form.dataset.deliveryDuplicateCount || 0) > 0) return;
+    timer = setTimeout(async () => {
+      try {
+        const payload = await shopInventoryDuplicatePreview(items);
+        if (currentSequence === sequence) paintShopDeliveryPreview(form, payload.duplicates || []);
+      } catch (error) {
+        if (currentSequence === sequence) console.error("[shop-admin] duplicate preview failed", error);
+      }
+    }, 450);
+  };
+  form.querySelector('[name="deliveryItems"]')?.addEventListener("input", update);
+  form.querySelector('[name="delimiter"]')?.addEventListener("input", update);
+  update();
 }
 
 async function shopPersistProductsAndRender(store, tab = "cards", successMessage = "Сохранено и опубликовано") {
@@ -12191,25 +12379,27 @@ async function shopPersistAndRender(tab = "dashboard") {
   renderShopPanel(tab);
 }
 
-async function persistShopSettings(store, data) {
+async function persistShopSettings(store, data, mode = "wallet") {
   const token = sellerAdminApiSessionToken();
   if (!store?.id || !token) throw new Error("Войдите в Shop Admin заново");
-  const wallets = { ...storeWallets(store) };
-  storeEnabledCoins(store).forEach((coin) => {
-    wallets[coin.id] = String(data.get(`wallet_${coin.id}`) || "").trim();
-  });
-  const ltcWallet = String(wallets.ltc ?? store.ltcWallet ?? "").trim();
-  wallets.ltc = ltcWallet;
+  const body = {};
+  if (mode === "wallet") {
+    const wallets = { ...storeWallets(store) };
+    storeEnabledCoins(store).forEach((coin) => {
+      wallets[coin.id] = String(data.get(`wallet_${coin.id}`) || "").trim();
+    });
+    const ltcWallet = String(wallets.ltc ?? store.ltcWallet ?? "").trim();
+    wallets.ltc = ltcWallet;
+    body.wallets = wallets;
+    body.ltcWallet = ltcWallet;
+  } else if (mode === "password") {
+    body.adminPassword = String(data.get("adminPassword") || "").trim();
+  }
   const payload = await apiFetch("/api/store-admin/settings", {
     method: "PUT",
     timeoutMs: 30000,
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      wallets,
-      ltcWallet,
-      autoReleaseHours: Math.max(0, Math.min(168, Number(data.get("autoReleaseHours") || 24))),
-      adminPassword: String(data.get("adminPassword") || "").trim()
-    })
+    body: JSON.stringify(body)
   });
   applyRemoteState(payload);
   restoreShopPanelStore(payload.store || store);
@@ -12220,6 +12410,7 @@ function bindShopPanelActions(store, activeTab) {
   console.log("[shop-admin] bind actions", { storeId: store?.id, activeTab });
   bindLocationSelects();
   bindShopLocationSelects(store);
+  bindShopDeliveryPreview(document.querySelector("[data-shop-product-form]"));
   document.querySelector("[data-shop-profile-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -12260,6 +12451,9 @@ function bindShopPanelActions(store, activeTab) {
         normalizedShopKey(item.title) === normalizedShopKey(title)
         && normalizedShopKey(item.subtype) === normalizedShopKey(subtype)
       ));
+      if (shopIsStaffSession() && product) {
+        throw new Error("Такая карточка уже существует. Сотрудник может создать только новую карточку, без изменения существующей.");
+      }
       const mainFile = data.get("mainImage");
       if (!product && (!mainFile || !mainFile.size)) throw new Error("Главная фотография обязательна для новой карточки");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 4);
@@ -12369,6 +12563,11 @@ function bindShopPanelActions(store, activeTab) {
       const delimiter = normalizedShopKey(delimiterInput) === "новая строка" ? "\n" : delimiterInput;
       const deliveryItems = shopSplitDeliveryItems(data.get("deliveryItems"), delimiterInput);
       if (!deliveryItems.length) throw new Error("Добавьте хотя бы один адрес");
+      const duplicatePreview = await shopInventoryDuplicatePreview(deliveryItems);
+      if (Number(duplicatePreview.duplicateCount || 0) > 0) {
+        paintShopDeliveryPreview(form, duplicatePreview.duplicates || []);
+        throw new Error(`Исправьте дубликаты: ${duplicatePreview.duplicateCount}`);
+      }
       product.positions = Array.isArray(product.positions) ? product.positions : [];
       const deliveryType = String(data.get("deliveryType") || "Тайник").trim();
       const saleMode = String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready";
@@ -12452,8 +12651,6 @@ function bindShopPanelActions(store, activeTab) {
         position.delimiter = normalizedShopKey(delimiterInput) === "новая строка" ? "\n" : delimiterInput;
         position.deliveryItems = deliveryItems;
         position.stock = deliveryItems.length;
-        position.status = String(data.get("status") || position.status || "ready");
-
         const payload = await persistSellerAdminProductPositions(store, product);
         applyRemoteState(payload);
         restoreShopPanelStore(payload.store || store);
@@ -12564,13 +12761,26 @@ function bindShopPanelActions(store, activeTab) {
     });
   });
 
-  document.querySelector("[data-shop-settings-form]")?.addEventListener("submit", async (event) => {
+  document.querySelector("[data-shop-wallet-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     await runShopFormSubmit(form, "Сохраняю...", async () => {
       const data = new FormData(form);
-      await persistShopSettings(store, data);
-      showToast("LTC кошелек и настройки сохранены");
+      await persistShopSettings(store, data, "wallet");
+      showToast("LTC кошелек сохранён");
+      renderShopPanel("settings");
+    });
+  });
+
+  document.querySelector("[data-shop-password-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    await runShopFormSubmit(form, "Изменяю...", async () => {
+      const data = new FormData(form);
+      const password = String(data.get("adminPassword") || "");
+      if (password !== String(data.get("adminPasswordConfirm") || "")) throw new Error("Пароли не совпадают");
+      await persistShopSettings(store, data, "password");
+      showToast("Пароль админки изменён");
       renderShopPanel("settings");
     });
   });

@@ -6171,11 +6171,21 @@ label,
 }
 
 .seller-dashboard-top {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, .76);
-  padding: 12px;
+  min-height: 72px;
+  padding: 10px 14px;
+}
+
+.seller-dashboard-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 body[data-theme="dark"] .seller-dashboard-top {
@@ -6205,6 +6215,72 @@ body[data-theme="dark"] .seller-dashboard-top {
   background: var(--paper);
   color: var(--ink);
   padding: 8px 14px;
+}
+
+.seller-dashboard-balance strong {
+  white-space: nowrap;
+}
+
+.shop-delivery-preview {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.shop-delivery-preview-head,
+.shop-delivery-preview-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) minmax(130px, .35fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+}
+
+.shop-delivery-preview-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-bottom: 1px solid var(--line);
+}
+
+.shop-delivery-preview-head span {
+  color: #49c77d;
+  font-weight: 800;
+}
+
+.shop-delivery-preview-head span.has-errors,
+.shop-delivery-preview-row.duplicate strong {
+  color: var(--danger);
+}
+
+.shop-delivery-preview-row {
+  border-bottom: 1px solid var(--line);
+}
+
+.shop-delivery-preview-row:last-child {
+  border-bottom: 0;
+}
+
+.shop-delivery-preview-row.head {
+  background: var(--soft);
+}
+
+.shop-delivery-preview-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.is-staff-panel [data-shop-card-edit],
+.is-staff-panel [data-shop-card-delete],
+.is-staff-panel [data-shop-card-move],
+.is-staff-panel [data-shop-position-edit],
+.is-staff-panel [data-shop-position-delete] {
+  display: none !important;
+}
+
+.shop-activity-log time {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .seller-dashboard-user {
@@ -7735,6 +7811,15 @@ body[data-theme="dark"] .seller-dashboard-top {
     font-size: 13px;
     text-overflow: ellipsis;
   }
+
+  .shop-panel-page.is-staff-panel .seller-dashboard-nav {
+    display: flex;
+  }
+
+  .shop-panel-page.is-staff-panel .seller-dashboard-nav button {
+    flex: 1 1 0;
+    width: auto;
+  }
 }
 
 /* Final CERBER cascade: keep the storefront consistently red and dark. */
@@ -8066,6 +8151,29 @@ body,
     width: 100%;
     overflow: hidden;
     padding-inline: 12px;
+  }
+
+  .seller-dashboard-top {
+    min-height: 0;
+  }
+
+  .seller-dashboard-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .seller-dashboard-actions .seller-dashboard-balance {
+    grid-column: 1 / -1;
+  }
+
+  .shop-delivery-preview-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .shop-delivery-preview-row > :last-child {
+    grid-column: 2;
   }
 
   .order-card {

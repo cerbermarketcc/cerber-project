@@ -343,6 +343,24 @@ function sellerDeliveryItems(value) {
     .filter(Boolean);
 }
 
+export function sellerDeliveryItemKey(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("ru-RU");
+}
+
+export function sellerDeliveryDuplicateReport(items = [], existingItems = []) {
+  const existing = new Set((Array.isArray(existingItems) ? existingItems : []).map(sellerDeliveryItemKey).filter(Boolean));
+  const seen = new Set();
+  return (Array.isArray(items) ? items : []).map((item, index) => {
+    const key = sellerDeliveryItemKey(item);
+    const reason = !key ? "empty" : existing.has(key) ? "existing" : seen.has(key) ? "batch" : "";
+    if (key) seen.add(key);
+    return { index, duplicate: Boolean(reason), reason };
+  });
+}
+
 function sellerPositionInput(position = {}, index = 0, product = {}) {
   const deliveryItems = sellerDeliveryItems(position.deliveryItems);
   const status = ["active", "disabled", "ready", "preorder"].includes(String(position.status || "").toLowerCase())
