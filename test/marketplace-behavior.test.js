@@ -146,11 +146,16 @@ test("home content has no empty brand spacer between mirrors and the store list"
   assert.doesNotMatch(styles, /market-brand-spacer/);
 });
 
+test("mobile product cards show complete three-by-four artwork", () => {
+  assert.match(styles, /grid-template-columns: clamp\(118px, 40vw, 154px\) minmax\(0, 1fr\)/);
+  assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: contain;/);
+});
+
 test("SOL and USDT Solana payment models remain available", () => {
   for (const source of [appClient, server]) {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=109/);
+  assert.match(indexHtml, /styles\.css\?v=110/);
   assert.match(indexHtml, /app\.js\?v=171/);
 });

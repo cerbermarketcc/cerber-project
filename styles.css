@@ -8440,3 +8440,34 @@ body,
     box-shadow: 0 8px 18px rgba(218, 38, 31, .22), 0 0 14px rgba(239, 61, 53, .12);
   }
 }
+
+/* Keep product artwork complete and proportionate on narrow screens. */
+@media (max-width: 560px) {
+  .product-catalog-grid .product-card .product-click,
+  .mega-product-card .product-click {
+    grid-template-columns: clamp(118px, 40vw, 154px) minmax(0, 1fr);
+    align-items: stretch;
+    min-height: 0;
+    padding: 10px;
+  }
+
+  .product-catalog-grid .product-image,
+  .mega-product-card .product-image {
+    align-self: center;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    aspect-ratio: 3 / 4;
+    border: 1px solid rgba(255, 82, 72, .2);
+    border-radius: 6px;
+    background: #09090a;
+    object-fit: contain;
+    object-position: center;
+  }
+
+  .product-catalog-grid .product-body,
+  .mega-product-card .product-body {
+    min-width: 0;
+    padding: 4px 2px 4px 12px;
+  }
+}
