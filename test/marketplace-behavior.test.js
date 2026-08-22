@@ -148,16 +148,19 @@ test("home content has no empty brand spacer between mirrors and the store list"
 
 test("mobile product cards show complete three-by-four artwork", () => {
   assert.match(styles, /grid-template-columns: clamp\(118px, 40vw, 154px\) minmax\(0, 1fr\)/);
-  assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: contain;/);
+  assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: cover;/);
+  assert.match(styles, /\.mega-product-card \.product-body h3[\s\S]{0,260}-webkit-line-clamp: 2/);
 });
 
-test("top stores title uses a one-shot animated Cerberus instead of fire", () => {
+test("top stores title uses a periodic breathing Cerberus instead of fire", () => {
   const title = functionBody(appClient, "topTitleView");
   assert.doesNotMatch(appClient, /storesTop: "[^"]*🔥/);
   assert.doesNotMatch(title, /🔥|top-fire-sticker/);
   assert.match(title, /topCerberusView\(\)/);
   assert.match(appClient, /class="top-cerberus"/);
-  assert.match(styles, /animation: topCerberusBarkMouth [^;]+ 1 both;/);
+  assert.match(styles, /animation: topCerberusBarkMouth 4\.2s [^;]+ infinite both;/);
+  assert.match(appClient, /top-cerberus-steam-left/);
+  assert.match(styles, /animation: topCerberusSteamLeft 4\.2s ease-out infinite/);
   assert.match(styles, /@media \(max-width: 360px\)[\s\S]{0,180}\.top-cerberus/);
   assert.doesNotMatch(styles, /topFireFlicker|fireSpark|top-fire-sticker/);
 });
@@ -167,6 +170,6 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=111/);
-  assert.match(indexHtml, /app\.js\?v=172/);
+  assert.match(indexHtml, /styles\.css\?v=112/);
+  assert.match(indexHtml, /app\.js\?v=173/);
 });

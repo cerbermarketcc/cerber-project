@@ -3373,8 +3373,8 @@ body[data-theme="dark"] .mirror-row {
 
 .top-cerberus {
   display: inline-grid;
-  width: 1.5em;
-  height: 1.08em;
+  width: 1.65em;
+  height: 1.12em;
   margin-left: 8px;
   vertical-align: -.15em;
   place-items: center;
@@ -3386,35 +3386,36 @@ body[data-theme="dark"] .mirror-row {
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 0 5px rgba(239, 61, 53, .38));
+  filter: drop-shadow(0 0 5px rgba(239, 61, 53, .34));
   transform-origin: 50% 78%;
-  animation: topCerberusBarkNod .78s ease-out 1 both;
+  animation: topCerberusBarkNod 4.2s ease-out infinite both;
 }
 
 .top-cerberus-neck,
 .top-cerberus-skull {
-  fill: #151518;
-  stroke: #f04a42;
-  stroke-width: 1.5;
+  fill: #09090b;
+  stroke: #d83a34;
+  stroke-width: 1.35;
+  stroke-linejoin: round;
+}
+
+.top-cerberus-mark {
+  fill: none;
+  stroke: #6e2221;
+  stroke-width: 1;
+  stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .top-cerberus-muzzle {
-  fill: #291719;
-  stroke: #9d2c28;
+  fill: #191012;
+  stroke: #782321;
   stroke-width: .8;
-}
-
-.top-cerberus-brow {
-  fill: none;
-  stroke: #f4f4f5;
-  stroke-width: 1.2;
-  stroke-linecap: round;
 }
 
 .top-cerberus-eye {
   fill: #ff3d33;
-  filter: drop-shadow(0 0 1.5px #ff3d33);
+  filter: drop-shadow(0 0 2px #ff3d33);
 }
 
 .top-cerberus-nose {
@@ -3424,15 +3425,15 @@ body[data-theme="dark"] .mirror-row {
 .top-cerberus-mouth {
   transform-box: fill-box;
   transform-origin: center top;
-  animation: topCerberusBarkMouth .72s cubic-bezier(.3, 0, .25, 1) 1 both;
+  animation: topCerberusBarkMouth 4.2s cubic-bezier(.3, 0, .25, 1) infinite both;
 }
 
-.top-cerberus-head-center .top-cerberus-mouth {
-  animation-delay: .04s;
+.top-cerberus-mouth-left {
+  transform-origin: right top;
 }
 
-.top-cerberus-head-right .top-cerberus-mouth {
-  animation-delay: .08s;
+.top-cerberus-mouth-right {
+  transform-origin: left top;
 }
 
 .top-cerberus-mouth-shape {
@@ -3442,41 +3443,82 @@ body[data-theme="dark"] .mirror-row {
 }
 
 .top-cerberus-fangs {
-  fill: #f4f4f5;
+  fill: #e7e1dc;
+}
+
+.top-cerberus-steam {
+  fill: none;
+  stroke: #d5d7da;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.top-cerberus-steam-left {
+  animation: topCerberusSteamLeft 4.2s ease-out infinite;
+}
+
+.top-cerberus-steam-center {
+  animation: topCerberusSteamCenter 4.2s ease-out infinite;
+}
+
+.top-cerberus-steam-right {
+  animation: topCerberusSteamRight 4.2s ease-out infinite;
 }
 
 @keyframes topCerberusBarkNod {
-  0%, 20%, 100% {
+  0%, 7%, 20%, 100% {
     transform: translateY(0) scale(1);
   }
 
-  38% {
-    transform: translateY(-1px) scale(1.035);
+  10% {
+    transform: translateY(-1px) scale(1.025);
   }
 
-  62% {
+  16% {
     transform: translateY(1px) scale(.99);
   }
 }
 
 @keyframes topCerberusBarkMouth {
-  0%, 20%, 72%, 100% {
-    transform: scaleY(.12);
+  0%, 8%, 19%, 100% {
+    transform: scaleY(.14);
   }
 
-  38%, 56% {
+  11%, 15% {
     transform: scaleY(1);
   }
 }
 
+@keyframes topCerberusSteamLeft {
+  0%, 10%, 24%, 100% { opacity: 0; transform: translate(0, 0) scale(.45); }
+  13% { opacity: .88; }
+  21% { opacity: 0; transform: translate(-5px, -2px) scale(1.25); }
+}
+
+@keyframes topCerberusSteamCenter {
+  0%, 10%, 24%, 100% { opacity: 0; transform: translate(0, 0) scale(.45); }
+  13% { opacity: .82; }
+  21% { opacity: 0; transform: translate(1px, 4px) scale(1.2); }
+}
+
+@keyframes topCerberusSteamRight {
+  0%, 10%, 24%, 100% { opacity: 0; transform: translate(0, 0) scale(.45); }
+  13% { opacity: .88; }
+  21% { opacity: 0; transform: translate(5px, -2px) scale(1.25); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .top-cerberus svg,
-  .top-cerberus-mouth {
+  .top-cerberus-mouth,
+  .top-cerberus-steam {
     animation: none;
   }
 
   .top-cerberus-mouth {
-    transform: scaleY(.12);
+    transform: scaleY(.14);
   }
 }
 
@@ -8492,33 +8534,71 @@ body,
   }
 }
 
-/* Keep product artwork complete and proportionate on narrow screens. */
+/* Compact mobile product cards without empty bands around their artwork. */
 @media (max-width: 560px) {
   .product-catalog-grid .product-card .product-click,
   .mega-product-card .product-click {
     grid-template-columns: clamp(118px, 40vw, 154px) minmax(0, 1fr);
     align-items: stretch;
     min-height: 0;
-    padding: 10px;
+    padding: 8px;
   }
 
   .product-catalog-grid .product-image,
   .mega-product-card .product-image {
-    align-self: center;
+    align-self: stretch;
+    display: block;
     width: 100%;
-    height: auto;
+    height: 100%;
     min-height: 0;
     aspect-ratio: 3 / 4;
     border: 1px solid rgba(255, 82, 72, .2);
     border-radius: 6px;
     background: #09090a;
-    object-fit: contain;
+    object-fit: cover;
     object-position: center;
   }
 
   .product-catalog-grid .product-body,
   .mega-product-card .product-body {
     min-width: 0;
-    padding: 4px 2px 4px 12px;
+    padding: 1px 2px 1px 10px;
+  }
+
+  .product-catalog-grid .product-body h3,
+  .mega-product-card .product-body h3 {
+    display: -webkit-box;
+    overflow: hidden;
+    margin: 0 0 4px;
+    font-size: 15px;
+    line-height: 1.2;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .product-catalog-grid .product-body p,
+  .mega-product-card .product-body p {
+    margin: 3px 0;
+    font-size: 12px;
+    line-height: 1.25;
+  }
+
+  .product-catalog-grid .price,
+  .mega-product-card .price {
+    font-size: 14px;
+    line-height: 1.25;
+  }
+
+  .product-catalog-grid .product-stock,
+  .mega-product-card .product-stock {
+    margin: 4px 0 6px !important;
+    font-size: 11px;
+  }
+
+  .product-catalog-grid .product-card-buy,
+  .mega-product-card .product-card-buy {
+    min-height: 36px;
+    padding: 6px 8px;
+    font-size: 12px;
   }
 }

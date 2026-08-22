@@ -4882,31 +4882,45 @@ function renderHome() {
   if (activeHomeTab === "exchange") bindExchangeCatalogCards();
 }
 
-function topCerberusHeadView(positionClass) {
-  return `
-    <g class="top-cerberus-head ${positionClass}">
-      <path class="top-cerberus-skull" d="M3 11 4 2 10 8Q13 6 16 8L22 2 23 11Q26 15 24 23 22 30 13 31 4 30 2 23 0 15 3 11Z"></path>
-      <path class="top-cerberus-muzzle" d="M6 20.5Q13 18 20 20.5L19 25Q13 28 7 25Z"></path>
-      <path class="top-cerberus-brow" d="M6 14 11 16M20 14 15 16"></path>
-      <circle class="top-cerberus-eye" cx="9.5" cy="17.2" r="1.35"></circle>
-      <circle class="top-cerberus-eye" cx="16.5" cy="17.2" r="1.35"></circle>
-      <path class="top-cerberus-nose" d="M10.5 20Q13 18.4 15.5 20L13 22Z"></path>
-      <g class="top-cerberus-mouth">
-        <path class="top-cerberus-mouth-shape" d="M7.5 23.7Q13 30 18.5 23.7Q13 26 7.5 23.7Z"></path>
-        <path class="top-cerberus-fangs" d="M9 24 11.5 24 10.3 26.8ZM17 24 14.5 24 15.7 26.8Z"></path>
-      </g>
-    </g>
-  `;
-}
-
 function topCerberusView() {
   return `
     <span class="top-cerberus" aria-hidden="true">
-      <svg viewBox="0 0 72 42" focusable="false">
-        <path class="top-cerberus-neck" d="M14 41Q18 31 28 32L36 27 44 32Q54 31 58 41Z"></path>
-        <g transform="translate(1 8) scale(.8)">${topCerberusHeadView("top-cerberus-head-left")}</g>
-        <g transform="translate(50 8) scale(.8)">${topCerberusHeadView("top-cerberus-head-right")}</g>
-        <g transform="translate(23 1)">${topCerberusHeadView("top-cerberus-head-center")}</g>
+      <svg viewBox="0 0 86 44" focusable="false">
+        <path class="top-cerberus-neck" d="M18 43 24 32 34 30 43 35 52 30 62 32 68 43Z"></path>
+        <g class="top-cerberus-head top-cerberus-head-left">
+          <path class="top-cerberus-skull" d="M34 17 29 11 28 2 21 8 15 9 9 14 1 18 7 21 2 24 10 27 17 26 21 32 24 26 30 23Z"></path>
+          <path class="top-cerberus-mark" d="M29 11 22 14 19 20M16 10 13 17 7 20"></path>
+          <path class="top-cerberus-eye" d="M16 14 24 14 19 18Z"></path>
+          <path class="top-cerberus-nose" d="M1 18 7 17 7 21 3 22Z"></path>
+          <g class="top-cerberus-mouth top-cerberus-mouth-left">
+            <path class="top-cerberus-mouth-shape" d="M4 22 18 21 14 29 7 28Z"></path>
+            <path class="top-cerberus-fangs" d="M7 22 10 22 8.5 25ZM15 22 12 22 13.5 25Z"></path>
+          </g>
+        </g>
+        <g class="top-cerberus-head top-cerberus-head-right">
+          <path class="top-cerberus-skull" d="M52 17 57 11 58 2 65 8 71 9 77 14 85 18 79 21 84 24 76 27 69 26 65 32 62 26 56 23Z"></path>
+          <path class="top-cerberus-mark" d="M57 11 64 14 67 20M70 10 73 17 79 20"></path>
+          <path class="top-cerberus-eye" d="M70 14 62 14 67 18Z"></path>
+          <path class="top-cerberus-nose" d="M85 18 79 17 79 21 83 22Z"></path>
+          <g class="top-cerberus-mouth top-cerberus-mouth-right">
+            <path class="top-cerberus-mouth-shape" d="M82 22 68 21 72 29 79 28Z"></path>
+            <path class="top-cerberus-fangs" d="M79 22 76 22 77.5 25ZM71 22 74 22 72.5 25Z"></path>
+          </g>
+        </g>
+        <g class="top-cerberus-head top-cerberus-head-center">
+          <path class="top-cerberus-skull" d="M29 18 32 12 33 2 40 9 43 4 46 9 53 2 54 12 57 18 55 29 49 35 43 38 37 35 31 29Z"></path>
+          <path class="top-cerberus-mark" d="M34 11 40 15 43 12 46 15 52 11M32 19 38 22M54 19 48 22"></path>
+          <path class="top-cerberus-eye" d="M33 17 41 18 36 22ZM53 17 45 18 50 22Z"></path>
+          <path class="top-cerberus-muzzle" d="M35 23 43 20 51 23 50 29 43 32 36 29Z"></path>
+          <path class="top-cerberus-nose" d="M39 23 43 21 47 23 43 26Z"></path>
+          <g class="top-cerberus-mouth top-cerberus-mouth-center">
+            <path class="top-cerberus-mouth-shape" d="M36 28 50 28 48 38 38 38Z"></path>
+            <path class="top-cerberus-fangs" d="M38 28 41 28 39.5 32ZM48 28 45 28 46.5 32Z"></path>
+          </g>
+        </g>
+        <path class="top-cerberus-steam top-cerberus-steam-left" d="M5 24C0 22 0 18-4 18"></path>
+        <path class="top-cerberus-steam top-cerberus-steam-center" d="M43 36C40 39 45 40 42 44"></path>
+        <path class="top-cerberus-steam top-cerberus-steam-right" d="M81 24C86 22 86 18 90 18"></path>
       </svg>
     </span>
   `;
