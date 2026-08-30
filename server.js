@@ -41,12 +41,12 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "compact-products-serious-cerberus-2026-08-22-v176";
+const cerberBuildVersion = "clean-launch-security-reset-2026-08-30-v177";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
-const cleanLaunchResetId = "clean-marketplace-launch-2026-08-17-v2";
+const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
-const securityTokenVersion = "incident-2026-08-12-v1";
-const securityTokenEpochMs = Math.max(1786554654000, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
+const securityTokenVersion = "clean-launch-2026-08-30-v2";
+const securityTokenEpochMs = Math.max(1788072973179, Number(process.env.SECURITY_TOKEN_EPOCH_MS || 0) || 0);
 const invalidPasswordTimingHash = "$2a$12$DKwXcwowvOq8mcDQ4fPPFO.XO5L4ge59H0uKy6ucXFUSEIHnq8WLG";
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -100,6 +100,7 @@ let litecoinUsdRateCache = { rate: 0, sources: [], updatedAt: 0 };
 let paymentReconcilePromise = null;
 let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
 let settingsSaveChain = Promise.resolve();
+let cleanLaunchInProgress = true;
 const withdrawalPayoutJobs = new Set();
 let nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
 const uiTranslationCache = new Map();
@@ -513,6 +514,31 @@ const cspDirectives = [
   "form-action 'self' https://nowpayments.io https://*.nowpayments.io"
 ].join("; ");
 
+function assertProductionSecurityConfiguration() {
+  if (!isProduction) return;
+  const errors = [];
+  const requireSecret = (name, minimumLength = 32) => {
+    if (String(process.env[name] || "").length < minimumLength) errors.push(`${name} must contain at least ${minimumLength} characters`);
+  };
+  if (!supabaseUrl || String(supabaseServiceKey || "").length < 32) errors.push("Supabase service-role storage is required");
+  requireSecret("ADMIN_JWT_SECRET");
+  requireSecret("DATA_ENCRYPTION_KEY");
+  requireSecret("SELLER_ADMIN_SECRET");
+  if (enforceCloudflareOriginSecret) requireSecret("CLOUDFLARE_ORIGIN_SECRET");
+  if (!String(process.env.MARKET_ADMIN_LOGIN || "").trim()) errors.push("MARKET_ADMIN_LOGIN is required");
+  if (!String(process.env.MARKET_ADMIN_PASSWORD || process.env.MARKET_ADMIN_PASSWORD_HASH || "").trim()) {
+    errors.push("MARKET_ADMIN_PASSWORD or MARKET_ADMIN_PASSWORD_HASH is required");
+  }
+  if (Boolean(turnstileSiteKey) !== Boolean(turnstileSecretKey)) errors.push("TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY must be configured together");
+  if (nowpaymentsApiKey && String(nowpaymentsIpnSecret).length < 16) errors.push("NOWPAYMENTS_IPN_SECRET is required when payments are enabled");
+  if (telegramBotToken && String(telegramWebhookSecret).length < 16) errors.push("TELEGRAM_WEBHOOK_SECRET is required when the Telegram bot is enabled");
+  if (siteNotifyBotToken && String(siteNotifyWebhookSecret).length < 16) errors.push("SITE_NOTIFY_WEBHOOK_SECRET is required when the notification bot is enabled");
+  if (proverkaBotToken && String(proverkaWebhookSecret).length < 16) errors.push("PROVERKA_WEBHOOK_SECRET is required when the verification bot is enabled");
+  if (errors.length) throw new Error(`Production security configuration is incomplete: ${errors.join("; ")}`);
+}
+
+assertProductionSecurityConfiguration();
+
 function isAllowedCorsOrigin(origin = "") {
   return allowedCorsOrigins.has(origin) || (!isProduction && localCorsOriginPattern.test(origin));
 }
@@ -691,6 +717,10 @@ const webhookApiJsonParser = express.json({ limit: "2mb" });
 const mediaApiJsonParser = express.json({ limit: "20mb" });
 app.use("/api", (req, res, next) => {
   try {
+    if (cleanLaunchInProgress && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      res.setHeader("Retry-After", "20");
+      return res.status(503).json({ error: "Сервис завершает безопасную очистку данных" });
+    }
     const contentLength = Math.max(0, Number(req.headers["content-length"] || 0) || 0);
     const hasBearerToken = /^Bearer\s+\S+/i.test(String(req.headers.authorization || ""));
     const isProviderWebhook = /\/(?:webhook|ipn)(?:\/|$)/i.test(req.path);
@@ -2730,20 +2760,12 @@ async function ensureSeed() {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
     const startedAt = Date.now();
-    const [{ data: existingSettings, error: settingsError }, { data: existingAdmin, error: adminError }] = await Promise.all([
-      supabase.from("app_settings").select("id").eq("id", mainSettingsRowId).maybeSingle(),
-      supabase.from("profiles").select("login_key").eq("login_key", "admin").maybeSingle()
-    ]);
+    const { data: existingSettings, error: settingsError } = await supabase
+      .from("app_settings")
+      .select("id")
+      .eq("id", mainSettingsRowId)
+      .maybeSingle();
     if (settingsError) throw settingsError;
-    if (adminError) throw adminError;
-
-    if (!existingAdmin) {
-      const adminHash = await bcrypt.hash(crypto.randomBytes(48).toString("base64url"), 12);
-      const { error } = await supabase.from("profiles").upsert([
-        { login: "admin", login_key: "admin", password_hash: adminHash, name: "Admin", role: "admin" }
-      ], { onConflict: "login_key" });
-      if (error) throw error;
-    }
 
     if (!existingSettings) {
       const { error } = await supabase.from("app_settings").upsert({
@@ -2799,7 +2821,7 @@ async function ensureSeed() {
     }
 
     seedReady = true;
-    console.log("[ensureSeed] ready", { ms: Date.now() - startedAt, createdAdmin: !existingAdmin, createdSettings: !existingSettings });
+    console.log("[ensureSeed] ready", { ms: Date.now() - startedAt, createdSettings: !existingSettings });
   })();
   try {
     await seedPromise;
@@ -2820,9 +2842,9 @@ async function deleteAllRowsForCleanLaunch(table, column = "id", options = {}) {
   return Number(count || 0);
 }
 
-async function removeStoreMediaForCleanLaunch() {
+async function removeUploadedMediaForCleanLaunch() {
   const storage = supabase.storage.from(mediaBucketName);
-  const pendingFolders = ["stores"];
+  const pendingFolders = [""];
   const objectPaths = [];
   while (pendingFolders.length) {
     const folder = pendingFolders.pop();
@@ -2839,7 +2861,7 @@ async function removeStoreMediaForCleanLaunch() {
       }
       const entries = Array.isArray(data) ? data : [];
       for (const entry of entries) {
-        const objectPath = `${folder}/${entry.name}`;
+        const objectPath = folder ? `${folder}/${entry.name}` : entry.name;
         if (entry.id || entry.metadata) objectPaths.push(objectPath);
         else pendingFolders.push(objectPath);
       }
@@ -2867,15 +2889,19 @@ async function runCleanLaunchResetOnce(options = {}) {
     return { skipped: true, reason: "already-completed" };
   }
 
-  const [{ data: settingsRows, error: settingsError }, { data: messageRows, error: messagesError }] = await Promise.all([
-    supabase.from("app_settings").select("id,data"),
-    supabase.from("messages").select("id,data").limit(10000)
-  ]);
+  const { data: settingsRows, error: settingsError } = await supabase.from("app_settings").select("id,data");
   if (settingsError) throw settingsError;
-  if (messagesError) throw messagesError;
+
+  const staleMaintenanceIds = (Array.isArray(settingsRows) ? settingsRows : [])
+    .map((row) => String(row?.id || ""))
+    .filter((id) => id.startsWith("maintenance_") && id !== cleanLaunchResetMarkerRowId);
+  for (let index = 0; index < staleMaintenanceIds.length; index += 200) {
+    const { error } = await supabase.from("app_settings").delete().in("id", staleMaintenanceIds.slice(index, index + 200));
+    if (error) throw error;
+  }
 
   const cleanedSettingsRows = (Array.isArray(settingsRows) ? settingsRows : [])
-    .filter((row) => row?.id !== cleanLaunchResetMarkerRowId)
+    .filter((row) => !String(row?.id || "").startsWith("maintenance_"))
     .map((row) => ({
       id: row.id,
       data: cleanMarketplaceLaunchState(row.data || {}),
@@ -2886,45 +2912,53 @@ async function runCleanLaunchResetOnce(options = {}) {
     if (error) throw error;
   }
 
-  const marketplaceMessageIds = (Array.isArray(messageRows) ? messageRows : [])
-    .filter((row) => {
-      const data = row?.data || {};
-      const storeId = String(data.storeId || data.store_id || "").toLowerCase();
-      return Boolean(storeId || data.exchangerId || data.exchanger_id)
-        && !["site", "support"].includes(storeId);
-    })
-    .map((row) => row.id)
-    .filter(Boolean);
-  for (let index = 0; index < marketplaceMessageIds.length; index += 200) {
-    const { error } = await supabase.from("messages").delete().in("id", marketplaceMessageIds.slice(index, index + 200));
-    if (error) throw error;
-  }
-
   const deleted = {};
   deleted.ledgerEntries = await deleteAllRowsForCleanLaunch("ledger_entries", "id", { optional: true });
   deleted.walletWithdrawals = await deleteAllRowsForCleanLaunch("wallet_withdrawals", "id", { optional: true });
   deleted.walletDeposits = await deleteAllRowsForCleanLaunch("wallet_deposits", "id", { optional: true });
   deleted.orders = await deleteAllRowsForCleanLaunch("orders", "id", { optional: true });
+  deleted.paymentIpnEvents = await deleteAllRowsForCleanLaunch("payment_ipn_events", "fingerprint", { optional: true });
+  deleted.messages = await deleteAllRowsForCleanLaunch("messages", "id");
+  deleted.sessions = await deleteAllRowsForCleanLaunch("sessions", "token");
+  deleted.profiles = await deleteAllRowsForCleanLaunch("profiles", "login_key");
   const { error: storeAdminError, count: storeAdminCount } = await supabase
     .from("admin_accounts")
     .delete({ count: "exact" })
     .eq("scope", "store");
   if (storeAdminError && !mirrorTableUnavailable(storeAdminError)) throw storeAdminError;
   deleted.storeAdminAccounts = Number(storeAdminCount || 0);
+  const configuredOwnerLoginKey = loginKey(process.env.MARKET_ADMIN_LOGIN || "admin");
   const { error: delegatedAdminError, count: delegatedAdminCount } = await supabase
     .from("admin_accounts")
     .delete({ count: "exact" })
     .eq("scope", "site")
-    .neq("role", "owner");
+    .neq("login_key", configuredOwnerLoginKey);
   if (delegatedAdminError && !mirrorTableUnavailable(delegatedAdminError)) throw delegatedAdminError;
   deleted.delegatedAdminAccounts = Number(delegatedAdminCount || 0);
+  const { data: ownerAccounts, error: ownerAccountsError } = await supabase
+    .from("admin_accounts")
+    .select("id,session_version")
+    .eq("scope", "site")
+    .eq("login_key", configuredOwnerLoginKey)
+    .eq("role", "owner");
+  if (ownerAccountsError && !mirrorTableUnavailable(ownerAccountsError)) throw ownerAccountsError;
+  for (const account of Array.isArray(ownerAccounts) ? ownerAccounts : []) {
+    const { error } = await supabase
+      .from("admin_accounts")
+      .update({ session_version: Number(account.session_version || 1) + 1, updated_at: new Date().toISOString() })
+      .eq("id", account.id);
+    if (error) throw error;
+  }
+  deleted.revokedOwnerSessions = Array.isArray(ownerAccounts) ? ownerAccounts.length : 0;
   deleted.stores = await deleteAllRowsForCleanLaunch("stores", "id");
   deleted.auditLogs = await deleteAllRowsForCleanLaunch("audit_logs", "id", { optional: true });
-  deleted.marketplaceMessages = marketplaceMessageIds.length;
+  deleted.authRateLimits = await deleteAllRowsForCleanLaunch("auth_rate_limits", "scope", { optional: true });
+  deleted.operationLocks = await deleteAllRowsForCleanLaunch("operation_locks", "lock_key", { optional: true });
+  deleted.settingsMaintenanceMarkers = staleMaintenanceIds.length;
 
   let removedMedia = 0;
   try {
-    removedMedia = await removeStoreMediaForCleanLaunch();
+    removedMedia = await removeUploadedMediaForCleanLaunch();
   } catch (error) {
     console.warn("[clean-launch] unreferenced store media cleanup failed", sanitizeErrorForLog(error));
   }
@@ -2936,6 +2970,16 @@ async function runCleanLaunchResetOnce(options = {}) {
   settingsBackupMemorySnapshot = null;
   settingsBackupMemoryAt = 0;
   adminLogMemory = [];
+  privilegedLoginAttempts.clear();
+  clientRateLimits.clear();
+  usedInternalCaptchas.clear();
+  internalCaptchaChallenges.clear();
+  uiTranslationCache.clear();
+  blockedUsersCache = { expiresAt: 0, value: {} };
+  proverkaStateCache = null;
+  proverkaStateDirty = false;
+  for (const timer of proverkaTimers.values()) clearTimeout(timer);
+  proverkaTimers.clear();
 
   const { error: markerSaveError } = await supabase.from("app_settings").upsert({
     id: cleanLaunchResetMarkerRowId,
@@ -16339,12 +16383,14 @@ const cleanLaunchStartupResult = await runCleanLaunchResetOnce().catch((error) =
   if (isProduction) throw error;
   return { skipped: true, reason: "local-reset-failed" };
 });
+cleanLaunchInProgress = !cleanLaunchStartupResult.skipped;
 
 const server = app.listen(port, () => {
   console.log(`CERBER server listening on ${port}`);
   if (!cleanLaunchStartupResult.skipped) {
     setTimeout(() => {
       runCleanLaunchResetOnce({ force: true, finalize: true })
+        .then(() => { cleanLaunchInProgress = false; })
         .catch((error) => console.error("[clean-launch] final pass failed", sanitizeErrorForLog(error)));
     }, 15 * 1000).unref?.();
   }

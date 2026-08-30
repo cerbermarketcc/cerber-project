@@ -130,6 +130,18 @@ export function normalizePublicBaseUrl(value = "", options = {}) {
 
 export function cleanMarketplaceLaunchState(state = {}) {
   const source = state && typeof state === "object" && !Array.isArray(state) ? state : {};
+  const groupSettings = source.groupSettings && typeof source.groupSettings === "object"
+    ? source.groupSettings
+    : {};
+  const telegramBot = source.telegramBot && typeof source.telegramBot === "object"
+    ? source.telegramBot
+    : {};
+  const siteNotifyBot = source.siteNotifyBot && typeof source.siteNotifyBot === "object"
+    ? source.siteNotifyBot
+    : {};
+  const proverkaBot = source.proverkaBot && typeof source.proverkaBot === "object"
+    ? source.proverkaBot
+    : {};
   return {
     ...source,
     ownerStores: [],
@@ -144,11 +156,53 @@ export function cleanMarketplaceLaunchState(state = {}) {
     walletDeposits: [],
     walletWithdrawals: [],
     referralPayments: [],
+    referrals: [],
+    pendingReferrals: [],
+    referralCodes: {},
     siteNotifications: [],
     broadcasts: [],
     supportTickets: [],
     nowpaymentsIpnEvents: [],
     adminLogs: [],
+    messages: [],
+    groupMessages: [],
+    groupSettings: {
+      ...groupSettings,
+      pinnedMessageId: "",
+      mutedUntil: {},
+      rollTimers: [],
+      members: [],
+      presence: {},
+      widgetSeenAt: {}
+    },
+    blockedUsers: {},
+    deletedStoreIds: [],
+    userFilters: {},
+    mirrorBots: [],
+    clientMirrorBots: [],
+    telegramBots: [],
+    telegramMirrors: [],
+    telegramWebhookEvents: [],
+    telegramBot: {
+      ...telegramBot,
+      users: {},
+      sentMessages: {},
+      webhookEvents: []
+    },
+    siteNotifyBot: {
+      ...siteNotifyBot,
+      users: {},
+      sentMessages: {},
+      webhookEvents: []
+    },
+    proverkaBot: {
+      settings: proverkaBot.settings && typeof proverkaBot.settings === "object" ? proverkaBot.settings : {},
+      users: {},
+      votes: {},
+      flood: {},
+      day: {},
+      webhookEvents: []
+    },
     balances: {},
     ltcBalances: {},
     ltcBalanceVersions: {},

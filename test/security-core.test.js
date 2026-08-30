@@ -27,7 +27,7 @@ import {
   verifyTotpCode
 } from "../security-core.js";
 
-test("clean launch removes marketplace and money while preserving user-owned state", () => {
+test("clean launch removes marketplace, money and user-owned state", () => {
   const source = {
     ownerStores: [{ id: "store-1" }],
     publicStoresCache: [{ id: "store-1" }],
@@ -56,9 +56,11 @@ test("clean launch removes marketplace and money while preserving user-owned sta
     assert.deepEqual(cleaned[key], {}, key);
   assert.equal(cleaned.ownerBalanceLtc, 0);
   assert.equal(cleaned.ownerBalanceUsd, 0);
-  assert.deepEqual(cleaned.groupMessages, source.groupMessages);
-  assert.deepEqual(cleaned.referralCodes, source.referralCodes);
-  assert.deepEqual(cleaned.telegramBot, source.telegramBot);
+  assert.deepEqual(cleaned.groupMessages, []);
+  assert.deepEqual(cleaned.groupSettings.members, []);
+  assert.deepEqual(cleaned.referralCodes, {});
+  assert.deepEqual(cleaned.telegramBot.users, {});
+  assert.deepEqual(cleaned.telegramBot.sentMessages, {});
   assert.notEqual(cleaned, source);
 });
 
