@@ -228,6 +228,15 @@ export function telegramLinkCodeFromMessage(value = "") {
   return normalizeTelegramLinkCode(text);
 }
 
+export function telegramEditFailureMode(error = {}) {
+  const message = String(error?.message || error || "");
+  if (/message is not modified/i.test(message)) return "ignore";
+  if (/message to edit not found|message (?:can'?t|cannot|can not) be edited|message identifier is not specified/i.test(message)) {
+    return "send";
+  }
+  return "fail";
+}
+
 export function boundedUserText(value = "", maxLength = 5000, fieldName = "Text") {
   const limit = Math.min(100_000, Math.max(1, Number(maxLength) || 5000));
   const text = String(value ?? "").trim();

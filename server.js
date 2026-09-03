@@ -28,6 +28,7 @@ import {
   sanitizeErrorForLog,
   sellerDeliveryDuplicateReport,
   sellerDeliveryItemKey,
+  telegramEditFailureMode,
   telegramLinkCodeFromMessage,
   totpCodeForStep,
   trustedWalletCreditLtc,
@@ -43,7 +44,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "secure-cerberlink-mirrors-2026-09-03-v178";
+const cerberBuildVersion = "telegram-mirror-callback-dedup-2026-09-03-v179";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -978,8 +979,13 @@ function rememberTelegramWebhookUpdate(state = {}, payload = {}, scope = "telegr
   const updateId = String(payload?.update_id ?? "").trim();
   if (!/^\d{1,24}$/.test(updateId)) return { valid: false, duplicate: false };
   const key = `${String(scope || "telegram").slice(0, 120)}:${updateId}`;
+  const callbackId = String(payload?.callback_query?.id || "").trim().slice(0, 160);
+  const callbackKey = callbackId ? `${String(scope || "telegram").slice(0, 120)}:callback:${callbackId}` : "";
   state.telegramWebhookEvents = Array.isArray(state.telegramWebhookEvents) ? state.telegramWebhookEvents : [];
-  if (state.telegramWebhookEvents.some((item) => item?.key === key)) return { valid: true, duplicate: true };
+  if (state.telegramWebhookEvents.some((item) => item?.key === key || (callbackKey && item?.key === callbackKey))) {
+    return { valid: true, duplicate: true };
+  }
+  if (callbackKey) state.telegramWebhookEvents.unshift({ key: callbackKey, createdAt: Date.now() });
   state.telegramWebhookEvents.unshift({ key, createdAt: Date.now() });
   state.telegramWebhookEvents = state.telegramWebhookEvents.slice(0, 2000);
   return { valid: true, duplicate: false };
@@ -14413,7 +14419,7 @@ async function botEditOrSend(state, callback, text, replyMarkup = botMainKeyboar
   const messageId = callback.message?.message_id;
   if (!chatId || !messageId) return botSendMessage(state, chatId, text, replyMarkup);
   try {
-    await telegramApi("editMessageText", {
+    return await telegramApi("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,
@@ -14421,8 +14427,11 @@ async function botEditOrSend(state, callback, text, replyMarkup = botMainKeyboar
       disable_web_page_preview: true,
       reply_markup: replyMarkup
     }, telegramTokenFromState(state));
-  } catch {
-    await botSendMessage(state, chatId, text, replyMarkup);
+  } catch (error) {
+    const failureMode = telegramEditFailureMode(error);
+    if (failureMode === "ignore") return null;
+    if (failureMode === "send") return botSendMessage(state, chatId, text, replyMarkup);
+    throw error;
   }
 }
 

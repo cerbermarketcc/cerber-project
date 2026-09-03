@@ -20,6 +20,7 @@ import {
   recoveryCodeHashes,
   sanitizeAuditDetails,
   sellerDeliveryDuplicateReport,
+  telegramEditFailureMode,
   telegramLinkCodeFromMessage,
   totpCodeForStep,
   trustedWalletCreditLtc,
@@ -77,6 +78,13 @@ test("CERBERLINK accepts only the one-time code command formats", () => {
   assert.equal(telegramLinkCodeFromMessage(`/start CERBERLINK_${code}`), code);
   assert.equal(telegramLinkCodeFromMessage("/login customer password123"), "");
   assert.equal(telegramLinkCodeFromMessage("CBR_AAAAAAAAAAAAAAA1"), "");
+});
+
+test("Telegram edit failures cannot turn an uncertain callback into a duplicate message", () => {
+  assert.equal(telegramEditFailureMode(new Error("Bad Request: message is not modified")), "ignore");
+  assert.equal(telegramEditFailureMode(new Error("Bad Request: message can't be edited")), "send");
+  assert.equal(telegramEditFailureMode(new Error("The operation timed out")), "fail");
+  assert.equal(telegramEditFailureMode(new Error("fetch failed")), "fail");
 });
 
 test("oversized untrusted text is rejected instead of silently stored", () => {

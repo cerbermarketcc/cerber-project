@@ -279,6 +279,8 @@ test("Telegram webhooks require a secret, serialize state changes and reject rep
   assert.match(proverka, /rememberTelegramWebhookUpdate\(state\.proverkaBot, req\.body/);
   assert.match(proverka, /update\.duplicate/);
   assert.match(server, /\/\^\\\/api\\\/telegram\\\/\(\?:wallet\|webhook\|mirror\|link-code\)/);
+  assert.match(server, /callbackKey[\s\S]{0,260}item\?\.key === callbackKey/);
+  assert.match(server, /telegramEditFailureMode\(error\)/);
 });
 
 test("CERBERLINK uses one-time hashed codes and never authenticates with a Telegram password", () => {
