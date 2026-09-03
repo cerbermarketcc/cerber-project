@@ -278,7 +278,22 @@ test("Telegram webhooks require a secret, serialize state changes and reject rep
   assert.match(proverka, /requireTelegramWebhookSecret\(req/);
   assert.match(proverka, /rememberTelegramWebhookUpdate\(state\.proverkaBot, req\.body/);
   assert.match(proverka, /update\.duplicate/);
-  assert.match(server, /\/\^\\\/api\\\/telegram\\\/\(\?:wallet\|webhook\|mirror\)/);
+  assert.match(server, /\/\^\\\/api\\\/telegram\\\/\(\?:wallet\|webhook\|mirror\|link-code\)/);
+});
+
+test("CERBERLINK uses one-time hashed codes and never authenticates with a Telegram password", () => {
+  const linkRoute = routeBody("post", "/api/telegram/link-code");
+  assert.match(linkRoute, /userFromRequest\(req\)/);
+  assert.match(linkRoute, /issueTelegramLinkCode\(state, user\)/);
+  assert.match(linkRoute, /Cache-Control", "no-store"/);
+  assert.doesNotMatch(linkRoute, /password|password_hash/);
+  assert.match(server, /telegramLinkCodeDigest[\s\S]{0,180}createHmac\("sha256", adminSecret\(\)\)/);
+  assert.match(server, /telegramLinkCodeTtlMs = 10 \* 60 \* 1000/);
+  assert.match(server, /state\.telegramLinkCodes\.splice\(index, 1\)/);
+  assert.match(server, /ownerChatIds[\s\S]{0,220}isMirrorOwner \? mirror\.login : ""/);
+  assert.match(appClient, /data-telegram-link/);
+  assert.match(appClient, /apiFetch\("\/api\/telegram\/link-code"/);
+  assert.doesNotMatch(server, /from\("profiles"\)[\s\S]{0,160}passwordMatchesProfile[\s\S]{0,160}handleBotLogin/);
 });
 
 test("the text administration page does not execute downloaded JavaScript", () => {

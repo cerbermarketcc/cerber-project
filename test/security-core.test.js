@@ -15,10 +15,12 @@ import {
   isBlockedStaticPath,
   mediaMagicMatches,
   normalizePublicBaseUrl,
+  normalizeTelegramLinkCode,
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
   sellerDeliveryDuplicateReport,
+  telegramLinkCodeFromMessage,
   totpCodeForStep,
   trustedWalletCreditLtc,
   validateProviderPayout,
@@ -45,7 +47,8 @@ test("clean launch removes marketplace, money and user-owned state", () => {
     adminLogs: [{ id: "log-1" }],
     groupMessages: [{ id: "group-1" }],
     referralCodes: { alice: "SAFE-CODE" },
-    telegramBot: { users: { "1": { login: "alice" } } }
+    telegramBot: { users: { "1": { login: "alice" } } },
+    telegramLinkCodes: [{ digest: "a".repeat(64), loginKey: "alice", expiresAt: Date.now() + 1000 }]
   };
   const cleaned = cleanMarketplaceLaunchState(source);
   for (const key of [
@@ -61,7 +64,19 @@ test("clean launch removes marketplace, money and user-owned state", () => {
   assert.deepEqual(cleaned.referralCodes, {});
   assert.deepEqual(cleaned.telegramBot.users, {});
   assert.deepEqual(cleaned.telegramBot.sentMessages, {});
+  assert.deepEqual(cleaned.telegramLinkCodes, []);
   assert.notEqual(cleaned, source);
+});
+
+test("CERBERLINK accepts only the one-time code command formats", () => {
+  const code = "CBR_ABCDEFGHJKLMNPQR";
+  assert.equal(normalizeTelegramLinkCode(code.toLowerCase()), code);
+  assert.equal(telegramLinkCodeFromMessage(`/cerberlink ${code}`), code);
+  assert.equal(telegramLinkCodeFromMessage(`/link@CerberLinkBot ${code}`), code);
+  assert.equal(telegramLinkCodeFromMessage(`/login ${code}`), code);
+  assert.equal(telegramLinkCodeFromMessage(`/start CERBERLINK_${code}`), code);
+  assert.equal(telegramLinkCodeFromMessage("/login customer password123"), "");
+  assert.equal(telegramLinkCodeFromMessage("CBR_AAAAAAAAAAAAAAA1"), "");
 });
 
 test("oversized untrusted text is rejected instead of silently stored", () => {

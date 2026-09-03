@@ -21,12 +21,14 @@ import {
   isBlockedStaticPath,
   mergeSellerProductInput,
   normalizePublicBaseUrl,
+  normalizeTelegramLinkCode,
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
   sanitizeErrorForLog,
   sellerDeliveryDuplicateReport,
   sellerDeliveryItemKey,
+  telegramLinkCodeFromMessage,
   totpCodeForStep,
   trustedWalletCreditLtc,
   validateProviderPayout,
@@ -41,7 +43,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "clean-launch-security-reset-2026-08-30-v177";
+const cerberBuildVersion = "secure-cerberlink-mirrors-2026-09-03-v178";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -81,6 +83,7 @@ const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
 const siteNotifyWebhookSecret = process.env.SITE_NOTIFY_WEBHOOK_SECRET || telegramWebhookSecret;
 const proverkaWebhookSecret = process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret;
 const walletDepositTtlMs = 40 * 60 * 1000;
+const telegramLinkCodeTtlMs = 10 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const paymentReconcileIntervalMs = 15 * 1000;
 const dbQueryTimeoutMs = Math.max(12000, Number(process.env.DB_QUERY_TIMEOUT_MS || 25000));
@@ -105,6 +108,7 @@ const withdrawalPayoutJobs = new Set();
 let nowpaymentsPayoutDiagnosticCache = { expiresAt: 0, value: null, promise: null };
 const uiTranslationCache = new Map();
 let blockedUsersCache = { expiresAt: 0, value: {} };
+let telegramBotIdentityCache = { username: "", name: "", updatedAt: 0 };
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for persistent storage.");
@@ -184,7 +188,7 @@ function requestNeedsFinancialLock(req = {}) {
     /^\/api\/orders(?:\/|$)/,
     /^\/api\/wallet(?:\/|$)/,
     /^\/api\/payments(?:\/|$)/,
-    /^\/api\/telegram\/(?:wallet|webhook|mirror)(?:\/|$)/,
+    /^\/api\/telegram\/(?:wallet|webhook|mirror|link-code)(?:\/|$)/,
     /^\/api\/(?:site-notify-bot|proverka-bot)\/webhook$/,
     /^\/api\/store-admin\/(?:store|products|withdrawals)(?:\/|$)/,
     /^\/api\/admin\/(?:stores|users|orders|withdrawals|settings|payout|catalog)(?:\/|$)/
@@ -4564,6 +4568,31 @@ app.post("/api/auth/login", async (req, res, next) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
     res.json({ token, ...(await authStateForUserWithStores(user, state)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/link-code", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    assertClientRateLimit(req, "telegram-link-code", { limit: 5, windowMs: 10 * 60 * 1000, identity: user.login });
+    const state = await loadSettingsState();
+    const link = issueTelegramLinkCode(state, user);
+    await saveSettingsState(state);
+    const identity = await telegramBotPublicIdentity().catch(() => telegramBotIdentityCache);
+    const payload = `CERBERLINK_${link.code}`;
+    appendAdminLog("telegram_link_code_issued", user.login, { loginKey: user.login_key, expiresAt: link.expiresAt, ...requestSource(req) }).catch(() => {});
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      code: link.code,
+      command: `/cerberlink ${link.code}`,
+      expiresAt: link.expiresAt,
+      botUsername: identity.username || "",
+      startUrl: identity.username ? `https://t.me/${identity.username}?start=${payload}` : ""
+    });
   } catch (error) {
     next(error);
   }
@@ -13924,7 +13953,10 @@ function botMainKeyboard() {
 
 function botMirrorOnlyKeyboard() {
   return {
-    keyboard: [[{ text: "Создать зеркало" }]],
+    keyboard: [
+      [{ text: "Привязать аккаунт" }],
+      [{ text: "Создать зеркало" }]
+    ],
     resize_keyboard: true,
     is_persistent: true
   };
@@ -13941,11 +13973,11 @@ function botMirrorCreatedKeyboard(mirror = {}) {
 function botMirrorHelpText() {
   return [
     "<b>Создание зеркала CERBER</b>",
-    "Вход паролем через Telegram отключён для защиты аккаунтов.",
-    "Создание новых зеркал временно доступно только для уже привязанных аккаунтов.",
+    "Откройте на сайте меню <b>Telegram / зеркало</b> и нажмите <b>Открыть CERBERLINK</b>.",
+    "После безопасной привязки без пароля:",
     "1. Создайте нового бота в @BotFather.",
     "2. Скопируйте API token.",
-    "3. Отправьте сюда команду:",
+    "3. Отправьте сюда:",
     "<code>/mirror 123456:ABCDEF...</code>",
     "",
     "После сохранения откройте созданного бота. В зеркале будет полное меню сайта, а рассылки владельца будут приходить туда."
@@ -14021,6 +14053,99 @@ function mirrorWebhookUrl(token) {
   return `${publicBaseUrl}/api/telegram/mirror/${mirrorWebhookId(token)}`;
 }
 
+function generateTelegramLinkCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.randomBytes(16);
+  return `CBR_${[...bytes].map((byte) => alphabet[byte & 31]).join("")}`;
+}
+
+function telegramLinkCodeDigest(code = "") {
+  return crypto.createHmac("sha256", adminSecret()).update(`telegram-link:${normalizeTelegramLinkCode(code)}`).digest("hex");
+}
+
+function pruneTelegramLinkCodes(state = {}, now = Date.now()) {
+  state.telegramLinkCodes = (Array.isArray(state.telegramLinkCodes) ? state.telegramLinkCodes : [])
+    .filter((item) => (
+      item
+      && /^[a-f0-9]{64}$/.test(String(item.digest || ""))
+      && Number(item.expiresAt || 0) > now
+      && loginKey(item.loginKey)
+    ))
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+    .slice(0, 1000);
+  return state.telegramLinkCodes;
+}
+
+function issueTelegramLinkCode(state = {}, user = {}) {
+  const now = Date.now();
+  const code = generateTelegramLinkCode();
+  const key = loginKey(user.login_key || user.login);
+  const entries = pruneTelegramLinkCodes(state, now).filter((item) => !sameLogin(item.loginKey, key));
+  entries.unshift({
+    id: crypto.randomBytes(12).toString("hex"),
+    digest: telegramLinkCodeDigest(code),
+    loginKey: key,
+    createdAt: now,
+    expiresAt: now + telegramLinkCodeTtlMs
+  });
+  state.telegramLinkCodes = entries.slice(0, 1000);
+  return { code, expiresAt: now + telegramLinkCodeTtlMs };
+}
+
+async function consumeTelegramLinkCode(state = {}, chatId = "", telegramUser = {}, code = "") {
+  const normalized = normalizeTelegramLinkCode(code);
+  const chat = telegramChatState(state, chatId);
+  const now = Date.now();
+  if (!normalized || Number(chat.linkLockedUntil || 0) > now) return { ok: false, locked: Number(chat.linkLockedUntil || 0) > now };
+  const digest = telegramLinkCodeDigest(normalized);
+  const entries = pruneTelegramLinkCodes(state, now);
+  const index = entries.findIndex((item) => secretValuesMatch(item.digest, digest));
+  if (index < 0) {
+    const windowStartedAt = Number(chat.linkFailureWindowAt || 0);
+    if (!windowStartedAt || now - windowStartedAt > 10 * 60 * 1000) {
+      chat.linkFailureWindowAt = now;
+      chat.linkFailures = 0;
+    }
+    chat.linkFailures = Number(chat.linkFailures || 0) + 1;
+    if (chat.linkFailures >= 8) chat.linkLockedUntil = now + 15 * 60 * 1000;
+    return { ok: false, locked: Boolean(chat.linkLockedUntil) };
+  }
+  const entry = entries[index];
+  const { data: user, error } = await supabase
+    .from("profiles")
+    .select("login,login_key,name,role")
+    .eq("login_key", entry.loginKey)
+    .maybeSingle();
+  if (error) throw error;
+  state.telegramLinkCodes.splice(index, 1);
+  if (!user || String(user.role || "user").toLowerCase() !== "user") return { ok: false };
+  chat.verified = true;
+  chat.login = user.login;
+  chat.loginKey = user.login_key;
+  chat.linkedAt = now;
+  chat.telegramId = String(telegramUser.id || chatId);
+  chat.username = telegramUser.username || chat.username || "";
+  chat.linkFailures = 0;
+  chat.linkFailureWindowAt = 0;
+  chat.linkLockedUntil = 0;
+  return { ok: true, user };
+}
+
+async function telegramBotPublicIdentity() {
+  if (telegramBotIdentityCache.username && Date.now() - telegramBotIdentityCache.updatedAt < 60 * 60 * 1000) {
+    return telegramBotIdentityCache;
+  }
+  if (!telegramBotToken) return telegramBotIdentityCache;
+  const response = await telegramApi("getMe");
+  const bot = response?.result || {};
+  telegramBotIdentityCache = {
+    username: String(bot.username || "").replace(/^@/, ""),
+    name: String(bot.first_name || bot.username || "CERBERLINK"),
+    updatedAt: Date.now()
+  };
+  return telegramBotIdentityCache;
+}
+
 function mainTelegramWebhookUrl() {
   return `${publicBaseUrl}/api/telegram/webhook`;
 }
@@ -14053,6 +14178,7 @@ async function telegramEnsureWebhook() {
   await telegramApi("setMyCommands", {
     commands: [
       { command: "start", description: "Открыть меню CERBER Links" },
+      { command: "cerberlink", description: "Привязать аккаунт одноразовым кодом" },
       { command: "mirror", description: "Подключить зеркало от BotFather" },
       { command: "addmirror", description: "Подключить зеркало от BotFather" }
     ]
@@ -14067,6 +14193,13 @@ async function telegramEnsureWebhook() {
     telegramApi("getMe").catch((error) => ({ ok: false, error: String(error.message || error) })),
     telegramApi("getWebhookInfo").catch((error) => ({ ok: false, error: String(error.message || error) }))
   ]);
+  if (me?.result?.username) {
+    telegramBotIdentityCache = {
+      username: String(me.result.username).replace(/^@/, ""),
+      name: String(me.result.first_name || me.result.username || "CERBERLINK"),
+      updatedAt: Date.now()
+    };
+  }
   return { me, webhook };
 }
 
@@ -14335,8 +14468,8 @@ function botUserStats(state, login) {
 function botNeedLoginText() {
   return [
     "<b>Аккаунт не привязан</b>",
-    "Вход паролем через Telegram отключён.",
-    "Никогда не отправляйте пароль сайта в сообщениях или ботам."
+    "Получите одноразовый код на сайте в меню <b>Telegram / зеркало</b>.",
+    "Пароль сайта в Telegram отправлять не нужно."
   ].join("\n");
 }
 
@@ -14404,8 +14537,36 @@ async function botMessagesText(user) {
   ].join("\n");
 }
 
-async function handleBotLogin(state, chatId, text) {
-  await botSendMessage(state, chatId, "Вход паролем через Telegram отключён. Никогда не отправляйте пароль сайта в чат или боту.", botMainKeyboard());
+async function handleBotLinkCommand(state, chatId, message, text, replyMarkup = botMainKeyboard()) {
+  const code = telegramLinkCodeFromMessage(text);
+  const result = await consumeTelegramLinkCode(state, chatId, message?.from || {}, code);
+  if (!result.ok) {
+    await botSendMessage(
+      state,
+      chatId,
+      result.locked
+        ? "Слишком много неверных кодов. Новая попытка будет доступна через 15 минут."
+        : "Код CERBERLINK неверный или истёк. Получите новый код на сайте.",
+      replyMarkup
+    );
+    return false;
+  }
+  await appendAdminLog("telegram_account_linked", result.user.login, {
+    loginKey: result.user.login_key,
+    telegramIdHash: secretFingerprint(String(message?.from?.id || chatId))
+  }).catch(() => {});
+  await botSendMessage(state, chatId, `Аккаунт <b>${botHtml(result.user.login)}</b> безопасно привязан. Пароль не передавался в Telegram.`, replyMarkup);
+  return true;
+}
+
+async function handleBotLogin(state, chatId, message, text, replyMarkup = botMainKeyboard()) {
+  const code = telegramLinkCodeFromMessage(text);
+  if (code) return handleBotLinkCommand(state, chatId, message, text, replyMarkup);
+  if (message?.message_id) {
+    await telegramApi("deleteMessage", { chat_id: chatId, message_id: message.message_id }, telegramTokenFromState(state)).catch(() => {});
+  }
+  await botSendMessage(state, chatId, "Вход по логину и паролю отключён. Откройте на сайте меню <b>Telegram / зеркало</b> и используйте одноразовый CERBERLINK-код.", replyMarkup);
+  return false;
 }
 
 async function handleBotDepositAmount(state, chatId, text) {
@@ -14545,7 +14706,7 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     await botSendMessage(state, chatId, [
       "Сначала привяжите аккаунт сайта, чтобы зеркало попало в админ-панель и получало рассылки.",
       "",
-      "Вход паролем через Telegram отключён. Не отправляйте пароль сайта ботам."
+      "Получите одноразовый код на сайте в меню Telegram / зеркало."
     ].join("\n"), botMirrorOnlyKeyboard());
     return true;
   }
@@ -14689,6 +14850,11 @@ async function handleTelegramMessage(state, message) {
   const chat = telegramChatState(state, chatId);
   chat.username = message.from?.username || chat.username || "";
   chat.updatedAt = Date.now();
+  const linkCode = telegramLinkCodeFromMessage(text);
+  if (linkCode) {
+    await handleBotLinkCommand(state, chatId, message, text, botMainKeyboard());
+    return;
+  }
   if (text === "/start") {
     if (state.__mirrorId && chat.loginKey) {
       chat.verified = true;
@@ -14702,7 +14868,11 @@ async function handleTelegramMessage(state, message) {
     return;
   }
   if (text.startsWith("/login")) {
-    await handleBotLogin(state, chatId, text);
+    await handleBotLogin(state, chatId, message, text, botMainKeyboard());
+    return;
+  }
+  if (/^\/(?:cerberlink|link)(?:@[A-Za-z0-9_]+)?\b/i.test(text)) {
+    await handleBotLinkCommand(state, chatId, message, text, botMainKeyboard());
     return;
   }
   if (/^\/(?:mirror|addmirror)\b/i.test(text)) {
@@ -14778,12 +14948,25 @@ async function handleTelegramMirrorOnlyMessage(state, message) {
   chat.username = message.from?.username || chat.username || "";
   chat.updatedAt = Date.now();
   const menuKey = botMenuTextKey(text);
+  const linkCode = telegramLinkCodeFromMessage(text);
+  if (linkCode) {
+    await handleBotLinkCommand(state, chatId, message, text, botMirrorOnlyKeyboard());
+    return;
+  }
   if (text === "/start") {
     chat.pendingMirrorToken = false;
     await botSendMessage(state, chatId, botMirrorHelpText(), botMirrorOnlyKeyboard());
     return;
   }
+  if (menuKey === "привязать аккаунт") {
+    await botSendMessage(state, chatId, botNeedLoginText(), botMirrorOnlyKeyboard());
+    return;
+  }
   if (menuKey === "создать зеркало" || menuKey === "добавить ещё зеркало" || menuKey === "добавить еще зеркало") {
+    if (!chat.loginKey) {
+      await botSendMessage(state, chatId, botNeedLoginText(), botMirrorOnlyKeyboard());
+      return;
+    }
     chat.pendingMirrorToken = true;
     await botSendMessage(state, chatId, "Отправьте токен вашего Telegram-бота от BotFather.\n\nПример:\n<code>123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
     return;
@@ -14799,11 +14982,14 @@ async function handleTelegramMirrorOnlyMessage(state, message) {
     return;
   }
   if (text.startsWith("/login")) {
-    chat.verified = true;
-    await handleBotLogin(state, chatId, text);
+    await handleBotLogin(state, chatId, message, text, botMirrorOnlyKeyboard());
     if (chat.loginKey) {
       await botSendMessage(state, chatId, "Теперь отправьте токен зеркала командой:\n<code>/mirror 123456:ABCDEF...</code>", botMirrorOnlyKeyboard());
     }
+    return;
+  }
+  if (/^\/(?:cerberlink|link)(?:@[A-Za-z0-9_]+)?\b/i.test(text)) {
+    await handleBotLinkCommand(state, chatId, message, text, botMirrorOnlyKeyboard());
     return;
   }
   if (/^\/(?:mirror|addmirror)\b/i.test(text) || chat.pendingMirrorToken || /^\d+:[A-Za-z0-9_-]{20,}$/.test(text)) {
@@ -14828,8 +15014,10 @@ function syncMirrorUserFromTelegramChat(state, mirror, chatId, telegramUser = {}
   const chat = telegramChatState(state, userKey);
   mirror.users = mirror.users && typeof mirror.users === "object" ? mirror.users : {};
   const previous = mirror.users[userKey] || {};
-  const mirrorLogin = chat.login || previous.login || mirror.login || "";
-  const mirrorLoginKey = chat.loginKey || previous.loginKey || previous.login_key || mirror.loginKey || "";
+  const ownerChatIds = [mirror.ownerTelegramId, mirror.ownerChatId, mirror.chatId].filter(Boolean).map(String);
+  const isMirrorOwner = ownerChatIds.includes(userKey);
+  const mirrorLogin = chat.login || previous.login || (isMirrorOwner ? mirror.login : "") || "";
+  const mirrorLoginKey = chat.loginKey || previous.loginKey || previous.login_key || (isMirrorOwner ? mirror.loginKey : "") || "";
   if (mirrorLogin) chat.login = mirrorLogin;
   if (mirrorLoginKey) chat.loginKey = mirrorLoginKey;
   if ((mirrorLogin || mirrorLoginKey) && !chat.linkedAt) chat.linkedAt = previous.linkedAt || mirror.createdAt || Date.now();

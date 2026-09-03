@@ -183,6 +183,7 @@ export function cleanMarketplaceLaunchState(state = {}) {
     telegramBots: [],
     telegramMirrors: [],
     telegramWebhookEvents: [],
+    telegramLinkCodes: [],
     telegramBot: {
       ...telegramBot,
       users: {},
@@ -211,6 +212,20 @@ export function cleanMarketplaceLaunchState(state = {}) {
     ownerBalanceUsd: 0,
     ownerBalanceLtc: 0
   };
+}
+
+export function normalizeTelegramLinkCode(value = "") {
+  const code = String(value || "").trim().toUpperCase();
+  return /^CBR_[A-HJ-NP-Z2-9]{16}$/.test(code) ? code : "";
+}
+
+export function telegramLinkCodeFromMessage(value = "") {
+  const text = String(value || "").trim();
+  const start = text.match(/^\/start(?:@[A-Za-z0-9_]+)?\s+CERBERLINK_(CBR_[A-Za-z0-9_-]+)$/i);
+  if (start) return normalizeTelegramLinkCode(start[1]);
+  const command = text.match(/^\/(?:cerberlink|link|login)(?:@[A-Za-z0-9_]+)?\s+(CBR_[A-Za-z0-9_-]+)$/i);
+  if (command) return normalizeTelegramLinkCode(command[1]);
+  return normalizeTelegramLinkCode(text);
 }
 
 export function boundedUserText(value = "", maxLength = 5000, fieldName = "Text") {

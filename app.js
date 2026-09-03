@@ -4431,6 +4431,7 @@ function layout(content) {
           ${accountMenuButton("messages", groupRoomLabel(), `data-route="group-chat"`)}
           ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
           ${accountMenuButton("referrals", "Рефералы", `data-route="referrals"`)}
+          ${accountMenuButton("messages", "Telegram / зеркало", `data-telegram-link`)}
           ${accountMenuButton("rules", "Правила", `data-rules`)}
           <div class="buyer-sidebar-language language">
             <span>${tr("language")}</span>
@@ -4455,6 +4456,7 @@ function layout(content) {
         ${accountMenuButton("messages", groupRoomLabel(), `data-route="group-chat"`)}
         ${accountMenuButton("referrals", "Реферальная программа", `data-route="referrals"`, `<b>NEW</b>`)}
         ${accountMenuButton("exchange", "Заявки на обмен", `data-route="exchange"`)}
+        ${accountMenuButton("messages", "Telegram / зеркало", `data-telegram-link`)}
         <div class="divider"></div>
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
@@ -13239,6 +13241,48 @@ function showModal(html, className = "") {
   bindButtonFeedback(document.querySelector("[data-modal]"));
 }
 
+async function openTelegramLinkModal() {
+  document.querySelector("[data-nav-pop]")?.classList.remove("open");
+  document.querySelector("[data-account-pop]")?.classList.remove("open");
+  showModal(`<h2>Telegram / зеркало</h2><p class="desc">Создаём одноразовую безопасную привязку...</p>`, "telegram-link-modal");
+  try {
+    const payload = await apiFetch("/api/telegram/link-code", { method: "POST", body: "{}" });
+    const code = String(payload.code || "");
+    const command = String(payload.command || "");
+    const username = String(payload.botUsername || "").replace(/^@/, "");
+    const startUrl = /^https:\/\/t\.me\/[A-Za-z0-9_]{5,32}\?start=[A-Za-z0-9_-]{1,64}$/.test(String(payload.startUrl || ""))
+      ? String(payload.startUrl)
+      : "";
+    showModal(`
+      <h2>CERBERLINK</h2>
+      <p class="telegram-link-status">Одноразовая привязка действует 10 минут</p>
+      <div class="telegram-link-code"><code>${esc(code)}</code></div>
+      <div class="telegram-link-actions">
+        ${startUrl ? `<button class="primary" type="button" data-open-telegram-link>Открыть ${esc(username ? `@${username}` : "CERBERLINK")}</button>` : ""}
+        <button class="ghost-button" type="button" data-copy-telegram-link>Скопировать команду</button>
+        <button class="ghost-button" type="button" data-refresh-telegram-link>Новый код</button>
+      </div>
+      <code class="telegram-link-command">${esc(command)}</code>
+      <button class="ghost-button" type="button" data-close-modal>${tr("close")}</button>
+    `, "telegram-link-modal");
+    document.querySelector("[data-open-telegram-link]")?.addEventListener("click", () => {
+      window.open(startUrl, "_blank", "noopener,noreferrer");
+    });
+    document.querySelector("[data-copy-telegram-link]")?.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        showToast("Команда CERBERLINK скопирована");
+      } catch {
+        showToast("Не удалось скопировать команду");
+      }
+    });
+    document.querySelector("[data-refresh-telegram-link]")?.addEventListener("click", openTelegramLinkModal);
+  } catch (error) {
+    showModal(`<h2>Telegram / зеркало</h2><p class="notice">${esc(error.message || "Не удалось создать код")}</p><button class="primary" type="button" data-refresh-telegram-link>Повторить</button><button class="ghost-button" type="button" data-close-modal>${tr("close")}</button>`, "telegram-link-modal");
+    document.querySelector("[data-refresh-telegram-link]")?.addEventListener("click", openTelegramLinkModal);
+  }
+}
+
 async function trackSiteBroadcast(notification, action) {
   if (!notification?.id || !API_ENABLED || !apiSessionToken()) return;
   try {
@@ -13309,6 +13353,9 @@ function bindGlobal() {
   });
   document.querySelectorAll("[data-rules]").forEach((button) => {
     button.onclick = openRulesModal;
+  });
+  document.querySelectorAll("[data-telegram-link]").forEach((button) => {
+    button.onclick = openTelegramLinkModal;
   });
   document.querySelectorAll("[data-store-tab]").forEach((button) => {
     button.onclick = () => renderStore(button.dataset.storeId, button.dataset.storeTab);
