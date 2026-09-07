@@ -20,6 +20,7 @@ import {
   generateTotpSecret,
   isBlockedStaticPath,
   mergeSellerProductInput,
+  normalizeRecoveryCode,
   normalizePublicBaseUrl,
   normalizeTelegramLinkCode,
   parseInlineMedia,
@@ -44,7 +45,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "telegram-mirror-callback-dedup-2026-09-03-v179";
+const cerberBuildVersion = "admin-mfa-lockout-recovery-2026-09-07-v180";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -1638,16 +1639,23 @@ function privilegedRateLimitKeys(req, scope = "admin-login", identity = "") {
 }
 
 function privilegedRateLimitError(retryAfterSeconds = 60) {
-  const error = new Error("Too many login attempts. Try later.");
+  const retryAfter = Math.max(1, Math.ceil(Number(retryAfterSeconds || 60)));
+  const error = new Error(`Слишком много попыток входа. Повторите через ${Math.max(1, Math.ceil(retryAfter / 60))} мин.`);
   error.status = 429;
-  error.retryAfter = Math.max(1, Math.ceil(Number(retryAfterSeconds || 60)));
+  error.retryAfter = retryAfter;
   return error;
 }
 
 function activeMemoryLoginRecord(key, windowMs) {
   const now = Date.now();
   let record = privilegedLoginAttempts.get(key);
-  if (!record || now >= Number(record.windowStartedAt || 0) + windowMs) {
+  if (
+    !record
+    || (
+      now >= Number(record.windowStartedAt || 0) + windowMs
+      && now >= Number(record.lockedUntil || 0)
+    )
+  ) {
     record = { failures: 0, windowStartedAt: now, lockedUntil: 0 };
     privilegedLoginAttempts.set(key, record);
   }
@@ -1664,10 +1672,10 @@ function assertMemoryPrivilegedRateLimit(keys = []) {
   }
 }
 
-function markMemoryPrivilegedLoginAttempt(keys = [], ok = false) {
+function markMemoryPrivilegedLoginAttempt(keys = [], ok = false, { clearIp = false } = {}) {
   const now = Date.now();
   for (const key of keys) {
-    if (ok && key.scope.endsWith(":account")) {
+    if (ok && (clearIp || key.scope.endsWith(":account"))) {
       privilegedLoginAttempts.delete(key.memoryKey);
       continue;
     }
@@ -1724,12 +1732,12 @@ async function assertPrivilegedLoginRateLimit(req, scope, identity) {
   return keys;
 }
 
-async function markPrivilegedLoginAttempt(req, scope, identity, ok) {
+async function markPrivilegedLoginAttempt(req, scope, identity, ok, { clearIp = false } = {}) {
   const keys = privilegedRateLimitKeys(req, scope, identity);
-  markMemoryPrivilegedLoginAttempt(keys, ok);
+  markMemoryPrivilegedLoginAttempt(keys, ok, { clearIp });
   if (!supabase) return;
   for (const key of keys) {
-    const rpc = ok && key.scope.endsWith(":account")
+    const rpc = ok && (clearIp || key.scope.endsWith(":account"))
       ? supabase.rpc("clear_auth_failures", {
         requested_scope: key.scope,
         requested_key_hash: key.keyHash
@@ -1752,6 +1760,28 @@ async function markPrivilegedLoginAttempt(req, scope, identity, ok) {
     }
     console.error("[security] persistent login limiter update failed", sanitizeErrorForLog(error));
   }
+}
+
+function isRecoveryCodeSubmission(body = {}) {
+  return Boolean(body?.recoveryCode) && normalizeRecoveryCode(body.recoveryCode).length === 12;
+}
+
+async function verifyRateLimitedAdminSecondFactor(req, scope, account = {}, body = {}) {
+  let activeLock = null;
+  try {
+    await assertPrivilegedLoginRateLimit(req, scope, account.id);
+  } catch (error) {
+    if (Number(error?.status) !== 429 || !isRecoveryCodeSubmission(body)) throw error;
+    activeLock = error;
+  }
+  const verifiedAccount = await verifyAdminSecondFactor(account, body);
+  if (verifiedAccount) return verifiedAccount;
+  if (activeLock) {
+    await delay(privilegedLoginFailureDelay());
+    throw activeLock;
+  }
+  await markPrivilegedLoginAttempt(req, scope, account.id, false);
+  return null;
 }
 
 function privilegedLoginFailureDelay() {
@@ -5118,7 +5148,7 @@ async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {
   const token = signSellerAdminToken(store.id, meta, account, req);
   resetClientRateLimit(req, "store-admin-login-ip");
   resetClientRateLimit(req, "store-admin-login", `${store.id}:${account.login}`);
-  await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true);
+  await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true, { clearIp: true });
   appendAdminLog(account.role === "staff" ? "store_staff_login" : "store_admin_login", account.login || store.id, {
     storeId: store.id,
     accountId: account.id,
@@ -5150,10 +5180,8 @@ async function continueStoreMfaLogin(req, res, store = {}, principal = {}) {
   if (!req.body.totp && !req.body.recoveryCode) {
     return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account), store: { id: store.id, name: store.name || store.id } });
   }
-  await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
-  const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+  const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "store-admin-mfa", account, req.body);
   if (!verifiedAccount) {
-    await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
     await delay(privilegedLoginFailureDelay());
     return res.status(401).json({ error: "Invalid or already used 2FA code" });
   }
@@ -5272,6 +5300,7 @@ app.post("/api/store-admin/2fa/confirm", async (req, res, next) => {
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
+    await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true, { clearIp: true });
     const { store, principal } = await storePrincipalForAccount(confirmed.account);
     if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
     await appendAdminLog("store_admin_mfa_enabled", confirmed.account.login, {
@@ -5300,10 +5329,8 @@ app.post("/api/store-admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "store-admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "store");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
-    await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
-    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "store-admin-mfa", account, req.body);
     if (!verifiedAccount) {
-      await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
@@ -6569,9 +6596,10 @@ app.post("/api/admin/login", async (req, res, next) => {
     if (!req.body.totp && !req.body.recoveryCode) {
       return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account) });
     }
-    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
-    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
-    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, Boolean(verifiedAccount));
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "site-admin-mfa", account, req.body);
+    if (verifiedAccount) {
+      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
+    }
     appendAdminLog(verifiedAccount ? "admin_login_success" : "admin_mfa_failed", login || "unknown", {
       ...requestSource(req),
       credentialSource: credentials.source
@@ -6613,7 +6641,7 @@ app.post("/api/admin/2fa/confirm", async (req, res, next) => {
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true);
+    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
     await appendAdminLog("admin_mfa_enabled", confirmed.account.login, { accountId: confirmed.account.id, ...requestSource(req) });
     res.json({
       token: signAdminToken(confirmed.account, req),
@@ -6630,15 +6658,13 @@ app.post("/api/admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "site");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
-    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
-    const verifiedAccount = await verifyAdminSecondFactor(account, req.body);
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "site-admin-mfa", account, req.body);
     if (!verifiedAccount) {
-      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, false);
       await appendAdminLog("admin_mfa_failed", account.login, { accountId: account.id, ...requestSource(req) });
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true);
+    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
     await appendAdminLog("admin_login_success", verifiedAccount.login, { accountId: verifiedAccount.id, ...requestSource(req) });
     res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
   } catch (error) {
@@ -16572,7 +16598,10 @@ app.use((error, _req, res, _next) => {
   let message = status >= 500 ? "Сервер временно недоступен" : String(error.message || "Ошибка запроса");
   if (/nowpayments/i.test(internalMessage)) message = "Платежный шлюз не настроен или временно недоступен";
   if (status === 429 && error.retryAfter) res.setHeader("Retry-After", String(Math.max(1, Math.ceil(Number(error.retryAfter)))));
-  res.status(status).json({ error: message });
+  res.status(status).json({
+    error: message,
+    ...(status === 429 && error.retryAfter ? { retryAfter: Math.max(1, Math.ceil(Number(error.retryAfter))) } : {})
+  });
 });
 
 const cleanLaunchStartupResult = await runCleanLaunchResetOnce().catch((error) => {

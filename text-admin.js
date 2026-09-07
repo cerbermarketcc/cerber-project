@@ -178,10 +178,14 @@ async function renderMfaSetup(challengeToken, account, message = "") {
 }
 
 function renderMfaVerify(challengeToken, account, message = "") {
+  const lockoutHint = /слишком много попыток|too many login attempts/i.test(message)
+    ? '<p class="auth-note">Обычный код Authenticator будет доступен после указанного времени. Сохранённый одноразовый recovery-код можно использовать сейчас.</p>'
+    : "";
   loginPanel.innerHTML = `
     <h2>Подтверждение входа</h2>
     <p class="auth-note">Введите код Authenticator для ${escapeHtml(account?.login || "администратора")} или одноразовый recovery-код.</p>
     ${message ? `<p class="auth-note">${escapeHtml(message)}</p>` : ""}
+    ${lockoutHint}
     <form class="mfa-form" data-mfa-verify-form>
       <label>Код 2FA или recovery-код<input name="factor" autocomplete="one-time-code" maxlength="20" required></label>
       <button type="submit">Подтвердить</button>
@@ -196,7 +200,7 @@ function renderMfaVerify(challengeToken, account, message = "") {
         headers: { Authorization: `Bearer ${challengeToken}` },
         body: JSON.stringify({
           challengeToken,
-          ...(factor.replace(/\D/g, "").length === 6 ? { totp: factor } : { recoveryCode: factor })
+          ...adminSecondFactorBody(factor)
         })
       });
       await finishAdminAuth(payload);
@@ -204,6 +208,12 @@ function renderMfaVerify(challengeToken, account, message = "") {
       renderMfaVerify(challengeToken, account, error.message);
     }
   });
+}
+
+function adminSecondFactorBody(value = "") {
+  const factor = String(value || "").trim();
+  const compactTotp = factor.replace(/\s/g, "");
+  return /^\d{6}$/.test(compactTotp) ? { totp: compactTotp } : { recoveryCode: factor };
 }
 
 loginForm.addEventListener("submit", async (event) => {

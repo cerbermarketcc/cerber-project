@@ -621,6 +621,9 @@ async function renderAdminMfaSetup(challengeToken, account = {}, message = "") {
 }
 
 function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
+  const lockoutHint = /слишком много попыток|too many login attempts/i.test(message)
+    ? '<p class="muted">Обычный код Authenticator будет доступен после указанного времени. Сохранённый одноразовый recovery-код можно использовать сейчас.</p>'
+    : "";
   root.innerHTML = `
     <section class="login-page">
       <form class="login-card" data-mfa-verify-form>
@@ -628,6 +631,7 @@ function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
         <h1>Подтверждение входа</h1>
         <p class="muted">Введите код Authenticator для ${esc(account.login || "администратора")} или один резервный код.</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
+        ${lockoutHint}
         <label class="field">Код 2FA или recovery-код<input name="factor" autocomplete="one-time-code" maxlength="20" required></label>
         <button class="primary">Подтвердить</button>
         <button class="ghost" type="button" data-mfa-cancel>Назад</button>
@@ -645,7 +649,7 @@ function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
       const payload = await api("/api/admin/2fa/verify", {
         method: "POST",
         headers: { Authorization: `Bearer ${challengeToken}` },
-        body: JSON.stringify({ challengeToken, ...(factor.replace(/\D/g, "").length === 6 ? { totp: factor } : { recoveryCode: factor }) })
+        body: JSON.stringify({ challengeToken, ...adminSecondFactorBody(factor) })
       });
       await finishAdminAuth(payload);
     } catch (error) {
@@ -655,6 +659,12 @@ function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
     }
   };
   bindAdminButtonFeedback(root);
+}
+
+function adminSecondFactorBody(value = "") {
+  const factor = String(value || "").trim();
+  const compactTotp = factor.replace(/\s/g, "");
+  return /^\d{6}$/.test(compactTotp) ? { totp: compactTotp } : { recoveryCode: factor };
 }
 
 function renderLogin(message = "") {

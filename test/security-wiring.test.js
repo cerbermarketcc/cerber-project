@@ -83,6 +83,19 @@ test("privileged login failures are locked by account and IP across server insta
   assert.doesNotMatch(adminLogin, /Invalid login credentials/);
 });
 
+test("admin recovery codes remain usable during MFA lockout without weakening TOTP limits", () => {
+  const adminMfa = routeBody("post", "/api/admin/2fa/verify");
+  const storeMfa = routeBody("post", "/api/store-admin/2fa/verify");
+  assert.match(server, /function isRecoveryCodeSubmission[\s\S]{0,220}normalizeRecoveryCode\(body\.recoveryCode\)\.length === 12/);
+  assert.match(server, /function verifyRateLimitedAdminSecondFactor[\s\S]{0,700}Number\(error\?\.status\) !== 429 \|\| !isRecoveryCodeSubmission\(body\)/);
+  assert.match(server, /markPrivilegedLoginAttempt\(req, "site-admin-mfa", account\.id, true, \{ clearIp: true \}\)/);
+  assert.match(adminMfa, /verifyRateLimitedAdminSecondFactor\(req, "site-admin-mfa", account, req\.body\)/);
+  assert.match(storeMfa, /verifyRateLimitedAdminSecondFactor\(req, "store-admin-mfa", account, req\.body\)/);
+  assert.match(adminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
+  assert.match(textAdminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
+  assert.doesNotMatch(`${adminClient}\n${textAdminClient}`, /replace\(\/\\D\/g, ""\)\.length === 6/);
+});
+
 test("private message refreshes share one in-flight request", () => {
   assert.match(appClient, /let privateMessagesLoadPromise = null/);
   assert.match(appClient, /if \(privateMessagesLoadPromise\) return privateMessagesLoadPromise/);
