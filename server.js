@@ -45,7 +45,9 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "admin-mfa-lockout-recovery-2026-09-07-v180";
+const cerberBuildVersion = "admin-mfa-rate-scope-rotation-2026-09-08-v181";
+const siteAdminMfaRateScope = "site-admin-mfa-v2";
+const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -5148,7 +5150,7 @@ async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {
   const token = signSellerAdminToken(store.id, meta, account, req);
   resetClientRateLimit(req, "store-admin-login-ip");
   resetClientRateLimit(req, "store-admin-login", `${store.id}:${account.login}`);
-  await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true, { clearIp: true });
+  await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, true, { clearIp: true });
   appendAdminLog(account.role === "staff" ? "store_staff_login" : "store_admin_login", account.login || store.id, {
     storeId: store.id,
     accountId: account.id,
@@ -5180,7 +5182,7 @@ async function continueStoreMfaLogin(req, res, store = {}, principal = {}) {
   if (!req.body.totp && !req.body.recoveryCode) {
     return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account), store: { id: store.id, name: store.name || store.id } });
   }
-  const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "store-admin-mfa", account, req.body);
+  const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, storeAdminMfaRateScope, account, req.body);
   if (!verifiedAccount) {
     await delay(privilegedLoginFailureDelay());
     return res.status(401).json({ error: "Invalid or already used 2FA code" });
@@ -5293,14 +5295,14 @@ app.post("/api/store-admin/2fa/confirm", async (req, res, next) => {
   try {
     assertClientRateLimit(req, "store-admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "store");
-    await assertPrivilegedLoginRateLimit(req, "store-admin-mfa", account.id);
+    await assertPrivilegedLoginRateLimit(req, storeAdminMfaRateScope, account.id);
     const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
     if (!confirmed) {
-      await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, false);
+      await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, false);
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    await markPrivilegedLoginAttempt(req, "store-admin-mfa", account.id, true, { clearIp: true });
+    await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, true, { clearIp: true });
     const { store, principal } = await storePrincipalForAccount(confirmed.account);
     if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
     await appendAdminLog("store_admin_mfa_enabled", confirmed.account.login, {
@@ -5329,7 +5331,7 @@ app.post("/api/store-admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "store-admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "store");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
-    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "store-admin-mfa", account, req.body);
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, storeAdminMfaRateScope, account, req.body);
     if (!verifiedAccount) {
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
@@ -6596,9 +6598,9 @@ app.post("/api/admin/login", async (req, res, next) => {
     if (!req.body.totp && !req.body.recoveryCode) {
       return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account) });
     }
-    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "site-admin-mfa", account, req.body);
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, siteAdminMfaRateScope, account, req.body);
     if (verifiedAccount) {
-      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
+      await markPrivilegedLoginAttempt(req, siteAdminMfaRateScope, account.id, true, { clearIp: true });
     }
     appendAdminLog(verifiedAccount ? "admin_login_success" : "admin_mfa_failed", login || "unknown", {
       ...requestSource(req),
@@ -6634,14 +6636,14 @@ app.post("/api/admin/2fa/confirm", async (req, res, next) => {
   try {
     assertClientRateLimit(req, "admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "site");
-    await assertPrivilegedLoginRateLimit(req, "site-admin-mfa", account.id);
+    await assertPrivilegedLoginRateLimit(req, siteAdminMfaRateScope, account.id);
     const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
     if (!confirmed) {
-      await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, false);
+      await markPrivilegedLoginAttempt(req, siteAdminMfaRateScope, account.id, false);
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
+    await markPrivilegedLoginAttempt(req, siteAdminMfaRateScope, account.id, true, { clearIp: true });
     await appendAdminLog("admin_mfa_enabled", confirmed.account.login, { accountId: confirmed.account.id, ...requestSource(req) });
     res.json({
       token: signAdminToken(confirmed.account, req),
@@ -6658,13 +6660,13 @@ app.post("/api/admin/2fa/verify", async (req, res, next) => {
     assertClientRateLimit(req, "admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
     const { account } = await accountForMfaChallenge(req, "site");
     if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
-    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, "site-admin-mfa", account, req.body);
+    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, siteAdminMfaRateScope, account, req.body);
     if (!verifiedAccount) {
       await appendAdminLog("admin_mfa_failed", account.login, { accountId: account.id, ...requestSource(req) });
       await delay(privilegedLoginFailureDelay());
       return res.status(401).json({ error: "Invalid or already used 2FA code" });
     }
-    await markPrivilegedLoginAttempt(req, "site-admin-mfa", account.id, true, { clearIp: true });
+    await markPrivilegedLoginAttempt(req, siteAdminMfaRateScope, account.id, true, { clearIp: true });
     await appendAdminLog("admin_login_success", verifiedAccount.login, { accountId: verifiedAccount.id, ...requestSource(req) });
     res.json({ token: signAdminToken(verifiedAccount, req), admin: adminAccountPublic(verifiedAccount) });
   } catch (error) {

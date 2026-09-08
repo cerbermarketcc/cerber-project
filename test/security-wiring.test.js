@@ -88,9 +88,11 @@ test("admin recovery codes remain usable during MFA lockout without weakening TO
   const storeMfa = routeBody("post", "/api/store-admin/2fa/verify");
   assert.match(server, /function isRecoveryCodeSubmission[\s\S]{0,220}normalizeRecoveryCode\(body\.recoveryCode\)\.length === 12/);
   assert.match(server, /function verifyRateLimitedAdminSecondFactor[\s\S]{0,700}Number\(error\?\.status\) !== 429 \|\| !isRecoveryCodeSubmission\(body\)/);
-  assert.match(server, /markPrivilegedLoginAttempt\(req, "site-admin-mfa", account\.id, true, \{ clearIp: true \}\)/);
-  assert.match(adminMfa, /verifyRateLimitedAdminSecondFactor\(req, "site-admin-mfa", account, req\.body\)/);
-  assert.match(storeMfa, /verifyRateLimitedAdminSecondFactor\(req, "store-admin-mfa", account, req\.body\)/);
+  assert.match(server, /const siteAdminMfaRateScope = "site-admin-mfa-v2"/);
+  assert.match(server, /const storeAdminMfaRateScope = "store-admin-mfa-v2"/);
+  assert.match(server, /markPrivilegedLoginAttempt\(req, siteAdminMfaRateScope, account\.id, true, \{ clearIp: true \}\)/);
+  assert.match(adminMfa, /verifyRateLimitedAdminSecondFactor\(req, siteAdminMfaRateScope, account, req\.body\)/);
+  assert.match(storeMfa, /verifyRateLimitedAdminSecondFactor\(req, storeAdminMfaRateScope, account, req\.body\)/);
   assert.match(adminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
   assert.match(textAdminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
   assert.doesNotMatch(`${adminClient}\n${textAdminClient}`, /replace\(\/\\D\/g, ""\)\.length === 6/);
