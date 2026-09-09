@@ -125,7 +125,7 @@ const PARTIAL_STATE_OBJECT_KEYS = [
   "blockedUsers"
 ];
 
-const fallbackImage = "assets/cerber-emblem.png";
+const fallbackImage = "assets/cerber-emblem-fast.webp";
 let cmsTextOverrides = {};
 let cmsVisualTextOverrides = {};
 let cmsApplyingVisualText = false;
@@ -435,7 +435,7 @@ function testSellerSeedStore() {
     name: "Test Shop",
     short: "Тестовая витрина для админ-панели магазина",
     description: "Демо-магазин для проверки новой панели: статистика, склад, клиенты, заказы и связь.",
-    image: "assets/cerber-emblem.png",
+    image: "assets/cerber-emblem-fast.webp",
     cover: "assets/market-banner.png",
     status: "active",
     salesBlocked: false,
@@ -449,8 +449,8 @@ function testSellerSeedStore() {
         description: "Товар-заглушка для проверки склада и заказов.",
         price: "25$",
         priceUsd: 25,
-        image: "assets/cerber-emblem.png",
-        images: ["assets/cerber-emblem.png"],
+        image: "assets/cerber-emblem-fast.webp",
+        images: ["assets/cerber-emblem-fast.webp"],
         sellerManaged: true,
         reviews: 0,
         rating: 5,
@@ -2351,28 +2351,34 @@ function mergeMessageLists(remoteMessages = [], localMessages = []) {
   const merged = new Map();
   const keepLocalAfter = Date.now() - 30 * 60 * 1000;
   const keepPrivateLocalAfter = Date.now() - 24 * 60 * 60 * 1000;
+  const messageKey = (message = {}) => message.clientRequestId
+    ? `request:${String(message.clientRequestId)}`
+    : `id:${String(message.id || "")}`;
   (Array.isArray(remoteMessages) ? remoteMessages : []).forEach((message) => {
-    if (message?.id) merged.set(message.id, message);
+    if (message?.id) merged.set(messageKey(message), message);
   });
   (Array.isArray(localMessages) ? localMessages : []).forEach((message) => {
     if (!message?.id) return;
-    const existing = merged.get(message.id);
+    const key = messageKey(message);
+    const existing = merged.get(key);
     if (existing) {
-      merged.set(message.id, {
+      merged.set(key, {
         ...message,
         ...existing,
         deleted: Boolean(existing.deleted || message.deleted),
         reactions: {
           ...(message.reactions || {}),
           ...(existing.reactions || {})
-        }
+        },
+        pendingSend: Boolean(existing.pendingSend),
+        sendFailed: Boolean(existing.sendFailed)
       });
       return;
     }
     const id = String(message.id || "");
     const localPrivateMessage = id.startsWith("private-") && Boolean(String(message.body || message.text || "").trim() || (Array.isArray(message.attachments) && message.attachments.length));
     const localGroupMessage = id.startsWith("group-");
-    if (localGroupMessage || Number(message.createdAt || 0) >= (localPrivateMessage ? keepPrivateLocalAfter : keepLocalAfter)) merged.set(message.id, message);
+    if (localGroupMessage || Number(message.createdAt || 0) >= (localPrivateMessage ? keepPrivateLocalAfter : keepLocalAfter)) merged.set(key, message);
   });
   return [...merged.values()];
 }
@@ -4397,12 +4403,12 @@ function layout(content) {
     <main class="app">
       <header class="topbar">
         <button class="logo-button" data-route="home" aria-label="CERBER Marketplace">
-          <span class="brand-lockup"><img class="logo" src="assets/cerber-neon-emblem.png" alt=""><span><strong>CERBER</strong><small>MARKETPLACE</small></span></span>
+          <span class="brand-lockup"><img class="logo" src="assets/cerber-neon-emblem-fast.webp" alt=""><span><strong>CERBER</strong><small>MARKETPLACE</small></span></span>
         </button>
         <button class="balance" data-account>
           <strong>${usdBalance.toFixed(2)} $</strong>
           <span>${ltcBalance.toFixed(6)} LTC</span>
-          <img class="avatar" src="assets/user-avatar.png" alt="">
+          <img class="avatar" src="assets/user-avatar-fast.webp" alt="">
         </button>
         <button class="topbar-menu" data-menu aria-label="Открыть меню" title="Открыть меню"><span></span><span></span><span></span></button>
       </header>
@@ -4417,7 +4423,7 @@ function layout(content) {
     </nav>
     <div class="nav-pop" data-nav-pop>
       <div class="nav-card buyer-sidebar">
-        <div class="buyer-sidebar-head"><img src="assets/cerber-neon-emblem.png" alt=""><strong>CERBER</strong><button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button></div>
+        <div class="buyer-sidebar-head"><img src="assets/cerber-neon-emblem-fast.webp" alt=""><strong>CERBER</strong><button class="nav-close" data-close-nav aria-label="Закрыть">${navIcon("close")}</button></div>
         <div class="buyer-sidebar-primary">
           ${accountMenuButton("wallet", "Пополнить", `data-route="wallet"`)}
           ${accountMenuButton("home", "Маркет", `data-route="home"`)}
@@ -4443,7 +4449,7 @@ function layout(content) {
     <div class="account-pop" data-account-pop>
       <div class="account-card">
         <div class="account-row account-head">
-          <img class="avatar" src="assets/user-avatar.png" alt="">
+          <img class="avatar" src="assets/user-avatar-fast.webp" alt="">
           <strong>${esc(currentUser()?.name || currentUser()?.login)}</strong>
           <button class="account-deposit" type="button" data-menu-deposit>Пополнить</button>
         </div>
@@ -4483,7 +4489,7 @@ function renderAuth(message = "") {
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem-fast.webp" alt="CERBER">
         <h1>${authMode === "login" ? tr("login") : tr("register")}</h1>
         ${message ? `<p class="${message.includes("успеш") || message.includes("success") ? "" : "notice"}">${esc(message)}</p>` : `<p>${tr("adminHint")}</p>`}
         <form class="form" data-auth-form>
@@ -4519,7 +4525,7 @@ function renderSellerAdminLogin(storeId = "", message = "") {
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem-fast.webp" alt="CERBER">
         <h1>Админка магазина</h1>
         <p>${esc(store?.name || "Магазин")}</p>
         ${message ? `<p class="notice">${esc(message)}</p>` : ""}
@@ -5495,7 +5501,7 @@ function storeCard(store) {
     <article class="shop-card ${isStopped ? "is-stopped" : ""}">
       <button class="shop-click" ${isStopped ? "disabled" : `data-store="${esc(store.id)}"`}>
         <div class="shop-inner">
-          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}">
+          <img class="shop-image" src="${esc(store.image || fallbackImage)}" alt="${esc(storeName)}" loading="lazy" decoding="async">
           <div class="shop-head">
             <div>
               <div class="shop-title"><h2>${esc(storeName)}</h2><span class="verify">✓</span></div>
@@ -5689,7 +5695,7 @@ function productCard(product, store) {
   return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
+        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="" loading="lazy" decoding="async">
       <div class="product-body">
         <h3 data-dynamic-translate>${esc(productTitle)}</h3>
         <p data-dynamic-translate>${esc(productCategory)}</p>
@@ -5713,7 +5719,7 @@ function productCardView(product, store) {
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="">
+        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="" loading="lazy" decoding="async">
         <div class="product-body mega-product-body">
           <h3 data-dynamic-translate>${esc(productTitle)}</h3>
           <p class="desc" data-dynamic-translate>${esc(productCategory)}</p>
@@ -5906,7 +5912,7 @@ function renderProduct(storeId, productId) {
       <p class="breadcrumbs">Магазины > ${esc(store.name)} > ${esc(product.title)}</p>
       <article class="panel product-detail">
         <div class="product-gallery">
-          ${(product.images || [product.image]).slice(0, 5).map((image) => `<img src="${esc(image || store.image || fallbackImage)}" alt="${esc(product.title)}">`).join("")}
+          ${(product.images || [product.image]).slice(0, 5).map((image) => `<img src="${esc(image || store.image || fallbackImage)}" alt="${esc(product.title)}" loading="lazy" decoding="async">`).join("")}
         </div>
         <div class="product-detail-body">
           <h1>${esc(product.title)}</h1>
@@ -5980,7 +5986,7 @@ function renderProductPayment(storeId, productId, positionId) {
     <section class="screen product-payment-screen">
       <h1>Оплата</h1>
       <article class="panel payment-product">
-        <img src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <img src="${esc(product.image || store.image || fallbackImage)}" alt="" loading="lazy" decoding="async">
         <div>
           <h2>${esc(product.title)}</h2>
           <p>${esc(position.title)} · ${esc(locationLabel(position))}</p>
@@ -6031,7 +6037,7 @@ function renderProductPaymentView(storeId, productId, positionId) {
           <p><span>Локация:</span> ${esc(locationLabel(position))}</p>
           <p><span>Стоимость:</span> ${priceUsd.toFixed(0)} $</p>
         </div>
-        <img src="${esc(product.image || store.image || fallbackImage)}" alt="">
+        <img src="${esc(product.image || store.image || fallbackImage)}" alt="" loading="lazy" decoding="async">
       </article>
       <div class="payment-head-row">
         <h1>Оплата</h1>
@@ -6689,7 +6695,11 @@ function startPrivateMessagesRefresh() {
 
 function rememberPrivateMessage(message = {}) {
   if (!message?.id) return false;
-  const index = (db.messages || []).findIndex((item) => String(item?.id || "") === String(message.id));
+  const requestId = String(message.clientRequestId || "");
+  const index = (db.messages || []).findIndex((item) => (
+    String(item?.id || "") === String(message.id)
+    || (requestId && String(item?.clientRequestId || "") === requestId)
+  ));
   if (index >= 0) db.messages[index] = { ...db.messages[index], ...message };
   else db.messages.unshift(message);
   saveDb({ localOnly: true, silentLocalStorageError: true });
@@ -6871,7 +6881,7 @@ function privateMessageView(msg) {
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
   const exchanger = exchangerForMessage(msg);
   return `
-    <article class="group-message private-message ${own ? "own" : ""} ${msg.stickerUrl ? "sticker-message" : ""}" data-private-message="${esc(msg.id)}">
+    <article class="group-message private-message ${own ? "own" : ""} ${msg.stickerUrl ? "sticker-message" : ""} ${msg.pendingSend ? "pending-send" : ""} ${msg.sendFailed ? "send-failed" : ""}" data-private-message="${esc(msg.id)}" ${msg.pendingSend ? 'aria-busy="true"' : ""}>
       ${privateAvatarHtml(msg.fromLogin, exchanger)}
       <div>
         <div class="group-meta">
@@ -6887,6 +6897,7 @@ function privateMessageView(msg) {
         ${messageReactionsHtml(msg, "private")}
         ${messageReactionPickerHtml(msg, "private")}
         ${messageActions(msg)}
+        ${msg.sendFailed ? '<small class="message-send-failed">Не отправлено</small>' : ""}
       </div>
     </article>
   `;
@@ -6998,21 +7009,44 @@ async function handlePrivateMessageSend(event) {
     }
   }
   if (sessionReady) {
+    const peerLogin = activePrivateLogin;
+    const clientRequestId = newClientRequestId("private-message");
+    rememberPrivateMessage({
+      id: `private-local-${clientRequestId}`,
+      clientRequestId,
+      storeId: "",
+      storeTag: peerLogin,
+      toLogin: peerLogin,
+      fromLogin: db.currentUser,
+      subject: "",
+      body,
+      attachments,
+      likes: [],
+      reactions: {},
+      createdAt: Date.now(),
+      date: new Date().toLocaleString(),
+      pendingSend: true
+    });
+    privateVoiceDraft = null;
+    renderMessages();
     try {
       const payload = await apiFetch("/api/private-messages", {
         method: "POST",
         timeoutMs: 15000,
-        body: JSON.stringify({ body, attachments, toLogin: activePrivateLogin })
+        body: JSON.stringify({ body, attachments, toLogin: peerLogin, clientRequestId })
       });
-      rememberPrivateMessage(payload.message);
-      privateVoiceDraft = null;
-      showToast(tr("sent"));
+      rememberPrivateMessage({ ...payload.message, pendingSend: false, sendFailed: false });
       renderMessages();
       return;
     } catch (error) {
+      const pending = (db.messages || []).find((item) => String(item?.clientRequestId || "") === clientRequestId);
+      if (pending) {
+        pending.pendingSend = false;
+        pending.sendFailed = true;
+        saveDb({ localOnly: true, silentLocalStorageError: true });
+      }
       showToast(error.message || "Не удалось отправить сообщение");
-      form.dataset.submitting = "";
-      if (submit) submit.disabled = false;
+      renderMessages();
       return;
     }
   }
@@ -7429,7 +7463,8 @@ async function sendGroupMessageRemote(message) {
         stickerUrl: message.stickerUrl || "",
         emojiUrls: groupEmojiUrlList(message.emojiUrls),
         room: message.room || currentGroupRoom(),
-        attachments: Array.isArray(message.attachments) ? message.attachments : []
+        attachments: Array.isArray(message.attachments) ? message.attachments : [],
+        clientRequestId: message.clientRequestId || ""
       })
     });
     applyGroupMessagesPayload(payload);
@@ -7859,7 +7894,7 @@ function groupMessageView(msg) {
     `;
   }
   return `
-    <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""} ${msg.stickerUrl ? "sticker-message" : ""}" data-group-message="${esc(msg.id)}">
+    <article class="group-message ${own ? "own" : ""} ${system ? "system" : ""} ${msg.stickerUrl ? "sticker-message" : ""} ${msg.pendingSend ? "pending-send" : ""} ${msg.sendFailed ? "send-failed" : ""}" data-group-message="${esc(msg.id)}" ${msg.pendingSend ? 'aria-busy="true"' : ""}>
       <button class="group-avatar" data-group-user="${esc(msg.fromLogin)}">${esc(String(msg.fromLogin || "?").slice(0, 1).toUpperCase())}</button>
       <div>
         <div class="group-meta">
@@ -7872,6 +7907,7 @@ function groupMessageView(msg) {
         ${likes.length ? `<button class="group-like-badge" data-group-like="${esc(msg.id)}">❤️ ${likes.length}</button>` : ""}
         ${messageReactionsHtml(msg, "group")}
         ${messageReactionPickerHtml(msg, "group")}
+        ${msg.sendFailed ? '<small class="message-send-failed">Не отправлено</small>' : ""}
         ${false && moderator ? `
           <div class="group-actions">
             <button data-group-pin="${esc(msg.id)}">${esc(tr("groupPinned"))}</button>
@@ -7965,8 +8001,10 @@ async function handleGroupMessageSend(event) {
     type: file.type,
     url: await fileToDataUrl(file)
   }] : (groupVoiceDraft ? [groupVoiceDraft] : []);
+  const clientRequestId = newClientRequestId("group-message");
   const message = {
-    id: `group-${Date.now()}`,
+    id: `group-local-${clientRequestId}`,
+    clientRequestId,
     fromLogin: user.login,
     room: currentGroupRoom(),
     body,
@@ -7974,14 +8012,23 @@ async function handleGroupMessageSend(event) {
     attachments,
     likes: [],
     createdAt: Date.now(),
-    date: new Date().toLocaleString()
+    date: new Date().toLocaleString(),
+    pendingSend: API_ENABLED && Boolean(apiSessionToken())
   };
   groupVoiceDraft = null;
   groupEmojiDraft = [];
-  const savedRemote = await sendGroupMessageRemote(message);
-  if (!savedRemote) {
-    db.groupMessages.push(message);
-    saveDb();
+  db.groupMessages.push(message);
+  saveDb({ localOnly: true, silentLocalStorageError: true });
+  renderGroupChat();
+  const shouldSendRemote = API_ENABLED && Boolean(apiSessionToken());
+  const savedRemote = shouldSendRemote ? await sendGroupMessageRemote(message) : false;
+  if (shouldSendRemote && !savedRemote) {
+    const pending = db.groupMessages.find((item) => String(item?.clientRequestId || "") === clientRequestId);
+    if (pending) {
+      pending.pendingSend = false;
+      pending.sendFailed = true;
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+    }
   }
   renderGroupChat();
 }
@@ -8564,7 +8611,7 @@ function exchangerCardView(item) {
       <button class="shop-click" data-exchanger-card="${esc(item.id)}">
         <div class="shop-inner">
           <div class="exchanger-cover">
-            <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}">
+            <img class="shop-image" src="${esc(item.image || fallbackImage)}" alt="${esc(name)}" loading="lazy" decoding="async">
             <span class="exchanger-rating-badge">${rating ? rating.toFixed(1) : "new"} ★</span>
           </div>
           <div class="exchanger-card-body">
@@ -8604,7 +8651,7 @@ function exchangeCardView(card) {
             </div>
             <span>${navIcon("exchange")}</span>
           </div>
-          <img class="shop-image" src="${esc(card.image || fallbackImage)}" alt="${esc(card.name)}">
+          <img class="shop-image" src="${esc(card.image || fallbackImage)}" alt="${esc(card.name)}" loading="lazy" decoding="async">
           <div class="rate-row">
             <span>${esc(regions)}</span>
             <strong>Обмен ${Number(card.exchangeRate).toFixed(2)} MDL / $</strong>
@@ -12076,7 +12123,7 @@ function renderShopPanelLogin(message = "") {
   root.innerHTML = `
     <main class="auth-wrap shop-panel-login">
       <section class="auth-card">
-        <img src="assets/cerber-neon-emblem.png" alt="CERBER">
+        <img src="assets/cerber-neon-emblem-fast.webp" alt="CERBER">
         <h1>Shop Admin</h1>
         <p>Панель управления магазином.</p>
         ${hashStore ? `<p>${esc(hashStore.name)}</p>` : ""}
@@ -13625,18 +13672,20 @@ async function initApp() {
   watchCmsVisualTextOverrides();
   connectRealtime();
   try {
-    await loadRemoteConfig();
-    safeRenderCurrent();
-    await loadCmsTextOverrides();
-    await loadRemoteState();
-    await loadRemoteSession();
-    await syncPendingProductPayments();
-    await syncPendingWalletDeposits();
-    await fetchLitecoinUsdRate();
+    await Promise.allSettled([
+      loadRemoteConfig(),
+      loadCmsTextOverrides(),
+      apiSessionToken() ? loadRemoteSession() : loadRemoteState()
+    ]);
   } catch (error) {
     console.error("[init] remote bootstrap failed", error);
   }
   safeRenderCurrent();
+  Promise.allSettled([
+    syncPendingProductPayments(),
+    syncPendingWalletDeposits(),
+    fetchLitecoinUsdRate()
+  ]).catch(() => {});
   startWalletDepositSync();
   clearInterval(liveLtcBalanceTimer);
   liveLtcBalanceTimer = setInterval(async () => {

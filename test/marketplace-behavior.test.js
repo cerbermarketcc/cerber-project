@@ -170,6 +170,26 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=112/);
-  assert.match(indexHtml, /app\.js\?v=173/);
+  assert.match(indexHtml, /styles\.css\?v=113/);
+  assert.match(indexHtml, /app\.js\?v=174/);
+});
+
+test("public bootstrap keeps assets light and avoids duplicate state requests", () => {
+  assert.doesNotMatch(indexHtml, /challenges\.cloudflare\.com\/turnstile/);
+  assert.match(appClient, /apiSessionToken\(\) \? loadRemoteSession\(\) : loadRemoteState\(\)/);
+  assert.match(appClient, /assets\/cerber-neon-emblem-fast\.webp/);
+  assert.match(appClient, /assets\/user-avatar-fast\.webp/);
+  assert.doesNotMatch(appClient, /src="assets\/cerber-neon-emblem\.png"/);
+  assert.doesNotMatch(appClient, /src="assets\/user-avatar\.png"/);
+  assert.match(server, /public, max-age=31536000, immutable/);
+  assert.match(routeBody("get", "/api/state"), /loadPublicCatalogSnapshot\(\)/);
+});
+
+test("chat messages render optimistically with server-side duplicate protection", () => {
+  assert.match(appClient, /newClientRequestId\("private-message"\)/);
+  assert.match(appClient, /newClientRequestId\("group-message"\)/);
+  assert.match(appClient, /pendingSend: true/);
+  assert.match(server, /function clientMessageIdentity/);
+  assert.match(routeBody("post", "/api/group/messages"), /clientMessageIdentity\("group"/);
+  assert.match(routeBody("post", "/api/private-messages"), /clientMessageIdentity\("private"/);
 });

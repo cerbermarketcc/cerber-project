@@ -45,7 +45,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "admin-mfa-rate-scope-rotation-2026-09-08-v181";
+const cerberBuildVersion = "performance-cache-chat-2026-09-09-v182";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -701,21 +701,30 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, res, next) => {
+  let requestUrl;
   let pathname = "";
   try {
-    pathname = decodeURIComponent(new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname);
+    requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    pathname = decodeURIComponent(requestUrl.pathname);
   } catch {
     return res.status(400).send("Bad request");
   }
-  const freshAsset = pathname === "/" || /\.(?:html|js|css)$/i.test(pathname);
-  if (pathname.startsWith("/api/")) {
+  const isHtml = pathname === "/" || /\.html$/i.test(pathname);
+  const isVersionedCode = /\.(?:js|css)$/i.test(pathname) && requestUrl.searchParams.has("v");
+  if (pathname === "/api/state" && req.method === "GET") {
+    res.setHeader("Cache-Control", "public, max-age=5, s-maxage=20, stale-while-revalidate=60");
+  } else if (pathname.startsWith("/api/")) {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Pragma", "no-cache");
   }
-  if (req.method === "GET" && freshAsset) {
+  if (req.method === "GET" && isHtml) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
+  } else if (req.method === "GET" && isVersionedCode) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  } else if (req.method === "GET" && pathname.startsWith("/assets/")) {
+    res.setHeader("Cache-Control", "public, max-age=604800, stale-while-revalidate=2592000");
   }
   next();
 });
@@ -2241,15 +2250,17 @@ function isBrokenImageValue(value = "") {
   return !image || image === "[object File]" || image === "[object Blob]" || image === "undefined" || image === "null";
 }
 
-function publicImageForState(value = "", fallback = "assets/cerber-emblem.png") {
-  const image = String(value || "").trim();
-  if (isBrokenImageValue(image)) return fallback;
+function publicImageForState(value = "", fallback = "assets/cerber-emblem-fast.webp") {
+  const requestedImage = String(value || "").trim();
+  const safeFallback = fallback === "assets/cerber-emblem.png" ? "assets/cerber-emblem-fast.webp" : fallback;
+  const image = requestedImage === "assets/cerber-emblem.png" ? "assets/cerber-emblem-fast.webp" : requestedImage;
+  if (isBrokenImageValue(image)) return safeFallback;
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(image)) {
-    return parseInlineMedia(image, allowedInlineImageTypes, 5 * 1024 * 1024) ? image : fallback;
+    return parseInlineMedia(image, allowedInlineImageTypes, 5 * 1024 * 1024) ? image : safeFallback;
   }
   if (trustedContentUrl(image)) return image;
   if (/^\/?assets\/[a-z0-9/_.,@+-]+\.(?:png|jpe?g|gif|webp)$/i.test(image)) return image.replace(/^\//, "");
-  return fallback;
+  return safeFallback;
 }
 
 function trustedContentUrl(value = "", options = {}) {
@@ -2381,6 +2392,26 @@ async function externalizeStoreMedia(store = {}) {
   return { store: next, changed: convertedImages > 0 };
 }
 
+async function externalizeExchangerMedia(exchanger = {}) {
+  const next = cloneJson(exchanger || {});
+  const imageSource = String(next.image || next.avatar || "");
+  const avatarSource = String(next.avatar || "");
+  const uploads = new Map();
+  const scope = `exchangers/${safeMediaPathSegment(next.id || next.login || "exchanger")}`;
+  const upload = async (source) => {
+    if (!inlineImagePayload(source)) return source;
+    if (!uploads.has(source)) uploads.set(source, externalizeInlineImage(source, scope));
+    return uploads.get(source);
+  };
+  next.image = await upload(imageSource);
+  if (avatarSource && avatarSource !== imageSource) next.avatar = await upload(avatarSource);
+  else delete next.avatar;
+  return {
+    exchanger: next,
+    changed: next.image !== imageSource || (avatarSource && avatarSource !== imageSource && next.avatar !== avatarSource) || Boolean(avatarSource && avatarSource === imageSource)
+  };
+}
+
 function publicStaffMemberForState(member = {}) {
   const { password, passwordHash, adminPassword, ...item } = member || {};
   item.hasPassword = Boolean(password || passwordHash || adminPassword);
@@ -2440,7 +2471,7 @@ function sellerImagePatch(existingValue = "", inputValue = "") {
   const existing = String(existingValue || "");
   const incoming = String(inputValue || "");
   if (isBrokenImageValue(incoming)) return isBrokenImageValue(existing) ? "" : existing;
-  if (["assets/cerber-emblem.png", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing)) return existing;
+  if (["assets/cerber-emblem.png", "assets/cerber-emblem-fast.webp", "assets/market-banner.png"].includes(incoming) && /^data:image\/[a-z0-9.+-]+;base64,/i.test(existing)) return existing;
   const trustedIncoming = publicImageForState(incoming, "");
   const trustedExisting = publicImageForState(existing, "");
   return trustedIncoming || trustedExisting;
@@ -2450,7 +2481,7 @@ function sellerProductPatch(existing = {}, input = {}) {
   const item = mergeSellerProductInput(existing, input);
   item.image = sellerImagePatch(existing.image, input.image);
   if (Array.isArray(input.images) && input.images.length) {
-    const hasOnlyPlaceholder = input.images.every((image) => image === "assets/cerber-emblem.png");
+    const hasOnlyPlaceholder = input.images.every((image) => ["assets/cerber-emblem.png", "assets/cerber-emblem-fast.webp"].includes(image));
     const requestedImages = hasOnlyPlaceholder && Array.isArray(existing.images) && existing.images.length ? existing.images : input.images;
     item.images = requestedImages.map((image) => publicImageForState(image, "")).filter(Boolean).slice(0, 5);
   } else if (Array.isArray(existing.images)) {
@@ -3831,6 +3862,7 @@ function publicGroupMessage(message) {
     .slice(0, 8);
   return {
     id: message.id,
+    clientRequestId: validIdempotencyKey(message.clientRequestId) || "",
     fromLogin: message.fromLogin,
     room: groupRoomKey(message.room),
     body: message.body || "",
@@ -3854,6 +3886,7 @@ function publicPrivateMessage(message = {}) {
     .slice(0, 8);
   return {
     id: message.id,
+    clientRequestId: validIdempotencyKey(message.clientRequestId) || "",
     fromLogin: message.fromLogin || "",
     toLogin: message.toLogin || "",
     subject: message.subject || "",
@@ -5063,6 +5096,17 @@ async function migrateInlineStoreMedia() {
         migrationState.publicStoresCacheAt = Date.now();
       }
     }
+    let exchangerMediaChanged = false;
+    if (Array.isArray(migrationState?.exchangers)) {
+      migrationState.exchangers = await Promise.all(migrationState.exchangers.map(async (exchanger) => {
+        const mediaResult = await externalizeExchangerMedia(exchanger).catch((error) => {
+          console.error("[media] exchanger migration failed", { exchangerId: exchanger?.id || "", message: error.message });
+          return { exchanger, changed: false };
+        });
+        if (mediaResult.changed) exchangerMediaChanged = true;
+        return mediaResult.exchanger;
+      }));
+    }
     const fallbackStores = mergeStoreSources(migrationState.ownerStores || [], migrationState.publicStoresCache || []);
     const migratedStores = [];
     for (const row of rows) {
@@ -5088,18 +5132,23 @@ async function migrateInlineStoreMedia() {
         rememberSavedStore(sourceStore);
       }
     }
-    if (migratedStores.length || fallbackSecretsChanged) {
+    if (migratedStores.length || fallbackSecretsChanged || exchangerMediaChanged) {
+      const migratedState = migrateStateStoreMedia(migrationState, migratedStores);
       if (migrationState) {
         await withTimeout(
-          saveSettingsState(migrateStateStoreMedia(migrationState, migratedStores), { deferSideEffects: true }),
+          saveSettingsState(migratedState, { deferSideEffects: true }),
           "inline media settings save",
           15000
         ).catch((error) => {
           console.error("[media] settings cache migration failed", { message: error.message });
         });
       }
-      await refreshPublicCatalogFromStoreRows({}, "inline media public catalog refresh").catch((error) => {
+      const refreshedCatalog = await refreshPublicCatalogFromStoreRows(migratedState, "inline media public catalog refresh").catch((error) => {
         console.error("[media] public catalog migration failed", { message: error.message });
+        return null;
+      });
+      if (!refreshedCatalog) await savePublicCatalogSnapshot(migratedState).catch((error) => {
+        console.error("[media] public catalog fallback save failed", { message: error.message });
       });
     }
     console.log("[media] inline store migration complete", { checked: rows.length, migrated: migratedStores.length });
@@ -6048,8 +6097,15 @@ app.post("/api/support/tickets/:id/reply", async (req, res, next) => {
 
 app.get("/api/state", async (_req, res, next) => {
   try {
-    const state = await loadSettingsState();
-    const catalog = buildPublicCatalogSnapshot(state);
+    let catalog = await loadPublicCatalogSnapshot();
+    if (!catalog) {
+      const state = await loadSettingsState();
+      catalog = buildPublicCatalogSnapshot(state);
+      publicCatalogMemorySnapshot = cloneJson(catalog);
+      publicCatalogMemorySnapshotAt = Date.now();
+    }
+    res.setHeader("Cache-Control", "public, max-age=5, s-maxage=20, stale-while-revalidate=60");
+    res.removeHeader("Pragma");
     res.json({
       user: null,
       state: {
@@ -6244,6 +6300,21 @@ function cleanMessageReactionUrl(value = "", options = {}) {
   return url.replace(/^\//, "");
 }
 
+function clientMessageIdentity(prefix = "message", sender = "", target = "", suppliedRequestId = "") {
+  const clientRequestId = validIdempotencyKey(suppliedRequestId);
+  if (!clientRequestId) {
+    return {
+      id: `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      clientRequestId: ""
+    };
+  }
+  const digest = crypto.createHash("sha256")
+    .update(`${prefix}:${loginKey(sender)}:${String(target || "").toLowerCase()}:${clientRequestId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return { id: `${prefix}-${digest}`, clientRequestId };
+}
+
 app.post("/api/group/messages", async (req, res, next) => {
   try {
     requireDb();
@@ -6251,8 +6322,10 @@ app.post("/api/group/messages", async (req, res, next) => {
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
     assertClientRateLimit(req, "group-message", { limit: 25, windowMs: 60 * 1000, identity: user.login });
     const payload = sanitizeGroupMessagePayload(req.body || {});
+    const identity = clientMessageIdentity("group", user.login, payload.room, req.body?.clientRequestId);
     const message = {
-      id: `group-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      id: identity.id,
+      ...(identity.clientRequestId ? { clientRequestId: identity.clientRequestId } : {}),
       fromLogin: user.login,
       room: payload.room,
       body: payload.body,
@@ -6264,16 +6337,24 @@ app.post("/api/group/messages", async (req, res, next) => {
       date: new Date().toLocaleString("ru-RU")
     };
     if (payload.stickerUrl) message.stickerUrl = payload.stickerUrl;
+    let savedMessage = message;
+    let created = false;
     const groupSettings = await mutateSettingsState((state) => {
       state.groupMessages = Array.isArray(state.groupMessages) ? state.groupMessages : [];
+      const existing = state.groupMessages.find((item) => String(item?.id || "") === message.id);
+      if (existing) {
+        savedMessage = existing;
+        return normalizeGroupSettings(state.groupSettings || {});
+      }
       state.groupMessages.push(message);
+      created = true;
       state.groupMessages = state.groupMessages
         .map((item) => ({ ...item, room: groupRoomKey(item.room) }))
         .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
       return normalizeGroupSettings(state.groupSettings || {});
     });
-    notifyRealtime("group_message_created", { id: message.id, fromLogin: user.login, room: message.room });
-    res.json({ ok: true, message: publicGroupMessage(message), groupSettings: publicGroupSettings(groupSettings) });
+    if (created) notifyRealtime("group_message_created", { id: savedMessage.id, fromLogin: user.login, room: savedMessage.room });
+    res.json({ ok: true, message: publicGroupMessage(savedMessage), groupSettings: publicGroupSettings(groupSettings) });
   } catch (error) {
     next(error);
   }
@@ -6513,8 +6594,10 @@ app.post("/api/private-messages", async (req, res, next) => {
     if (review && !linkedExchanger) return res.status(404).json({ error: "У этого пользователя нет активного обменника для отзыва" });
     const savedReview = review ? addExchangerReview(linkedExchanger, user, review) : null;
     const now = Date.now();
+    const identity = clientMessageIdentity("private", user.login, recipient.login, req.body?.clientRequestId);
     const message = {
-      id: `private-${now}-${crypto.randomBytes(3).toString("hex")}`,
+      id: identity.id,
+      ...(identity.clientRequestId ? { clientRequestId: identity.clientRequestId } : {}),
       storeId: "",
       storeTag: recipient.login,
       toLogin: recipient.login,
@@ -6531,7 +6614,7 @@ app.post("/api/private-messages", async (req, res, next) => {
       ...(linkedExchanger ? { exchangerId: linkedExchanger.id } : {}),
       ...(savedReview ? { reviewId: savedReview.id, reviewRating: savedReview.rating } : {})
     };
-    await upsertPrivateMessage(message);
+    await upsertPrivateMessage(message, { ignoreDuplicates: Boolean(identity.clientRequestId) });
     if (savedReview && state) await saveSettingsState(state);
     notifyRealtime("private_message_created", { id: message.id, fromLogin: user.login, toLogin: recipient.login, exchangerId: linkedExchanger?.id || "", reviewId: savedReview?.id || "" });
     res.json({ ok: true, peerLogin: recipient.login, message: publicPrivateMessage(message) });
@@ -7917,7 +8000,7 @@ app.post("/api/admin/exchangers", async (req, res, next) => {
     let id = idBase;
     let counter = 2;
     while (state.exchangers.some((item) => String(item.id || "") === id)) id = `${idBase}-${counter++}`;
-    const exchanger = {
+    const exchangerDraft = {
       ...clean,
       id,
       login: profile.login,
@@ -7926,6 +8009,7 @@ app.post("/api/admin/exchangers", async (req, res, next) => {
       updatedAt: now,
       createdBy: admin.login
     };
+    const { exchanger } = await externalizeExchangerMedia(exchangerDraft);
     state.exchangers.unshift(exchanger);
     await saveSettingsState(state, { deferSideEffects: true });
     appendAdminLog("exchanger_created", admin.login, { exchangerId: id, login: profile.login }).catch((error) => {
@@ -7949,7 +8033,7 @@ app.patch("/api/admin/exchangers/:id", async (req, res, next) => {
     if (!clean.login || !clean.title) return res.status(400).json({ error: "Укажите логин и название обменника" });
     const profile = await findProfileByLogin(clean.login);
     if (!profile) return res.status(404).json({ error: "Пользователь с таким логином не найден" });
-    state.exchangers[index] = {
+    const exchangerDraft = {
       ...state.exchangers[index],
       ...clean,
       login: profile.login,
@@ -7957,6 +8041,8 @@ app.patch("/api/admin/exchangers/:id", async (req, res, next) => {
       updatedAt: Date.now(),
       updatedBy: admin.login
     };
+    const { exchanger } = await externalizeExchangerMedia(exchangerDraft);
+    state.exchangers[index] = exchanger;
     await saveSettingsState(state, { deferSideEffects: true });
     appendAdminLog("exchanger_updated", admin.login, { exchangerId: req.params.id, login: profile.login, fields: Object.keys(req.body || {}) }).catch((error) => {
       console.error("[admin-exchanger] update log deferred failed", { exchangerId: req.params.id, message: error.message });
@@ -10639,7 +10725,10 @@ async function notifySiteUser(state, login, notification = {}) {
 }
 
 async function upsertPrivateMessage(message, options = {}) {
-  const { error } = await supabase.from("messages").upsert({ id: message.id, data: message }, { onConflict: "id" });
+  const { error } = await supabase.from("messages").upsert(
+    { id: message.id, data: message },
+    { onConflict: "id", ignoreDuplicates: Boolean(options.ignoreDuplicates) }
+  );
   if (error) throw error;
   if (options.notify !== false) {
     siteNotifyDeliverPrivateMessage(message).catch((error) => {
@@ -12375,19 +12464,23 @@ function addExchangerReview(exchanger, user, review) {
 function publicExchangersForState(exchangers = []) {
   return (Array.isArray(exchangers) ? exchangers : [])
     .filter((item) => item && isMarketplaceRecordAfterVisualReset(item) && item.status !== "disabled" && item.active !== false && item.login)
-    .map((item) => ({
-      id: String(item.id || ""),
-      login: String(item.login || item.ownerLogin || ""),
-      title: String(item.title || item.name || item.login || ""),
-      name: String(item.name || item.title || item.login || ""),
-      description: String(item.description || ""),
-      image: String(item.image || ""),
-      avatar: String(item.avatar || ""),
-      position: Number(item.position || 0),
-      createdAt: item.createdAt || null,
-      updatedAt: item.updatedAt || null,
-      ...exchangerReviewSummary(item)
-    }))
+    .map((item) => {
+      const image = String(item.image || item.avatar || "");
+      const avatar = String(item.avatar || "");
+      return {
+        id: String(item.id || ""),
+        login: String(item.login || item.ownerLogin || ""),
+        title: String(item.title || item.name || item.login || ""),
+        name: String(item.name || item.title || item.login || ""),
+        description: String(item.description || ""),
+        image,
+        ...(avatar && avatar !== image ? { avatar } : {}),
+        position: Number(item.position || 0),
+        createdAt: item.createdAt || null,
+        updatedAt: item.updatedAt || null,
+        ...exchangerReviewSummary(item)
+      };
+    })
     .sort((a, b) => Number(a.position || 0) - Number(b.position || 0) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 

@@ -3381,6 +3381,18 @@ body[data-theme="dark"] .mirror-row {
   line-height: 1;
 }
 
+.group-message.pending-send > div {
+  opacity: .68;
+}
+
+.message-send-failed {
+  display: block;
+  margin-top: 4px;
+  color: #ff7373;
+  font-size: .72rem;
+  font-weight: 700;
+}
+
 .telegram-link-modal {
   width: min(460px, calc(100vw - 28px));
 }
