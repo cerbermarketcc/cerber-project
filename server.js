@@ -45,7 +45,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "courier-school-link-2026-09-09-v183";
+const cerberBuildVersion = "multi-owner-admin-2026-09-09-v184";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -6835,7 +6835,7 @@ app.post("/api/admin/accounts", async (req, res, next) => {
     const role = String(req.body.role || "admin").toLowerCase();
     if (!/^[a-zA-Z0-9_.-]{3,64}$/.test(login)) return res.status(400).json({ error: "Invalid administrator login" });
     if (password.length < 12 || password.length > 128) return res.status(400).json({ error: "Administrator password must contain 12 to 128 characters" });
-    if (!new Set(["admin", "moderator", "manager", "support"]).has(role)) return res.status(400).json({ error: "Invalid administrator role" });
+    if (!new Set(["owner", "admin", "moderator", "manager", "support"]).has(role)) return res.status(400).json({ error: "Invalid administrator role" });
     if (await loadSiteAdminAccount(login)) return res.status(409).json({ error: "Administrator already exists" });
     const account = await insertAdminAccount({
       id: siteAdminAccountId(login),

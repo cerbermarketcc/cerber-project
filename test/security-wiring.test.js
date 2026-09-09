@@ -131,6 +131,20 @@ test("passwords are hashed before database persistence and legacy store secrets 
   assert.equal((server.match(/\.from\("stores"\)\s*\.upsert/g) || []).length, 1);
 });
 
+test("site owners can create separate full-access owner accounts with independent MFA", () => {
+  const adminCreate = routeBody("post", "/api/admin/accounts");
+  const adminMfaSetup = routeBody("post", "/api/admin/2fa/setup");
+  assert.match(adminCreate, /requireOwnerAdmin\(req\)/);
+  assert.match(adminCreate, /new Set\(\["owner", "admin", "moderator", "manager", "support"\]\)/);
+  assert.match(adminCreate, /password_hash: await bcrypt\.hash\(password, 12\)/);
+  assert.match(adminClient, /<option value="owner">Владелец \(полный доступ\)<\/option>/);
+  assert.match(adminClient, /name="passwordConfirm"/);
+  assert.match(adminClient, /account\.mfaEnabled && account\.id !== currentAdminAccountId/);
+  assert.match(server, /if \(!account\.totp_enabled\)[\s\S]{0,500}requiresMfaSetup: true/);
+  assert.match(adminMfaSetup, /beginMfaSetup\(account\)/);
+  assert.match(server, /recoveryCodeHashes\(mfaRecoverySecret\(account\), account\.id, recoveryCodes\)/);
+});
+
 test("rendered user content is escaped and dangerous URL schemes are filtered", () => {
   assert.match(appClient, /function esc\(value\)[\s\S]{0,220}amp;[\s\S]{0,120}quot;/);
   assert.match(appClient, /function safeContentUrl[\s\S]{0,900}url\.protocol === "https:"/);

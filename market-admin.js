@@ -955,20 +955,34 @@ function filterRows(rows, keys) {
   return rows.filter((row) => keys.some((key) => String(row[key] ?? "").toLowerCase().includes(query)));
 }
 
+function adminRoleLabel(role = "") {
+  return ({
+    owner: "Владелец",
+    admin: "Администратор",
+    manager: "Менеджер",
+    moderator: "Модератор",
+    support: "Поддержка"
+  })[String(role || "").toLowerCase()] || role;
+}
+
 function renderAdministrators() {
   const accounts = Array.isArray(data.adminAccounts) ? data.adminAccounts : [];
   if (data.admin?.role !== "owner") return `<p class="notice">Этот раздел доступен только владельцу.</p>`;
+  const currentAdminAccountId = String(data.admin?.accountId || data.admin?.id || "");
+  const ownerCount = accounts.filter((account) => account.role === "owner").length;
   return `
     <section class="split-card">
-      <h2>Новый администратор</h2>
-      <p class="muted">После первого входа администратор сам подключит Authenticator. Без настройки 2FA доступ к панели и API не выдаётся.</p>
+      <h2>Новый аккаунт админ-панели</h2>
+      <p class="muted">Для партнёров выберите роль «Владелец». Каждый входит под своим логином и паролем, затем сам подключает отдельный Authenticator и получает личные recovery-коды.</p>
+      <p class="notice">Сейчас владельцев: ${esc(ownerCount)}. Никому не передавайте свой пароль или код 2FA.</p>
       <form data-admin-account-create>
         <div class="row">
           <label class="field">Логин<input name="login" minlength="3" maxlength="64" required></label>
           <label class="field">Временный пароль<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
-          <label class="field">Роль<select name="role"><option value="admin">Admin</option><option value="manager">Manager</option><option value="moderator">Moderator</option><option value="support">Support</option></select></label>
+          <label class="field">Повторите пароль<input name="passwordConfirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          <label class="field">Роль<select name="role"><option value="owner">Владелец (полный доступ)</option><option value="admin">Администратор</option><option value="manager">Менеджер</option><option value="moderator">Модератор</option><option value="support">Поддержка</option></select></label>
         </div>
-        <button class="primary">Создать администратора</button>
+        <button class="primary">Создать аккаунт</button>
       </form>
     </section>
     <section class="table-wrap">
@@ -977,13 +991,14 @@ function renderAdministrators() {
         <tbody>${accounts.map((account) => `
           <tr>
             <td>${esc(account.login)}</td>
-            <td>${esc(account.role)}</td>
+            <td>${esc(adminRoleLabel(account.role))}</td>
             <td>${account.mfaEnabled ? "Включена" : "Не настроена"}</td>
             <td>${esc(account.recoveryCodesRemaining || 0)}</td>
             <td>${account.disabled ? "Отключён" : "Активен"}</td>
             <td class="actions">
               ${account.role === "owner" ? "" : `<button class="ghost" data-admin-account-toggle="${esc(account.id)}" data-disabled="${account.disabled ? "0" : "1"}">${account.disabled ? "Включить" : "Отключить"}</button>`}
-              ${account.role === "owner" ? "" : `<button class="ghost" data-admin-account-mfa-reset="${esc(account.id)}">Сбросить 2FA</button>`}
+              ${account.mfaEnabled && account.id !== currentAdminAccountId ? `<button class="ghost" data-admin-account-mfa-reset="${esc(account.id)}">Сбросить 2FA</button>` : ""}
+              ${account.id === currentAdminAccountId ? `<span class="muted">Это вы</span>` : ""}
             </td>
           </tr>
         `).join("") || `<tr><td colspan="6">Администраторы не найдены</td></tr>`}</tbody>
@@ -2020,6 +2035,10 @@ function bindActions() {
     event.preventDefault();
     const form = event.currentTarget;
     const fd = new FormData(form);
+    if (String(fd.get("password") || "") !== String(fd.get("passwordConfirm") || "")) {
+      toast("Пароли не совпадают", true);
+      return;
+    }
     const endSubmit = beginAdminFormSubmit(form, "Создаю...");
     if (!endSubmit) return;
     try {
@@ -2028,7 +2047,7 @@ function bindActions() {
         body: JSON.stringify({ login: fd.get("login"), password: fd.get("password"), role: fd.get("role") })
       });
       data.adminAccounts = [...(data.adminAccounts || []), payload.account];
-      toast("Администратор создан. При первом входе он настроит 2FA.");
+      toast("Аккаунт создан. При первом входе владелец настроит личный 2FA.");
       renderCurrentView();
     } catch (error) {
       toast(error.message, true);
