@@ -1127,6 +1127,7 @@ Object.assign(uiPhraseTranslations.md, {
   "Нет в наличии": "Nu este in stoc",
   "Открыть меню": "Deschide meniul",
   "Официальные зеркала": "Oglinzi oficiale",
+  "Школа Курьеров от Cerber": "Scoala de curieri Cerber",
   "Магазин активен": "Magazin activ",
   "Работает сейчас": "Activ acum"
 });
@@ -1158,6 +1159,7 @@ Object.assign(uiPhraseTranslations.en, {
   "Нет в наличии": "Out of stock",
   "Открыть меню": "Open menu",
   "Официальные зеркала": "Official mirrors",
+  "Школа Курьеров от Cerber": "Cerber Courier School",
   "Магазин активен": "Store active",
   "Работает сейчас": "Open now"
 });
@@ -4952,6 +4954,10 @@ function officialMirrorsView() {
     <section class="official-mirrors official-mirrors-compact">
       <strong>Официальные зеркала</strong>
       <div class="official-domain-list">${officialClearDomains.map((domain) => `<button data-copy="${esc(domain)}" title="Скопировать">${esc(domain)}</button>`).join("")}</div>
+      <div class="courier-school-promo">
+        <span class="courier-school-copy">Школа Курьеров от Cerber <span class="courier-school-arrow" aria-hidden="true">→</span></span>
+        <a class="courier-school-link" href="https://t.me/HRcerber" target="_blank" rel="noopener noreferrer" aria-label="Открыть HRCerber в Telegram">HRCerber</a>
+      </div>
     </section>
   `;
 }

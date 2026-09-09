@@ -146,6 +146,15 @@ test("home content has no empty brand spacer between mirrors and the store list"
   assert.doesNotMatch(styles, /market-brand-spacer/);
 });
 
+test("official mirrors promote the courier school with a safe Telegram link", () => {
+  const mirrors = functionBody(appClient, "officialMirrorsView");
+  assert.match(mirrors, /Школа Курьеров от Cerber/);
+  assert.match(mirrors, /href="https:\/\/t\.me\/HRcerber"/);
+  assert.match(mirrors, /target="_blank" rel="noopener noreferrer"/);
+  assert.match(mirrors, />HRCerber<\/a>/);
+  assert.match(styles, /\.courier-school-promo\s*\{[\s\S]{0,260}grid-column: 1 \/ -1/);
+});
+
 test("mobile product cards show complete three-by-four artwork", () => {
   assert.match(styles, /grid-template-columns: clamp\(118px, 40vw, 154px\) minmax\(0, 1fr\)/);
   assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: cover;/);
@@ -170,8 +179,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=113/);
-  assert.match(indexHtml, /app\.js\?v=174/);
+  assert.match(indexHtml, /styles\.css\?v=114/);
+  assert.match(indexHtml, /app\.js\?v=175/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {
