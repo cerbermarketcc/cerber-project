@@ -978,7 +978,7 @@ function renderAdministrators() {
       <form data-admin-account-create>
         <div class="row">
           <label class="field">Логин<input name="login" minlength="3" maxlength="64" required></label>
-          <label class="field">Временный пароль<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          <label class="field">Пароль аккаунта<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
           <label class="field">Повторите пароль<input name="passwordConfirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
           <label class="field">Роль<select name="role"><option value="owner">Владелец (полный доступ)</option><option value="admin">Администратор</option><option value="manager">Менеджер</option><option value="moderator">Модератор</option><option value="support">Поддержка</option></select></label>
         </div>
@@ -2047,7 +2047,7 @@ function bindActions() {
         body: JSON.stringify({ login: fd.get("login"), password: fd.get("password"), role: fd.get("role") })
       });
       data.adminAccounts = [...(data.adminAccounts || []), payload.account];
-      toast("Аккаунт создан. При первом входе владелец настроит личный 2FA.");
+      toast("Аккаунт создан. При первом входе пользователь настроит личный 2FA.");
       renderCurrentView();
     } catch (error) {
       toast(error.message, true);

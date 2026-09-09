@@ -45,7 +45,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "multi-owner-admin-2026-09-09-v184";
+const cerberBuildVersion = "multi-owner-admin-2026-09-09-v185";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
