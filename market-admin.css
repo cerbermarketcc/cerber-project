@@ -784,6 +784,18 @@ tr:hover td {
   color: var(--red);
 }
 
+.admin-store-media-preview {
+  display: block;
+  max-width: 100%;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--line, #444);
+  border-radius: 6px;
+}
+.admin-store-media-preview[hidden] { display: none; }
+.admin-store-media-preview.is-avatar { width: 112px; height: 112px; }
+.admin-store-media-preview.is-banner { width: 360px; height: 120px; }
+
 .admin-gallery {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

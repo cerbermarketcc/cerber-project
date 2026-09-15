@@ -348,12 +348,11 @@ async function formImageValue(formData, fileName, fallbackName = "") {
   const file = formData.get(fileName);
   if (file && file.size) {
     const value = await fileToDataUrl(file);
-    if (!value && file.size > ADMIN_IMAGE_HARD_LIMIT_BYTES) {
-      toast("Фото слишком большое. Объект будет создан без этого фото.", true);
-    }
+    if (!value) throw new Error("Не удалось обработать фото. Выберите JPG, PNG или WebP меньшего размера.");
     return value;
   }
-  return String(formData.get(fallbackName || fileName) || "").trim();
+  const fallback = formData.get(fallbackName || fileName);
+  return typeof fallback === "string" ? fallback.trim() : "";
 }
 
 async function formImageValues(formData, fileName, limit = 12) {
@@ -1076,7 +1075,8 @@ function renderStores() {
     <details class="split-card admin-create-panel" ${createPanelOpen}>
       <summary><span><strong>Создать магазин</strong><small>Основное, доступы, размещение</small></span><b>+</b></summary>
       <form data-create-store-form>
-        <label class="field">Фото магазина файлом<input name="imageFile" type="file" accept="image/*"></label>
+        ${storeMediaField("imageFile", "Аватарка магазина")}
+        ${storeMediaField("coverFile", "Баннер магазина")}
         <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
         ${storePlacementPositionControls(["stores"], createPositions)}
         <div class="row">
@@ -1131,8 +1131,8 @@ function storeDetail(id) {
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(panelPasswordStatus)}</strong></p>
     <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)} · ${fmtLtc(store.grossRevenueLtc)}</strong><br>К выводу магазину: <strong>${fmtMoney(store.availableUsd ?? storeRevenue)} · ${fmtLtc(store.availableLtc ?? store.revenueLtc)}</strong><br>Комиссия владельца: <strong>${fmtMoney(ownerCommission)} · ${fmtLtc(store.commissionLtc)}</strong></p>
     <form data-store-form="${esc(store.id)}">
-      <label class="field">Фото / аватар файлом<input name="imageFile" type="file" accept="image/*"></label>
-      <label class="field">Баннер файлом<input name="coverFile" type="file" accept="image/*"></label>
+      ${storeMediaField("imageFile", "Аватарка магазина", store.image || store.avatar)}
+      ${storeMediaField("coverFile", "Баннер магазина", store.cover || store.banner)}
       <label class="field">Дополнительные фото магазина<input name="galleryFiles" type="file" accept="image/*" multiple></label>
       ${Array.isArray(store.gallery) && store.gallery.length ? `<div class="admin-gallery">${store.gallery.slice(0, 12).map((image) => `<img src="${esc(image)}" alt="">`).join("")}</div>` : ""}
       ${storePlacementPositionControls(placements, store)}
@@ -2029,7 +2029,31 @@ function bindPlacementPositionControls(scope = root) {
   });
 }
 
+function storeMediaField(name, label, value = "") {
+  const source = safeAdminContentUrl(value);
+  return `<label class="field admin-store-media">${esc(label)}
+    <img class="admin-store-media-preview ${name === "coverFile" ? "is-banner" : "is-avatar"}" ${source ? `src="${esc(source)}"` : "hidden"} alt="${esc(label)}">
+    <input name="${esc(name)}" type="file" accept="image/*" data-store-media-input>
+  </label>`;
+}
+
 function bindActions() {
+  root.querySelectorAll("[data-store-media-input]").forEach((input) => {
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const preview = input.closest("label").querySelector("img");
+      try {
+        const value = await fileToDataUrl(file);
+        if (input.files?.[0] !== file) return;
+        if (!value) throw new Error("Не удалось загрузить фото. Выберите JPG, PNG или WebP меньшего размера.");
+        preview.src = value;
+        preview.hidden = false;
+      } catch (error) {
+        toast(error.message || "Не удалось загрузить фото", true);
+      }
+    };
+  });
   bindPlacementPositionControls();
   root.querySelector("[data-admin-account-create]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2197,6 +2221,7 @@ function bindActions() {
           ownerLogin: fd.get("ownerLogin"),
           adminPassword: fd.get("adminPassword"),
           image,
+          cover: await formImageValue(fd, "coverFile"),
           gallery: gallery.length ? gallery : undefined,
           description: fd.get("description"),
           placement: placements[0] || "stores",
