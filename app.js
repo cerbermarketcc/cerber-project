@@ -4468,6 +4468,7 @@ function layout(content) {
         <div class="divider"></div>
         ${accountMenuButton("support", "Поддержка", `data-route="support"`)}
         ${accountMenuButton("rules", "Правила", `data-rules`)}
+        ${accountMenuButton("rules", passwordChangeText().title, `data-change-password`)}
         ${accountMenuButton("logout", tr("logout"), `data-logout`)}
       </div>
     </div>
@@ -13286,6 +13287,49 @@ function blobToDataUrl(blob) {
   });
 }
 
+function passwordChangeText() {
+  return ({
+    ru: { title: "Сменить пароль", label: "Новый пароль", save: "Сохранить пароль", success: "Пароль успешно изменён", length: "Минимум 10 символов, максимум 72 байта", close: "Закрыть" },
+    md: { title: "Schimba parola", label: "Parola noua", save: "Salveaza parola", success: "Parola a fost schimbata", length: "Minimum 10 caractere, maximum 72 de octeti", close: "Inchide" },
+    en: { title: "Change password", label: "New password", save: "Save password", success: "Password changed successfully", length: "At least 10 characters, at most 72 bytes", close: "Close" }
+  })[db.lang] || { title: "Change password", label: "New password", save: "Save password", success: "Password changed successfully", length: "At least 10 characters, at most 72 bytes", close: "Close" };
+}
+
+function openPasswordChangeModal() {
+  const text = passwordChangeText();
+  document.querySelector("[data-account-pop]")?.classList.remove("open");
+  showModal(`<h2>${text.title}</h2><form class="form" data-password-change-form>
+    <label class="field">${text.label}<input name="newPassword" type="password" autocomplete="new-password" minlength="10" maxlength="72" required></label>
+    <p class="notice" data-password-result role="status"></p>
+    <button class="primary" type="submit">${text.save}</button>
+    <button class="ghost-button" type="button" data-close-modal>${text.close}</button>
+  </form>`);
+  const form = document.querySelector("[data-password-change-form]");
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('[type="submit"]');
+    if (button.disabled) return;
+    const result = form.querySelector("[data-password-result]");
+    const newPassword = new FormData(form).get("newPassword");
+    if (newPassword.length < 10 || new TextEncoder().encode(newPassword).length > 72) {
+      result.textContent = text.length;
+      return;
+    }
+    button.disabled = true;
+    result.textContent = "";
+    try {
+      await apiFetch("/api/auth/password", { method: "POST", body: JSON.stringify({ newPassword }) });
+      form.reset();
+      result.textContent = text.success;
+      showToast(text.success);
+    } catch (error) {
+      result.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  };
+}
+
 function showModal(html, className = "") {
   const safeClassName = String(className || "").split(/\s+/).filter((item) => /^[a-z0-9_-]+$/i.test(item)).join(" ");
   document.querySelector("[data-modal]").innerHTML = sanitizeRenderedHtml(`<div class="modal ${safeClassName}">${html}</div>`);
@@ -13447,6 +13491,7 @@ function bindGlobal() {
       renderCurrent();
     };
   });
+  document.querySelector("[data-change-password]")?.addEventListener("click", openPasswordChangeModal);
   document.querySelectorAll("[data-logout]").forEach((button) => {
     button.onclick = () => {
       const token = apiSessionToken();

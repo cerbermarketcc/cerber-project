@@ -5864,6 +5864,26 @@ app.get("/api/session", async (req, res, next) => {
   }
 });
 
+app.post("/api/auth/password", async (req, res, next) => {
+  try {
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+    if (String(user.role || "user") !== "user") return res.status(403).json({ error: "Смена пароля доступна в панели этого аккаунта" });
+    assertClientRateLimit(req, "customer-password", { limit: 5, windowMs: 15 * 60 * 1000, identity: user.login_key });
+    const password = req.body.newPassword;
+    if (typeof password !== "string" || password.length < 10 || Buffer.byteLength(password, "utf8") > 72) {
+      return res.status(400).json({ error: "Пароль: минимум 10 символов, максимум 72 байта" });
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    const { error } = await supabase.from("profiles").update({ password_hash: passwordHash }).eq("login_key", user.login_key);
+    if (error) throw error;
+    auditSecurityEvent("customer_password_changed", req, { login: user.login });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/auth/logout", async (req, res, next) => {
   try {
     requireDb();

@@ -495,13 +495,19 @@ select {
   box-shadow: 0 24px 80px rgba(0, 0, 0, .62), 0 0 34px rgba(212, 32, 25, .1);
 }
 
-.mfa-qr {
+.auth-card > img.mfa-qr {
   display: block;
   width: min(240px, 72vw);
+  max-width: 100%;
+  height: auto;
   aspect-ratio: 1;
   margin: 10px auto 16px;
   padding: 8px;
   object-fit: contain;
+  object-position: center;
+  filter: none !important;
+  mix-blend-mode: normal;
+  box-shadow: none;
   background: #fff;
   border: 1px solid #6d2929;
   border-radius: 6px;
