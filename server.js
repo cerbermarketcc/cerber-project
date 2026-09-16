@@ -1392,6 +1392,7 @@ async function accountForMfaChallenge(req, expectedScope = "") {
   if (!challenge) {
     const error = new Error("2FA setup session is invalid or expired");
     error.status = 401;
+    error.code = "MFA_CHALLENGE_INVALID";
     throw error;
   }
   const account = await loadAdminAccountById(challenge.accountId);
@@ -1404,6 +1405,7 @@ async function accountForMfaChallenge(req, expectedScope = "") {
   ) {
     const error = new Error("2FA setup session is no longer valid");
     error.status = 401;
+    error.code = "MFA_CHALLENGE_INVALID";
     throw error;
   }
   return { challenge, account };
@@ -16715,6 +16717,7 @@ app.use((error, _req, res, _next) => {
   if (status === 429 && error.retryAfter) res.setHeader("Retry-After", String(Math.max(1, Math.ceil(Number(error.retryAfter)))));
   res.status(status).json({
     error: message,
+    ...(error.code === "MFA_CHALLENGE_INVALID" ? { code: error.code } : {}),
     ...(status === 429 && error.retryAfter ? { retryAfter: Math.max(1, Math.ceil(Number(error.retryAfter))) } : {})
   });
 });

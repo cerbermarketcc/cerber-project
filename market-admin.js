@@ -386,6 +386,7 @@ async function api(path, options = {}) {
       if (!response.ok) {
         const error = new Error(payload.error || "API error");
         error.status = response.status;
+        error.code = payload.code || "";
         if ([502, 503, 504].includes(response.status)) error.code = "ADMIN_API_UPSTREAM";
         throw error;
       }
@@ -427,7 +428,7 @@ async function api(path, options = {}) {
 
 function adminAuthError(error) {
   const message = String(error?.message || "");
-  return [401, 403].includes(Number(error?.status || 0)) || /session required|unauthorized|forbidden|401|403|admin session/i.test(message);
+  return Number(error?.status || 0) === 401 || /session required|unauthorized|admin session/i.test(message);
 }
 
 async function refreshData(silent = false) {
@@ -652,6 +653,9 @@ function renderAdminMfaVerify(challengeToken, account = {}, message = "") {
       });
       await finishAdminAuth(payload);
     } catch (error) {
+      if (error.code === "MFA_CHALLENGE_INVALID" || /2FA setup session/i.test(error.message)) {
+        return renderLogin("Запрос подтверждения входа истёк или был отменён. Введите логин и пароль заново, затем новый код Authenticator.");
+      }
       renderAdminMfaVerify(challengeToken, account, error.message);
     } finally {
       endSubmit();

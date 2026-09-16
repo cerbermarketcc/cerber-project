@@ -2194,6 +2194,7 @@ async function apiFetchOnce(path, options = {}) {
       const message = payload.error || "API error";
       const error = new Error(message);
       error.status = response.status;
+      error.code = payload.code || "";
       if (response.status === 401 && /Сессия не найдена|Сессия истекла|session/i.test(String(message))) {
         clearApiSession();
         error.sessionExpired = true;
@@ -12117,6 +12118,11 @@ function renderStoreMfaVerify(challengeToken, account = {}, storeInfo = {}, dest
       });
       completeStoreAdminLogin(payload, storeInfo.id, destination);
     } catch (error) {
+      if (error.code === "MFA_CHALLENGE_INVALID" || /2FA setup session/i.test(error.message)) {
+        const message = "Запрос подтверждения входа истёк или был отменён. Введите логин и пароль заново, затем новый код Authenticator.";
+        if (destination === "seller") return renderSellerAdminLogin(storeInfo.id, message);
+        return renderShopPanelLogin(message);
+      }
       renderStoreMfaVerify(challengeToken, account, storeInfo, destination, error.message);
     }
   };
