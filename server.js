@@ -9,6 +9,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import compression from "compression";
 import QRCode from "qrcode";
+import { defaultHrUsername, hrUsername, hrBotUpdate } from "./hr-bot.js";
 import { createClient } from "@supabase/supabase-js";
 import WebSocket, { WebSocketServer } from "ws";
 import {
@@ -16687,6 +16688,63 @@ app.post("/api/proverka-bot/webhook", async (req, res, next) => {
 });
 
 
+async function readHrState() {
+  requireDb();
+  const { data, error } = await supabase.from("app_settings").select("data").eq("id", "hr-contact").maybeSingle();
+  if (error) throw error;
+  return data?.data || null;
+}
+
+function hrWebhookSecret() {
+  return crypto.createHmac("sha256", adminSecret()).update("hr-bot-webhook-v1").digest("hex");
+}
+
+async function hrEnsureWebhook() {
+  const token = process.env.HR_TELEGRAM_BOT_TOKEN || "";
+  if (!token) return;
+  await telegramApi("setWebhook", { url: "https://cerber.cc/api/hr-bot/webhook", secret_token: hrWebhookSecret(), allowed_updates: ["message"], max_connections: 1 }, token);
+}
+
+app.get("/api/hr/contact", async (_req, res, next) => {
+  try {
+    const state = await readHrState();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ username: hrUsername(`@${state?.username || ""}`) || defaultHrUsername });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/hr-bot/webhook", async (req, res, next) => {
+  try {
+    requireTelegramWebhookSecret(req, hrWebhookSecret(), "HR bot webhook");
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const current = await readHrState();
+      const result = hrBotUpdate(current || {}, req.body);
+      if (!result) return res.json({ ok: true });
+      if (!current) {
+        const { error } = await supabase.from("app_settings").insert({ id: "hr-contact", data: result.state });
+        if (error?.code === "23505") continue;
+        if (error) throw error;
+      } else {
+        const { data, error } = await supabase.from("app_settings").update({ data: result.state, updated_at: new Date().toISOString() }).eq("id", "hr-contact").eq("data", JSON.stringify(current)).select("id");
+        if (error) throw error;
+        if (!data?.length) continue;
+      }
+      return res.json(result.reply);
+    }
+    res.status(503).json({ error: "Повторите запрос" });
+  } catch (error) { next(error); }
+});
+
+app.get(["/hr", "/hr/", "/hr.html"], async (_req, res, next) => {
+  try {
+    const state = await readHrState();
+    const username = hrUsername(`@${state?.username || ""}`) || defaultHrUsername;
+    const html = await fs.readFile(path.join(__dirname, "hr-template.html"), "utf8");
+    res.setHeader("Cache-Control", "no-store");
+    res.type("html").send(html.replaceAll("HR_USERNAME", username));
+  } catch (error) { next(error); }
+});
+
 app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
   res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.sendFile(path.join(__dirname, "text-admin.html"));
@@ -16741,6 +16799,7 @@ const server = app.listen(port, () => {
   revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", sanitizeErrorForLog(error)));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", sanitizeErrorForLog(error)));
   telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", sanitizeErrorForLog(error)));
+  hrEnsureWebhook().catch(() => console.error("HR bot webhook setup failed"));
   siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", sanitizeErrorForLog(error)));
   proverkaEnsureWebhook().catch((error) => console.error("Proverka webhook setup error", sanitizeErrorForLog(error)));
   setTimeout(() => {
