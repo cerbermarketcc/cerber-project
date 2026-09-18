@@ -1954,6 +1954,7 @@ function renderHealth() {
           <tr><td>Active</td><td>${esc(checks.bots?.active ?? "-")}</td></tr>
           <tr><td>Errors</td><td>${esc(checks.bots?.errors ?? "-")}</td></tr>
           <tr><td>Last error</td><td>${checks.bots?.lastErrorAt ? fmtDate(checks.bots.lastErrorAt) : "-"}</td></tr>
+          ${Object.entries(checks.bots?.webhooks || {}).map(([role, bot]) => `<tr><td>${esc(role)}${bot.username ? ` / @${esc(bot.username)}` : ""}</td><td>${esc(bot.status)}${bot.error ? `<br>${esc(bot.error)}` : ""}${bot.lastDeliveryError ? `<br>${esc(bot.lastDeliveryError)}` : ""}</td></tr>`).join("")}
         </tbody></table>
       </article>
     </section>

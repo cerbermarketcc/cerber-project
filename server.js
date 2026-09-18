@@ -10,6 +10,7 @@ import bcrypt from "bcryptjs";
 import compression from "compression";
 import QRCode from "qrcode";
 import { defaultHrUsername, hrUsername, hrBotUpdate } from "./hr-bot.js";
+import { telegramWebhookSecretValue, telegramRequest, existingOwnedMirror, findAdminMirror } from "./telegram-runtime.js";
 import { createClient } from "@supabase/supabase-js";
 import WebSocket, { WebSocketServer } from "ws";
 import {
@@ -46,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "multi-owner-admin-2026-09-09-v185";
+const cerberBuildVersion = "telegram-mirrors-2026-09-18-v186";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -81,12 +82,13 @@ const mainLtcWallet = String(process.env.NOWPAYMENTS_LTC_WALLET || "").trim();
 if (isProduction && !/^ltc1[ac-hj-np-z02-9]{8,87}$/i.test(mainLtcWallet)) {
   throw new Error("NOWPAYMENTS_LTC_WALLET must contain a valid LTC address");
 }
-const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
-const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
-const proverkaBotToken = process.env.PROVERKA_BOT_TOKEN || "";
-const siteNotifyBotToken = process.env.SITE_NOTIFY_BOT_TOKEN || "";
-const siteNotifyWebhookSecret = process.env.SITE_NOTIFY_WEBHOOK_SECRET || telegramWebhookSecret;
-const proverkaWebhookSecret = process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret;
+const telegramBotToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const telegramWebhookSecret = telegramWebhookSecretValue(process.env.TELEGRAM_WEBHOOK_SECRET);
+const proverkaBotToken = String(process.env.PROVERKA_BOT_TOKEN || "").trim();
+const siteNotifyBotToken = String(process.env.SITE_NOTIFY_BOT_TOKEN || "").trim();
+const siteNotifyWebhookSecret = telegramWebhookSecretValue(process.env.SITE_NOTIFY_WEBHOOK_SECRET || telegramWebhookSecret);
+const proverkaWebhookSecret = telegramWebhookSecretValue(process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret);
+const telegramWebhookSetupStatus = {};
 const walletDepositTtlMs = 40 * 60 * 1000;
 const telegramLinkCodeTtlMs = 10 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
@@ -4829,6 +4831,7 @@ app.get("/api/health/deep", async (req, res, next) => {
     const mirrors = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
     const withdrawals = Array.isArray(state.walletWithdrawals) ? state.walletWithdrawals : [];
     health.checks.bots = {
+      webhooks: telegramWebhookSetupStatus,
       mirrors: mirrors.length,
       active: mirrors.filter((bot) => bot.active !== false && !bot.blocked).length,
       errors: mirrors.reduce((sum, bot) => sum + Number(bot.telegramErrorsCount || 0), 0),
@@ -8599,7 +8602,7 @@ app.patch("/api/admin/bots", async (req, res, next) => {
     const action = String(req.body.action || "");
     state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
     const bots = adminCollectMirrorBots(state);
-    const target = bots.find((bot) => bot.id === id || bot.webhookId === id || bot.chatId === req.body.chatId || bot.token === req.body.token);
+    const target = findAdminMirror(bots, req.body);
     if (!target) return res.status(404).json({ error: "Зеркало не найдено" });
 
     const mirror = state.mirrorBots[target.index];
@@ -8636,13 +8639,13 @@ app.patch("/api/admin/bots", async (req, res, next) => {
         if (!mirror.token) return res.status(400).json({ error: "У зеркала нет токена" });
         if (!telegramWebhookSecret) return res.status(503).json({ error: "Сервис Telegram временно недоступен" });
         mirror.webhookId = mirror.webhookId || mirrorWebhookId(mirror.token);
-        mirror.webhookUrl = mirror.webhookUrl || mirrorWebhookUrl(mirror.token);
+        mirror.webhookUrl = mirrorWebhookUrl(mirror.token);
         await telegramTokenApi(mirror.token, "setWebhook", {
           url: mirror.webhookUrl,
           secret_token: telegramWebhookSecret
         });
         const webhook = await telegramTokenApi(mirror.token, "getWebhookInfo");
-        mirror.webhookOk = Boolean(webhook?.result?.url);
+        mirror.webhookOk = webhook?.result?.url === mirror.webhookUrl;
         mirror.lastTelegramError = webhook?.result?.last_error_message || "";
         mirror.status = mirror.blocked ? "blocked" : mirror.verified === false ? "disabled" : "active";
       } else if (action === "checkApi") {
@@ -8654,7 +8657,7 @@ app.patch("/api/admin/bots", async (req, res, next) => {
         const bot = info?.result || {};
         mirror.botUsername = bot.username || mirror.botUsername || "";
         mirror.botName = bot.first_name || mirror.botName || mirror.botUsername || "";
-        mirror.webhookOk = Boolean(webhook?.result?.url);
+        mirror.webhookOk = webhook?.result?.url === mirrorWebhookUrl(mirror.token);
         mirror.lastTelegramError = webhook?.result?.last_error_message || "";
         mirror.active = mirror.verified !== false && !mirror.blocked;
         mirror.status = mirror.blocked ? "blocked" : mirror.active ? "active" : "disabled";
@@ -14307,19 +14310,7 @@ async function telegramApi(method, payload = {}, tokenOverride = "") {
     error.status = 500;
     throw error;
   }
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000)
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || body.ok === false) {
-    const error = new Error(body.description || `Telegram ${method} error`);
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  return telegramRequest(token, method, payload);
 }
 
 async function telegramEnsureWebhook() {
@@ -14335,6 +14326,7 @@ async function telegramEnsureWebhook() {
   }).catch((error) => console.error("Telegram setMyCommands error", sanitizeErrorForLog(error)));
   const payload = {
     url: mainTelegramWebhookUrl(),
+    max_connections: 1,
     allowed_updates: ["message", "callback_query"]
   };
   payload.secret_token = telegramWebhookSecret;
@@ -14353,20 +14345,51 @@ async function telegramEnsureWebhook() {
   return { me, webhook };
 }
 
-async function telegramTokenApi(token, method, payload = {}) {
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000)
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || body.ok === false) {
-    const error = new Error(body.description || `Telegram ${method} error`);
-    error.status = response.status;
-    throw error;
+function startTelegramWebhookSetup(role, token, setup, expectedUrl) {
+  const configuredBots = [
+    ["links", telegramBotToken],
+    ["hr", String(process.env.HR_TELEGRAM_BOT_TOKEN || "").trim()],
+    ["notifications", siteNotifyBotToken],
+    ["proverka", proverkaBotToken]
+  ];
+  const firstRole = configuredBots.find(([, value]) => value && value.split(":")[0] === token?.split(":")[0])?.[0];
+  if (!token || firstRole !== role) {
+    const error = !token ? "Bot token is not configured" : `Token is already used by ${firstRole}; configure a separate bot`;
+    telegramWebhookSetupStatus[role] = { status: "configuration_error", error, checkedAt: Date.now() };
+    console.error(`[telegram:${role}] ${error}`);
+    return;
   }
-  return body;
+  let attempt = 0;
+  const run = async () => {
+    attempt++;
+    telegramWebhookSetupStatus[role] = { status: "configuring", attempt, checkedAt: Date.now() };
+    try {
+      await setup();
+      const info = await telegramTokenApi(token, "getWebhookInfo");
+      const identity = await telegramTokenApi(token, "getMe");
+      if (info.result?.url !== expectedUrl) throw new Error("Telegram webhook URL does not match this service");
+      const status = {
+        status: "configured", username: identity.result?.username || "", url: expectedUrl,
+        pendingUpdates: Number(info.result?.pending_update_count || 0),
+        lastDeliveryError: info.result?.last_error_message || "", checkedAt: Date.now()
+      };
+      telegramWebhookSetupStatus[role] = status;
+      console.log(`[telegram:${role}] webhook configured`, status);
+    } catch (error) {
+      const delayMs = Math.max(Math.min(300000, 5000 * (2 ** Math.min(attempt - 1, 6))), (error.retryAfter || 0) * 1000);
+      telegramWebhookSetupStatus[role] = {
+        status: "retrying", attempt, error: sanitizeErrorForLog(error).message,
+        checkedAt: Date.now(), retryAt: Date.now() + delayMs
+      };
+      console.error(`[telegram:${role}] webhook setup failed; retry scheduled`, sanitizeErrorForLog(error));
+      setTimeout(run, delayMs).unref?.();
+    }
+  };
+  void run();
+}
+
+async function telegramTokenApi(token, method, payload = {}) {
+  return telegramRequest(token, method, payload);
 }
 
 function initSiteNotifyBotState(state) {
@@ -14460,7 +14483,7 @@ async function siteNotifyEnsureWebhook() {
   await siteNotifyBotApi("setWebhook", {
     url: siteNotifyWebhookUrl(),
     secret_token: siteNotifyWebhookSecret
-  }).catch((error) => console.error("Site notify setWebhook error", sanitizeErrorForLog(error)));
+  });
 }
 
 async function siteNotifyDeliverPrivateMessage(message = {}) {
@@ -14849,7 +14872,7 @@ async function handleTelegramCallback(state, callback) {
 
 async function handleBotMirrorCommand(state, chatId, message, text) {
   const chat = telegramChatState(state, chatId);
-  const token = text.replace(/^\/(?:mirror|addmirror)\s*/i, "").trim();
+  const token = text.replace(/^\/(?:mirror|addmirror)(?:@[A-Za-z0-9_]+)?\s*/i, "").trim();
   const ownerUsername = message.from?.username || chat.username || "";
   const ownerName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(" ").trim();
   const ownerLoginKey = chat.loginKey || "";
@@ -14872,11 +14895,14 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     return true;
   }
   try {
+    state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
+    const existing = existingOwnedMirror(state.mirrorBots, token, ownerTelegramId, [
+      telegramBotToken, siteNotifyBotToken, proverkaBotToken, process.env.HR_TELEGRAM_BOT_TOKEN
+    ]);
     const info = await telegramTokenApi(token, "getMe");
     const bot = info?.result || {};
-    state.mirrorBots = Array.isArray(state.mirrorBots) ? state.mirrorBots : [];
-    const existing = state.mirrorBots.find((item) => String(item.token || "") === token || String(item.chatId || "") === String(chatId));
-    const mirror = existing || {};
+    const mirror = existing ? { ...existing } : {};
+    mirror.botId = String(bot.id);
     mirror.id = mirror.id || `mirror-${crypto.createHash("sha1").update(token).digest("hex").slice(0, 12)}`;
     mirror.chatId = String(chatId);
     mirror.ownerChatId = String(chatId);
@@ -14901,10 +14927,13 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
     mirror.lastTelegramError = "";
     await telegramTokenApi(token, "setWebhook", {
       url: mirror.webhookUrl,
-      secret_token: telegramWebhookSecret
+      secret_token: telegramWebhookSecret,
+      allowed_updates: ["message", "callback_query"],
+      max_connections: 1
     });
     const webhookInfo = await telegramTokenApi(token, "getWebhookInfo");
-    mirror.webhookOk = Boolean(webhookInfo?.result?.url);
+    mirror.webhookOk = webhookInfo?.result?.url === mirror.webhookUrl;
+    if (!mirror.webhookOk) throw new Error("Telegram не подтвердил адрес зеркала. Повторите подключение.");
     mirror.lastTelegramError = webhookInfo?.result?.last_error_message || "";
     mirror.users = mirror.users && typeof mirror.users === "object" ? mirror.users : {};
     mirror.users[String(chatId)] = {
@@ -14919,7 +14948,11 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       firstSeenAt: mirror.users[String(chatId)]?.firstSeenAt || Date.now(),
       lastSeenAt: Date.now()
     };
-    if (!existing) state.mirrorBots.unshift(mirror);
+    if (existing) state.mirrorBots[state.mirrorBots.indexOf(existing)] = mirror;
+    else state.mirrorBots.unshift(mirror);
+    chat.pendingMirrorToken = false;
+    // Persist the mirror and creator before acknowledging success to its owner.
+    await saveSettingsState(state);
     console.log("[mirror-bot] created", {
       id: mirror.id,
       userId: ownerLoginKey,
@@ -14961,7 +14994,7 @@ async function handleBotMirrorCommand(state, chatId, message, text) {
       webhookOk: mirror.webhookOk,
       status: "active",
       storage: "app_settings.mirrorBots"
-    });
+    }).catch((error) => console.error("Mirror audit log failed", sanitizeErrorForLog(error)));
     const mirrorUsername = String(mirror.botUsername || "").replace(/^@/, "");
     const mirrorOpenText = mirrorUsername ? `\n\nОткрыть: https://t.me/${botHtml(mirrorUsername)}` : "";
     await botSendMessage(state, chatId, `Зеркало сохранено: @${botHtml(mirror.botUsername || mirror.botName || "bot")}${mirrorOpenText}\n\nОткройте его в Telegram: там будет полное меню CERBER.`, botMirrorCreatedKeyboard(mirror)).catch(() => {});
@@ -15106,7 +15139,7 @@ async function handleTelegramMirrorOnlyMessage(state, message) {
     await handleBotLinkCommand(state, chatId, message, text, botMirrorOnlyKeyboard());
     return;
   }
-  if (text === "/start") {
+  if (/^\/start(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text)) {
     chat.pendingMirrorToken = false;
     await botSendMessage(state, chatId, botMirrorHelpText(), botMirrorOnlyKeyboard());
     return;
@@ -16359,19 +16392,7 @@ async function proverkaTelegramApi(method, payload = {}) {
     error.status = 500;
     throw error;
   }
-  const response = await fetch(`https://api.telegram.org/bot${proverkaBotToken}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000)
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || body.ok === false) {
-    const error = new Error(body.description || `Telegram ${method} error`);
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  return telegramRequest(proverkaBotToken, method, payload);
 }
 
 async function proverkaSendMessage(chatId, text, options = {}) {
@@ -16798,10 +16819,10 @@ const server = app.listen(port, () => {
   }
   revokeCompromisedSessionsOnce().catch((error) => console.error("Incident session revoke error", sanitizeErrorForLog(error)));
   loadLitecoinUsdRate(true).catch((error) => console.error("Litecoin rate startup load error", sanitizeErrorForLog(error)));
-  telegramEnsureWebhook().catch((error) => console.error("Telegram webhook setup error", sanitizeErrorForLog(error)));
-  hrEnsureWebhook().catch(() => console.error("HR bot webhook setup failed"));
-  siteNotifyEnsureWebhook().catch((error) => console.error("Site notify webhook setup error", sanitizeErrorForLog(error)));
-  proverkaEnsureWebhook().catch((error) => console.error("Proverka webhook setup error", sanitizeErrorForLog(error)));
+  startTelegramWebhookSetup("links", telegramBotToken, telegramEnsureWebhook, mainTelegramWebhookUrl());
+  startTelegramWebhookSetup("hr", String(process.env.HR_TELEGRAM_BOT_TOKEN || "").trim(), hrEnsureWebhook, "https://cerber.cc/api/hr-bot/webhook");
+  startTelegramWebhookSetup("notifications", siteNotifyBotToken, siteNotifyEnsureWebhook, siteNotifyWebhookUrl());
+  startTelegramWebhookSetup("proverka", proverkaBotToken, proverkaEnsureWebhook, `${publicBaseUrl}/api/proverka-bot/webhook`);
   setTimeout(() => {
     migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", sanitizeErrorForLog(error)));
   }, 1500);

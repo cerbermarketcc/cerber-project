@@ -252,7 +252,7 @@ export function boundedUserText(value = "", maxLength = 5000, fieldName = "Text"
 export function isBlockedStaticPath(value = "") {
   const pathname = String(value || "").split("?", 1)[0].replace(/\\/g, "/");
   return /^\/(?:\.[^/]+|node_modules|scripts|test|textolite)(?:\/|$)/i.test(pathname)
-    || /^\/(?:hr-bot\.js|hr-template\.html)$/i.test(pathname)
+    || /^\/(?:hr-bot\.js|telegram-runtime\.js|hr-template\.html)$/i.test(pathname)
     || /^\/(?:server\.js|security-core\.js|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|render\.yaml|supabase-schema\.sql|supabase-security-2fa\.sql|.*\.env(?:\..*)?|cms-texts\.json|SECURITY_AUDIT\.md)$/i.test(pathname)
     || /\.(?:php|ini|md|sql|ya?ml|lock|log|bak|old|orig|map|pem|key|crt|pfx|dump|zip|tar|gz)$/i.test(pathname);
 }
