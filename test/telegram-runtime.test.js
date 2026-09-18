@@ -148,3 +148,33 @@ test("startup retries a failed webhook and refuses to overwrite the links bot wi
   context.startTelegramWebhookSetup("notifications", "99:main", () => assert.fail("must not overwrite"), "https://example.test/other");
   assert.equal(statuses.notifications.status, "configuration_error");
 });
+
+test("mirror request context cannot leak into persisted settings or the main bot", () => {
+  const fn = source.slice(source.indexOf("function settingsStateForStorage("), source.indexOf("const ADMIN_MFA_ROLES"));
+  const context = vm.createContext({ encryptStoredSecret: value => "encrypted:" + value, decryptStoredSecret: value => value.replace(/^encrypted:/, "") });
+  vm.runInContext(fn, context);
+  const state = { __telegramToken: "mirror-secret", __mirrorId: "mirror-1", mirrorBots: [{ id: "mirror-1", token: "mirror-secret" }] };
+  const stored = context.settingsStateForStorage(state);
+  assert.equal(stored.__telegramToken, undefined);
+  assert.equal(stored.__mirrorId, undefined);
+  assert.equal(stored.mirrorBots[0].token, "encrypted:mirror-secret");
+  const runtime = context.settingsStateForRuntime({ ...stored, __telegramToken: "stale-secret", __mirrorId: "stale-id" });
+  assert.equal(runtime.__telegramToken, undefined);
+  assert.equal(runtime.__mirrorId, undefined);
+  assert.equal(runtime.mirrorBots[0].token, "mirror-secret");
+  assert.equal(state.__telegramToken, "mirror-secret");
+});
+
+test("links callback uses the approved Render origin while rejecting unrelated hosts", () => {
+  const fn = source.slice(source.indexOf("function mainTelegramWebhookUrl("), source.indexOf("async function telegramApi("));
+  const env = {};
+  const context = vm.createContext({ URL, process: { env }, publicBaseUrl: "https://cerber.to", directRenderHosts: new Set(["cerber-project.onrender.com"]) });
+  vm.runInContext(fn, context);
+  assert.equal(context.mainTelegramWebhookUrl(), "https://cerber.to/api/telegram/webhook");
+  env.RENDER_EXTERNAL_URL = "https://cerber-project.onrender.com";
+  assert.equal(context.mainTelegramWebhookUrl(), "https://cerber-project.onrender.com/api/telegram/webhook");
+  for (const invalid of ["https://untrusted.example", "http://cerber-project.onrender.com", "https://user:pass@cerber-project.onrender.com"]) {
+    env.RENDER_EXTERNAL_URL = invalid;
+    assert.equal(context.mainTelegramWebhookUrl(), "https://cerber.to/api/telegram/webhook");
+  }
+});

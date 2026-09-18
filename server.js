@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "telegram-mirrors-2026-09-18-v186";
+const cerberBuildVersion = "telegram-delivery-2026-09-18-v187";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -851,6 +851,14 @@ app.use((req, res, next) => {
   try {
     const webhookKind = financialWebhookKind(req);
     if (!webhookKind) return next();
+    if (req.path === "/api/telegram/webhook") {
+      const startedAt = Date.now();
+      req.telegramStage = "verify_secret";
+      res.once("finish", () => console.log(`[telegram:links] request ${JSON.stringify({
+        updateId: Number.isSafeInteger(req.body?.update_id) ? req.body.update_id : null,
+        status: res.statusCode, stage: req.telegramStage, durationMs: Date.now() - startedAt
+      })}`));
+    }
     if (webhookKind === "nowpayments") {
       if (!verifyNowpaymentsSignature(req)) return res.status(401).json({ error: "Bad NOWPayments signature" });
     } else if (webhookKind === "site-notify") {
@@ -869,6 +877,7 @@ app.use((req, res, next) => {
 app.use(async (req, res, next) => {
   if (!requestNeedsFinancialLock(req)) return next();
   try {
+    if (req.telegramStage) req.telegramStage = "wait_state_lock";
     const release = await acquireOperationLocks(["finance:state"], { waitMs: 15000, ttlSeconds: 90 });
     let finished = false;
     const finish = () => {
@@ -1140,6 +1149,8 @@ function decryptStoredSecret(value = "") {
 
 function settingsStateForStorage(state = {}) {
   const storedState = { ...state };
+  delete storedState.__telegramToken;
+  delete storedState.__mirrorId;
   delete storedState.restoredFromBackup;
   delete storedState.restoredFromMemory;
   return {
@@ -1152,6 +1163,8 @@ function settingsStateForStorage(state = {}) {
 
 function settingsStateForRuntime(state = {}) {
   const runtimeState = { ...state };
+  delete runtimeState.__telegramToken;
+  delete runtimeState.__mirrorId;
   delete runtimeState.restoredFromBackup;
   delete runtimeState.restoredFromMemory;
   return {
@@ -14300,7 +14313,13 @@ async function telegramBotPublicIdentity() {
 }
 
 function mainTelegramWebhookUrl() {
-  return `${publicBaseUrl}/api/telegram/webhook`;
+  // Signed callbacks already have a dedicated origin bypass; browser routes do not.
+  let base = publicBaseUrl;
+  try {
+    const render = new URL(process.env.RENDER_EXTERNAL_URL || "");
+    if (render.protocol === "https:" && directRenderHosts.has(render.hostname) && !render.username && !render.password) base = render.origin;
+  } catch {}
+  return `${base}/api/telegram/webhook`;
 }
 
 async function telegramApi(method, payload = {}, tokenOverride = "") {
@@ -14374,7 +14393,27 @@ function startTelegramWebhookSetup(role, token, setup, expectedUrl) {
         lastDeliveryError: info.result?.last_error_message || "", checkedAt: Date.now()
       };
       telegramWebhookSetupStatus[role] = status;
-      console.log(`[telegram:${role}] webhook configured`, status);
+      console.log(`[telegram:${role}] webhook configured ${JSON.stringify(status)}`);
+      if (role === "links") {
+        for (const delay of [30000, 90000]) {
+          setTimeout(async () => {
+            try {
+              const delivery = (await telegramTokenApi(token, "getWebhookInfo")).result || {};
+              const snapshot = {
+                username: status.username, url: delivery.url,
+                pendingUpdates: Number(delivery.pending_update_count || 0),
+                lastDeliveryError: delivery.last_error_message || "",
+                lastErrorAt: delivery.last_error_date || null,
+                checkedAt: Date.now()
+              };
+              Object.assign(telegramWebhookSetupStatus[role], snapshot);
+              console.log(`[telegram:links] delivery ${JSON.stringify(snapshot)}`);
+            } catch (error) {
+              console.error(`[telegram:links] delivery check ${JSON.stringify(sanitizeErrorForLog(error))}`);
+            }
+          }, delay).unref?.();
+        }
+      }
     } catch (error) {
       const delayMs = Math.max(Math.min(300000, 5000 * (2 ** Math.min(attempt - 1, 6))), (error.retryAfter || 0) * 1000);
       telegramWebhookSetupStatus[role] = {
@@ -15253,15 +15292,20 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
     requireTelegramWebhookSecret(req, telegramWebhookSecret, "Telegram webhook");
     requireDb();
     if (!telegramBotToken) return res.status(503).json({ error: "Telegram service is temporarily unavailable" });
+    req.telegramStage = "load_state";
     const state = await loadSettingsState();
     const update = rememberTelegramWebhookUpdate(state, req.body, "telegram-main");
     if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
     if (update.duplicate) return res.json({ ok: true, duplicate: true });
+    req.telegramStage = "handle_update";
     if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
     else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
+    req.telegramStage = "save_state";
     await saveSettingsState(state);
+    req.telegramStage = "completed";
     res.json({ ok: true });
   } catch (error) {
+    console.error(`[telegram:links] update failed ${JSON.stringify(sanitizeErrorForLog(error))}`);
     next(error);
   }
 });
