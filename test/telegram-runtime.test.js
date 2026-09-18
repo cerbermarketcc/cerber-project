@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import vm from "node:vm";
 import { readFileSync } from "node:fs";
-import { telegramWebhookSecretValue, telegramRequest, existingOwnedMirror, findAdminMirror } from "../telegram-runtime.js";
+import { telegramWebhookSecretValue, telegramRequest, existingOwnedMirror, findAdminMirror, telegramRecipientUnavailable } from "../telegram-runtime.js";
 
 test("webhook secrets preserve valid values and encode unsupported characters consistently", () => {
   assert.equal(telegramWebhookSecretValue(" abc_DEF-123 "), "abc_DEF-123");
@@ -177,4 +177,54 @@ test("links callback uses the approved Render origin while rejecting unrelated h
     env.RENDER_EXTERNAL_URL = invalid;
     assert.equal(context.mainTelegramWebhookUrl(), "https://cerber.to/api/telegram/webhook");
   }
+});
+
+test("only permanent recipient failures are acknowledged, not authentication or transient errors", () => {
+  assert.equal(telegramRecipientUnavailable({ status: 403, message: "Forbidden: bot was blocked by the user" }), true);
+  assert.equal(telegramRecipientUnavailable({ status: 403, message: "Forbidden: user is deactivated" }), true);
+  for (const error of [{ status: 403, message: "Forbidden" }, { status: 401, message: "Unauthorized" },
+    { status: 429, message: "Too Many Requests" }, { status: 503, message: "database unavailable" }]) {
+    assert.equal(telegramRecipientUnavailable(error), false);
+  }
+});
+
+test("webhook saves and acknowledges blocked-user updates once while continuing other chats", async () => {
+  const fn = source.slice(source.indexOf('app.post("/api/telegram/webhook",'), source.indexOf('app.post("/api/telegram/mirror/:webhookId",'));
+  const dedup = source.slice(source.indexOf("function rememberTelegramWebhookUpdate("), source.indexOf("function verifyCmsAdmin("));
+  let route;
+  let persisted = {};
+  let saveFails = false;
+  const sends = [];
+  const context = vm.createContext({
+    app: { post: (_path, handler) => { route = handler; } },
+    console: { error() {} }, telegramWebhookSecret: "test", telegramBotToken: "fake",
+    requireTelegramWebhookSecret() {}, requireDb() {}, telegramRecipientUnavailable,
+    sanitizeErrorForLog: error => ({ message: error.message }),
+    loadSettingsState: async () => structuredClone(persisted),
+    saveSettingsState: async state => { if (saveFails) throw new Error("database unavailable"); persisted = structuredClone(state); },
+    handleTelegramMirrorOnlyMessage: async (_state, message) => {
+      sends.push(message.chat.id);
+      if (message.chat.id === 1) throw Object.assign(new Error("Forbidden: bot was blocked by the user"), { status: 403 });
+    }
+  });
+  vm.runInContext(dedup + "\n" + fn, context);
+  async function deliver(id, chatId) {
+    const req = { body: { update_id: id, message: { chat: { id: chatId }, text: "/start" } } };
+    const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    let failure;
+    await route(req, res, error => { failure = error; });
+    return { req, res, failure };
+  }
+  const blocked = await deliver(1, 1);
+  assert.equal(blocked.res.body.ok, true);
+  assert.equal(blocked.req.telegramStage, "recipient_unavailable");
+  assert.equal((await deliver(1, 1)).res.body.duplicate, true);
+  assert.equal((await deliver(2, 2)).req.telegramStage, "completed");
+  assert.deepEqual(sends, [1, 2]);
+  saveFails = true;
+  const failed = await deliver(3, 1);
+  assert.equal(failed.res.body, undefined);
+  assert.match(failed.failure.message, /database unavailable/);
+  saveFails = false;
+  assert.equal((await deliver(3, 1)).res.body.ok, true);
 });

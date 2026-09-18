@@ -10,7 +10,7 @@ import bcrypt from "bcryptjs";
 import compression from "compression";
 import QRCode from "qrcode";
 import { defaultHrUsername, hrUsername, hrBotUpdate } from "./hr-bot.js";
-import { telegramWebhookSecretValue, telegramRequest, existingOwnedMirror, findAdminMirror } from "./telegram-runtime.js";
+import { telegramWebhookSecretValue, telegramRequest, existingOwnedMirror, findAdminMirror, telegramRecipientUnavailable } from "./telegram-runtime.js";
 import { createClient } from "@supabase/supabase-js";
 import WebSocket, { WebSocketServer } from "ws";
 import {
@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "telegram-delivery-2026-09-18-v187";
+const cerberBuildVersion = "telegram-delivery-2026-09-18-v188";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -15298,12 +15298,19 @@ app.post("/api/telegram/webhook", async (req, res, next) => {
     if (!update.valid) return res.status(400).json({ error: "Invalid Telegram update" });
     if (update.duplicate) return res.json({ ok: true, duplicate: true });
     req.telegramStage = "handle_update";
-    if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
-    else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
+    let recipientUnavailable = false;
+    try {
+      if (req.body.callback_query) await handleTelegramMirrorOnlyCallback(state, req.body.callback_query);
+      else if (req.body.message) await handleTelegramMirrorOnlyMessage(state, req.body.message);
+    } catch (error) {
+      if (!telegramRecipientUnavailable(error)) throw error;
+      recipientUnavailable = true;
+    }
     req.telegramStage = "save_state";
+    // Persist the update receipt before acknowledging an undeliverable reply.
     await saveSettingsState(state);
-    req.telegramStage = "completed";
-    res.json({ ok: true });
+    req.telegramStage = recipientUnavailable ? "recipient_unavailable" : "completed";
+    res.json({ ok: true, ...(recipientUnavailable ? { recipientUnavailable: true } : {}) });
   } catch (error) {
     console.error(`[telegram:links] update failed ${JSON.stringify(sanitizeErrorForLog(error))}`);
     next(error);

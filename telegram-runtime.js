@@ -9,6 +9,11 @@ export function telegramWebhookSecretValue(value) {
 
 const retryableMethods = new Set(["setWebhook", "getWebhookInfo", "getMe", "setMyCommands"]);
 
+export function telegramRecipientUnavailable(error) {
+  return Number(error?.status) === 403
+    && /^(?:Forbidden: )?(?:bot was blocked by the user|user is deactivated)$/i.test(String(error?.message || "").trim());
+}
+
 export async function telegramRequest(token, method, payload = {}, options = {}) {
   if (!token) throw new Error("Telegram bot token is not configured");
   const fetcher = options.fetch || fetch;
