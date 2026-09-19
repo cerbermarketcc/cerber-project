@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "telegram-delivery-2026-09-18-v188";
+const cerberBuildVersion = "persistent-customer-session-2026-09-18-v189";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -63,9 +63,14 @@ const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || "";
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY || "";
 const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
 const internalCaptchaTtlMs = 10 * 60 * 1000;
-const configuredSessionTtlHours = Number(process.env.USER_SESSION_TTL_HOURS || 24);
-const userSessionTtlHours = Math.max(1, Math.min(168, Number.isFinite(configuredSessionTtlHours) ? configuredSessionTtlHours : 24));
-const userSessionTtlMs = userSessionTtlHours * 60 * 60 * 1000;
+const configuredRememberSessionTtlHours = Number(process.env.USER_REMEMBER_SESSION_TTL_HOURS || 720);
+const userRememberSessionTtlHours = Math.max(1, Math.min(720, Number.isFinite(configuredRememberSessionTtlHours) ? configuredRememberSessionTtlHours : 720));
+const userSessionTtlMs = userRememberSessionTtlHours * 60 * 60 * 1000;
+const configuredAccessSessionTtlHours = Number(process.env.USER_SESSION_TTL_HOURS || 24);
+const userAccessSessionTtlHours = Math.max(1, Math.min(24, Number.isFinite(configuredAccessSessionTtlHours) ? configuredAccessSessionTtlHours : 24));
+const userAccessSessionTtlMs = userAccessSessionTtlHours * 60 * 60 * 1000;
+const secureUserSessionCookieName = "__Host-cerber_remember_v1";
+const localUserSessionCookieName = "cerber_remember_v1";
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
@@ -590,6 +595,69 @@ function maskSecret(value = "") {
   return `${text.slice(0, 6)}...${text.slice(-4)}`;
 }
 
+function requestUsesHttps(req = {}) {
+  const forwardedProtocol = String(req.headers?.["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  return Boolean(req.secure || forwardedProtocol === "https" || isProduction);
+}
+
+function requestCookie(req = {}, name = "") {
+  const header = String(req.headers?.cookie || "");
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function bearerUserSessionToken(req = {}) {
+  return String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "").trim();
+}
+
+function persistentUserSessionToken(req = {}) {
+  return requestCookie(req, userSessionCookieName(req));
+}
+
+function userSessionCookieName(req = {}) {
+  return requestUsesHttps(req) ? secureUserSessionCookieName : localUserSessionCookieName;
+}
+
+function appendUserSessionCookie(req, res, token = "", { clear = false } = {}) {
+  const secure = requestUsesHttps(req);
+  const cookieName = userSessionCookieName(req);
+  const parts = [
+    `${cookieName}=${clear ? "" : encodeURIComponent(String(token || ""))}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    clear ? "Max-Age=0" : `Max-Age=${Math.max(1, Math.floor(userSessionTtlMs / 1000))}`,
+    clear ? "Expires=Thu, 01 Jan 1970 00:00:00 GMT" : `Expires=${new Date(Date.now() + userSessionTtlMs).toUTCString()}`
+  ];
+  if (secure) parts.push("Secure");
+  res.append("Set-Cookie", parts.join("; "));
+}
+
+function clearUserSessionCookies(req, res) {
+  appendUserSessionCookie(req, res, "", { clear: true });
+  const alternateName = userSessionCookieName(req) === secureUserSessionCookieName
+    ? localUserSessionCookieName
+    : secureUserSessionCookieName;
+  const parts = [
+    `${alternateName}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    "Max-Age=0",
+    "Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+  ];
+  if (alternateName === secureUserSessionCookieName) parts.push("Secure");
+  res.append("Set-Cookie", parts.join("; "));
+}
+
 function adminPublicBot(bot = {}) {
   const { token, ...publicBot } = bot;
   return {
@@ -1049,24 +1117,28 @@ function signUserSessionBinding(payload = "") {
   return crypto.createHmac("sha256", adminSecret()).update(`user-session-binding:${payload}`).digest("base64url");
 }
 
-function createBoundUserSessionToken(req = {}) {
-  const payload = `u2.${crypto.randomBytes(32).toString("base64url")}.${userSessionAgentFingerprint(req)}`;
+function createBoundUserSessionToken(req = {}, purpose = "access") {
+  const prefix = purpose === "persistent" ? "u2p" : "u2";
+  const payload = `${prefix}.${crypto.randomBytes(32).toString("base64url")}.${userSessionAgentFingerprint(req)}`;
   return `${payload}.${signUserSessionBinding(payload)}`;
 }
 
-function userSessionTokenMatchesRequest(token = "", req = {}) {
+function userSessionTokenMatchesRequest(token = "", req = {}, purpose = "access") {
   const value = String(token || "");
   const parts = value.split(".");
-  if (parts.length !== 4 || parts[0] !== "u2") return false;
+  const expectedPrefix = purpose === "persistent" ? "u2p" : "u2";
+  if (parts.length !== 4 || parts[0] !== expectedPrefix) return false;
   const payload = parts.slice(0, 3).join(".");
   return secretValuesMatch(parts[2], userSessionAgentFingerprint(req))
     && secretValuesMatch(parts[3], signUserSessionBinding(payload));
 }
 
-async function createUserSession(req, loginKeyValue = "") {
+async function createUserSession(req, loginKeyValue = "", purpose = "access") {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const token = createBoundUserSessionToken(req);
+    const token = purpose === "access"
+      ? createBoundUserSessionToken(req)
+      : createBoundUserSessionToken(req, purpose);
     const tokenDigest = sessionTokenDigest(token);
     // Keep the durable session row compatible with both the original and the
     // hardened schema. Device binding is authenticated inside the signed token.
@@ -1083,6 +1155,16 @@ async function createUserSession(req, loginKeyValue = "") {
     sessionError.status = 500;
     throw sessionError;
   }
+}
+
+async function createPersistentUserSession(req, res, loginKeyValue = "") {
+  const previousToken = persistentUserSessionToken(req);
+  const token = await createUserSession(req, loginKeyValue, "persistent");
+  appendUserSessionCookie(req, res, token);
+  if (previousToken) {
+    await supabase.from("sessions").delete().eq("token", sessionTokenDigest(previousToken));
+  }
+  return token;
 }
 
 function isDuplicateDbError(error) {
@@ -3801,11 +3883,13 @@ async function stateFor(user) {
   }
 }
 
-async function userFromRequest(req) {
+async function userFromSessionToken(token = "", req = {}, purpose = "access") {
   requireDb();
-  const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
-  if (!userSessionTokenMatchesRequest(token, req)) return null;
+  const tokenMatches = purpose === "access"
+    ? userSessionTokenMatchesRequest(token, req)
+    : userSessionTokenMatchesRequest(token, req, purpose);
+  if (!tokenMatches) return null;
   const tokenDigest = sessionTokenDigest(token);
   const { data: session, error: sessionError } = await withTimeout(
     supabase.from("sessions").select("login_key,created_at").eq("token", tokenDigest).maybeSingle(),
@@ -3815,7 +3899,8 @@ async function userFromRequest(req) {
   if (sessionError) throw sessionError;
   if (!session) return null;
   const createdAt = Date.parse(session.created_at || "");
-  if (!Number.isFinite(createdAt) || createdAt < securityTokenEpochMs || Date.now() - createdAt > userSessionTtlMs) {
+  const ttlMs = purpose === "persistent" ? userSessionTtlMs : userAccessSessionTtlMs;
+  if (!Number.isFinite(createdAt) || createdAt < securityTokenEpochMs || Date.now() - createdAt > ttlMs) {
     supabase.from("sessions").delete().eq("token", tokenDigest).then(() => {}).catch(() => {});
     return null;
   }
@@ -3827,6 +3912,14 @@ async function userFromRequest(req) {
   if (userError) throw userError;
   if (user && await isLoginBlocked(user.login)) return null;
   return user || null;
+}
+
+async function userFromRequest(req) {
+  return userFromSessionToken(bearerUserSessionToken(req), req);
+}
+
+async function userFromPersistentSession(req) {
+  return userFromSessionToken(persistentUserSessionToken(req), req, "persistent");
 }
 
 async function isLoginBlocked(login = "") {
@@ -4564,6 +4657,7 @@ app.post("/api/auth/register", async (req, res, next) => {
           return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
         }
         const token = await createUserSession(req, existing.login_key || key);
+        await createPersistentUserSession(req, res, existing.login_key || key);
         appendAdminLog("user_register_recovered", existing.login, { login: existing.login, ...requestSource(req) }).catch((error) => {
           console.error("[auth] register recovery log failed", { login: existing.login, message: error.message });
         });
@@ -4603,6 +4697,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     });
 
     const token = await createUserSession(req, key);
+    await createPersistentUserSession(req, res, key);
     appendAdminLog("user_registered", login, { login, referrerLogin: referral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] register log failed", { login, message: error.message });
     });
@@ -4653,6 +4748,7 @@ app.post("/api/auth/login", async (req, res, next) => {
       });
     }
     const token = await createUserSession(req, user.login_key);
+    await createPersistentUserSession(req, res, user.login_key);
     appendAdminLog("user_login", user.login, { login: user.login, referrerLogin: repairedReferral?.referrerLogin || "", ...requestSource(req) }).catch((error) => {
       console.error("[auth] login log failed", { login: user.login, message: error.message });
     });
@@ -4687,7 +4783,34 @@ app.post("/api/telegram/link-code", async (req, res, next) => {
   }
 });
 
-app.post(["/api/auth/restore-session", "/api/telegram/login"], (_req, res) => {
+app.post("/api/auth/restore-session", async (req, res, next) => {
+  try {
+    requireDb();
+    const rememberToken = persistentUserSessionToken(req);
+    assertClientRateLimit(req, "auth-restore-session", {
+      limit: 30,
+      windowMs: 10 * 60 * 1000,
+      identity: rememberToken ? secretFingerprint(rememberToken) : "no-cookie"
+    });
+    const user = await userFromPersistentSession(req);
+    if (!user) {
+      clearUserSessionCookies(req, res);
+      return res.status(401).json({ error: "Сессия не найдена" });
+    }
+    const state = await loadAuthSettingsState("restore session settings");
+    if (adminIsUserBlocked(state, user.login)) {
+      clearUserSessionCookies(req, res);
+      return res.status(403).json({ error: state.blockedUsers?.[loginKey(user.login)]?.reason || "Ваш аккаунт заблокирован" });
+    }
+    const token = await createUserSession(req, user.login_key);
+    appendAdminLog("user_session_restored", user.login, { login: user.login, ...requestSource(req) }).catch(() => {});
+    res.json({ token, ...(await authStateForUserWithStores(user, state)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/telegram/login", (_req, res) => {
   res.status(410).json({ error: "Этот способ входа отключён. Используйте защищённую форму входа на сайте." });
 });
 
@@ -5906,8 +6029,12 @@ app.post("/api/auth/password", async (req, res, next) => {
 app.post("/api/auth/logout", async (req, res, next) => {
   try {
     requireDb();
-    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    if (token) await supabase.from("sessions").delete().eq("token", sessionTokenDigest(token));
+    const tokens = [...new Set([bearerUserSessionToken(req), persistentUserSessionToken(req)].filter(Boolean))];
+    await Promise.all(tokens.map(async (token) => {
+      const { error } = await supabase.from("sessions").delete().eq("token", sessionTokenDigest(token));
+      if (error) throw error;
+    }));
+    clearUserSessionCookies(req, res);
     res.setHeader("Clear-Site-Data", '"cache"');
     res.json({ ok: true });
   } catch (error) {

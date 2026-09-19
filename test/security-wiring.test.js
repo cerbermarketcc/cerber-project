@@ -60,7 +60,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=175/);
+  assert.match(indexHtml, /app\.js\?v=176/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -402,7 +402,8 @@ test("database migrations enforce private tables and per-admin 2FA state", () =>
 
 test("customer sessions are server-side, expiring and device-bound", () => {
   assert.match(server, /sessionTokenDigest\(token\)/);
-  assert.match(server, /Date\.now\(\) - createdAt > userSessionTtlMs/);
+  assert.match(server, /purpose === "persistent" \? userSessionTtlMs : userAccessSessionTtlMs/);
+  assert.match(server, /Date\.now\(\) - createdAt > ttlMs/);
   assert.match(server, /createBoundUserSessionToken\(req\)/);
   assert.match(server, /userSessionTokenMatchesRequest\(token, req\)/);
   assert.match(server, /secretValuesMatch\(parts\[2\], userSessionAgentFingerprint\(req\)\)/);

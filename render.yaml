@@ -39,6 +39,8 @@ services:
         value: "cerber-project.onrender.com,cerber-project,cerber.to,www.cerber.to,cerber.love,www.cerber.love,cerber.vip,www.cerber.vip,cerber.cc,www.cerber.cc"
       - key: USER_SESSION_TTL_HOURS
         value: "24"
+      - key: USER_REMEMBER_SESSION_TTL_HOURS
+        value: "720"
       - key: BLOCK_DIRECT_RENDER_ORIGIN
         value: "true"
       - key: CLOUDFLARE_ORIGIN_SECRET

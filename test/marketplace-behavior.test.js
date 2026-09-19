@@ -180,12 +180,14 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
   assert.match(indexHtml, /styles\.css\?v=114/);
-  assert.match(indexHtml, /app\.js\?v=175/);
+  assert.match(indexHtml, /app\.js\?v=176/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {
+  const bootstrap = functionBody(appClient, "initApp");
   assert.doesNotMatch(indexHtml, /challenges\.cloudflare\.com\/turnstile/);
-  assert.match(appClient, /apiSessionToken\(\) \? loadRemoteSession\(\) : loadRemoteState\(\)/);
+  assert.match(bootstrap, /loadInitialRemoteState\(\)/);
+  assert.doesNotMatch(bootstrap, /apiSessionToken\(\)\s*\?\s*loadRemoteSession\(\)\s*:\s*loadRemoteState\(\)/);
   assert.match(appClient, /assets\/cerber-neon-emblem-fast\.webp/);
   assert.match(appClient, /assets\/user-avatar-fast\.webp/);
   assert.doesNotMatch(appClient, /src="assets\/cerber-neon-emblem\.png"/);

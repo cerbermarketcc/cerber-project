@@ -44,12 +44,12 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 
 ### Хранение сессий и секретов
 
-- Customer session: случайный 32-byte token, в БД хранится только HMAC digest; production TTL 24 часа; обязательная привязка к User-Agent; logout удаляет запись.
+- Customer session: purpose-bound случайные access/remember tokens, в БД хранятся только HMAC digests; production TTL access 24 часа, remember 30 дней; обязательная привязка к User-Agent; logout отзывает токен текущей вкладки и remember-cookie.
 - Admin session: HMAC token на 2 часа, `mfa: true`, device hash, credential/session version; аккаунт повторно проверяется в БД на каждом admin request.
 - MFA challenge: отдельный purpose-bound token на 10 минут; не принимается `verifyAdminToken`.
 - TOTP secret: отдельный для каждого администратора, AES-256-GCM encrypted at rest.
 - Recovery codes: показываются один раз, в БД хранятся HMAC hashes, каждый код одноразовый.
-- Browser: чувствительные bearer tokens удалены из `localStorage` и хранятся только в runtime/`sessionStorage`.
+- Browser: чувствительные bearer tokens удалены из `localStorage` и хранятся только в runtime/`sessionStorage`; после нового входа повторный запуск восстанавливает новый bearer через отдельную `__Host-` HttpOnly/Secure/SameSite cookie, которая не принимается обычными mutation routes. Сессии, выданные до этого изменения, требуют одного повторного входа для получения cookie.
 
 ## API Inventory
 
@@ -62,6 +62,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | GET | `/api/state` | Optional bearer | Own user if present | Bearer | Anonymous получает только public catalog |
 | GET | `/api/auth/captcha` | Public + rate limit | None | IP/device | Ответ captcha не раскрывается |
 | POST | `/api/auth/register`, `/api/auth/login` | Captcha + rate limit | Customer only | Login/password/name/ref | Password никогда не возвращается/не логируется |
+| POST | `/api/auth/restore-session` | Purpose-bound HttpOnly remember cookie + rate limit | Current customer/device | Empty body | Returns a new tab-scoped bearer and own state |
 | POST | `/api/auth/logout`; GET `/api/session` | Customer bearer | Current session | Bearer | Own session/profile |
 | POST | `/api/referrals/claim-code` | Customer bearer | Own account | Existing server code | Own referral state |
 | POST/GET/PATCH | `/api/support/tickets*`, `/api/group/*`, `/api/private-messages*`, `/api/messages/:id` | Customer bearer | Own ticket/chat/message | Bounded text/media/action | Own messages and attachments |
@@ -86,7 +87,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | GET | `/api/health/deep`, `/api/admin/db-diagnostics` | Full site MFA | Role allowlist | None | Sanitized diagnostics |
 | POST/PUT | `/api/cms-texts` write | Full site MFA | Role allowlist | Safe text catalog | CMS content only |
 | POST | `/api/translate`, `/api/broadcasts/:id/track` | Public + strict rate/idempotency | None/current notification | Bounded text/action | No account secrets |
-| Any | Deprecated `/api/owner/*`, Telegram password login, restore-session and destructive legacy routes | Disabled | None | Ignored | `410/403`, no state mutation |
+| Any | Deprecated `/api/owner/*`, Telegram password login and destructive legacy routes | Disabled | None | Ignored | `410/403`, no state mutation |
 
 ## Vulnerabilities Found
 
@@ -204,7 +205,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 - Affected: customer/admin/store browser sessions.
 - Cause: persistent browser storage survives browser restarts and is easier to reuse after local compromise/XSS.
 - Impact: session theft and replay.
-- Fix: incident reset removes old keys; sensitive tokens use runtime/`sessionStorage`; server TTL/device/session version still enforced.
+- Fix: incident reset removes old keys; access tokens use runtime/`sessionStorage`; browser restarts use a separate purpose-bound HttpOnly remember cookie that can only mint a new 24-hour access token; server TTL/device/session version remain enforced. Existing access bearer alone cannot mint a persistent cookie.
 - Test: customer server-side session wiring and source scan.
 - Status: **FIXED**.
 
@@ -337,7 +338,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | Race Conditions | PASS* | `*` Requires operation-lock migration in production |
 | SQL Injection | PASS | Supabase query builder/RPC; no user-concatenated raw SQL found |
 | XSS | PASS WITH RISK | Escaping/sanitization/CSP; extensive DOM templates remain review-sensitive |
-| CSRF | PASS | Bearer-header model, no auth cookies, no credentialed CORS |
+| CSRF | PASS | State-changing APIs keep the bearer-header model; the Strict remember cookie is accepted only by session restore/logout, and credentialed cross-origin reads are not enabled |
 | SSRF | PASS | Outbound fetch hosts are fixed; no user-controlled URL fetch found |
 | File Upload | PASS WITH RISK | Magic bytes/path/size; no AV scan or mandatory re-encode |
 | Path Traversal | PASS | Generated object names and blocked static path classes |

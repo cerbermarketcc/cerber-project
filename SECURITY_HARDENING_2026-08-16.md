@@ -141,8 +141,17 @@ file or commit is identified later:
 ## Bearer-to-cookie migration plan
 
 Customer and administrative bearer tokens are still kept in `sessionStorage`.
-Moving them safely requires a coordinated rollout because the SPA currently
-uses token presence for routing, uploads, WebSockets, and session restoration.
+Customer restart persistence now uses a separate purpose-bound `__Host-`
+HttpOnly/Secure/SameSite cookie. That cookie is accepted only by the restore
+and logout endpoints and mints a new tab-scoped bearer, so ordinary API writes
+remain on the existing bearer-header model and do not become cookie-authenticated.
+Existing bearer-only sessions must sign in once after rollout; a bearer alone
+cannot be upgraded to a persistent cookie. Access tokens last at most 24 hours,
+while the remember cookie lasts at most 30 days and can restore a new access token.
+
+Moving the remaining access and administrative tokens fully to cookies still
+requires a coordinated rollout because the SPA uses token presence for routing,
+uploads, WebSockets, and session restoration.
 
 1. Add server support for short-lived `__Host-` prefixed HttpOnly, Secure,
    SameSite=Lax cookies while temporarily accepting existing bearer tokens.
@@ -158,9 +167,10 @@ uses token presence for routing, uploads, WebSockets, and session restoration.
 6. Add regression tests for CSRF rejection, cookie flags, login fixation,
    logout invalidation, cross-origin requests, and WebSocket origin checks.
 
-This migration was intentionally not partially enabled in this change: mixing
-cookie and bearer assumptions without updating every client gate would break
-orders, admin panels, uploads, and realtime messaging.
+Do not extend the remember cookie to ordinary API routes without completing the
+CSRF steps above. The narrowly scoped customer restore flow deliberately avoids
+mixing cookie and bearer assumptions in orders, admin panels, uploads, and
+realtime messaging.
 
 ## Verification performed
 
@@ -177,8 +187,9 @@ orders, admin panels, uploads, and realtime messaging.
 - The Cloudflare secret-header protection is inactive until the same new secret
   is configured in Cloudflare and Render.
 - SQL migrations are not active until run in the production Supabase project.
-- Bearer tokens remain in `sessionStorage` pending the coordinated cookie/CSRF
-  migration above.
+- Access bearer tokens remain in `sessionStorage`; only the purpose-bound
+  customer remember token persists in an HttpOnly cookie pending the full
+  coordinated cookie/CSRF migration above.
 - Legacy aggregate state in `app_settings` is server-only but not fully
   normalized by immutable `owner_id`.
 - Code review cannot verify Cloudflare account rules, Render environment values,

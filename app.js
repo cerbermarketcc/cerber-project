@@ -63,6 +63,8 @@ try {
 
 const runtimeStorage = new Map();
 let runtimeApiToken = "";
+let apiSessionRestorePromise = null;
+let customerSessionGeneration = 0;
 let runtimeSellerAdminApiToken = "";
 let TURNSTILE_SITE_KEY = "";
 let TURNSTILE_ENABLED = false;
@@ -2188,16 +2190,17 @@ async function apiFetchOnce(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || 25000);
   try {
-    const response = await fetch(apiUrl(path), { ...options, headers, signal: controller.signal });
+    const response = await fetch(apiUrl(path), { ...options, credentials: "same-origin", headers, signal: controller.signal });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const message = payload.error || "API error";
       const error = new Error(message);
       error.status = response.status;
       error.code = payload.code || "";
-      if (response.status === 401 && /Сессия не найдена|Сессия истекла|session/i.test(String(message))) {
-        clearApiSession();
+      if (response.status === 401 && !hasAuthorization && /^(?:Сессия не найдена|Сессия истекла)$/i.test(String(message))) {
+        if (token && apiSessionToken() === token) clearApiSession();
         error.sessionExpired = true;
+        error.customerSessionExpired = true;
         error.message = "Сессия истекла. Войдите снова.";
       }
       throw error;
@@ -2213,11 +2216,27 @@ async function apiFetchOnce(path, options = {}) {
 
 async function apiFetch(path, options = {}) {
   let lastError = null;
+  const explicitAuthorization = Object.keys(options.headers || {}).some((key) => key.toLowerCase() === "authorization");
+  const pathname = new URL(apiUrl(path)).pathname;
+  const canRestoreCustomerSession = !explicitAuthorization
+    && pathname.startsWith("/api/")
+    && !/^\/api\/auth\/(?:register|login|logout|restore-session|captcha)(?:\/|$)/.test(pathname)
+    && !/^\/api\/(?:admin\/|store-admin\/|cms-texts(?:\/|$)|health\/deep(?:\/|$))/.test(pathname);
+  const generation = customerSessionGeneration;
+  const initialToken = apiSessionToken();
   for (let index = 0; index < API_ORIGINS.length; index += 1) {
     const origin = API_ORIGINS[index];
     try {
       return await apiFetchOnce(apiUrl(path, origin), options);
     } catch (error) {
+      if (error.customerSessionExpired && canRestoreCustomerSession && generation === customerSessionGeneration) {
+        const alreadyRenewed = Boolean(apiSessionToken() && apiSessionToken() !== initialToken);
+        if (alreadyRenewed || await restoreApiSession()) {
+          if (generation !== customerSessionGeneration) throw error;
+          return apiFetchOnce(apiUrl(path, origin), options);
+        }
+        if (db.currentUser) error.message = "Не удалось проверить вход. Проверьте интернет и попробуйте снова.";
+      }
       lastError = error;
       const hasNextOrigin = index < API_ORIGINS.length - 1;
       const canRetry = hasNextOrigin && /API error|Database is not configured|Failed to fetch|NetworkError|Load failed|Unexpected token|404|405|502|503|504|Сервер/i.test(String(error.message || error));
@@ -2409,18 +2428,64 @@ function mergeOrderLists(remoteOrders = [], localOrders = []) {
 async function loadRemoteSession() {
   if (!API_ENABLED) return false;
   const token = apiSessionToken();
-  if (!token) return false;
+  if (!token) return ensureApiSession();
+  const generation = customerSessionGeneration;
   try {
     const payload = await apiFetch("/api/session");
+    if (generation !== customerSessionGeneration) return false;
     applyRemoteState(payload);
     return Boolean(payload.user);
   } catch (error) {
+    if (generation !== customerSessionGeneration) return false;
     if (error.sessionExpired || error.status === 401 || error.status === 403) {
+      if (apiSessionToken() !== token) return false;
       clearApiSession();
-      return ensureApiSession();
+      return restoreApiSession();
     }
     return false;
   }
+}
+
+async function restoreApiSession() {
+  if (!API_ENABLED) return true;
+  if (apiSessionToken()) return true;
+  if (!db.currentUser || !currentUser()) return false;
+  if (apiSessionRestorePromise) return apiSessionRestorePromise;
+  const generation = customerSessionGeneration;
+  apiSessionRestorePromise = (async () => {
+    try {
+      const payload = await apiFetch("/api/auth/restore-session", {
+        method: "POST",
+        timeoutMs: 15000,
+        body: JSON.stringify({})
+      });
+      if (generation !== customerSessionGeneration) return false;
+      if (!payload.token || !payload.user) throw new Error("Сессия не найдена");
+      rememberApiToken(payload.token);
+      applyRemoteState(payload);
+      return true;
+    } catch (error) {
+      if (generation !== customerSessionGeneration) return false;
+      if (error.sessionExpired || error.status === 401 || error.status === 403 || error.status === 410) {
+        clearSession();
+        safeRenderCurrent();
+      }
+      return false;
+    }
+  })().finally(() => {
+    apiSessionRestorePromise = null;
+  });
+  return apiSessionRestorePromise;
+}
+
+async function loadInitialRemoteState() {
+  if (!API_ENABLED) return false;
+  if (apiSessionToken() || (db.currentUser && currentUser())) {
+    const restored = await loadRemoteSession();
+    if (restored) return true;
+    if (db.currentUser) return false;
+  }
+  return loadRemoteState();
 }
 
 function clientStorageUser(user = {}) {
@@ -2538,7 +2603,7 @@ async function loadRemoteState() {
 
 async function refreshRemoteState() {
   if (!API_ENABLED) return;
-  if (apiSessionToken()) {
+  if (await ensureApiSession()) {
     await loadRemoteSession();
     return;
   }
@@ -3110,6 +3175,7 @@ function saveDb(options = {}) {
 }
 
 function clearSession() {
+  customerSessionGeneration += 1;
   db.currentUser = "";
   try {
     storageRemove(SESSION_KEY);
@@ -3165,7 +3231,8 @@ function rememberLocalPassword(login = "", password = "") {
 
 async function ensureApiSession() {
   if (!API_ENABLED) return true;
-  return hasApiSession();
+  if (hasApiSession()) return true;
+  return restoreApiSession();
 }
 
 function isAdmin() {
@@ -13349,6 +13416,7 @@ async function openTelegramLinkModal() {
   document.querySelector("[data-account-pop]")?.classList.remove("open");
   showModal(`<h2>Telegram / зеркало</h2><p class="desc">Создаём одноразовую безопасную привязку...</p>`, "telegram-link-modal");
   try {
+    if (!(await ensureApiSession())) throw new Error("Не удалось проверить вход. Проверьте подключение и попробуйте снова.");
     const payload = await apiFetch("/api/telegram/link-code", { method: "POST", body: "{}" });
     const code = String(payload.code || "");
     const command = String(payload.command || "");
@@ -13499,17 +13567,24 @@ function bindGlobal() {
   });
   document.querySelector("[data-change-password]")?.addEventListener("click", openPasswordChangeModal);
   document.querySelectorAll("[data-logout]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
+      if (button.disabled) return;
+      button.disabled = true;
       const token = apiSessionToken();
-      if (API_ENABLED && token) {
-        apiFetch("/api/auth/logout", {
-          method: "POST",
-          timeoutMs: 8000,
-          headers: { Authorization: `Bearer ${token}` }
-        }).catch(() => {});
+      try {
+        if (API_ENABLED) {
+          await apiFetch("/api/auth/logout", {
+            method: "POST",
+            timeoutMs: 8000,
+            ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {})
+          });
+        }
+        clearSession();
+        renderAuth();
+      } catch {
+        button.disabled = false;
+        showToast("Не удалось выйти на сервере. Проверьте связь и попробуйте снова.");
       }
-      clearSession();
-      renderAuth();
     };
   });
   bindGroupFloatingWidget();
@@ -13725,19 +13800,24 @@ function safeRenderCurrent() {
 }
 
 async function initApp() {
-  safeRenderCurrent();
+  const rememberedUserNeedsVerification = API_ENABLED && Boolean(db.currentUser && currentUser());
+  if (rememberedUserNeedsVerification) renderFallbackScreen();
+  else safeRenderCurrent();
   watchCmsVisualTextOverrides();
   connectRealtime();
+  let sessionVerified = false;
   try {
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
       loadRemoteConfig(),
       loadCmsTextOverrides(),
-      apiSessionToken() ? loadRemoteSession() : loadRemoteState()
+      loadInitialRemoteState()
     ]);
+    sessionVerified = results[2].status === "fulfilled" && results[2].value === true;
   } catch (error) {
     console.error("[init] remote bootstrap failed", error);
   }
-  safeRenderCurrent();
+  if (rememberedUserNeedsVerification && db.currentUser && !sessionVerified) renderFallbackScreen();
+  else safeRenderCurrent();
   Promise.allSettled([
     syncPendingProductPayments(),
     syncPendingWalletDeposits(),
