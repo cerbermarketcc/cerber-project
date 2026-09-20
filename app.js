@@ -9481,7 +9481,7 @@ function renderWallet() {
       ${addresses.length ? `
         <article class="wallet-transactions wallet-deposit-addresses">
           <h2>Мои адреса для пополнения</h2>
-          <p class="desc">Адрес постоянный: его можно использовать для следующих пополнений. Перевод ниже актуального минимума NOWPayments может не зачислиться.</p>
+          <p class="desc">Адрес постоянный: его можно использовать для следующих пополнений.</p>
           ${addresses.map((deposit) => `
             <div class="wallet-deposit-address-row">
               <div><strong>${esc(walletCoinLabel(walletDepositCoin(deposit).id))}</strong><small>${esc(deposit.payAddress)}</small></div>
@@ -9636,11 +9636,9 @@ function showWalletDepositDetails(depositId) {
   const coin = walletDepositCoin(deposit);
   const coinLabel = walletCoinLabel(coin.id);
   if (deposit.kind === "permanent_address") {
-    const minimumAtCreation = Number(deposit.minimumUsdAtCreation || 0);
     showModal(`
       <h2>Личный адрес ${esc(coinLabel)}</h2>
       <p class="desc">Этот адрес остаётся за вами для следующих пополнений. Каждый подтверждённый перевод зачисляется отдельно по фактически полученной сумме.</p>
-      <p class="notice">Перевод ниже актуального минимума NOWPayments может не зачислиться.${Number.isFinite(minimumAtCreation) && minimumAtCreation > 0 ? ` Минимум при выдаче адреса: около ${minimumAtCreation.toFixed(2)} USD. Это оценка на тот момент; текущий минимум может измениться.` : ""}</p>
       <div class="deposit-address">
         <strong>${esc(deposit.payAddress)}</strong>
         <button class="ghost-button" data-copy="${esc(deposit.payAddress)}">Скопировать</button>
@@ -9710,7 +9708,7 @@ async function openWalletDepositModal() {
   }
   showModal(`
     <h2>Пополнить баланс</h2>
-    <p>Выберите монету и получите свой постоянный адрес. Перевод ниже актуального минимума NOWPayments может не зачислиться.</p>
+    <p>Выберите монету и получите свой постоянный адрес.</p>
     <form class="form" data-wallet-deposit-form data-wallet-deposit-mode="permanent">
       <label class="field">Монета и сеть<select name="coinId" required>
         ${WALLET_COINS.map((coin) => `<option value="${esc(coin.id)}">${esc(walletCoinLabel(coin.id))}</option>`).join("")}
