@@ -7,6 +7,10 @@ actually received. The first payment and later repeated payments are handled the
 way. Product-order payments and older amount-specific wallet payments keep their
 existing verification rules.
 
+Until the feature flag and required NOWPayments credentials are present, the
+website keeps the existing amount-specific top-up form and endpoint. Disabling
+the flag later does not stop reconciliation of addresses already issued.
+
 Before enabling this on a live account:
 
 1. Confirm with NOWPayments that **Extra deposit auto processing / Repeated payments**

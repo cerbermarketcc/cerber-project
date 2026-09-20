@@ -81,6 +81,8 @@ const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED
   && secretValuesMatch(process.env.INCIDENT_PAYOUT_UNLOCK, incidentPayoutUnlockVersion);
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
+const permanentDepositsReady = Boolean(nowpaymentsPermanentDepositsEnabled && nowpaymentsApiKey
+  && nowpaymentsIpnSecret && nowpaymentsEmail && nowpaymentsPassword);
 const nowpaymentsPayout2faSecret = process.env.NOWPAYMENTS_PAYOUT_2FA_SECRET || "";
 const publicBaseUrl = normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL, { production: isProduction });
 const referralPublicBaseUrl = publicBaseUrl;
@@ -4856,7 +4858,8 @@ app.use("/api/telegram/group-chat", (_req, res) => {
 
 app.get("/api/config", async (_req, res, next) => {
   try {
-    res.json({ turnstileSiteKey: turnstileEnabled ? turnstileSiteKey : "", turnstileEnabled, cmsTexts: await readCmsTexts() });
+    res.json({ turnstileSiteKey: turnstileEnabled ? turnstileSiteKey : "", turnstileEnabled,
+      permanentDepositsEnabled: permanentDepositsReady, cmsTexts: await readCmsTexts() });
   } catch (error) {
     next(error);
   }
@@ -14131,14 +14134,89 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
   try {
     requireDb();
     if (!nowpaymentsApiKey) return res.status(503).json({ error: "Платежный сервис временно недоступен" });
-    if (!nowpaymentsPermanentDepositsEnabled || !nowpaymentsIpnSecret || !nowpaymentsEmail || !nowpaymentsPassword) {
-      return res.status(503).json({ error: "Постоянные адреса пока не включены. Проверьте обработку повторных переводов в NOWPayments." });
-    }
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     assertClientRateLimit(req, "wallet-deposit-create", { limit: 10, windowMs: 10 * 60 * 1000, identity: user.login });
-    requestIdempotencyKey(req, "Wallet deposit");
+    const clientRequestId = requestIdempotencyKey(req, "Wallet deposit");
+    if (!permanentDepositsReady) {
+      // Keep the existing top-up flow available until repeated deposits have
+      // been enabled and verified on the merchant's NOWPayments account.
+      const amountUsd = Number(req.body.amountUsd || 0);
+      const legacyCoin = walletCoinFromRequest(req.body);
+      if (!Number.isFinite(amountUsd) || amountUsd < 1 || amountUsd > 100000) {
+        return res.status(400).json({ error: "Сумма пополнения должна быть от 1 до 100 000 $" });
+      }
+      const ltcUsdRateAtCreation = Number((await loadLitecoinUsdRate()).rate || 0);
+      if (!Number.isFinite(ltcUsdRateAtCreation) || ltcUsdRateAtCreation <= 0) {
+        return res.status(503).json({ error: "Курс LTC временно недоступен. Попробуйте еще раз." });
+      }
+      const amountLtcExpected = amountUsd / ltcUsdRateAtCreation;
+      const legacyState = await loadSettingsState();
+      const legacyDeposits = Array.isArray(legacyState.walletDeposits) ? legacyState.walletDeposits : [];
+      const walletTransactions = Array.isArray(legacyState.walletTransactions) ? legacyState.walletTransactions : [];
+      const existingDeposit = legacyDeposits.find((item) => item.clientRequestId === clientRequestId && sameLogin(item.login, user.login));
+      if (existingDeposit) {
+        if (Number(existingDeposit.amountUsd || 0) !== amountUsd
+          || String(existingDeposit.payCurrency || "").toLowerCase() !== String(legacyCoin.payCurrency || "").toLowerCase()) {
+          return res.status(409).json({ error: "Idempotency key was already used for another wallet deposit" });
+        }
+        return res.json({ deposit: existingDeposit, reused: true, ...(await stateFor(user)) });
+      }
+      const deposit = {
+        id: `deposit-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
+        clientRequestId,
+        login: user.login,
+        status: "waiting",
+        amountUsd,
+        amountLtcExpected,
+        ltcUsdRateAtCreation,
+        coinId: legacyCoin.id,
+        payCurrency: legacyCoin.payCurrency,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + walletDepositTtlMs,
+        date: new Date().toLocaleString("ru-RU")
+      };
+      const payment = await createNowpaymentsWalletPayment({
+        price_amount: amountUsd,
+        price_currency: "usd",
+        pay_currency: legacyCoin.payCurrency,
+        order_id: deposit.id,
+        order_description: `CERBER MARKET wallet top up / ${user.login}`,
+        ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
+      });
+      deposit.paymentId = payment.payment_id || payment.id || "";
+      deposit.payAddress = payment.pay_address || payment.address || "";
+      deposit.payAmount = Number(payment.pay_amount || 0);
+      deposit.paymentUrl = payment.payment_url || payment.invoice_url || "";
+      deposit.paymentStatus = payment.payment_status || "waiting";
+      deposit.paymentProviderPayload = {
+        paymentId: deposit.paymentId,
+        payAddress: deposit.payAddress,
+        payAmount: deposit.payAmount,
+        payCurrency: deposit.payCurrency,
+        coinId: deposit.coinId,
+        paymentUrl: deposit.paymentUrl
+      };
+      legacyDeposits.unshift(deposit);
+      walletTransactions.unshift({
+        id: `tx-${deposit.id}`,
+        login: user.login,
+        type: "deposit",
+        title: "Пополнение баланса",
+        amountLtc: amountLtcExpected,
+        amountUsd,
+        payAmount: deposit.payAmount,
+        payCurrency: deposit.payCurrency,
+        coinId: deposit.coinId,
+        createdAt: deposit.createdAt,
+        expiresAt: deposit.expiresAt,
+        date: deposit.date,
+        status: "processing"
+      });
+      await saveSettingsState({ ...legacyState, walletDeposits: legacyDeposits, walletTransactions });
+      return res.json({ deposit, ...(await stateFor(user)) });
+    }
     const coin = walletCoins.find((item) => item.id === String(req.body.coinId || "ltc").toLowerCase());
     if (!coin) return res.status(400).json({ error: "Монета пополнения не поддерживается" });
 
