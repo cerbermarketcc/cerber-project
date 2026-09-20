@@ -180,7 +180,7 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
   assert.match(indexHtml, /styles\.css\?v=114/);
-  assert.match(indexHtml, /app\.js\?v=176/);
+  assert.match(indexHtml, /app\.js\?v=178/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

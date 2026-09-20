@@ -1716,11 +1716,17 @@ function normalizeDb(next) {
       storeCommissionUsd: Number.isFinite(Number(store.storeCommissionUsd)) ? Number(store.storeCommissionUsd) : undefined,
       storeBalanceUsd: Number.isFinite(Number(store.storeBalanceUsd)) ? Number(store.storeBalanceUsd) : undefined,
       storeHeldUsd: Number.isFinite(Number(store.storeHeldUsd)) ? Number(store.storeHeldUsd) : undefined,
+      storePendingUsd: Number.isFinite(Number(store.storePendingUsd)) ? Number(store.storePendingUsd) : undefined,
+      storeDisputeHeldUsd: Number.isFinite(Number(store.storeDisputeHeldUsd)) ? Number(store.storeDisputeHeldUsd) : undefined,
+      storeReviewHeldUsd: Number.isFinite(Number(store.storeReviewHeldUsd)) ? Number(store.storeReviewHeldUsd) : undefined,
       storeAvailableBalanceUsd: Number.isFinite(Number(store.storeAvailableBalanceUsd)) ? Number(store.storeAvailableBalanceUsd) : undefined,
       storeGrossLtc: Number.isFinite(Number(store.storeGrossLtc)) ? Number(store.storeGrossLtc) : undefined,
       storeCommissionLtc: Number.isFinite(Number(store.storeCommissionLtc)) ? Number(store.storeCommissionLtc) : undefined,
       storeBalanceLtc: Number.isFinite(Number(store.storeBalanceLtc)) ? Number(store.storeBalanceLtc) : undefined,
       storeHeldLtc: Number.isFinite(Number(store.storeHeldLtc)) ? Number(store.storeHeldLtc) : undefined,
+      storePendingLtc: Number.isFinite(Number(store.storePendingLtc)) ? Number(store.storePendingLtc) : undefined,
+      storeDisputeHeldLtc: Number.isFinite(Number(store.storeDisputeHeldLtc)) ? Number(store.storeDisputeHeldLtc) : undefined,
+      storeReviewHeldLtc: Number.isFinite(Number(store.storeReviewHeldLtc)) ? Number(store.storeReviewHeldLtc) : undefined,
       storeAvailableBalanceLtc: Number.isFinite(Number(store.storeAvailableBalanceLtc)) ? Number(store.storeAvailableBalanceLtc) : undefined,
       storeLtcUsdRate: Number.isFinite(Number(store.storeLtcUsdRate)) ? Number(store.storeLtcUsdRate) : undefined,
       storeBalanceChart: Array.isArray(store.storeBalanceChart) ? store.storeBalanceChart : [],
@@ -1950,6 +1956,8 @@ function normalizeOrders(next) {
     const createdAt = order.createdAt || now;
     const age = now - Number(createdAt);
     if (order.type === "product") {
+      // In API mode the server alone owns reservation expiry, payment and completion.
+      if (API_ENABLED) return order;
       const hasDisputeHistory = orderHasClientDisputeHistory(order);
       if (hasDisputeHistory && !order.disputeChatClosed) {
         return {
@@ -2685,8 +2693,8 @@ function staffSafeShopStore(store = {}) {
   const next = cloneStoreSnapshot(store || {});
   [
     "wallets", "ltcWallet", "productOrders", "orders", "storeFinanceRows", "storeBalanceChart",
-    "storeGrossUsd", "storeCommissionUsd", "storeBalanceUsd", "storeHeldUsd", "storeGrossLtc",
-    "storeCommissionLtc", "storeBalanceLtc", "storeHeldLtc", "storeAvailableBalanceLtc",
+    "storeGrossUsd", "storeCommissionUsd", "storeBalanceUsd", "storeHeldUsd", "storePendingUsd", "storeDisputeHeldUsd", "storeReviewHeldUsd", "storeGrossLtc",
+    "storeCommissionLtc", "storeBalanceLtc", "storeHeldLtc", "storePendingLtc", "storeDisputeHeldLtc", "storeReviewHeldLtc", "storeAvailableBalanceLtc",
     "storeAvailableBalanceUsd", "activityLogs"
   ].forEach((key) => delete next[key]);
   next.staff = [];
@@ -5237,7 +5245,7 @@ function showProductOrder(orderId) {
           }))}">Скопировать счет пополнения</button>
         ` : ""}
         ${orderPaymentUrl ? `<a class="primary link-button" href="${esc(orderPaymentUrl)}" target="_blank" rel="noopener">Открыть основную ссылку оплаты</a>` : ""}
-        ${userBalance() >= Number(order.amountUsd || 0) ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
+        ${API_ENABLED ? `<p class="notice">По этому заказу уже открыт криптосчёт. Сменить способ оплаты нельзя: дождитесь подтверждения платежа или истечения брони.</p>` : userBalance() >= Number(order.amountUsd || 0) ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
         ${order.sellerWallet || order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerWallet || order.sellerLtcWallet)}</strong></p>` : ""}
         <div class="row">
           <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || ""}\nСумма: ${orderDepositPayAmount.toFixed(8)} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать всё</button>
@@ -5245,8 +5253,8 @@ function showProductOrder(orderId) {
           <button class="ghost-button" data-copy="${orderDepositPayAmount.toFixed(8)}">Скопировать сумму</button>
         </div>
         ${orderCoin.id === "ltc" && (order.sellerWallet || order.sellerLtcWallet) ? `<a class="primary link-button" href="litecoin:${esc(order.sellerWallet || order.sellerLtcWallet)}?amount=${orderDepositPayAmount.toFixed(8)}">Открыть LTC-ссылку</a>` : ""}
-        <p class="desc">После подтверждения оплаты заказ станет завершенным, и здесь появится описание товара.</p>
-        <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
+        <p class="desc">После подтверждения оплаты заказ станет активным, и здесь появится описание товара. Сделку можно завершить после получения товара.</p>
+        ${API_ENABLED ? "" : `<button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>`}
       </div>
     ` : ""}
     ${orderCanComplete(order) ? `<button class="primary" data-product-complete="${esc(order.id)}">Завершить сделку</button>` : ""}
@@ -5301,7 +5309,13 @@ async function sendClientDisputeReply(event) {
     return;
   }
   const clientRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  if (API_ENABLED && hasApiSession()) {
+  if (API_ENABLED) {
+    if (!await ensureApiSession()) {
+      showToast("Не удалось подтвердить вход. Войдите снова и повторите отправку.");
+      form.dataset.submitting = "";
+      if (submit) submit.disabled = false;
+      return;
+    }
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/reply`, {
         method: "POST",
@@ -5348,7 +5362,11 @@ async function sendClientDisputeReply(event) {
 async function completeProductOrderByClient(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || !orderCanComplete(order)) return;
-  if (API_ENABLED && hasApiSession()) {
+  if (API_ENABLED) {
+    if (!await ensureApiSession()) {
+      showToast("Не удалось подтвердить вход. Войдите снова и повторите завершение сделки.");
+      return;
+    }
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/complete`, { method: "POST" });
       applyRemoteState(payload);
@@ -5371,7 +5389,11 @@ async function completeProductOrderByClient(orderId) {
 async function closeProductDisputeByClient(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || !orderCanCloseDispute(order)) return;
-  if (API_ENABLED && hasApiSession()) {
+  if (API_ENABLED) {
+    if (!await ensureApiSession()) {
+      showToast("Не удалось подтвердить вход. Войдите снова и повторите закрытие диспута.");
+      return;
+    }
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/close`, { method: "POST" });
       applyRemoteState(payload);
@@ -5435,7 +5457,12 @@ async function handleProductReview(event) {
   const rating = Number(data.get("rating") || 5);
   if (!text) return showToast("Напишите отзыв");
   setButtonLoading(submit, true, "Отправляем");
-  if (API_ENABLED && hasApiSession()) {
+  if (API_ENABLED) {
+    if (!await ensureApiSession()) {
+      showToast("Не удалось подтвердить вход. Войдите снова и повторите отправку отзыва.");
+      setButtonLoading(submit, false);
+      return;
+    }
     try {
       const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/review`, {
         method: "POST",
@@ -6250,6 +6277,10 @@ async function handleProductPurchase(storeId, productId, positionId) {
 function payProductOrderFromBalance(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.status !== "pending_payment") return;
+  if (API_ENABLED) {
+    showToast("По этому заказу уже открыт криптосчёт. Дождитесь подтверждения оплаты или истечения брони; сменить способ оплаты сейчас нельзя.");
+    return;
+  }
   const ltcAmount = productOrderLtcAmount(order);
   const priceUsd = Number(order.amountUsd || 0);
   if (userBalance() < priceUsd) {
@@ -6434,9 +6465,9 @@ function renderProductPaymentOrder(orderId) {
         <h2>Оплата через платежный шлюз</h2>
         <p>Оплата принимается в LTC. Средства идут на LTC-счёт магазина.</p>
         <p>Комиссия площадки: ${Number(order.platformCommissionPercent || 0).toFixed(2)}%.</p>
-        <p class="desc">После подтверждения платежа заказ автоматически станет завершённым, а описание из строки выдачи появится в деталях заказа.</p>
+        <p class="desc">После подтверждения платежа заказ станет активным, а описание из строки выдачи появится в деталях заказа.</p>
         ${payUrl ? `<a class="primary link-button" href="${esc(payUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : `<button class="primary" data-create-gateway-payment="${esc(order.id)}">Создать ссылку оплаты</button>`}
-        <button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>
+        ${API_ENABLED ? "" : `<button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>`}
       </article>
     </section>
   `);
@@ -6479,6 +6510,10 @@ function markProductOrderPaid(orderId) {
 function cancelProductOrder(orderId, options = {}) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order || order.paymentStatus === "paid") return;
+  if (API_ENABLED) {
+    if (!options.silent) showToast("Серверную бронь нельзя отменить здесь. Дождитесь истечения счёта или обратитесь в поддержку.");
+    return;
+  }
   restoreReservedProductItem(order, db);
   order.status = "canceled";
   order.paymentStatus = "canceled";
@@ -6488,23 +6523,28 @@ function cancelProductOrder(orderId, options = {}) {
   renderOrders("canceled");
 }
 
-function openProductDispute(orderId) {
+async function openProductDispute(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (!orderCanDispute(order)) {
     showToast("Спор по этому заказу сейчас нельзя открыть");
     return;
   }
-  if (API_ENABLED && hasApiSession()) {
-    apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/open`, { method: "POST" })
-      .then((payload) => {
-        applyRemoteState(payload);
-        document.querySelector("[data-modal]")?.classList.remove("open");
-        activePrivateLogin = payload.disputePeer || storeById(order.storeId)?.ownerLogin || "admin";
-        showToast("Диспут открыт. Напишите обращение в чате.");
-        renderMessages();
-      })
-      .catch((error) => showToast(error.message || "Не удалось открыть диспут"));
+  if (API_ENABLED) {
+    if (!await ensureApiSession()) {
+      showToast("Не удалось подтвердить вход. Войдите снова и повторите открытие диспута.");
+      return;
+    }
+    try {
+      const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/dispute/open`, { method: "POST" });
+      applyRemoteState(payload);
+      document.querySelector("[data-modal]")?.classList.remove("open");
+      activePrivateLogin = payload.disputePeer || storeById(order.storeId)?.ownerLogin || "admin";
+      showToast("Диспут открыт. Напишите обращение в чате.");
+      renderMessages();
+    } catch (error) {
+      showToast(error.message || "Не удалось открыть диспут");
+    }
     return;
   }
   order.status = "dispute";
@@ -9785,6 +9825,24 @@ function heldStoreOrders(storeId) {
   });
 }
 
+function pendingStoreOrders(storeId) {
+  return heldStoreOrders(storeId).filter((order) => !order.disputeOpen && String(order.status || "").toLowerCase() !== "dispute");
+}
+
+function disputedStoreOrders(storeId) {
+  return heldStoreOrders(storeId).filter((order) => order.disputeOpen || String(order.status || "").toLowerCase() === "dispute");
+}
+
+function storePendingLtc(storeId, store = null) {
+  if (Number.isFinite(Number(store?.storePendingLtc))) return Math.max(0, Number(store.storePendingLtc));
+  return pendingStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetLtc(order, store), 0);
+}
+
+function storeDisputeHeldLtc(storeId, store = null) {
+  if (Number.isFinite(Number(store?.storeDisputeHeldLtc))) return Math.max(0, Number(store.storeDisputeHeldLtc));
+  return disputedStoreOrders(storeId).reduce((sum, order) => sum + storeOrderNetLtc(order, store), 0);
+}
+
 function storeBalanceUsd(storeId) {
   return ltcToUsd(storeBalanceLtc(storeId));
 }
@@ -9871,6 +9929,7 @@ function storeFinanceRows(storeId, store = null) {
   if (Array.isArray(store?.storeFinanceRows) && store.storeFinanceRows.length) {
     return store.storeFinanceRows.map((row) => ({
       id: row.id || row.orderId || `finance-${Math.random().toString(36).slice(2, 8)}`,
+      orderId: row.orderId || "",
       title: row.title || `Заказ: ${row.orderId || ""}`,
       login: row.login || "",
       grossUsd: Number(row.grossUsd || 0),
@@ -9883,6 +9942,7 @@ function storeFinanceRows(storeId, store = null) {
       originalNetUsd: Number(row.originalNetUsd || 0),
       originalCommissionUsd: Number(row.originalCommissionUsd || 0),
       status: row.status || "",
+      holdReason: row.holdReason || "",
       createdAt: Number(row.createdAt || 0)
     }));
   }
@@ -9891,6 +9951,7 @@ function storeFinanceRows(storeId, store = null) {
     .sort((a, b) => Number(b.paidAt || b.createdAt || 0) - Number(a.paidAt || a.createdAt || 0))
     .map((order) => ({
       id: order.id,
+      orderId: order.id,
       title: `Заказ: ${order.product || order.id}`,
       login: order.login || "",
       grossUsd: Number(order.amountUsd || 0),
@@ -11028,6 +11089,8 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
     ? Math.max(0, Number(store.storeAvailableBalanceLtc))
     : Math.max(0, salesLtc - activeWithdrawalLtc("store", store.id));
   const availableUsd = ltcToUsd(availableLtc);
+  const pendingLtc = storePendingLtc(store.id, store);
+  const pendingUsd = ltcToUsd(pendingLtc);
   const todaySalesLtc = storeTodaySalesLtc(store.id);
   const todaySalesUsd = storeTodaySalesUsd(store.id);
   const financeRows = storeFinanceRows(store.id, store);
@@ -11066,7 +11129,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
             </div>
             <div class="seller-dashboard-actions">
               ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
-                <span>Баланс магазина</span>
+                <span>Доступно к выводу</span>
                 <strong>${availableUsd.toFixed(2)} $ · ${availableLtc.toFixed(8)} LTC</strong>
               </div>`}
               <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
@@ -11096,7 +11159,7 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
           </div>
           <div class="seller-dashboard-actions">
             ${shopIsStaffSession() ? "" : `<div class="seller-dashboard-balance">
-              <span>Баланс магазина</span>
+              <span>Доступно к выводу</span>
               <strong>${availableUsd.toFixed(2)} $ · ${availableLtc.toFixed(8)} LTC</strong>
             </div>`}
             <button class="seller-dashboard-user">${esc(store.ownerLogin || "seller")} ▾</button>
@@ -11112,9 +11175,10 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
         </section>
 
         <section class="seller-dashboard-stats">
-          ${sellerDashStat("Оплачено сегодня", todayOrders.length, "Продажи за день")}
+          ${sellerDashStat("Завершено сегодня", todayOrders.length, "Закрытые сделки за день")}
           ${sellerDashStat("Доход сегодня", `${todaySalesUsd.toFixed(2)} $`, `${todaySalesLtc.toFixed(8)} LTC`)}
           ${sellerDashStat("Доступно", `${availableUsd.toFixed(2)} $`, `${availableLtc.toFixed(8)} LTC`)}
+          ${canAccessShopTab("finances") ? sellerDashStat("Оплачено, ожидает завершения", `${pendingUsd.toFixed(2)} $`, `${pendingLtc.toFixed(8)} LTC · пока не к выводу`) : ""}
           ${sellerDashStat("Клиентов", clients.length, "Всего покупателей")}
           ${sellerDashStat("Склад", stockTotal, "Доступных позиций")}
           ${sellerDashStat("Диспуты", storeDisputes(store.id, store).length, "Открытые обращения")}
@@ -11863,8 +11927,22 @@ async function deleteShopDisputeMessage(messageId) {
     showToast(error.message || "Не удалось удалить сообщение");
   }
 }
+function shopFinanceStatusLabel(row = {}, orderById = new Map()) {
+  const status = String(row.status || "").toLowerCase();
+  if (status === "held") {
+    if (row.holdReason === "review") return "На проверке — пока не к выводу";
+    const order = orderById.get(String(row.orderId || ""));
+    return order?.disputeOpen || String(order?.status || "").toLowerCase() === "dispute"
+      ? "В диспуте — пока не к выводу"
+      : "Оплачено, ожидает завершения — пока не к выводу";
+  }
+  if (["completed", "closed", "paid"].includes(status)) return "Завершено";
+  return status || "Ожидает обработки";
+}
+
 function shopFinancesTab(store, finance = {}, financeRows) {
   const rows = (Array.isArray(financeRows) ? financeRows : []).filter((row) => row && typeof row === "object");
+  const orderById = new Map(allStoreOrders(store.id, store).map((order) => [String(order.id || ""), order]));
   const grossLtc = Number.isFinite(Number(store?.storeGrossLtc)) ? Number(store.storeGrossLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.grossLtc), 0);
   const commissionLtc = Number.isFinite(Number(store?.storeCommissionLtc)) ? Number(store.storeCommissionLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.commissionLtc), 0);
   const netLtc = Number.isFinite(Number(store?.storeBalanceLtc)) ? Number(store.storeBalanceLtc) : rows.reduce((sum, row) => sum + finiteMoney(row.netLtc), 0);
@@ -11874,7 +11952,9 @@ function shopFinancesTab(store, finance = {}, financeRows) {
   const monthlyLtc = rows
     .filter((row) => Number(row.createdAt || 0) >= monthStart.getTime() && !["held", "pending", "dispute", "cancelled", "canceled", "rejected"].includes(String(row.status || "").toLowerCase()))
     .reduce((sum, row) => sum + Number(row.netLtc || 0), 0);
-  const heldLtc = storeHeldLtc(store.id, store);
+  const pendingLtc = storePendingLtc(store.id, store);
+  const disputeHeldLtc = storeDisputeHeldLtc(store.id, store);
+  const reviewHeldLtc = Number(store?.storeReviewHeldLtc || 0);
   const requestedLtc = activeWithdrawalLtc("store", store.id);
   const availableLtc = Number.isFinite(Number(finance.availableLtc))
     ? Math.max(0, Number(finance.availableLtc))
@@ -11887,12 +11967,14 @@ function shopFinancesTab(store, finance = {}, financeRows) {
     .filter((item) => item && typeof item === "object" && item.scope === "store" && item.storeId === store.id)
     .slice()
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
-  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Фактически полученный LTC и его стоимость по текущему курсу.</p></div></section>
+  return `<section class="seller-dashboard-hero"><div><h2>Финансы</h2><p>Оплаченные заказы сначала ожидают завершения сделки. После завершения доля магазина становится доступна к выводу.</p></div></section>
   <section class="seller-dashboard-stats">
     ${sellerDashStat("За текущий месяц", `${ltcToUsd(monthlyLtc).toFixed(2)} $`, `${monthlyLtc.toFixed(8)} LTC`)}
     ${sellerDashStat("Всего заработано", `${ltcToUsd(netLtc).toFixed(2)} $`, `${netLtc.toFixed(8)} LTC`)}
     ${sellerDashStat("К выводу магазину", `${ltcToUsd(availableLtc).toFixed(2)} $`, `${availableLtc.toFixed(8)} LTC`)}
-    ${sellerDashStat("Заморожено в диспутах", `${ltcToUsd(heldLtc).toFixed(2)} $`, `${heldLtc.toFixed(8)} LTC`)}
+    ${sellerDashStat("Оплачено, ожидает завершения", `${ltcToUsd(pendingLtc).toFixed(2)} $`, `${pendingLtc.toFixed(8)} LTC · пока не к выводу`)}
+    ${sellerDashStat("В диспутах", `${ltcToUsd(disputeHeldLtc).toFixed(2)} $`, `${disputeHeldLtc.toFixed(8)} LTC · пока не к выводу`)}
+    ${reviewHeldLtc > 0 ? sellerDashStat("На проверке", `${ltcToUsd(reviewHeldLtc).toFixed(2)} $`, `${reviewHeldLtc.toFixed(8)} LTC · пока не к выводу`) : ""}
     ${sellerDashStat("Сегодня", `${ltcToUsd(todayLtc).toFixed(2)} $`, `${todayLtc.toFixed(8)} LTC`)}
     ${sellerDashStat("Валовый оборот", `${ltcToUsd(grossLtc).toFixed(2)} $`, `${grossLtc.toFixed(8)} LTC`)}
     ${sellerDashStat("Комиссия владельца", `${ltcToUsd(commissionLtc).toFixed(2)} $`, `${commissionLtc.toFixed(8)} LTC · ${storeCommissionPercent(store)}%`)}
@@ -11905,7 +11987,7 @@ function shopFinancesTab(store, finance = {}, financeRows) {
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>Операции по заказам</h3><span>${rows.length}</span></div>
-    ${rows.length ? rows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title || "Операция")} · ${esc(tx.login || "client")} · ${esc(tx.status || "")}${tx.originalNetUsd ? `<br><small>Цена продажи: ${finiteMoney(tx.originalNetUsd).toFixed(2)} $</small>` : ""}</span><strong>${finiteMoney(tx.netLtc).toFixed(8)} LTC<br><small>сейчас ${ltcToUsd(tx.netLtc).toFixed(2)} $</small></strong></div>`).join("") : `<p>Операций пока нет.</p>`}
+    ${rows.length ? rows.slice(0, 80).map((tx) => `<div class="seller-source"><span>${esc(tx.title || "Операция")} · ${esc(tx.login || "client")} · ${esc(shopFinanceStatusLabel(tx, orderById))}${tx.originalNetUsd ? `<br><small>Цена продажи: ${finiteMoney(tx.originalNetUsd).toFixed(2)} $</small>` : ""}</span><strong>${finiteMoney(tx.netLtc).toFixed(8)} LTC<br><small>сейчас ${ltcToUsd(tx.netLtc).toFixed(2)} $</small></strong></div>`).join("") : `<p>Операций пока нет.</p>`}
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>

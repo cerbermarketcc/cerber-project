@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "persistent-customer-session-2026-09-18-v189";
+const cerberBuildVersion = "financial-settlement-2026-09-20-v190";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -3716,9 +3716,7 @@ async function stateFor(user) {
       }
     }
     if (await normalizeServerOrders(settingsData)) {
-      saveSettingsState(settingsData).catch((error) => {
-        console.error("[stateFor] order normalization save failed", { message: error.message });
-      });
+      await saveSettingsState(settingsData);
     }
     const allMessages = sanitizeMessagesForVisualReset((messages || []).map((row) => row.data));
     let orders = hydrateOrdersDisputeHistory(
@@ -4433,10 +4431,7 @@ function sellerForbidden(res) {
 async function stateForStoreAdmin(storeId, token = {}) {
   const id = String(storeId || "");
   const [loadedState, messagesResult, ledgerResult, storeResult] = await Promise.all([
-    withTimeout(loadSettingsState(), "store-admin app_settings query", 6000).catch(async (error) => {
-      console.error("[store-admin] app_settings fallback", { message: error.message });
-      return loadSettingsBackupState();
-    }),
+    withTimeout(loadSettingsState(), "store-admin app_settings query", 12000),
     withTimeout(
       supabase.from("messages").select("data").order("created_at", { ascending: false }).limit(1000),
       "store-admin messages query",
@@ -4482,7 +4477,7 @@ async function stateForStoreAdmin(storeId, token = {}) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const messages = messagesResult?.data || [];
   const ledgerMessages = ledgerResult?.data || [];
-  const storeRow = storeResult?.data || null;
+  const storeRow = storeResult?.data?.data || null;
   const stateStores = sanitizeStoresForVisualReset(mergeStoreSources(state.ownerStores || [], state.publicStoresCache || []));
   let store = storeRow || stateStores.find((item) => String(item?.id || "") === id) || null;
   if (store && !isMarketplaceRecordAfterVisualReset(store)) store = null;
@@ -4567,10 +4562,16 @@ async function stateForStoreAdmin(storeId, token = {}) {
     payload.state.stores[0].storeCommissionUsd = finance.commissionUsd;
     payload.state.stores[0].storeBalanceUsd = finance.netUsd;
     payload.state.stores[0].storeHeldUsd = finance.heldUsd;
+    payload.state.stores[0].storePendingUsd = finance.pendingUsd;
+    payload.state.stores[0].storeDisputeHeldUsd = finance.disputeHeldUsd;
+    payload.state.stores[0].storeReviewHeldUsd = finance.reviewHeldUsd;
     payload.state.stores[0].storeGrossLtc = finance.grossLtc;
     payload.state.stores[0].storeCommissionLtc = finance.commissionLtc;
     payload.state.stores[0].storeBalanceLtc = finance.netLtc;
     payload.state.stores[0].storeHeldLtc = finance.heldLtc;
+    payload.state.stores[0].storePendingLtc = finance.pendingLtc;
+    payload.state.stores[0].storeDisputeHeldLtc = finance.disputeHeldLtc;
+    payload.state.stores[0].storeReviewHeldLtc = finance.reviewHeldLtc;
     payload.state.stores[0].storeAvailableBalanceLtc = availableLtc;
     payload.state.stores[0].storeAvailableBalanceUsd = availableLtc * finance.rate;
     payload.state.stores[0].storeLtcUsdRate = finance.rate;
@@ -8520,7 +8521,7 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
     const currentRate = cachedLitecoinUsdRate();
     const storeById = new Map(data.stores.map((store) => [store.id, store]));
     const orders = Array.isArray(state.orders) ? state.orders : [];
-    const completedOrders = orders.filter((order) => (order.type === "product" || order.storeId) && adminIsPaidProductOrder(order));
+    const completedOrders = orders.filter((order) => (order.type === "product" || order.storeId) && adminIsWithdrawableStoreOrder(order));
     const totalCommissionLtc = roundLtc(completedOrders.reduce((sum, order) => sum + orderLtcBreakdown(order, state, storeById.get(order.storeId)).commissionLtc, 0));
     const referralPayments = Array.isArray(state.referralPayments) ? state.referralPayments : [];
     const walletDeposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
@@ -9904,6 +9905,12 @@ async function saveSettingsBackupState(state = {}) {
 
 function durableFinanceRecordRank(record = {}) {
   const status = String(record.status || record.paymentStatus || "").toLowerCase();
+  if (isProductOrderRecord(record)) {
+    if (record.disputeChatClosed && ["completed", "closed"].includes(status)) return 8;
+    // A concurrent auto-close must not overwrite an open dispute. Only an
+    // explicit dispute closure may outrank it.
+    if (record.disputeOpen || status === "dispute") return 7;
+  }
   if (["completed", "paid", "finished"].includes(status)) return 5;
   if (["cancelled", "canceled", "failed", "expired", "refunded", "rejected", "manual_review", "underpaid"].includes(status)) return 4;
   if (["processing", "sending", "creating", "submitting"].includes(status)) return 3;
@@ -10631,7 +10638,7 @@ async function ensureProductOrderSettlement(state = {}, order = {}, store = null
   await settleProductReferralReward(state, order);
 
   const afterReferralCount = Array.isArray(state.referralPayments) ? state.referralPayments.length : 0;
-  return !hadLedger || state.walletTransactions.length !== beforeTxCount || afterReferralCount !== beforeReferralCount;
+  return !hadLedger || storeReleaseNeeded || state.walletTransactions.length !== beforeTxCount || afterReferralCount !== beforeReferralCount;
 }
 
 async function normalizeServerOrders(state = {}) {
@@ -10694,19 +10701,10 @@ async function normalizeServerOrders(state = {}) {
           body: `Заказ ${order.product || order.id} закрыт по таймеру автозавершения.`
         });
         const autoCompletedOrder = { ...order, status: "completed", completedAt: now, closedAt: now };
-        if (await ensureProductOrderSettlement(state, autoCompletedOrder, store)) {
-          order.ledgerRecordedAt = autoCompletedOrder.ledgerRecordedAt;
-          order.platformCommissionPercent = autoCompletedOrder.platformCommissionPercent;
-          order.platformCommissionUsd = autoCompletedOrder.platformCommissionUsd;
-          order.sellerAmountUsd = autoCompletedOrder.sellerAmountUsd;
-          order.ltcSettlementVersion = autoCompletedOrder.ltcSettlementVersion;
-          order.settlementCurrency = autoCompletedOrder.settlementCurrency;
-          order.settlementGrossLtc = autoCompletedOrder.settlementGrossLtc;
-          order.grossAmountLtc = autoCompletedOrder.grossAmountLtc;
-          order.platformCommissionLtc = autoCompletedOrder.platformCommissionLtc;
-          order.sellerAmountLtc = autoCompletedOrder.sellerAmountLtc;
-          order.ltcUsdRateAtPayment = autoCompletedOrder.ltcUsdRateAtPayment;
-        }
+        await ensureProductOrderSettlement(state, autoCompletedOrder, store);
+        // Preserve the release marker as well as the amounts, so reprocessing
+        // this order cannot add its seller balance a second time.
+        Object.assign(order, autoCompletedOrder);
         nextOrders.push({
           ...order,
           status: "completed",
@@ -10956,7 +10954,11 @@ async function adminLoadMarketplace(options = {}) {
     state.filters = state.filters || publicCatalog.filters || {};
   }
   state = settingsStateForRuntime(state);
+  await mergeFinanceMirrorIntoState(state);
   state = sanitizeStateForVisualReset(state);
+  // The owner dashboard must perform the same due-order release as customer
+  // and seller reads; otherwise an expired hold remains invisible here.
+  if (await normalizeServerOrders(state)) await saveSettingsState(state);
   state.adminLogs = mergeById(
     mergeById(adminLogMemory, auditLogs),
     Array.isArray(state.adminLogs) ? state.adminLogs : []
@@ -11306,7 +11308,9 @@ function applyProductOrderLtcSettlement(order, state = {}, store = null) {
 
 function adminIsPaidProductOrder(order) {
   const status = String(order.status || "").toLowerCase();
-  return ["completed", "closed", "paid"].includes(status);
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  return ["completed", "closed", "paid"].includes(status)
+    && (!paymentStatus || ["paid", "finished"].includes(paymentStatus));
 }
 
 function adminIsWithdrawableStoreOrder(order) {
@@ -11321,8 +11325,21 @@ function adminStoreNetAmount(order, state, store) {
 }
 
 function storeOrderHeldForPayout(order = {}) {
+  return !adminIsWithdrawableStoreOrder(order);
+}
+
+function adminIsHeldPaidProductOrder(order = {}) {
   const status = String(order.status || "").toLowerCase();
-  return Boolean(order.disputeOpen || ["active", "processing", "pending_payment", "dispute", "canceled", "cancelled"].includes(status));
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  return ["paid", "finished"].includes(paymentStatus)
+    && !["canceled", "cancelled", "refunded", "failed", "manual_review"].includes(status)
+    && (["active", "processing", "dispute"].includes(status) || Boolean(order.disputeOpen));
+}
+
+function storeLedgerHoldReason(order = {}) {
+  if (!storeOrderHeldForPayout(order)) return "";
+  if (order.disputeOpen || String(order.status || "").toLowerCase() === "dispute") return "dispute";
+  return adminIsHeldPaidProductOrder(order) ? "pending" : "review";
 }
 
 function storeSaleLedgerOrderFromMessage(message = {}, store = null) {
@@ -11401,6 +11418,8 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
     const originalGrossUsd = Number(tx.grossUsd || order.amountUsd || tx.amountUsd || 0);
     const originalCommissionUsd = Number(tx.commissionUsd || adminPlatformCommission(order, state, store) || 0);
     const originalNetUsd = Number(tx.amountUsd || adminStoreNetAmount(order, state, store) || 0);
+    // A ledger entry without its authoritative order is not proof of release.
+    const held = storeOrderHeldForPayout(order);
     rows.push({
       id: tx.id || `tx-store-sale-${orderId}`,
       orderId,
@@ -11415,16 +11434,18 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
       originalGrossUsd,
       originalCommissionUsd,
       originalNetUsd,
-      status: storeOrderHeldForPayout(order) ? "held" : "completed",
-      held: storeOrderHeldForPayout(order),
+      status: held ? "held" : "completed",
+      held,
+      holdReason: storeLedgerHoldReason(order),
       createdAt: Number(tx.createdAt || order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
     });
   });
 
   (Array.isArray(orders) ? orders : [])
-    .filter((order) => String(order.storeId || "") === storeId && adminIsPaidProductOrder(order) && !seenOrderIds.has(String(order.id || "")))
+    .filter((order) => String(order.storeId || "") === storeId && (adminIsWithdrawableStoreOrder(order) || adminIsHeldPaidProductOrder(order)) && !seenOrderIds.has(String(order.id || "")))
     .forEach((order) => {
       const breakdown = orderLtcBreakdown(order, state, store);
+      const held = storeOrderHeldForPayout(order);
       rows.push({
         id: `order-ledger-${order.id}`,
         orderId: order.id,
@@ -11439,8 +11460,9 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
         originalGrossUsd: adminOrderAmount(order),
         originalCommissionUsd: adminPlatformCommission(order, state, store),
         originalNetUsd: adminStoreNetAmount(order, state, store),
-        status: storeOrderHeldForPayout(order) ? "held" : "completed",
-        held: storeOrderHeldForPayout(order),
+        status: held ? "held" : "completed",
+        held,
+        holdReason: storeLedgerHoldReason(order),
         createdAt: Number(order.paidAt || order.completedAt || order.closedAt || order.createdAt || 0)
       });
     });
@@ -11448,10 +11470,16 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
   rows.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
   const completedRows = rows.filter((row) => !row.held);
   const heldRows = rows.filter((row) => row.held);
+  const pendingRows = heldRows.filter((row) => row.holdReason === "pending");
+  const disputeRows = heldRows.filter((row) => row.holdReason === "dispute");
+  const reviewRows = heldRows.filter((row) => row.holdReason === "review");
   const grossLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.grossLtc || 0), 0));
   const commissionLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.commissionLtc || 0), 0));
   const netLtc = roundLtc(completedRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
   const heldLtc = roundLtc(heldRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
+  const pendingLtc = roundLtc(pendingRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
+  const disputeHeldLtc = roundLtc(disputeRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
+  const reviewHeldLtc = roundLtc(reviewRows.reduce((sum, row) => sum + Number(row.netLtc || 0), 0));
   return {
     rows,
     rate: currentRate,
@@ -11459,10 +11487,16 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
     commissionLtc,
     netLtc,
     heldLtc,
+    pendingLtc,
+    disputeHeldLtc,
+    reviewHeldLtc,
     grossUsd: grossLtc * currentRate,
     commissionUsd: commissionLtc * currentRate,
     netUsd: netLtc * currentRate,
     heldUsd: heldLtc * currentRate,
+    pendingUsd: pendingLtc * currentRate,
+    disputeHeldUsd: disputeHeldLtc * currentRate,
+    reviewHeldUsd: reviewHeldLtc * currentRate,
     originalGrossUsd: completedRows.reduce((sum, row) => sum + Number(row.originalGrossUsd || 0), 0),
     originalCommissionUsd: completedRows.reduce((sum, row) => sum + Number(row.originalCommissionUsd || 0), 0),
     originalNetUsd: completedRows.reduce((sum, row) => sum + Number(row.originalNetUsd || 0), 0)
@@ -12689,14 +12723,17 @@ function adminBuildOverview(data) {
   const referralPayments = Array.isArray(state.referralPayments) ? state.referralPayments : [];
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const productOrders = orders.filter((order) => order.type === "product" || order.storeId);
-  const completedOrders = productOrders.filter(adminIsPaidProductOrder);
+  const completedOrders = productOrders.filter(adminIsWithdrawableStoreOrder);
+  const heldPaidOrders = productOrders.filter(adminIsHeldPaidProductOrder);
   const currentLtcUsdRate = cachedLitecoinUsdRate();
-  const orderLtcById = new Map(completedOrders.map((order) => [
+  const orderLtcById = new Map([...completedOrders, ...heldPaidOrders].map((order) => [
     String(order.id || ""),
     orderLtcBreakdown(order, state, storeById.get(order.storeId))
   ]));
   const totalCommissionLtc = roundLtc(completedOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
   const totalStoresNetLtc = roundLtc(completedOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
+  const pendingCommissionLtc = roundLtc(heldPaidOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
+  const pendingStoresNetLtc = roundLtc(heldPaidOrders.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
   const totalCommissionUsd = totalCommissionLtc * currentLtcUsdRate;
   const totalStoresNetUsd = totalStoresNetLtc * currentLtcUsdRate;
   const totalReferralRewardsLtc = roundLtc(referralPayments.reduce((sum, item) => sum + adminReferralRewardLtc(item, state, completedOrders, walletDeposits), 0));
@@ -12714,7 +12751,7 @@ function adminBuildOverview(data) {
     ...orders.filter(orderHasDisputeHistory),
     ...exchangeRequests.filter(requestHasDisputeHistory)
   ];
-  const buyers = new Set(completedOrders.map((order) => loginKey(order.login)).filter(Boolean));
+  const buyers = new Set([...completedOrders, ...heldPaidOrders].map((order) => loginKey(order.login)).filter(Boolean));
   const productsCount = stores.reduce((sum, store) => sum + (Array.isArray(store.products) ? store.products.length : 0), 0);
   const onlineUsers = new Set(sessions.filter((session) => Date.now() - Date.parse(session.created_at) < 30 * 60 * 1000).map((session) => session.login_key)).size;
 
@@ -12741,12 +12778,15 @@ function adminBuildOverview(data) {
 
   const storeRows = stores.map((store) => {
     const storeOrders = productOrders.filter((order) => order.storeId === store.id);
-    const storeCompleted = storeOrders.filter(adminIsPaidProductOrder);
+    const storeCompleted = storeOrders.filter(adminIsWithdrawableStoreOrder);
+    const storePending = storeOrders.filter(adminIsHeldPaidProductOrder);
     const storeDisputes = storeOrders.filter(orderHasDisputeHistory);
     const clients = new Set(storeOrders.map((order) => loginKey(order.login)).filter(Boolean));
     const grossRevenueLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.grossLtc || 0), 0));
     const commissionLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
     const revenueLtc = roundLtc(storeCompleted.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
+    const pendingRevenueLtc = roundLtc(storePending.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.sellerLtc || 0), 0));
+    const pendingCommissionLtcForStore = roundLtc(storePending.reduce((sum, order) => sum + Number(orderLtcById.get(String(order.id || ""))?.commissionLtc || 0), 0));
     const requestedLtc = activeWithdrawalLtc(state, "store", store.id);
     const availableLtc = roundLtc(Math.max(0, revenueLtc - requestedLtc));
     const grossRevenue = grossRevenueLtc * currentLtcUsdRate;
@@ -12764,6 +12804,11 @@ function adminBuildOverview(data) {
       revenueLtc,
       commission,
       commissionLtc,
+      pendingSales: storePending.length,
+      pendingRevenueLtc,
+      pendingRevenueUsd: pendingRevenueLtc * currentLtcUsdRate,
+      pendingCommissionLtc: pendingCommissionLtcForStore,
+      pendingCommissionUsd: pendingCommissionLtcForStore * currentLtcUsdRate,
       availableLtc,
       availableUsd: availableLtc * currentLtcUsdRate,
       clients: clients.size,
@@ -12847,6 +12892,11 @@ function adminBuildOverview(data) {
       totalTurnover: completedOrders.reduce((sum, order) => sum + adminOrderAmount(order), 0),
       totalCommission: totalCommissionUsd,
       totalCommissionLtc,
+      pendingPaidDeals: heldPaidOrders.length,
+      pendingCommissionUsd: pendingCommissionLtc * currentLtcUsdRate,
+      pendingCommissionLtc,
+      pendingStoresNetUsd: pendingStoresNetLtc * currentLtcUsdRate,
+      pendingStoresNetLtc,
       totalReferralRewards: totalReferralRewardsUsd,
       totalReferralRewardsLtc,
       ownerNetAfterReferrals: ownerNetLtc * currentLtcUsdRate,

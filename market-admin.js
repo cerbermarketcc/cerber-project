@@ -1017,10 +1017,12 @@ function renderDashboard() {
       ${statCard("Продажи", s.totalSales, "закрытые сделки")}
       ${statCard("Оборот", fmtMoney(s.totalTurnover), "всё время")}
       ${statCard("Комиссия", cryptoValue(s.totalCommission, s.totalCommissionLtc), "доход площадки")}
+      ${statCard("Комиссия по оплаченным сделкам", cryptoValue(s.pendingCommissionUsd || 0, s.pendingCommissionLtc), `${Number(s.pendingPaidDeals || 0)} ожидают завершения · пока не к выводу`)}
       ${statCard("Рефералам", cryptoValue(s.totalReferralRewards || 0, s.totalReferralRewardsLtc), "3% начисления")}
       ${statCard("Чистая комиссия", cryptoValue(s.ownerNetAfterReferrals || 0, s.ownerNetAfterReferralsLtc), "после рефералов")}
       ${statCard("К выводу владельцу", cryptoValue(s.ownerWithdrawableUsd || 0, s.ownerWithdrawableLtc), "комиссии минус рефералы")}
       ${statCard("К выводу магазинам", cryptoValue(s.storesWithdrawableUsd || 0, s.storesWithdrawableLtc), "чистый доход продавцов")}
+      ${statCard("Доля магазинов по оплаченным сделкам", cryptoValue(s.pendingStoresNetUsd || 0, s.pendingStoresNetLtc), "ожидает завершения · пока не к выводу")}
       ${statCard("Новые пользователи", s.newUsers, "за сутки")}
       ${statCard("Всего пользователей", s.totalUsers, `${s.usersWithPurchase} с покупкой`)}
       ${statCard("Диспуты", s.disputes, "открытые")}
@@ -1029,7 +1031,7 @@ function renderDashboard() {
     </section>
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
-      <p class="muted">Доступно: <strong>${fmtLtc(s.ownerWithdrawableLtc)}</strong> · сейчас примерно <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Курс: 1 LTC = ${fmtMoney(s.ltcUsdRate || 0)}.</p>
+      <p class="muted">Доступно после завершения сделок: <strong>${fmtLtc(s.ownerWithdrawableLtc)}</strong> · сейчас примерно <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Комиссия по активным оплаченным заказам пока не доступна к выводу. Курс: 1 LTC = ${fmtMoney(s.ltcUsdRate || 0)}.</p>
       <form data-owner-withdraw-form>
         <div class="row">
           <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.00000001" step="0.00000001" max="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}" value="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}"></label>
@@ -1110,7 +1112,7 @@ function renderStores() {
             placements.includes("TOP 10") ? `TOP 10 #${adminPlacementPosition(s, "TOP 10")}` : "",
             placements.includes("NEW") ? `Новые #${adminPlacementPosition(s, "NEW")}` : ""
           ].filter(Boolean).join(" · ");
-          return `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}<br>${esc(positions)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}</td><td>${fmtMoney(s.revenue)}<br><span class="muted">${fmtLtc(s.revenueLtc)}</span></td><td>${fmtMoney(s.commission)}<br><span class="muted">${fmtLtc(s.commissionLtc)}</span></td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`;
+          return `<tr data-store="${esc(s.id)}"><td><strong>${esc(s.name)}</strong><br><span class="muted">${esc(s.ownerLogin)}<br>${esc(positions)}</span></td><td>${esc(s.id)}</td><td><span class="status ${statusClass(s.status)}">${esc(s.status)}</span></td><td>${s.sales}<br><span class="muted">${Number(s.pendingSales || 0)} оплачено, ожидает завершения</span></td><td>${fmtMoney(s.revenue)}<br><span class="muted">${fmtLtc(s.revenueLtc)}<br>Ожидает: ${fmtMoney(s.pendingRevenueUsd || 0)} · ${fmtLtc(s.pendingRevenueLtc)}</span></td><td>${fmtMoney(s.commission)}<br><span class="muted">${fmtLtc(s.commissionLtc)}<br>Ожидает: ${fmtMoney(s.pendingCommissionUsd || 0)} · ${fmtLtc(s.pendingCommissionLtc)}</span></td><td>${s.clients}</td><td>${s.products}</td><td>${s.disputes}</td><td>${fmtDate(s.registeredAt)}</td></tr>`;
         }).join("")}
       </tbody></table></article>
       <article class="split-card" data-store-detail><h2>Магазин</h2><p class="muted">Выбери строку магазина для управления статусом, комиссией, позицией, автозакрытием и монетами.</p></article>
@@ -1133,7 +1135,7 @@ function storeDetail(id) {
   return `
     <h2>${esc(store.name)}</h2>
     <p class="muted">Shop Admin: <a href="${esc(panelUrl)}" target="_blank">${esc(panelUrl)}</a><br>Логин: <strong>${esc(store.panel?.login || store.ownerLogin || "")}</strong> · Пароль: <strong>${esc(panelPasswordStatus)}</strong></p>
-    <p class="notice">Оборот: <strong>${fmtMoney(grossRevenue)} · ${fmtLtc(store.grossRevenueLtc)}</strong><br>К выводу магазину: <strong>${fmtMoney(store.availableUsd ?? storeRevenue)} · ${fmtLtc(store.availableLtc ?? store.revenueLtc)}</strong><br>Комиссия владельца: <strong>${fmtMoney(ownerCommission)} · ${fmtLtc(store.commissionLtc)}</strong></p>
+    <p class="notice">Оборот завершённых сделок: <strong>${fmtMoney(grossRevenue)} · ${fmtLtc(store.grossRevenueLtc)}</strong><br>К выводу магазину: <strong>${fmtMoney(store.availableUsd ?? storeRevenue)} · ${fmtLtc(store.availableLtc ?? store.revenueLtc)}</strong><br>Комиссия владельца: <strong>${fmtMoney(ownerCommission)} · ${fmtLtc(store.commissionLtc)}</strong><br>Оплачено, ожидает завершения (${Number(store.pendingSales || 0)}): магазину <strong>${fmtMoney(store.pendingRevenueUsd || 0)} · ${fmtLtc(store.pendingRevenueLtc)}</strong>, владельцу <strong>${fmtMoney(store.pendingCommissionUsd || 0)} · ${fmtLtc(store.pendingCommissionLtc)}</strong>. Эти суммы пока не доступны к выводу.</p>
     <form data-store-form="${esc(store.id)}">
       ${storeMediaField("imageFile", "Аватарка магазина", store.image || store.avatar)}
       ${storeMediaField("coverFile", "Баннер магазина", store.cover || store.banner)}
