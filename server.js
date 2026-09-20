@@ -3800,7 +3800,7 @@ async function stateFor(user) {
       ? (Array.isArray(settingsData.walletDeposits) ? settingsData.walletDeposits : []).filter((item) => sameUser(item.login))
       : [];
     const userWalletWithdrawals = user
-      ? (Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : []).filter((item) => sameUser(item.login))
+      ? (Array.isArray(settingsData.walletWithdrawals) ? settingsData.walletWithdrawals : []).filter((item) => sameUser(item.login)).map(publicWithdrawalForState)
       : [];
     const fixedUsdBalance = user ? stateUserUsdBalance(settingsData, userLogin, userKey) : 0;
     const userBalances = user ? {
@@ -4040,8 +4040,23 @@ function publicMessageAttachments(attachments = []) {
 function publicSiteNotification(notification = {}) {
   return {
     ...notification,
+    title: publicPaymentProviderCopy(notification.title),
+    body: publicPaymentProviderCopy(notification.body),
     photoUrl: publicImageForState(notification.photoUrl || "", ""),
     buttonUrl: trustedContentUrl(notification.buttonUrl || "")
+  };
+}
+
+function publicPaymentProviderCopy(value = "") {
+  return String(value || "").replace(/NOW\s*Payments?/gi, "платёжный сервис");
+}
+
+function publicWithdrawalForState(withdrawal = {}) {
+  return {
+    ...withdrawal,
+    payoutFailureMessage: publicPaymentProviderCopy(withdrawal.payoutFailureMessage),
+    providerStatusCheckError: publicPaymentProviderCopy(withdrawal.providerStatusCheckError),
+    providerVerificationError: publicPaymentProviderCopy(withdrawal.providerVerificationError)
   };
 }
 
@@ -8612,7 +8627,7 @@ app.post("/api/admin/withdrawals/:id/status", async (req, res, next) => {
       return res.status(400).json({ error: "Неверный статус вывода" });
     }
     if (withdrawal.provider === "nowpayments") {
-      return res.status(409).json({ error: "NOWPayments payout status is controlled only by verified provider status" });
+      return res.status(409).json({ error: "Статус выплаты обновляется только после подтверждения платёжным сервисом" });
     }
     const prevStatus = String(withdrawal.status || "pending").toLowerCase();
     withdrawal.status = nextStatus;
@@ -9205,7 +9220,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
     withdrawal.autoPayoutError = String(record.error || record.message || "NOWPayments payout rejected").slice(0, 500);
     withdrawal.autoPayoutErrorCode = nowpaymentsPayoutErrorCode({ message: withdrawal.autoPayoutError, body: record });
     withdrawal.autoPayoutStage = "provider_status";
-    withdrawal.payoutFailureMessage = "NOWPayments отклонил выплату. Средства снова доступны; проверьте Whitelist, адрес и 2FA перед новой заявкой.";
+    withdrawal.payoutFailureMessage = "Выплата отклонена. Средства снова доступны; проверьте список разрешённых адресов, адрес выплаты и 2FA перед новой заявкой.";
     return { status, validation, terminal: true };
   }
   if (status === "failed") {
@@ -9215,7 +9230,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
     withdrawal.autoPayoutError = String(record.error || record.message || "NOWPayments payout failed").slice(0, 500);
     withdrawal.autoPayoutErrorCode = nowpaymentsPayoutErrorCode({ message: withdrawal.autoPayoutError, body: record });
     withdrawal.autoPayoutStage = "provider_status";
-    withdrawal.payoutFailureMessage = "NOWPayments сообщил failed. Не создавайте повторную выплату, пока транзакцию не проверит поддержка NOWPayments.";
+    withdrawal.payoutFailureMessage = "Выплату не удалось подтвердить. Не создавайте повторную заявку до проверки поддержкой.";
     return { status, validation, terminal: false };
   }
   if (["creating", "waiting", "processing", "sending"].includes(status)) {
@@ -9274,19 +9289,19 @@ function nowpaymentsPayoutErrorCode(value = {}) {
 function nowpaymentsPayoutFailureMessage(code = "provider_rejected") {
   return ({
     amount_precision: "Старая заявка была отклонена из-за формата суммы LTC. Формат выплаты уже исправлен, создайте новую заявку.",
-    whitelist_required: "NOWPayments отклонил выплату настройками Whitelist. Владельцу нужно разрешить IP сервера и адрес выплаты в NOWPayments.",
-    insufficient_balance: "На Primary balance NOWPayments недостаточно LTC для этой выплаты.",
-    custody_unavailable: "Primary/Custody balance NOWPayments недоступен для API. Включите его в аккаунте NOWPayments.",
-    two_factor_failed: "NOWPayments не принял код 2FA. Проверьте секрет 2FA для автоматических выплат.",
-    invalid_address: "NOWPayments отклонил LTC-адрес получателя.",
-    below_minimum: "Сумма меньше минимальной суммы выплаты NOWPayments.",
-    auth_failed: "NOWPayments не принял данные входа для выплат.",
-    api_key_invalid: "NOWPayments не принял API-ключ для проверки баланса или выплаты.",
-    access_forbidden: "NOWPayments запретил доступ к выплатам настройками аккаунта или Whitelist.",
-    timeout: "NOWPayments не подтвердил результат вовремя. Заявка оставлена на ручной проверке, повторять её пока нельзя.",
-    provider_unavailable: "NOWPayments временно недоступен. Повторите заявку позднее.",
-    provider_rejected: "NOWPayments отклонил выплату. Причина доступна владельцу в разделе финансов."
-  })[code] || "NOWPayments отклонил выплату.";
+    whitelist_required: "Выплата отклонена настройками доступа. Владельцу нужно проверить разрешённые IP и адрес выплаты.",
+    insufficient_balance: "Недостаточно LTC на счёте для этой выплаты.",
+    custody_unavailable: "Счёт для выплат недоступен через API. Проверьте настройки платёжного сервиса.",
+    two_factor_failed: "Не принят код 2FA. Проверьте настройку 2FA для автоматических выплат.",
+    invalid_address: "LTC-адрес получателя отклонён.",
+    below_minimum: "Сумма меньше минимальной суммы выплаты.",
+    auth_failed: "Не приняты данные входа для выплат.",
+    api_key_invalid: "Не принят API-ключ для проверки баланса или выплаты.",
+    access_forbidden: "Доступ к выплатам запрещён настройками аккаунта или списка разрешений.",
+    timeout: "Результат выплаты не подтверждён вовремя. Заявка оставлена на ручной проверке, повторять её пока нельзя.",
+    provider_unavailable: "Платёжный сервис временно недоступен. Повторите заявку позднее.",
+    provider_rejected: "Выплата отклонена. Причина доступна владельцу в разделе финансов."
+  })[code] || "Выплата отклонена.";
 }
 
 async function nowpaymentsPayoutStep(stage, operation) {
@@ -9565,14 +9580,14 @@ async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
             ? "Выплата требует проверки"
             : "Выплата отправлена в обработку",
     body: payoutPaid
-      ? `NOWPayments подтвердил завершение заявки ${latestWithdrawal.id}.`
+      ? `Выплата по заявке ${latestWithdrawal.id} завершена.`
       : payoutRejected
-        ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments отклонил выплату."}`
+        ? `${latestWithdrawal.payoutFailureMessage || "Выплата отклонена."}`
         : payoutFailed
-      ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments отклонил выплату."} Средства снова доступны для вывода.`
+      ? `${latestWithdrawal.payoutFailureMessage || "Выплата отклонена."} Средства снова доступны для вывода.`
       : payoutNeedsReview
-        ? `${latestWithdrawal.payoutFailureMessage || "NOWPayments не подтвердил результат."} Новую заявку пока не создавайте.`
-        : `Заявка ${latestWithdrawal.id} передана в NOWPayments.`
+        ? `${latestWithdrawal.payoutFailureMessage || "Результат выплаты пока не подтверждён."} Новую заявку пока не создавайте.`
+        : `Заявка ${latestWithdrawal.id} передана в обработку.`
   });
   await saveSettingsState(latestState);
   await appendAdminLog("withdrawal_provider_submitted", "system", {
@@ -9635,8 +9650,8 @@ async function reconcileNowpaymentsWithdrawalInState(state, withdrawal, { force 
         storeId: withdrawal.storeId || "",
         title: nextStatus === "paid" ? "Выплата завершена" : nextStatus === "rejected" ? "Выплата отклонена" : "Выплата требует проверки",
         body: nextStatus === "paid"
-          ? `NOWPayments подтвердил статус finished для заявки ${withdrawal.id}.`
-          : withdrawal.payoutFailureMessage || `NOWPayments вернул статус ${withdrawal.providerStatus || nextStatus}.`
+          ? `Выплата по заявке ${withdrawal.id} завершена.`
+          : withdrawal.payoutFailureMessage || `Статус заявки: ${withdrawal.providerStatus || nextStatus}.`
       });
     }
     return { changed: true, previousStatus, nextStatus, outcome };
@@ -12096,7 +12111,7 @@ function storeAdminWithdrawalForState(withdrawal = {}) {
     safeWithdrawal.payoutFailureCode = failureCode;
     safeWithdrawal.payoutFailureMessage = nowpaymentsPayoutFailureMessage(failureCode);
   }
-  return safeWithdrawal;
+  return publicWithdrawalForState(safeWithdrawal);
 }
 
 function withdrawalRequestFingerprint(req, { scope = "", identity = "", amountUsd = 0, amountLtc = 0, address = "" } = {}) {
@@ -14233,7 +14248,7 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
     );
     const minUsd = Number(minimum.fiat_equivalent || 0);
     if (!Number.isFinite(minUsd) || minUsd <= 0) {
-      return res.status(503).json({ error: "NOWPayments не вернул минимальную сумму для этой монеты" });
+      return res.status(503).json({ error: "Не удалось получить условия пополнения для этой монеты" });
     }
     const nominalUsd = Math.max(0.01, Math.ceil(minUsd * 100) / 100);
     const addressRecord = {
@@ -14260,13 +14275,13 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
     addressRecord.payAddress = String(payment.pay_address || payment.address || "").trim();
     addressRecord.minimumUsdAtCreation = minUsd;
     if (!addressRecord.seedPaymentId || !addressRecord.payAddress) {
-      return res.status(502).json({ error: "NOWPayments не вернул адрес или ID платежа" });
+      return res.status(502).json({ error: "Не удалось получить адрес пополнения. Попробуйте позже" });
     }
     if (permanentWalletAddresses(state).some((item) => (
       item.payCurrency === coin.payCurrency && (item.payAddress === addressRecord.payAddress || item.seedPaymentId === addressRecord.seedPaymentId)
     )) || deposits.some((item) => item.kind !== "permanent_address" && item.payAddress === addressRecord.payAddress)
       || (state.orders || []).some((item) => item.payAddress === addressRecord.payAddress || item.walletDepositAddress === addressRecord.payAddress)) {
-      return res.status(502).json({ error: "NOWPayments повторно выдал уже закрепленный адрес. Попробуйте позже." });
+      return res.status(502).json({ error: "Не удалось выдать уникальный адрес пополнения. Попробуйте позже." });
     }
     deposits.unshift(addressRecord);
     await saveSettingsState({ ...state, walletDeposits: deposits });

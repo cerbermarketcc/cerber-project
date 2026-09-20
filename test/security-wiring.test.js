@@ -60,7 +60,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=181/);
+  assert.match(indexHtml, /app\.js\?v=182/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -272,7 +272,7 @@ test("critical owner finance and repair routes require the owner role", () => {
     assert.match(routeBody(method, route), /requireOwnerAdmin\(req\)/, `${route} must be owner-only`);
   }
   assert.match(routeBody("post", "/api/admin/users/:login/balance"), /requestIdempotencyKey\(req, "Balance adjustment"\)/);
-  assert.match(routeBody("post", "/api/admin/withdrawals/:id/status"), /controlled only by verified provider status/);
+  assert.match(routeBody("post", "/api/admin/withdrawals/:id/status"), /withdrawal\.provider === "nowpayments"[\s\S]*res\.status\(409\)/);
   assert.match(routeBody("post", "/api/admin/withdrawals/:id/sync"), /reconcileNowpaymentsWithdrawalPayout/);
 });
 

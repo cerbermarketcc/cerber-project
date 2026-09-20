@@ -1676,7 +1676,7 @@ function renderFinance() {
     const status = String(w.status || "pending").toLowerCase();
     if (w.provider === "nowpayments") {
       if (w.providerPayoutId && !["paid", "rejected"].includes(status)) {
-        return `<button class="ghost" type="button" data-withdrawal-sync="${esc(w.id)}">Проверить NOWPayments</button>`;
+        return `<button class="ghost" type="button" data-withdrawal-sync="${esc(w.id)}">Проверить статус выплаты</button>`;
       }
       return `<span class="muted">${w.processedAt ? `Confirmed ${fmtDate(w.processedAt)}` : "Provider controlled"}</span>`;
     }
@@ -1691,7 +1691,7 @@ function renderFinance() {
   return `<section class="grid">${bucketCard("Successful deposits", buckets.successful)}${bucketCard("Pending", buckets.pending)}${bucketCard("Cancelled", buckets.cancelled)}${bucketCard("Failed", buckets.failed)}${statCard("Referral rewards", cryptoValue(referralTotals.rewardsUsd || 0, referralTotals.rewardsLtc), `${Number(referralTotals.count || 0)} refs`)}${statCard("From purchases", cryptoValue(referralTotals.productRewardsUsd || 0, referralTotals.productRewardsLtc), "product orders")}</section>
   <article class="table-card"><h3>Referral rewards</h3><table><thead><tr><th>ID</th><th>Inviter</th><th>Referral</th><th>Base</th><th>Reward</th><th>Source</th><th>Date</th></tr></thead><tbody>${referralPayments.slice(0, 160).map((p) => `<tr><td>${esc(p.id)}</td><td>${esc(p.referrerLogin || "")}</td><td>${esc(p.referralLogin || "")}</td><td>${fmtMoney(p.amount || p.amountUsd || 0)}</td><td>${fmtMoney(p.rewardCurrentUsd || p.reward || 0)}<br><span class="muted">${fmtLtc(p.rewardLtc)}</span></td><td>${esc(p.sourceId || "")}</td><td>${fmtDate(p.createdAt || p.date)}</td></tr>`).join("")}</tbody></table></article>
   <article class="table-card"><h3>Deposits</h3><table><thead><tr><th>ID</th><th>Login</th><th>Amount</th><th>Coin</th><th>Status</th><th>Address</th><th>Date</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
-  <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(6)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span>${w.providerStatus && w.providerStatus !== w.status ? `<br><span class="muted">NOWPayments: ${esc(w.providerStatus)}</span>` : ""}${w.payoutFailureMessage || w.providerStatusCheckError ? `<br><span class="muted">${esc(w.payoutFailureMessage || w.providerStatusCheckError)}</span>` : ""}</td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
+  <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(6)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span>${w.providerStatus && w.providerStatus !== w.status ? `<br><span class="muted">Статус выплаты: ${esc(w.providerStatus)}</span>` : ""}${w.payoutFailureMessage || w.providerStatusCheckError ? `<br><span class="muted">${esc(w.payoutFailureMessage || w.providerStatusCheckError)}</span>` : ""}</td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function renderSettings() {
@@ -1930,7 +1930,7 @@ function renderHealth() {
     <section class="grid">
       ${statCard("Health", healthPending ? "CHECKING" : (health.ok ? "OK" : "FAIL"), health.time || "")}
       ${statCard("Database", healthPending ? "CHECKING" : (checks.database?.ok ? "OK" : "FAIL"), "database")}
-      ${statCard("NOWPayments", healthPending ? "CHECKING" : (checks.nowpayments?.readyForPayouts ? "READY" : "CHECK"), "payments")}
+      ${statCard("Платёжный сервис", healthPending ? "CHECKING" : (checks.nowpayments?.readyForPayouts ? "READY" : "CHECK"), "payments")}
       ${statCard("Telegram", healthPending ? "CHECKING" : (checks.telegram?.mainBot ? "OK" : "CHECK"), "bots")}
     </section>
     <section class="split">
@@ -1938,9 +1938,9 @@ function renderHealth() {
         <h3>Services</h3>
         <table><tbody>
           <tr><td>Database</td><td>${healthStatus(checks.database?.ok)}</td></tr>
-          <tr><td>NOWPayments API</td><td>${healthStatus(checks.nowpayments?.apiKey)}</td></tr>
-          <tr><td>NOWPayments IPN secret</td><td>${healthStatus(checks.nowpayments?.ipnSecret)}</td></tr>
-          <tr><td>NOWPayments payouts</td><td>${healthStatus(checks.nowpayments?.readyForPayouts)}</td></tr>
+          <tr><td>Платёжный API</td><td>${healthStatus(checks.nowpayments?.apiKey)}</td></tr>
+          <tr><td>Секрет уведомлений об оплате</td><td>${healthStatus(checks.nowpayments?.ipnSecret)}</td></tr>
+          <tr><td>Автоматические выплаты</td><td>${healthStatus(checks.nowpayments?.readyForPayouts)}</td></tr>
           <tr><td>Telegram main bot</td><td>${healthStatus(checks.telegram?.mainBot)}</td></tr>
           <tr><td>Telegram webhook secret</td><td>${healthStatus(checks.telegram?.webhookSecret)}</td></tr>
           <tr><td>Site notify bot</td><td>${healthStatus(checks.telegram?.siteNotifyBot)}</td></tr>
@@ -2618,7 +2618,7 @@ function bindActions() {
         headers: { "X-Idempotency-Key": adminRequestId("owner-withdrawal") },
         body: JSON.stringify({ amountLtc, address })
       });
-      toast("Заявка создана. Выплата завершится только после статуса finished от NOWPayments");
+      toast("Заявка создана. Выплата завершится после подтверждения");
       renderShell();
     } catch (error) {
       toast(error.message, true);
@@ -2662,7 +2662,7 @@ function bindActions() {
           method: "POST",
           body: JSON.stringify({})
         });
-        toast("Статус NOWPayments обновлён");
+        toast("Статус выплаты обновлён");
         renderShell();
       } catch (error) {
         toast(error.message, true);

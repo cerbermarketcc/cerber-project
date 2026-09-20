@@ -13264,7 +13264,7 @@ async function requestShopPayout(event) {
     });
     applyRemoteState(payload);
     document.querySelector("[data-modal]")?.classList.remove("open");
-    showToast("Заявка создана. Ожидайте статус finished от NOWPayments");
+    showToast("Заявка создана. Ожидайте подтверждения выплаты");
     renderShopPanel("finances");
   } catch (error) {
     showToast(error.message || "Не удалось создать заявку на вывод");
