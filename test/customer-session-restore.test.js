@@ -189,7 +189,7 @@ test("initial bootstrap restores the customer session before falling back to pub
   assert.match(initApp, /if\s*\(rememberedUserNeedsVerification\)\s*renderFallbackScreen\(\)/);
   assert.match(initApp, /if\s*\(rememberedUserNeedsVerification\s*&&\s*db\.currentUser\s*&&\s*!sessionVerified\)\s*renderFallbackScreen\(\)/);
   assert.doesNotMatch(initApp, /apiSessionToken\(\)\s*\?\s*loadRemoteSession\(\)\s*:\s*loadRemoteState\(\)/);
-  assert.match(indexHtml, /<script\s+src=["']app\.js\?v=180["']><\/script>/);
+  assert.match(indexHtml, /<script\s+src=["']app\.js\?v=181["']><\/script>/);
 });
 
 test("logout waits for server revocation before clearing the local session", () => {
