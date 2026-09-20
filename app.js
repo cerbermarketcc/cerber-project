@@ -175,7 +175,6 @@ const GROUP_CHAT_HIDDEN_SITE_EMOJI_IDS = new Set([
   "038"
 ]);
 const scheduledRollTimers = new Set();
-const WALLET_DEPOSIT_TTL_MS = 40 * 60 * 1000;
 let groupVoiceRecorder = null;
 let groupVoiceChunks = [];
 let groupVoiceDraft = null;
@@ -2556,8 +2555,9 @@ async function syncPendingProductPayments() {
 
 function hasPendingWalletDeposit() {
   return (db.walletDeposits || []).some((deposit) => (
-    deposit?.paymentId
-    && ["waiting", "processing", "pending"].includes(String(deposit.status || "waiting").toLowerCase())
+    (deposit?.kind === "permanent_address" && deposit.payAddress)
+    || (deposit?.paymentId
+      && ["waiting", "processing", "pending"].includes(String(deposit.status || "waiting").toLowerCase()))
   ));
 }
 
@@ -2573,9 +2573,13 @@ async function syncPendingWalletDeposits() {
     timeoutMs: 40000
   }).then((payload) => {
     const previousBalance = userLtcBalance();
+    const previousUsdBalance = userBalance();
+    const previousTransactionId = walletTransactions()[0]?.id;
     applyRemoteState(payload);
     if (!hasPendingWalletDeposit()) startWalletDepositSync();
-    const changed = Math.abs(userLtcBalance() - previousBalance) > 0.000000001;
+    const changed = Math.abs(userLtcBalance() - previousBalance) > 0.000000001
+      || Math.abs(userBalance() - previousUsdBalance) > 0.000001
+      || walletTransactions()[0]?.id !== previousTransactionId;
     if (changed && realtimeCanRenderNow()) {
       if (route === "wallet") renderWallet();
       else renderCurrent();
@@ -3710,6 +3714,20 @@ function walletDepositCoin(deposit) {
 
 function walletDepositPayAmount(deposit) {
   return Number(deposit.payAmount || deposit.amountPay || 0);
+}
+
+function walletPermanentDeposits(login = db.currentUser) {
+  return (db.walletDeposits || [])
+    .filter((deposit) => deposit.kind === "permanent_address" && deposit.payAddress && sameLogin(deposit.login, login))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+}
+
+function walletDepositAddress(deposit) {
+  if (deposit.payAddress) return deposit.payAddress;
+  if (deposit.addressId) {
+    return (db.walletDeposits || []).find((item) => item.id === deposit.addressId)?.payAddress || "";
+  }
+  return "";
 }
 
 function activeWithdrawalUsd(scope = "", storeId = "") {
@@ -9431,11 +9449,12 @@ function renderWallet() {
   const usd = userBalance();
   const txs = walletTransactions();
   const withdrawals = walletWithdrawals();
+  const addresses = walletPermanentDeposits();
   layout(`
     <section class="screen wallet-screen">
       <article class="wallet-hero">
         <h1>Баланс</h1>
-        <p>Все платежи поступают на ваш кошелек CERBER MARKET.<br>Основной баланс хранится в фиксированной сумме USD.</p>
+        <p>Пополняйте личный адрес выбранной монеты. После подтверждения каждого перевода фактическая сумма появится на балансе CERBER.</p>
         <div class="coin-tabs">
           <button class="active"><span class="ltc-badge">Ł</span> LTC</button>
         </div>
@@ -9453,6 +9472,18 @@ function renderWallet() {
           <button class="ghost-button" data-route="exchange">Купить LTC ↙</button>
         </div>
       </article>
+      ${addresses.length ? `
+        <article class="wallet-transactions wallet-deposit-addresses">
+          <h2>Мои адреса для пополнения</h2>
+          <p class="desc">Адрес постоянный: его можно использовать для следующих пополнений. Отправляйте любую сумму выше минимального порога платёжного провайдера.</p>
+          ${addresses.map((deposit) => `
+            <div class="wallet-deposit-address-row">
+              <div><strong>${esc(walletCoinLabel(walletDepositCoin(deposit).id))}</strong><small>${esc(deposit.payAddress)}</small></div>
+              <button class="ghost-button" type="button" data-copy="${esc(deposit.payAddress)}">Скопировать</button>
+            </div>
+          `).join("")}
+        </article>
+      ` : ""}
       <article class="wallet-transactions">
         <h2>Заявки на вывод</h2>
         ${withdrawals.length ? withdrawals.map(walletWithdrawalView).join("") : `
@@ -9478,6 +9509,7 @@ function renderWallet() {
     </section>
   `);
   document.querySelector("[data-wallet-deposit-open]")?.addEventListener("click", openWalletDepositModal);
+  bindCopyButtons();
   document.querySelectorAll("[data-wallet-withdraw-open]").forEach((button) => button.addEventListener("click", openWalletWithdrawModal));
   document.querySelectorAll(".wallet-tx[data-wallet-deposit]").forEach((row) => {
     row.addEventListener("click", () => showWalletDepositDetails(row.dataset.walletDeposit));
@@ -9514,12 +9546,14 @@ function walletTransactionView(tx) {
   const depositCoin = deposit ? walletDepositCoin(deposit) : null;
   const depositAmount = deposit ? walletDepositPayAmount(deposit) : 0;
   const title = depositCoin ? `Пополнение ${walletCoinLabel(depositCoin.id)}` : tx.title;
+  const credited = deposit?.kind === "permanent_credit";
+  const date = tx.date || new Date(Number(tx.createdAt || Date.now())).toLocaleString();
   return `
     <article class="wallet-tx ${status.key}" ${canOpenDeposit ? `data-wallet-deposit="${esc(deposit.id)}"` : ""}>
       <div class="wallet-tx-main">
         <h3>${esc(title)}</h3>
-        <p>${esc(tx.date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
-        ${deposit ? `<small>К оплате: ${depositAmount.toFixed(8)} ${esc(walletCoinLabel(depositCoin.id))}</small>` : ""}
+        <p>${esc(date)} · ${status.label}${status.timer ? ` · ${status.timer}` : ""}</p>
+        ${credited ? `<small>Получено: ${depositAmount.toFixed(8)} ${esc(walletCoinLabel(depositCoin.id))} · зачислено ${Number(deposit.amountUsd || tx.amountUsd || 0).toFixed(2)} USD</small>` : deposit ? `<small>К оплате: ${depositAmount.toFixed(8)} ${esc(walletCoinLabel(depositCoin.id))}</small>` : ""}
       </div>
       <strong class="${Number(tx.amountLtc || 0) >= 0 ? "plus" : "minus"}">${sign}${Number(tx.amountLtc || 0).toFixed(6)} LTC</strong>
       ${canOpenDeposit ? `<button class="ghost-button wallet-tx-details" data-wallet-deposit="${esc(deposit.id)}">Детали</button>` : ""}
@@ -9557,10 +9591,14 @@ function walletTransactionStatus(tx) {
 function walletDepositForTransaction(tx) {
   if (tx.type !== "deposit") return null;
   const id = String(tx.id || "").replace(/^tx-/, "");
-  return (db.walletDeposits || []).find((deposit) => deposit.id === id || deposit.paymentId === tx.paymentId) || null;
+  return (db.walletDeposits || []).find((deposit) => deposit.kind !== "permanent_address"
+    && (deposit.id === id
+      || tx.depositId && deposit.id === tx.depositId
+      || tx.paymentId && deposit.paymentId === tx.paymentId)) || null;
 }
 
 function walletDepositStatusText(deposit) {
+  if (deposit.kind === "permanent_address") return "Постоянный адрес активен";
   const status = walletTransactionStatus({
     status: deposit.status === "waiting" ? "processing" : deposit.status,
     expiresAt: deposit.expiresAt
@@ -9570,6 +9608,9 @@ function walletDepositStatusText(deposit) {
 
 function walletDepositCopyText(deposit) {
   const coin = walletDepositCoin(deposit);
+  if (deposit.kind === "permanent_address") {
+    return `Сеть: ${walletCoinLabel(coin.id)}\nАдрес: ${deposit.payAddress || ""}`;
+  }
   return `Сеть: ${walletCoinLabel(coin.id)}\nАдрес: ${deposit.payAddress || ""}\nСумма: ${walletDepositPayAmount(deposit).toFixed(8)} ${walletCoinLabel(coin.id)}`;
 }
 
@@ -9588,6 +9629,33 @@ function showWalletDepositDetails(depositId) {
   if (!deposit) return;
   const coin = walletDepositCoin(deposit);
   const coinLabel = walletCoinLabel(coin.id);
+  if (deposit.kind === "permanent_address") {
+    showModal(`
+      <h2>Личный адрес ${esc(coinLabel)}</h2>
+      <p class="desc">Этот адрес остаётся за вами для следующих пополнений. Отправляйте любую сумму выше минимального порога платёжного провайдера. Каждый подтверждённый перевод зачисляется отдельно по фактически полученной сумме.</p>
+      <div class="deposit-address">
+        <strong>${esc(deposit.payAddress)}</strong>
+        <button class="ghost-button" data-copy="${esc(deposit.payAddress)}">Скопировать</button>
+      </div>
+      <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать адрес и сеть</button>
+      <button class="ghost-button" data-close-modal>${tr("close")}</button>
+    `);
+    bindCopyButtons();
+    return;
+  }
+  if (deposit.kind === "permanent_credit") {
+    const address = walletDepositAddress(deposit);
+    showModal(`
+      <h2>Пополнение ${esc(coinLabel)}</h2>
+      <p>${esc(walletDepositStatusText(deposit))}</p>
+      <p class="desc">Перевод от ${esc(new Date(Number(deposit.createdAt || Date.now())).toLocaleString())}</p>
+      <div class="deposit-address"><span>Получено</span><strong>${walletDepositPayAmount(deposit).toFixed(8)} ${esc(coinLabel)}</strong></div>
+      <div class="deposit-address"><span>Зачислено</span><strong>${Number(deposit.amountUsd || 0).toFixed(2)} USD</strong></div>
+      ${address ? `<div class="deposit-address"><span>Адрес</span><strong>${esc(address)}</strong></div>` : ""}
+      <button class="ghost-button" data-close-modal>${tr("close")}</button>
+    `);
+    return;
+  }
   showModal(`
     <h2>Пополнение ${esc(coinLabel)}</h2>
     <p>${esc(walletDepositStatusText(deposit))}</p>
@@ -9609,13 +9677,12 @@ function showWalletDepositDetails(depositId) {
 function openWalletDepositModal() {
   showModal(`
     <h2>Пополнить баланс</h2>
-    <p>Выберите монету и сумму. После подтверждения на внутренний баланс зачислится указанная сумма в USD.</p>
+    <p>Выберите монету и получите свой постоянный адрес. На него можно отправлять любую сумму выше минимального порога платёжного провайдера.</p>
     <form class="form" data-wallet-deposit-form>
-      <label class="field">Сумма в USD<input name="amountUsd" type="number" min="1" step="0.01" value="10" required></label>
       <label class="field">Монета и сеть<select name="coinId" required>
         ${WALLET_COINS.map((coin) => `<option value="${esc(coin.id)}">${esc(walletCoinLabel(coin.id))}</option>`).join("")}
       </select></label>
-      <button class="primary">Создать счет</button>
+      <button class="primary">Получить адрес</button>
     </form>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
@@ -9664,82 +9731,36 @@ async function createWalletWithdrawal(event) {
   }
 }
 
-async function createWalletDepositRequest(amountUsd, coinId = "ltc", title = "Пополнение баланса") {
+async function createWalletDepositRequest(coinId = "ltc") {
   const coin = walletCoinById(coinId);
-  if (!API_ENABLED) {
-    const amountLtc = usdToLtc(amountUsd);
-    const deposit = {
-      id: `deposit-${Date.now()}`,
-      login: db.currentUser,
-      amountUsd,
-      amountLtc,
-      payAmount: coin.id === "ltc" ? amountLtc : amountUsd,
-      coinId: coin.id,
-      payCurrency: coin.payCurrency,
-      payAddress: "",
-      status: "processing",
-      expiresAt: Date.now() + WALLET_DEPOSIT_TTL_MS,
-      createdAt: Date.now()
-    };
-    db.walletDeposits.unshift(deposit);
-    addWalletTransaction({
-      id: `tx-${deposit.id}`,
-      type: "deposit",
-      title,
-      amountLtc,
-      amountUsd,
-      coinId: coin.id,
-      payCurrency: coin.payCurrency,
-      status: "processing",
-      expiresAt: deposit.expiresAt
-    });
-    saveDb();
-    return deposit;
-  }
+  if (!API_ENABLED) throw new Error("Для получения адреса требуется подключение к серверу");
   const payload = await apiFetch("/api/wallet/deposits/create", {
     method: "POST",
-    body: JSON.stringify({ amountUsd, coinId: coin.id, payCurrency: coin.payCurrency, clientRequestId: newClientRequestId("wallet-deposit") })
+    body: JSON.stringify({ coinId: coin.id, payCurrency: coin.payCurrency, clientRequestId: newClientRequestId("wallet-deposit") })
   });
   applyRemoteState(payload);
-  startWalletDepositSync();
   const deposit = payload.deposit || {};
-  if (!deposit.payAddress && !deposit.paymentUrl) throw new Error("Платежный шлюз не вернул адрес оплаты");
-  const tx = (db.walletTransactions || []).find((item) => item.id === `tx-${deposit.id}` || item.paymentId === deposit.paymentId);
-  if (tx && title) tx.title = title;
+  if (!deposit.id || !deposit.payAddress || deposit.kind !== "permanent_address") {
+    throw new Error("Платёжный шлюз не вернул постоянный адрес");
+  }
+  if (!(db.walletDeposits || []).some((item) => item.id === deposit.id)) {
+    db.walletDeposits.unshift({ ...deposit, login: deposit.login || db.currentUser });
+  }
   saveDb();
+  startWalletDepositSync();
   return deposit;
 }
 
 async function createWalletDeposit(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
-  const amountUsd = Number(data.get("amountUsd") || 0);
   const coin = walletCoinById(data.get("coinId") || "ltc");
-  if (amountUsd <= 0) return;
   const submit = event.currentTarget.querySelector("button");
-  setButtonLoading(submit, true, "Создаём счет");
+  setButtonLoading(submit, true, "Получаем адрес");
   try {
-    const deposit = await createWalletDepositRequest(amountUsd, coin.id);
-    const finalCoin = walletDepositCoin(deposit);
-    const coinLabel = walletCoinLabel(finalCoin.id);
+    const deposit = await createWalletDepositRequest(coin.id);
     renderWallet();
-    showModal(`
-      <h2>Счет на пополнение</h2>
-      <p>Скопируйте адрес и сумму ниже. Оплата истекает через 40 минут, транзакция уже добавлена в обработку.</p>
-      <p class="desc">После подтверждения платеж будет зачислен на внутренний баланс сайта в LTC-эквиваленте.</p>
-      <div class="deposit-address">
-        <strong>${esc(deposit.payAddress || "Адрес создается")}</strong>
-        <button class="ghost-button" data-copy="${esc(deposit.payAddress || "")}">Скопировать</button>
-      </div>
-      <div class="deposit-address">
-        <strong>${walletDepositPayAmount(deposit).toFixed(8)} ${esc(coinLabel)}</strong>
-        <button class="ghost-button" data-copy="${walletDepositPayAmount(deposit).toFixed(8)}">Скопировать сумму</button>
-      </div>
-      <button class="primary" data-copy="${esc(walletDepositCopyText(deposit))}">Скопировать всё вместе</button>
-      ${deposit.paymentUrl ? `<a class="primary link-button" href="${esc(deposit.paymentUrl)}" target="_blank" rel="noopener">Открыть оплату</a>` : ""}
-      <button class="ghost-button" data-close-modal>${tr("close")}</button>
-    `);
-    bindCopyButtons();
+    showWalletDepositDetails(deposit.id);
   } catch (error) {
     showToast(error.message || "Не удалось создать пополнение");
     setButtonLoading(submit, false);

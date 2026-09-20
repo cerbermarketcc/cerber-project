@@ -5988,6 +5988,37 @@ body[data-theme="dark"] .mirror-row {
   margin: 0 0 18px;
 }
 
+.wallet-deposit-addresses .desc {
+  margin: 0 0 12px;
+}
+
+.wallet-deposit-address-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.wallet-deposit-address-row > div {
+  min-width: 0;
+}
+
+.wallet-deposit-address-row small {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+@media (max-width: 620px) {
+  .wallet-deposit-address-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .wallet-tx {
   display: flex;
   align-items: center;

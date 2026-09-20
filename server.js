@@ -74,6 +74,8 @@ const localUserSessionCookieName = "cerber_remember_v1";
 const nowpaymentsApiKey = process.env.NOWPAYMENTS_API_KEY || "";
 const nowpaymentsIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET || "";
 const nowpaymentsPublicKey = process.env.NOWPAYMENTS_PUBLIC_KEY || "";
+// Enable only after NOWPayments confirms extra/repeated deposit processing for this account.
+const nowpaymentsPermanentDepositsEnabled = String(process.env.NOWPAYMENTS_PERMANENT_DEPOSITS_ENABLED || "").toLowerCase() === "true";
 const incidentPayoutUnlockVersion = "reviewed-2026-08-12-v1";
 const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED || "").toLowerCase() === "true"
   && secretValuesMatch(process.env.INCIDENT_PAYOUT_UNLOCK, incidentPayoutUnlockVersion);
@@ -114,6 +116,9 @@ const walletCoins = [
 let litecoinUsdRateCache = { rate: 0, sources: [], updatedAt: 0 };
 let paymentReconcilePromise = null;
 let paymentReconcileStatus = { state: "idle", checked: 0, completed: 0, pending: 0, statuses: {}, updatedAt: 0, error: "" };
+const permanentAddressLastCheckAt = new Map();
+const permanentPaymentLastCheckAt = new Map();
+let permanentPaymentListLastScanAt = 0;
 let settingsSaveChain = Promise.resolve();
 let cleanLaunchInProgress = true;
 const withdrawalPayoutJobs = new Set();
@@ -9730,6 +9735,213 @@ async function createNowpaymentsWalletPayment(paymentPayload) {
   return payment;
 }
 
+function permanentWalletAddresses(state = {}) {
+  return (Array.isArray(state.walletDeposits) ? state.walletDeposits : [])
+    .filter((item) => item?.kind === "permanent_address" && item.status === "active" && item.payAddress && item.seedPaymentId);
+}
+
+function permanentWalletAddressForPayment(state, payment = {}) {
+  const paymentId = String(payment.payment_id || payment.id || "").trim();
+  const parentId = String(payment.parent_payment_id || "").trim();
+  const address = String(payment.pay_address || "").trim();
+  const currency = String(payment.pay_currency || "").toLowerCase();
+  if (!paymentId || !address || !currency) return null;
+  const matches = permanentWalletAddresses(state).filter((item) => (
+    item.payAddress === address && String(item.payCurrency).toLowerCase() === currency
+  ));
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  if (parentId && parentId !== String(match.seedPaymentId)) return null;
+  const orderId = String(payment.order_id || payment.order || payment.orderId || "").trim();
+  if (orderId && orderId !== match.id) return null;
+  if ((state.orders || []).some((order) => (
+    String(order.paymentId || "") === paymentId
+    || String(order.payAddress || "") === address
+    || String(order.walletDepositAddress || "") === address
+  ))) return null;
+  if ((state.walletDeposits || []).some((deposit) => (
+    deposit.kind !== "permanent_address" && deposit.kind !== "permanent_credit"
+    && (String(deposit.paymentId || "") === paymentId || String(deposit.payAddress || "") === address)
+  ))) return null;
+  // The provider may omit parent_payment_id on a repeated payment. A payment
+  // fetched from its API can still be attributed by its unique pay-in address.
+  return match;
+}
+
+async function completePermanentWalletPayment(state, payment = {}, options = {}) {
+  const address = permanentWalletAddressForPayment(state, payment);
+  if (!address) return { credited: false, reason: "address_or_parent_mismatch" };
+  const paymentId = String(payment.payment_id || payment.id || "").trim();
+  const status = String(payment.payment_status || payment.status || "").toLowerCase();
+  if (status !== "finished") return { credited: false, reason: `status_${status || "missing"}` };
+  const paidCoin = Number(payment.actually_paid);
+  if (!Number.isFinite(paidCoin) || paidCoin <= 0) return { credited: false, reason: "paid_amount_missing" };
+  const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+  const existing = deposits.find((item) => String(item.paymentId || "") === paymentId);
+  if (existing) {
+    if (existing.kind !== "permanent_credit" || existing.addressId !== address.id) {
+      return { credited: false, reason: "payment_id_already_assigned" };
+    }
+    reconcileUserLtcBalanceFromLedger(state, address.login);
+    return { credited: false, duplicate: true, deposit: existing };
+  }
+  const outcomeLtc = String(payment.outcome_currency || "").toLowerCase() === "ltc"
+    ? Number(payment.outcome_amount || 0) : 0;
+  const paidLtc = roundLtc(address.payCurrency === "ltc" ? paidCoin : outcomeLtc);
+  if (!paidLtc) return { credited: false, reason: "ltc_outcome_missing" };
+  const rate = Number((await loadLitecoinUsdRate()).rate || 0);
+  if (!Number.isFinite(rate) || rate <= 0) return { credited: false, reason: "ltc_rate_missing" };
+  const paidUsd = Number((paidLtc * rate).toFixed(2));
+  const completedAt = Date.now();
+  const deposit = {
+    id: `permanent-deposit-${paymentId}`,
+    kind: "permanent_credit",
+    addressId: address.id,
+    login: address.login,
+    paymentId,
+    payAddress: address.payAddress,
+    payCurrency: address.payCurrency,
+    coinId: address.coinId,
+    payAmount: paidCoin,
+    amountLtc: paidLtc,
+    amountUsd: paidUsd,
+    ltcUsdRateAtCredit: rate,
+    status: "completed",
+    paymentStatus: status,
+    paymentProviderPayload: payment,
+    createdAt: completedAt,
+    paidAt: completedAt,
+    completedAt,
+    balanceCreditedAt: completedAt,
+    date: new Date(completedAt).toLocaleString("ru-RU")
+  };
+  state.walletDeposits = deposits;
+  state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
+  if (state.walletTransactions.some((item) => item.id === `tx-${deposit.id}`)) {
+    return { credited: false, reason: "ledger_id_already_assigned" };
+  }
+  state.walletTransactions.unshift({
+    id: `tx-${deposit.id}`,
+    login: address.login,
+    type: "deposit",
+    title: "Пополнение баланса",
+    amountLtc: paidLtc,
+    amountUsd: paidUsd,
+    payAmount: paidCoin,
+    payCurrency: address.payCurrency,
+    coinId: address.coinId,
+    paymentId,
+    balanceCreditId: deposit.id,
+    createdAt: completedAt,
+    completedAt,
+    date: deposit.date,
+    status: "completed"
+  });
+  deposits.unshift(deposit);
+  deposit.balanceAfterLtc = setStateUserLtcBalance(state, address.login, stateUserLtcBalance(state, address.login) + paidLtc);
+  const referralPayment = applyReferralReward(state, address.login, paidUsd, `wallet-deposit:${deposit.id}`, paidLtc);
+  await saveSettingsState(state);
+  notifyRealtime("wallet_deposit_completed", { id: deposit.id, login: address.login });
+  if (options.notify !== false) {
+    await notifySiteUser(state, address.login, {
+      id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(address.login)}`,
+      eventType: "wallet_deposit_completed",
+      title: "Баланс пополнен",
+      body: `Получено ${paidCoin} ${address.payCurrency.toUpperCase()}. Зачислено ${paidLtc.toFixed(8)} LTC (${paidUsd.toFixed(2)} $).`
+    });
+    if (referralPayment) await notifySiteUser(state, referralPayment.referrerLogin, {
+      id: `notice-referral-reward-${referralPayment.id}-${loginKey(referralPayment.referrerLogin)}`,
+      eventType: "referral_reward",
+      title: "Реферальное начисление",
+      body: `Начислено ${Number(referralPayment.reward || 0).toFixed(2)} $ за пополнение пользователя ${address.login}.`
+    });
+    await saveSettingsState(state);
+  }
+  return { credited: true, deposit };
+}
+
+async function scanPermanentWalletPayments(state) {
+  const addresses = permanentWalletAddresses(state);
+  if (!addresses.length || !nowpaymentsEmail || !nowpaymentsPassword) return { checked: 0, credited: 0 };
+  if (!state.permanentPaymentListScan && Date.now() - permanentPaymentListLastScanAt < 2 * 60 * 1000) {
+    return { checked: 0, credited: 0 };
+  }
+  permanentPaymentListLastScanAt = Date.now();
+  const firstAddressAt = Math.min(...addresses.map((item) => Number(item.createdAt || Date.now())));
+  const cursor = Number(state.permanentPaymentListScannedAt || firstAddressAt);
+  const scan = state.permanentPaymentListScan?.dateTo ? state.permanentPaymentListScan : {
+    dateFrom: new Date(Math.max(firstAddressAt, cursor - 6 * 60 * 60 * 1000)).toISOString(),
+    dateTo: new Date().toISOString(),
+    page: 0,
+    index: 0
+  };
+  const token = await nowpaymentsPayoutToken();
+  let checked = 0;
+  let credited = 0;
+  let exhausted = false;
+  const reviewIds = new Set(Array.isArray(state.permanentPaymentReviewIds) ? state.permanentPaymentReviewIds.map(String) : []);
+  for (const id of [...reviewIds].slice(0, 5)) {
+    const detail = await nowpaymentsRequest(`payment/${encodeURIComponent(id)}`, { method: "GET" });
+    checked += 1;
+    const result = await completePermanentWalletPayment(state, detail);
+    if (result.credited) credited += 1;
+    if (result.credited || result.duplicate) reviewIds.delete(id);
+    else {
+      reviewIds.delete(id);
+      reviewIds.add(id);
+    }
+  }
+  for (let pagesThisRun = 0; pagesThisRun < 2; pagesThisRun += 1) {
+    const query = new URLSearchParams({
+      limit: "500", page: String(scan.page), sortBy: "created_at", orderBy: "asc",
+      dateFrom: scan.dateFrom, dateTo: scan.dateTo
+    });
+    const list = await nowpaymentsRequest(`payment/?${query}`, { method: "GET", token });
+    if (!Array.isArray(list.data)) throw new Error("NOWPayments payment list has no data array");
+    const rows = Array.isArray(list.data) ? list.data : [];
+    if (Number(scan.index || 0) > rows.length) throw new Error("NOWPayments payment list changed during scan");
+    for (let index = Number(scan.index || 0); index < rows.length; index += 1) {
+      const row = rows[index];
+      const id = String(row.payment_id || row.id || "");
+      if (!id || String(row.payment_status || row.status || "").toLowerCase() !== "finished") continue;
+      if ((state.walletDeposits || []).some((item) => String(item.paymentId || "") === id)) continue;
+      const address = addresses.find((item) => (
+        (item.payAddress === String(row.pay_address || "") && item.payCurrency === String(row.pay_currency || "").toLowerCase())
+        || item.seedPaymentId === String(row.parent_payment_id || "")
+      ));
+      if (!address) continue;
+      if (checked >= 20) {
+        scan.index = index;
+        state.permanentPaymentListScan = scan;
+        state.permanentPaymentReviewIds = [...reviewIds];
+        await saveSettingsState(state);
+        return { checked, credited, complete: false };
+      }
+      const detail = await nowpaymentsRequest(`payment/${encodeURIComponent(id)}`, { method: "GET" });
+      checked += 1;
+      const result = await completePermanentWalletPayment(state, detail);
+      if (result.credited) credited += 1;
+      else if (!result.duplicate) reviewIds.add(id);
+    }
+    const pagesCount = Number(list.pagesCount ?? list.pages_count ?? 0);
+    if (rows.length < 500 || (pagesCount > 0 && scan.page + 1 >= pagesCount)) {
+      exhausted = true;
+      break;
+    }
+    scan.page += 1;
+    scan.index = 0;
+  }
+  state.permanentPaymentReviewIds = [...reviewIds];
+  if (exhausted) {
+    delete state.permanentPaymentListScan;
+    state.permanentPaymentListScannedAt = Date.parse(scan.dateTo);
+  } else {
+    state.permanentPaymentListScan = scan;
+  }
+  await saveSettingsState(state);
+  return { checked, credited, complete: exhausted };
+}
+
 function walletCoinFromRequest(body = {}) {
   const requested = String(body.payCurrency || body.coinId || "ltc").toLowerCase();
   return walletCoins.find((coin) => coin.id === requested || coin.payCurrency === requested) || walletCoins[0];
@@ -13278,6 +13490,7 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
     const completedDeposits = deposits.filter((deposit) => (
       deposit?.id
       && deposit.login
+      && deposit.kind !== "permanent_credit"
       && ["completed", "paid", "finished"].includes(String(deposit.status || "").toLowerCase())
     ));
     for (const deposit of completedDeposits) {
@@ -13291,6 +13504,10 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
       } catch (error) {
         errors.push(`deposit repair ${deposit.id}: ${String(error.message || error).slice(0, 160)}`);
       }
+    }
+    for (const login of new Set(deposits.filter((item) => item.kind === "permanent_credit" && item.status === "completed").map((item) => item.login))) {
+      const before = stateUserLtcBalance(state, login);
+      if (reconcileUserLtcBalanceFromLedger(state, login) > before + 0.000000001) changed = true;
     }
     const depositCandidates = deposits
       .filter((deposit) => (
@@ -13327,6 +13544,55 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
         errors.push(String(error.message || error).slice(0, 200));
       }
     }
+    let permanentChecked = 0;
+    let permanentCompleted = 0;
+    const permanentCandidates = permanentWalletAddresses(state)
+      .sort((a, b) => Number(permanentAddressLastCheckAt.get(a.id) || 0) - Number(permanentAddressLastCheckAt.get(b.id) || 0))
+      .slice(0, 5);
+    for (const address of permanentCandidates) {
+      if (Date.now() - Number(permanentAddressLastCheckAt.get(address.id) || 0) < 60 * 1000) continue;
+      permanentAddressLastCheckAt.set(address.id, Date.now());
+      try {
+        const parent = await nowpaymentsRequest(`payment/${encodeURIComponent(address.seedPaymentId)}`, { method: "GET" });
+        permanentChecked += 1;
+        const knownIds = new Set(deposits.filter((item) => item.kind === "permanent_credit").map((item) => String(item.paymentId || "")));
+        const extras = Array.isArray(parent.payment_extra_ids) ? parent.payment_extra_ids : [];
+        const extraIds = extras.map((item) => String(typeof item === "object" ? item?.payment_id || item?.id || "" : item || "")).filter(Boolean);
+        const candidateIds = [String(address.seedPaymentId), ...extraIds]
+          .filter((id, index, all) => all.indexOf(id) === index && !knownIds.has(id))
+          .sort((a, b) => Number(permanentPaymentLastCheckAt.get(a) || 0) - Number(permanentPaymentLastCheckAt.get(b) || 0))
+          .slice(0, 5);
+        for (const id of candidateIds) {
+          if (Date.now() - Number(permanentPaymentLastCheckAt.get(id) || 0) < 60 * 1000) continue;
+          permanentPaymentLastCheckAt.set(id, Date.now());
+          const payment = id === String(address.seedPaymentId)
+            ? parent
+            : await nowpaymentsRequest(`payment/${encodeURIComponent(id)}`, { method: "GET" });
+          const verifiedPayment = {
+            ...payment,
+            ...(id !== String(address.seedPaymentId) && !payment.parent_payment_id ? { parent_payment_id: address.seedPaymentId } : {})
+          };
+          const result = await completePermanentWalletPayment(state, verifiedPayment);
+          if (result.credited) {
+            permanentCompleted += 1;
+            changed = true;
+          } else if (!["status_waiting", "status_confirming", "status_confirmed", "status_sending", "status_partially_paid"].includes(result.reason)) {
+            errors.push(`permanent ${id}: ${result.reason}`);
+          }
+        }
+      } catch (error) {
+        errors.push(`permanent ${address.id}: ${String(error.message || error).slice(0, 160)}`);
+      }
+    }
+    let permanentListChecked = 0;
+    try {
+      const listResult = await scanPermanentWalletPayments(state);
+      permanentListChecked = listResult.checked;
+      permanentCompleted += listResult.credited;
+      changed = changed || listResult.credited > 0;
+    } catch (error) {
+      errors.push(`permanent list: ${String(error.message || error).slice(0, 160)}`);
+    }
     if (changed && completed === 0) await saveSettingsState(state);
     paymentReconcileStatus = {
       state: errors.length && !(checked + depositsChecked) ? "error" : "ready",
@@ -13336,6 +13602,9 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
       depositsChecked,
       depositsCompleted,
       depositsRepaired,
+      permanentChecked,
+      permanentCompleted,
+      permanentListChecked,
       statuses,
       updatedAt: Date.now(),
       durationMs: Date.now() - startedAt,
@@ -13862,96 +14131,68 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
   try {
     requireDb();
     if (!nowpaymentsApiKey) return res.status(503).json({ error: "Платежный сервис временно недоступен" });
+    if (!nowpaymentsPermanentDepositsEnabled || !nowpaymentsIpnSecret || !nowpaymentsEmail || !nowpaymentsPassword) {
+      return res.status(503).json({ error: "Постоянные адреса пока не включены. Проверьте обработку повторных переводов в NOWPayments." });
+    }
     const user = await userFromRequest(req);
     if (!user) return res.status(401).json({ error: "Сессия не найдена" });
 
     assertClientRateLimit(req, "wallet-deposit-create", { limit: 10, windowMs: 10 * 60 * 1000, identity: user.login });
-    const clientRequestId = requestIdempotencyKey(req, "Wallet deposit");
-    const amountUsd = Number(req.body.amountUsd || 0);
-    const coin = walletCoinFromRequest(req.body);
-    if (!Number.isFinite(amountUsd) || amountUsd < 1 || amountUsd > 100000) {
-      return res.status(400).json({ error: "Сумма пополнения должна быть от 1 до 100 000 $" });
-    }
-    const ltcUsdRateAtCreation = Number((await loadLitecoinUsdRate()).rate || 0);
-    if (!Number.isFinite(ltcUsdRateAtCreation) || ltcUsdRateAtCreation <= 0) {
-      return res.status(503).json({ error: "Курс LTC временно недоступен. Попробуйте еще раз." });
-    }
-    const amountLtcExpected = amountUsd / ltcUsdRateAtCreation;
+    requestIdempotencyKey(req, "Wallet deposit");
+    const coin = walletCoins.find((item) => item.id === String(req.body.coinId || "ltc").toLowerCase());
+    if (!coin) return res.status(400).json({ error: "Монета пополнения не поддерживается" });
 
     const state = await loadSettingsState();
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
-    const walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-    const existingDeposit = deposits.find((item) => item.clientRequestId === clientRequestId && sameLogin(item.login, user.login));
-    if (existingDeposit) {
-      if (
-        Number(existingDeposit.amountUsd || 0) !== amountUsd
-        || String(existingDeposit.payCurrency || "").toLowerCase() !== String(coin.payCurrency || "").toLowerCase()
-      ) {
-        return res.status(409).json({ error: "Idempotency key was already used for another wallet deposit" });
-      }
-      return res.json({ deposit: existingDeposit, reused: true, ...(await stateFor(user)) });
+    const existingAddress = permanentWalletAddresses(state).find((item) => sameLogin(item.login, user.login) && item.coinId === coin.id);
+    if (existingAddress) return res.json({ deposit: existingAddress, reused: true, ...(await stateFor(user)) });
+
+    // The provider requires a nominal amount to issue an address. This amount is
+    // never shown to the customer and never used to calculate a balance credit.
+    const minimum = await nowpaymentsRequest(
+      `min-amount?currency_from=${encodeURIComponent(coin.payCurrency)}&currency_to=ltc&fiat_equivalent=usd`,
+      { method: "GET" }
+    );
+    const minUsd = Number(minimum.fiat_equivalent || 0);
+    if (!Number.isFinite(minUsd) || minUsd <= 0) {
+      return res.status(503).json({ error: "NOWPayments не вернул минимальную сумму для этой монеты" });
     }
-    const deposit = {
-      id: `deposit-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
-      clientRequestId,
+    const nominalUsd = Math.max(0.01, Math.ceil(minUsd * 100) / 100);
+    const addressRecord = {
+      id: `permanent-address-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
+      kind: "permanent_address",
       login: user.login,
-      status: "waiting",
-      amountUsd,
-      amountLtcExpected,
-      ltcUsdRateAtCreation,
+      status: "active",
       coinId: coin.id,
       payCurrency: coin.payCurrency,
       createdAt: Date.now(),
-      expiresAt: Date.now() + walletDepositTtlMs,
       date: new Date().toLocaleString("ru-RU")
     };
-
     const paymentPayload = {
-      price_amount: amountUsd,
+      price_amount: nominalUsd,
       price_currency: "usd",
       pay_currency: coin.payCurrency,
-      order_id: deposit.id,
+      order_id: addressRecord.id,
       order_description: `CERBER MARKET wallet top up / ${user.login}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
     };
 
-    const payment = await createNowpaymentsWalletPayment(paymentPayload);
-
-    deposit.paymentId = payment.payment_id || payment.id || "";
-    deposit.payAddress = payment.pay_address || payment.address || "";
-    deposit.payAmount = Number(payment.pay_amount || 0);
-    deposit.payCurrency = coin.payCurrency;
-    deposit.coinId = coin.id;
-    deposit.paymentUrl = payment.payment_url || payment.invoice_url || "";
-    deposit.paymentStatus = payment.payment_status || "waiting";
-    deposit.paymentProviderPayload = {
-      paymentId: deposit.paymentId,
-      payAddress: deposit.payAddress,
-      payAmount: deposit.payAmount,
-      payCurrency: deposit.payCurrency,
-      coinId: deposit.coinId,
-      paymentUrl: deposit.paymentUrl
-    };
-
-    deposits.unshift(deposit);
-    walletTransactions.unshift({
-      id: `tx-${deposit.id}`,
-      login: user.login,
-      type: "deposit",
-      title: "Пополнение баланса",
-      amountLtc: amountLtcExpected,
-      amountUsd,
-      payAmount: deposit.payAmount,
-      payCurrency: deposit.payCurrency,
-      coinId: deposit.coinId,
-      createdAt: deposit.createdAt,
-      expiresAt: deposit.expiresAt,
-      date: deposit.date,
-      status: "processing"
-    });
-    await saveSettingsState({ ...state, walletDeposits: deposits, walletTransactions });
-
-    res.json({ deposit, ...(await stateFor(user)) });
+    const payment = await nowpaymentsJson("payment", paymentPayload);
+    addressRecord.seedPaymentId = String(payment.payment_id || payment.id || "").trim();
+    addressRecord.payAddress = String(payment.pay_address || payment.address || "").trim();
+    addressRecord.minimumUsdAtCreation = minUsd;
+    if (!addressRecord.seedPaymentId || !addressRecord.payAddress) {
+      return res.status(502).json({ error: "NOWPayments не вернул адрес или ID платежа" });
+    }
+    if (permanentWalletAddresses(state).some((item) => (
+      item.payCurrency === coin.payCurrency && (item.payAddress === addressRecord.payAddress || item.seedPaymentId === addressRecord.seedPaymentId)
+    )) || deposits.some((item) => item.kind !== "permanent_address" && item.payAddress === addressRecord.payAddress)
+      || (state.orders || []).some((item) => item.payAddress === addressRecord.payAddress || item.walletDepositAddress === addressRecord.payAddress)) {
+      return res.status(502).json({ error: "NOWPayments повторно выдал уже закрепленный адрес. Попробуйте позже." });
+    }
+    deposits.unshift(addressRecord);
+    await saveSettingsState({ ...state, walletDeposits: deposits });
+    res.json({ deposit: addressRecord, ...(await stateFor(user)) });
   } catch (error) {
     next(error);
   }
@@ -14113,7 +14354,7 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     const status = String(req.body.payment_status || req.body.status || "").toLowerCase();
     const paid = nowpaymentsPaymentIsPaid(status);
     const cancelled = nowpaymentsPaymentIsCancelled(status);
-    if (!orderId) return res.status(400).json({ error: "Unsupported payment callback" });
+    if (!orderId && !callbackPaymentId) return res.status(400).json({ error: "Unsupported payment callback" });
 
     const state = await loadSettingsState();
     if (!rememberNowpaymentsIpn(state, fingerprint, "payment")) return res.json({ ok: true, duplicate: true });
@@ -14121,13 +14362,38 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
       console.warn("[finance-mirror] payment ipn event skipped", { message: error.message });
     });
     const orders = Array.isArray(state.orders) ? state.orders : [];
-    const order = orders.find((item) => item.id === orderId);
+    const order = orders.find((item) => item.id === orderId || (callbackPaymentId && String(item.paymentId || "") === callbackPaymentId));
+    const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
+    const legacyDeposit = deposits.find((item) => item.kind !== "permanent_address" && item.kind !== "permanent_credit" && (
+      (item.id === orderId && (!item.paymentId || !callbackPaymentId || String(item.paymentId) === callbackPaymentId))
+      || (callbackPaymentId && String(item.paymentId || "") === callbackPaymentId)
+    ));
+    const permanentCandidate = !order && !legacyDeposit && permanentWalletAddresses(state).find((item) => (
+      item.id === orderId
+      || item.seedPaymentId === callbackPaymentId
+      || item.seedPaymentId === String(req.body.parent_payment_id || "")
+      || (item.payAddress === String(req.body.pay_address || "") && item.payCurrency === String(req.body.pay_currency || "").toLowerCase())
+    ));
+    if (permanentCandidate) {
+      if (!callbackPaymentId) return res.status(400).json({ error: "Payment ID missing" });
+      // A signed callback is a trigger, not the source of the credited amount.
+      // Verify the payment directly with NOWPayments before touching the ledger.
+      const verified = await nowpaymentsRequest(`payment/${encodeURIComponent(callbackPaymentId)}`, { method: "GET" });
+      if (String(verified.payment_id || verified.id || "") !== callbackPaymentId) {
+        return res.status(409).json({ error: "Provider payment ID mismatch" });
+      }
+      const payment = {
+        ...verified,
+        parent_payment_id: verified.parent_payment_id || req.body.parent_payment_id
+      };
+      const result = await completePermanentWalletPayment(state, payment);
+      if (result.credited || result.duplicate) return res.json({ ok: true, duplicate: Boolean(result.duplicate) });
+      if (String(result.reason || "").startsWith("status_")) return res.json({ ok: true, ignored: result.reason });
+      return res.status(409).json({ error: "Permanent deposit verification failed", reason: result.reason });
+    }
+    if (!orderId) return res.status(404).json({ error: "Order not found" });
     if (!order) {
-      const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
-      const deposit = deposits.find((item) => (
-        (item.id === orderId && (!item.paymentId || !callbackPaymentId || String(item.paymentId) === callbackPaymentId))
-        || (callbackPaymentId && String(item.paymentId || "") === callbackPaymentId)
-      ));
+      const deposit = legacyDeposit;
       if (!deposit) return res.status(404).json({ error: "Order not found" });
       const validation = paid ? validateProviderPayment(req.body, deposit) : { ok: true };
       if (paid && !validation.ok) {
