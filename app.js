@@ -9682,7 +9682,16 @@ function showWalletDepositDetails(depositId) {
   bindCopyButtons();
 }
 
-function openWalletDepositModal() {
+async function openWalletDepositModal() {
+  if (API_ENABLED) {
+    // Refresh the server's current payment mode when the customer opens the
+    // form. A tab kept open across a rollout must not show the old amount form.
+    await loadRemoteConfig();
+    if (remoteConfigError) {
+      showToast("Не удалось проверить настройки пополнения. Попробуйте ещё раз.");
+      return;
+    }
+  }
   if (!permanentDepositsEnabled) {
     showModal(`
       <h2>Пополнить баланс</h2>
