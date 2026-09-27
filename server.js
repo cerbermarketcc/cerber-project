@@ -9110,15 +9110,27 @@ function nowpaymentsPayoutLookupIds(withdrawal = {}) {
 }
 
 function nowpaymentsPayoutRecords(payload = {}) {
-  const roots = [
-    payload,
-    ...(Array.isArray(payload?.data) ? payload.data : [payload?.data]),
-    ...(Array.isArray(payload?.items) ? payload.items : [])
-  ].filter((value) => value && typeof value === "object" && !Array.isArray(value));
-  return roots.flatMap((root) => [
-    ...(Array.isArray(root.withdrawals) ? root.withdrawals : []),
-    root
-  ]);
+  const records = [];
+  const seen = new Set();
+  const recordKeys = [
+    "id", "payout_id", "withdrawal_id", "batch_withdrawal_id", "batch_id", "batchId",
+    "status", "payout_status", "currency", "amount", "address"
+  ];
+  const collect = (value, depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 6 || records.length >= 200) return;
+    if (Array.isArray(value)) {
+      value.slice(0, 200).forEach((item) => collect(item, depth + 1));
+      return;
+    }
+    if (seen.has(value)) return;
+    seen.add(value);
+    ["withdrawals", "payouts", "data", "items"].forEach((key) => collect(value[key], depth + 1));
+    if (recordKeys.some((key) => value[key] !== undefined && value[key] !== null && value[key] !== "")) {
+      records.push(value);
+    }
+  };
+  collect(payload);
+  return records;
 }
 
 function nowpaymentsPayoutRecord(payload = {}, withdrawal = {}) {
@@ -9213,7 +9225,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
     delete withdrawal.payoutFailureMessage;
     return { status, validation, terminal: true };
   }
-  if (["rejected", "cancelled", "canceled"].includes(status)) {
+  if (["rejected", "rejected_not_checked", "cancelled", "canceled"].includes(status)) {
     withdrawal.status = "rejected";
     withdrawal.failedAt = Date.now();
     withdrawal.requiresManualReview = false;
