@@ -13,7 +13,7 @@ const DISPUTE_SYNCED_PRIVATE_MESSAGES_KEY = "cerber_synced_private_dispute_messa
 const LANGUAGE_KEY = "cerber_language_v2";
 const TRANSLATION_CACHE_KEY = "cerber_translation_cache_v1";
 const INCIDENT_BROWSER_RESET_KEY = "cerber_incident_cache_v164";
-const CATALOG_FILTER_DEFAULTS_KEY = "cerber_catalog_filter_defaults_v2";
+const CATALOG_FILTER_DEFAULTS_KEY = "cerber_catalog_filter_defaults_v3";
 const LOCAL_API_HOSTS = ["127.0.0.1", "localhost"];
 const PRIMARY_API_ORIGIN = "https://cerber.vip";
 const IS_LOCAL_APP_HOST = LOCAL_API_HOSTS.includes(location.hostname);
@@ -241,7 +241,7 @@ const filterOptions = {
         lipcani: city("Липканы"),
         nisporeni: city("Ниспорены"),
         ocnita: city("Окница"),
-        orhei: city("Оргеев", ["Центр", "Нордик", "Лупоайка", "Слободка", "Промзона"]),
+        orhei: city("Орхей", ["Центр", "Нордик", "Лупоайка", "Слободка", "Промзона"]),
         otaci: city("Отачь"),
         rezina: city("Резина"),
         riscani: city("Рышканы"),
@@ -366,6 +366,7 @@ const defaults = {
     country: "",
     city: "",
     district: "",
+    weight: "",
     category: "Все товары",
     sort: "relevance",
     query: ""
@@ -497,6 +498,9 @@ let activeStoreTab = "positions";
 let activeProductId = "";
 let activeProductTab = "positions";
 let activeProductMode = "any";
+let activeProductCityKey = "";
+let activeProductWeightKey = "";
+let activeProductDistrictKey = "";
 let activePositionId = "";
 let authMode = "login";
 let activeOrdersTab = "all";
@@ -1681,7 +1685,12 @@ function normalizeDb(next) {
       && categoryIsAll(next.filters.category)
       && !String(next.filters.query || "").trim()
       && (!next.filters.sort || next.filters.sort === "relevance");
-    if (legacyImplicitLocation) next.filters = structuredClone(defaults.filters);
+    const legacyForcedProducts = next.filters.country === "moldova"
+      && next.filters.city === "chisinau"
+      && next.filters.district === "Центр"
+      && canonicalCatalogCategory(next.filters.category) === "Альфа (A-PVP)"
+      && !String(next.filters.query || "").trim();
+    if (legacyImplicitLocation || legacyForcedProducts) next.filters = structuredClone(defaults.filters);
     storageSet(CATALOG_FILTER_DEFAULTS_KEY, "done");
   }
   (next.users || []).forEach((user) => {
@@ -3391,6 +3400,26 @@ function locationFilterActive(filters = catalogFilters()) {
   return Boolean(filters.country || filters.city || filters.district);
 }
 
+function normalizedWeightKey(value = "") {
+  return String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("ru-RU")
+    .replace(/,/g, ".")
+    .replace(/\s+/g, "")
+    .replace(/^([0-9]+(?:\.[0-9]+)?)(?:g|gr|г|гр|грамм(?:а|ов)?|grams?|gram)$/u, "$1");
+}
+
+function positionFilterActive(filters = catalogFilters()) {
+  return locationFilterActive(filters) || Boolean(normalizedWeightKey(filters.weight));
+}
+
+function enabledProductPositions(product = {}, { inStockOnly = false } = {}) {
+  return (Array.isArray(product.positions) ? product.positions : []).filter((position) => (
+    String(position.status || "ready").toLowerCase() !== "disabled"
+    && (!inStockOnly || Number(position.stock || 0) > 0)
+  ));
+}
+
 function categoryMatches(product = {}, filters = catalogFilters()) {
   if (categoryIsAll(filters.category)) return true;
   const selectedKey = catalogCategoryKey(filters.category);
@@ -3406,13 +3435,13 @@ function positionMatchesFilters(position = {}, filters = catalogFilters()) {
   if (filters.country && position.country && position.country !== filters.country) return false;
   if (filters.city && position.city && position.city !== filters.city) return false;
   if (filters.district && position.district && position.district !== filters.district) return false;
+  if (normalizedWeightKey(filters.weight) && normalizedWeightKey(position.weight) !== normalizedWeightKey(filters.weight)) return false;
   return true;
 }
 
 function productFilteredPositions(product = {}, filters = catalogFilters()) {
-  const positions = (Array.isArray(product.positions) ? product.positions : [])
-    .filter((position) => String(position.status || "ready").toLowerCase() !== "disabled");
-  const matched = !positions.length || !locationFilterActive(filters)
+  const positions = enabledProductPositions(product);
+  const matched = !positions.length || !positionFilterActive(filters)
     ? positions.slice()
     : positions.filter((position) => positionMatchesFilters(position, filters));
   if (filters.sort === "priceAsc") return matched.sort((a, b) => Number(a.priceUsd || 0) - Number(b.priceUsd || 0));
@@ -3451,8 +3480,10 @@ function productMatchesFilters(product = {}, store = {}, filters = catalogFilter
   const query = searchText(filters.query);
   if (query && !productSearchBlob(product, store).includes(query)) return false;
   const positions = Array.isArray(product.positions) ? product.positions : [];
-  if (locationFilterActive(filters) && positions.some((position) => position.country || position.city || position.district)) {
-    return productFilteredPositions(product, filters).length > 0;
+  if (positionFilterActive(filters)) {
+    const hasPositionScope = Boolean(normalizedWeightKey(filters.weight))
+      || positions.some((position) => position.country || position.city || position.district || position.weight);
+    if (hasPositionScope) return positions.length > 0 && productFilteredPositions(product, filters).length > 0;
   }
   return true;
 }
@@ -3508,6 +3539,75 @@ function sortProductsForFilters(products = [], filters = catalogFilters()) {
   if (filters.sort === "priceAsc") return ordered.sort((a, b) => productMinPrice(a, filters) - productMinPrice(b, filters));
   if (filters.sort === "priceDesc") return ordered.sort((a, b) => productMinPrice(b, filters) - productMinPrice(a, filters));
   return ordered.sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+}
+
+function positionCityKey(position = {}) {
+  return `${String(position.country || "").trim()}::${String(position.city || "").trim()}`;
+}
+
+function positionCityName(position = {}) {
+  return filterOptions.countries[position.country]?.cities?.[position.city]?.label
+    || String(position.city || "").trim()
+    || "Без города";
+}
+
+function customerWeightLabel(value = "") {
+  const text = String(value ?? "").trim();
+  if (!text) return "Без фасовки";
+  return /\p{L}/u.test(text) ? text : `${text} г`;
+}
+
+function customerDistrictKey(position = {}) {
+  return normalizedShopKey(position.district) || "__without_district__";
+}
+
+function customerDistrictLabel(position = {}) {
+  return String(position.district || "").trim() || "Без района";
+}
+
+function formatUsdPrice(value = 0) {
+  const amount = Number(value || 0);
+  return `${Number.isInteger(amount) ? amount.toFixed(0) : amount.toFixed(2)} $`;
+}
+
+function catalogQuickFilterOptions(filters = catalogFilters(), rows = null) {
+  const products = Array.isArray(rows)
+    ? rows
+    : publicStores().flatMap((store) => sortedStoreProducts(store).map((product) => ({ product, store })));
+  const query = searchText(filters.query);
+  const matchingRows = products.filter(({ product, store }) => (
+    categoryMatches(product, filters)
+    && (!query || productSearchBlob(product, store).includes(query))
+  ));
+  const positions = matchingRows.flatMap(({ product }) => enabledProductPositions(product, { inStockOnly: true }));
+  const cityMap = new Map();
+  positions.forEach((position) => {
+    const key = positionCityKey(position);
+    if (!cityMap.has(key)) cityMap.set(key, {
+      key,
+      country: String(position.country || ""),
+      city: String(position.city || ""),
+      label: positionCityName(position)
+    });
+  });
+  const cityOptions = [...cityMap.values()].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  const cityPositions = filters.city
+    ? positions.filter((position) => (
+      position.city === filters.city
+      && (!filters.country || !position.country || position.country === filters.country)
+    ))
+    : positions;
+  const weightMap = new Map();
+  cityPositions.forEach((position) => {
+    const key = normalizedWeightKey(position.weight);
+    if (!key || weightMap.has(key)) return;
+    weightMap.set(key, { key, value: String(position.weight ?? "").trim(), label: customerWeightLabel(position.weight) });
+  });
+  const weightOptions = [...weightMap.values()].sort((a, b) => (
+    Number.parseFloat(a.value) - Number.parseFloat(b.value)
+    || a.label.localeCompare(b.label, "ru")
+  ));
+  return { cityOptions, weightOptions };
 }
 
 function storePlacementPosition(store = {}, placement = "stores") {
@@ -5534,7 +5634,11 @@ function renderFilters() {
   const filters = catalogFilters();
   const country = filterOptions.countries[filters.country] || null;
   const city = country?.cities?.[filters.city] || null;
-  const resultCount = homeStores(activeHomeTab, filters).length;
+  const weightOptions = catalogQuickFilterOptions(filters).weightOptions;
+  const resultCount = route === "products"
+    ? publicStores().flatMap((store) => sortedStoreProducts(store).map((product) => ({ product, store })))
+      .filter(({ product, store }) => productMatchesFilters(product, store, filters)).length
+    : homeStores(activeHomeTab, filters).length;
   showModal(`
     <div class="filter-head">
       <button data-clear-filters>Очистить</button>
@@ -5563,6 +5667,12 @@ function renderFilters() {
           ${city ? city.districts.map((district) => `<option value="${esc(district)}" ${filters.district === district ? "selected" : ""}>${esc(district)}</option>`).join("") : ""}
         </select>
       </label>
+      <label class="field">Фасовка
+        <select name="weight">
+          <option value="" ${!filters.weight ? "selected" : ""}>Все фасовки</option>
+          ${weightOptions.map((option) => `<option value="${esc(option.value)}" ${normalizedWeightKey(filters.weight) === option.key ? "selected" : ""}>${esc(option.label)}</option>`).join("")}
+        </select>
+      </label>
       <label class="field">Категория товара
         <select name="category">
           ${filterOptions.categories.map((category) => `<option value="${esc(category)}" ${filters.category === category ? "selected" : ""}>${esc(category)}</option>`).join("")}
@@ -5579,14 +5689,14 @@ function renderFilters() {
   `, "filter-panel");
   document.querySelector("[name='country']").onchange = (event) => {
     const draft = new FormData(document.querySelector("[data-filter-form]"));
-    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, country: event.target.value, city: "", district: "" };
+    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, country: event.target.value, city: "", district: "", weight: "" };
     saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
   };
   document.querySelector("[name='city']").onchange = (event) => {
     const draft = new FormData(document.querySelector("[data-filter-form]"));
-    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, city: event.target.value, district: "" };
+    db.filters = { ...filters, query: String(draft.get("query") || "").trim(), category: draft.get("category"), sort: draft.get("sort") || filters.sort, city: event.target.value, district: "", weight: "" };
     saveDb({ localOnly: true, silentLocalStorageError: true });
     document.querySelector("[data-modal]").classList.remove("open");
     renderFilters();
@@ -5604,6 +5714,7 @@ function renderFilters() {
       country: data.get("country"),
       city: data.get("city"),
       district: data.get("district"),
+      weight: data.get("weight"),
       category: data.get("category"),
       sort: data.get("sort"),
       query: String(data.get("query") || "").trim()
@@ -5647,26 +5758,85 @@ function renderProductsCatalog() {
   const filters = catalogFilters();
   const allProducts = publicStores().flatMap((store) => sortedStoreProducts(store)
     .map((product) => ({ product, store })));
-  let rows = allProducts.filter(({ product, store }) => productMatchesFilters(product, store, filters));
-  let fallbackUsed = false;
-  if (!rows.length && locationFilterActive(filters)) {
-    const withoutLocation = { ...filters, country: "", city: "", district: "" };
-    rows = allProducts.filter(({ product, store }) => productMatchesFilters(product, store, withoutLocation))
-      .sort((a, b) => Number(b.product.rating || 0) - Number(a.product.rating || 0));
-    fallbackUsed = rows.length > 0;
+  const quickOptions = catalogQuickFilterOptions(filters, allProducts);
+  const selectedCityKey = filters.city ? `${filters.country || ""}::${filters.city}` : "";
+  if (filters.city && !quickOptions.cityOptions.some((option) => option.key === selectedCityKey)) {
+    db.filters = { ...filters, country: "", city: "", district: "", weight: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    return renderProductsCatalog();
   }
+  if (filters.weight && !quickOptions.weightOptions.some((option) => option.key === normalizedWeightKey(filters.weight))) {
+    db.filters = { ...filters, district: "", weight: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    return renderProductsCatalog();
+  }
+  const matchingRows = allProducts.filter(({ product, store }) => productMatchesFilters(product, store, filters));
+  const order = new Map(sortProductsForFilters(matchingRows.map(({ product }) => product), filters)
+    .map((product, index) => [product, index]));
+  const rows = matchingRows.sort((a, b) => (order.get(a.product) || 0) - (order.get(b.product) || 0));
   layout(`
     <section class="hero products-catalog-hero">
       <h1>Товары</h1>
+      <div class="catalog-quick-filters">
+        <label class="catalog-category-select">
+          <span>Категория</span>
+          <select data-catalog-category aria-label="Категория товара">
+            ${filterOptions.categories.map((category) => `<option value="${esc(category)}" ${filters.category === category || (categoryIsAll(category) && categoryIsAll(filters.category)) ? "selected" : ""}>${categoryIsAll(category) ? "Все товары" : esc(category)}</option>`).join("")}
+          </select>
+        </label>
+        <div class="catalog-choice-group">
+          <span>Город</span>
+          <div class="catalog-choice-pills" role="group" aria-label="Выберите город">
+            <button class="${!filters.city ? "active" : ""}" data-catalog-city="" data-catalog-country="" aria-pressed="${!filters.city}">Все города</button>
+            ${quickOptions.cityOptions.map((option) => `<button class="${selectedCityKey === option.key ? "active" : ""}" data-catalog-city="${esc(option.city)}" data-catalog-country="${esc(option.country)}" aria-pressed="${selectedCityKey === option.key}">${esc(option.label)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="catalog-choice-group">
+          <span>Фасовка</span>
+          <div class="catalog-choice-pills" role="group" aria-label="Выберите фасовку">
+            <button class="${!filters.weight ? "active" : ""}" data-catalog-weight="" aria-pressed="${!filters.weight}">Любая</button>
+            ${quickOptions.weightOptions.map((option) => `<button class="${normalizedWeightKey(filters.weight) === option.key ? "active" : ""}" data-catalog-weight="${esc(option.value)}" aria-pressed="${normalizedWeightKey(filters.weight) === option.key}">${esc(option.label)}</button>`).join("")}
+          </div>
+        </div>
+      </div>
       <label class="search"><b>⌕</b><input data-product-search value="${esc(filters.query || "")}" placeholder="Поиск товара"></label>
       <button class="filter-inline-button" data-filters>Фильтры</button>
-      <p class="catalog-selection">${esc(filters.category || "Все товары")} · ${esc(currentLocationFilterLabel())}</p>
-      ${fallbackUsed ? `<p class="catalog-fallback">В выбранном районе товара нет. Показаны лучшие варианты в других районах.</p>` : ""}
+      <p class="catalog-selection">${esc(filters.category || "Все товары")} · ${esc(currentLocationFilterLabel())} · ${esc(filters.weight ? customerWeightLabel(filters.weight) : "Любая фасовка")}</p>
     </section>
     <section class="feed product-catalog-grid" data-product-feed>
-      ${rows.map(({ product, store }) => productCard(product, store)).join("") || `<article class="panel empty-state"><p>Товаров по этим фильтрам пока нет.</p></article>`}
+      ${rows.map(({ product, store }) => productCard(product, store)).join("") || `<article class="panel empty-state"><p>Товаров по выбранным параметрам пока нет.</p><button class="ghost-button" data-catalog-reset>Сбросить выбор</button></article>`}
     </section>
   `);
+  document.querySelector("[data-catalog-category]")?.addEventListener("change", (event) => {
+    db.filters = { ...catalogFilters(), category: event.target.value || "Все товары", country: "", city: "", district: "", weight: "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    renderProductsCatalog();
+  });
+  document.querySelectorAll("[data-catalog-city]").forEach((button) => {
+    button.addEventListener("click", () => {
+      db.filters = {
+        ...catalogFilters(),
+        country: button.dataset.catalogCountry || "",
+        city: button.dataset.catalogCity || "",
+        district: "",
+        weight: ""
+      };
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+      renderProductsCatalog();
+    });
+  });
+  document.querySelectorAll("[data-catalog-weight]").forEach((button) => {
+    button.addEventListener("click", () => {
+      db.filters = { ...catalogFilters(), district: "", weight: button.dataset.catalogWeight || "" };
+      saveDb({ localOnly: true, silentLocalStorageError: true });
+      renderProductsCatalog();
+    });
+  });
+  document.querySelector("[data-catalog-reset]")?.addEventListener("click", () => {
+    db.filters = { ...structuredClone(defaults.filters), query: filters.query || "" };
+    saveDb({ localOnly: true, silentLocalStorageError: true });
+    renderProductsCatalog();
+  });
   document.querySelector("[data-product-search]")?.addEventListener("input", (event) => {
     db.filters = { ...catalogFilters(), query: event.target.value };
     saveDb({ localOnly: true, silentLocalStorageError: true });
@@ -5805,53 +5975,72 @@ function renderStore(storeId, tab = activeStoreTab || "positions") {
 }
 
 function productStockSummary(product = {}) {
-  const positions = (Array.isArray(product.positions) ? product.positions : [])
-    .filter((position) => String(position.status || "ready").toLowerCase() !== "disabled");
+  const positions = enabledProductPositions(product);
   const stock = positions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
   return { positions, stock };
 }
 
-function productCard(product, store) {
-  const summary = productStockSummary(product);
+function productCardFacts(product = {}, filters = catalogFilters()) {
+  const filtered = productFilteredPositions(product, filters);
+  const available = filtered.filter((position) => Number(position.stock || 0) > 0);
+  const positions = available.length ? available : filtered.length ? filtered : enabledProductPositions(product);
+  const cityLabels = [...new Set(positions.map(positionCityName).filter(Boolean))];
+  const weightLabels = [...new Map(positions.map((position) => [
+    normalizedWeightKey(position.weight) || "__without_weight__",
+    customerWeightLabel(position.weight)
+  ])).values()];
+  const prices = [...new Set(positions
+    .map((position) => Number(position.priceUsd || product.priceUsd || 0))
+    .filter((price) => price > 0))].sort((a, b) => a - b);
+  const priceText = prices.length > 1
+    ? `${formatUsdPrice(prices[0])} – ${formatUsdPrice(prices.at(-1))}`
+    : formatUsdPrice(prices[0] || product.priceUsd || 0);
+  return {
+    positions,
+    stock: positions.reduce((sum, position) => sum + Number(position.stock || 0), 0),
+    cities: cityLabels.join(", ") || "Не указаны",
+    weights: weightLabels.join(", ") || "Не указаны",
+    priceText
+  };
+}
+
+function productCardBody(product, store) {
+  const facts = productCardFacts(product);
   const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
   const productCategory = displayContentText(localizedValue(product, "category"));
   const storeName = localizedValue(store, "name");
   return `
+    <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="${esc(productTitle)}" loading="lazy" decoding="async">
+    <div class="product-body product-market-body">
+      <h3 data-dynamic-translate>${esc(productTitle)}</h3>
+      ${productCategory && catalogCategoryKey(productCategory) !== catalogCategoryKey(productTitle) ? `<p class="product-category" data-dynamic-translate>${esc(productCategory)}</p>` : ""}
+      <p class="product-store-name"><span>Магазин</span><strong>${esc(storeName)}</strong><i class="verify">✓</i></p>
+      <dl class="product-card-facts">
+        <div><dt>Города</dt><dd>${esc(facts.cities)}</dd></div>
+        <div><dt>Фасовки</dt><dd>${esc(facts.weights)}</dd></div>
+        <div><dt>Цены</dt><dd>${esc(facts.priceText)}</dd></div>
+      </dl>
+      <p class="product-stock ${facts.stock ? "in-stock" : "out-of-stock"}">${facts.stock ? `${facts.positions.length} ${tr("positions").toLowerCase()} · ${facts.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
+      <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
+    </div>
+  `;
+}
+
+function productCard(product, store) {
+  return `
     <article class="product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="" loading="lazy" decoding="async">
-      <div class="product-body">
-        <h3 data-dynamic-translate>${esc(productTitle)}</h3>
-        <p data-dynamic-translate>${esc(productCategory)}</p>
-        <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
-        <p class="price">${esc(product.price || `from ${Number(product.priceUsd || 0).toFixed(0)}$`)}</p>
-        <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
-        <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
-        </div>
+        ${productCardBody(product, store)}
       </button>
     </article>
   `;
 }
 
 function productCardView(product, store) {
-  const minPrice = Number(product.priceUsd || 0);
-  const ltcAmount = usdToLtc(minPrice);
-  const summary = productStockSummary(product);
-  const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
-  const productCategory = displayContentText(localizedValue(product, "category"));
-  const storeName = localizedValue(store, "name");
   return `
     <article class="product-card mega-product-card">
       <button class="product-click" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">
-        <img class="product-image" src="${esc(product.image || product.images?.[0] || fallbackImage)}" alt="" loading="lazy" decoding="async">
-        <div class="product-body mega-product-body">
-          <h3 data-dynamic-translate>${esc(productTitle)}</h3>
-          <p class="desc" data-dynamic-translate>${esc(productCategory)}</p>
-          <p class="product-store-name"><strong>${esc(storeName)}</strong> <span class="verify">✓</span></p>
-          <p class="price">${minPrice.toFixed(0)}$ · <span data-ltc-price data-usd="${minPrice}">${ltcAmount.toFixed(6)} LTC</span></p>
-          <p class="product-stock ${summary.stock ? "in-stock" : "out-of-stock"}">${summary.stock ? `${summary.positions.length} ${tr("positions").toLowerCase()} · ${summary.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
-          <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
-        </div>
+        ${productCardBody(product, store)}
       </button>
     </article>
   `;
@@ -5896,6 +6085,118 @@ function currentLocationFilterLabel() {
   return filters.district || city?.label || "Любой город";
 }
 
+function customerWeightKey(position = {}) {
+  return normalizedWeightKey(position.weight) || "__without_weight__";
+}
+
+function productPurchaseSelection(product = {}) {
+  const allAvailable = enabledProductPositions(product, { inStockOnly: true })
+    .filter((position) => activeProductMode === "any" || positionSaleMode(position) === activeProductMode);
+  const cityMap = new Map();
+  allAvailable.forEach((position) => {
+    const key = positionCityKey(position);
+    if (!cityMap.has(key)) cityMap.set(key, { key, label: positionCityName(position), position });
+  });
+  const cities = [...cityMap.values()].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  if (!cities.some((option) => option.key === activeProductCityKey)) activeProductCityKey = cities[0]?.key || "";
+  const cityPositions = allAvailable.filter((position) => positionCityKey(position) === activeProductCityKey);
+  const weightMap = new Map();
+  cityPositions.forEach((position) => {
+    const key = customerWeightKey(position);
+    if (!weightMap.has(key)) weightMap.set(key, { key, label: customerWeightLabel(position.weight), position });
+  });
+  const weights = [...weightMap.values()].sort((a, b) => (
+    Number.parseFloat(a.position.weight) - Number.parseFloat(b.position.weight)
+    || a.label.localeCompare(b.label, "ru")
+  ));
+  if (!weights.some((option) => option.key === activeProductWeightKey)) activeProductWeightKey = weights[0]?.key || "";
+  const weightPositions = cityPositions.filter((position) => customerWeightKey(position) === activeProductWeightKey);
+  const districtMap = new Map();
+  weightPositions.forEach((position) => {
+    const key = customerDistrictKey(position);
+    const existing = districtMap.get(key);
+    if (existing) existing.positions.push(position);
+    else districtMap.set(key, { key, label: customerDistrictLabel(position), positions: [position] });
+  });
+  const districts = [...districtMap.values()].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  if (!districts.some((option) => option.key === activeProductDistrictKey)) activeProductDistrictKey = "";
+  const selectedPositions = activeProductDistrictKey
+    ? (districtMap.get(activeProductDistrictKey)?.positions || []).slice().sort((a, b) => (
+      Number(a.priceUsd || product.priceUsd || 0) - Number(b.priceUsd || product.priceUsd || 0)
+      || String(a.deliveryType || "").localeCompare(String(b.deliveryType || ""), "ru")
+    ))
+    : [];
+  return { allAvailable, cities, cityPositions, weights, weightPositions, districts, selectedPositions };
+}
+
+function productPurchaseOfferView(position, product, store, multiple = false) {
+  const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+  const ltcAmount = usdToLtc(priceUsd);
+  const deliveryType = displayContentText(localizedValue(position, "deliveryType") || tr("product"));
+  const mode = positionSaleMode(position) === "preorder" ? tr("preorder") : tr("ready");
+  return `
+    <div class="purchase-offer ${multiple ? "has-alternatives" : ""}">
+      <div class="purchase-offer-copy">
+        <strong data-dynamic-translate>${esc(deliveryType)}</strong>
+        <span>${esc(mode)} · ${esc(position.stock || 0)} ${tr("pieces")} · ${esc(formatUsdPrice(priceUsd))}</span>
+        <small data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</small>
+      </div>
+      <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">${tr("buy")}</button>
+    </div>
+  `;
+}
+
+function productPurchaseSelectorView(product, store) {
+  const selection = productPurchaseSelection(product);
+  if (!selection.allAvailable.length) {
+    return `<article class="panel empty-state purchase-empty"><p>Этого товара сейчас нет в наличии.</p></article>`;
+  }
+  const summaryPositions = selection.selectedPositions.length ? selection.selectedPositions : selection.weightPositions;
+  const totalStock = summaryPositions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
+  const prices = [...new Set(summaryPositions.map((position) => Number(position.priceUsd || product.priceUsd || 0)).filter((price) => price > 0))].sort((a, b) => a - b);
+  const priceText = prices.length > 1
+    ? `${formatUsdPrice(prices[0])} – ${formatUsdPrice(prices.at(-1))}`
+    : formatUsdPrice(prices[0] || product.priceUsd || 0);
+  const productTitle = displayContentText([localizedValue(product, "title"), product.subtype].filter(Boolean).join(" · "));
+  const selectedWeight = selection.weights.find((option) => option.key === activeProductWeightKey)?.label || "";
+  return `
+    <section class="product-purchase-selector" aria-label="Выбор позиции товара">
+      <div class="purchase-choice-block">
+        <h2>Выберите город</h2>
+        <div class="purchase-choice-pills city-pills" role="radiogroup" aria-label="Город">
+          ${selection.cities.map((option) => `<button class="${activeProductCityKey === option.key ? "active" : ""}" data-product-city-choice="${esc(option.key)}" aria-pressed="${activeProductCityKey === option.key}">${esc(option.label)}</button>`).join("")}
+        </div>
+      </div>
+      <div class="purchase-choice-block">
+        <h2>Выберите фасовку</h2>
+        <div class="purchase-choice-pills weight-pills" role="radiogroup" aria-label="Фасовка">
+          ${selection.weights.map((option) => `<button class="${activeProductWeightKey === option.key ? "active" : ""}" data-product-weight-choice="${esc(option.key)}" aria-pressed="${activeProductWeightKey === option.key}">${esc(option.label)}</button>`).join("")}
+        </div>
+      </div>
+      <article class="position-card mega-position-card purchase-position-card">
+        <div class="purchase-position-summary">
+          <p><span>${tr("quantity")}</span><strong>${esc(totalStock)} ${tr("pieces")}</strong></p>
+          <p><span>${tr("titleLabel")}</span><strong data-dynamic-translate>${esc(productTitle)}</strong></p>
+          <p><span>${tr("weight")}</span><strong>${esc(selectedWeight)}</strong></p>
+          <p><span>${tr("price")}</span><strong>${esc(priceText)}</strong></p>
+        </div>
+        <div class="purchase-district-block">
+          <h2>Выберите район</h2>
+          <div class="purchase-choice-pills district-pills" role="radiogroup" aria-label="Район">
+            ${selection.districts.map((option) => `<button class="${activeProductDistrictKey === option.key ? "active" : ""}" data-product-district-choice="${esc(option.key)}" aria-pressed="${activeProductDistrictKey === option.key}">${esc(option.label)}<small>${option.positions.reduce((sum, position) => sum + Number(position.stock || 0), 0)} шт.</small></button>`).join("")}
+          </div>
+        </div>
+        ${selection.selectedPositions.length ? `
+          <div class="purchase-offers">
+            ${selection.selectedPositions.length > 1 ? `<p class="purchase-offers-title">Выберите способ получения</p>` : ""}
+            ${selection.selectedPositions.map((position) => productPurchaseOfferView(position, product, store, selection.selectedPositions.length > 1)).join("")}
+          </div>
+        ` : `<button class="primary buy-button purchase-awaiting-district" disabled>Сначала выберите район</button>`}
+      </article>
+    </section>
+  `;
+}
+
 function renderProductView(storeId, productId) {
   const productChanged = activeStoreId !== storeId || activeProductId !== productId;
   if (productChanged) {
@@ -5909,10 +6210,13 @@ function renderProductView(storeId, productId) {
   if (!store) return renderCatalog();
   const product = productById(store, productId);
   if (!product) return renderStore(store.id, "positions");
-  const allPositions = productPositions(product);
-  const positions = activeProductMode === "any"
-    ? allPositions
-    : allPositions.filter((position) => positionSaleMode(position) === activeProductMode);
+  if (productChanged) {
+    const filters = catalogFilters();
+    activeProductCityKey = filters.city ? `${filters.country || ""}::${filters.city}` : "";
+    activeProductWeightKey = normalizedWeightKey(filters.weight);
+    activeProductDistrictKey = filters.district ? normalizedShopKey(filters.district) : "";
+  }
+  const allPositions = enabledProductPositions(product, { inStockOnly: true });
   const productReviews = productReviewsForView(product, store);
   const productReviewCount = Math.max(Number(product.reviews || 0), productReviews.length);
   const images = [...new Set([
@@ -5947,7 +6251,6 @@ function renderProductView(storeId, productId) {
         <p class="price">${Number(product.priceUsd || 0).toFixed(0)}$</p>
         <p class="rating-line big-stars"><span class="star-text">${stars(Math.round(product.rating || 5))}</span> ${Number(product.rating || 5).toFixed(2)} / ${esc(productReviewCount)}</p>
       </article>
-      <button class="location-select" data-filters>${esc(currentLocationFilterLabel())}<span>⌄</span></button>
       <div class="pill-tabs">
         <button class="${activeProductTab === "positions" ? "" : "muted"}" data-product-detail-tab="positions">${tr("positions")} <span>${allPositions.length}</span></button>
         <button class="${activeProductTab === "reviews" ? "" : "muted"}" data-product-detail-tab="reviews">${tr("reviews")} <span>${esc(productReviewCount)}</span></button>
@@ -5962,12 +6265,7 @@ function renderProductView(storeId, productId) {
           <button class="${activeProductMode === "ready" ? "active" : ""}" data-product-mode="ready">${tr("ready")}</button>
           <button class="${activeProductMode === "preorder" ? "active" : ""}" data-product-mode="preorder">${tr("preorder")}</button>
         </div>
-        ${positions.length ? positions.map((position) => positionCardView(position, product, store)).join("") : `
-          <article class="panel empty-state">
-            <p>${activeProductMode === "any" ? tr("noFilteredProducts") : "Товаров этого типа пока нет."}</p>
-            ${activeProductMode === "any" ? `<button class="primary" data-filters>${tr("openFilters")}</button>` : ""}
-          </article>
-        `}
+        ${productPurchaseSelectorView(product, store)}
       `}
     </section>
   `);
@@ -5986,6 +6284,28 @@ function renderProductView(storeId, productId) {
   document.querySelectorAll("[data-product-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       activeProductMode = button.dataset.productMode || "any";
+      activeProductDistrictKey = "";
+      renderProductView(storeId, productId);
+    });
+  });
+  document.querySelectorAll("[data-product-city-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProductCityKey = button.dataset.productCityChoice || "";
+      activeProductWeightKey = "";
+      activeProductDistrictKey = "";
+      renderProductView(storeId, productId);
+    });
+  });
+  document.querySelectorAll("[data-product-weight-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProductWeightKey = button.dataset.productWeightChoice || "";
+      activeProductDistrictKey = "";
+      renderProductView(storeId, productId);
+    });
+  });
+  document.querySelectorAll("[data-product-district-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProductDistrictKey = button.dataset.productDistrictChoice || "";
       renderProductView(storeId, productId);
     });
   });
@@ -6386,12 +6706,21 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     authMode = "login";
     return renderAuth("Войдите или зарегистрируйтесь, чтобы купить товар");
   }
-  const store = storeById(storeId);
-  const product = productById(store, productId);
-  const position = positionById(product, positionId);
-  if (!product || !position) return;
+  const store = (db.stores || []).find((item) => item.id === storeId);
+  const product = (store?.products || []).find((item) => item.id === productId);
+  const position = (product?.positions || []).find((item) => item.id === positionId);
+  if (!store || !product || !position) {
+    showToast("Позиция больше недоступна. Обновите каталог.");
+    return;
+  }
   if (!storeIsActive(store) || store.salesBlocked) {
     showToast("\u041c\u0430\u0433\u0430\u0437\u0438\u043d \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d");
+    return;
+  }
+  if (String(product.status || "active").toLowerCase() === "disabled"
+    || String(position.status || "ready").toLowerCase() === "disabled"
+    || Number(position.stock || 0) <= 0) {
+    showToast("Позиция уже закончилась или временно недоступна.");
     return;
   }
   const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
@@ -13923,10 +14252,6 @@ function routeTo(next) {
   if (next === "filters") return renderFilters();
   if (next === "rules") return openRulesModal();
   if (next === "messages" && route !== "messages") activePrivateLogin = "";
-  if (next === "products" && route !== "products") {
-    db.filters = { ...catalogFilters(), category: "Альфа (A-PVP)", country: "moldova", city: "chisinau", district: "Центр", query: "" };
-    saveDb({ localOnly: true, silentLocalStorageError: true });
-  }
   route = next;
   safeRenderCurrent();
 }
@@ -13944,10 +14269,6 @@ function renderCurrent() {
     history.replaceState(null, "", `${location.pathname}${location.search}`);
   }
   const directRoute = hashRoute();
-  if (directRoute === "products" && route !== "products") {
-    db.filters = { ...catalogFilters(), category: "Альфа (A-PVP)", country: "moldova", city: "chisinau", district: "Центр", query: "" };
-    saveDb({ localOnly: true, silentLocalStorageError: true });
-  }
   if (directRoute) route = directRoute;
   if (route === "owner" || route === "admin") return renderLegacyAdminDisabled();
   if (!db.currentUser || !currentUser()) return renderAuth();

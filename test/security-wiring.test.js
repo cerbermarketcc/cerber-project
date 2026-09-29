@@ -16,6 +16,13 @@ const financeMirrors = readFileSync(new URL("../supabase-finance-mirrors.sql", i
 const renderConfig = readFileSync(new URL("../render.yaml", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 
+function functionBody(source, name) {
+  const start = source.indexOf(`function ${name}`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const next = source.indexOf("\nfunction ", start + name.length + 9);
+  return source.slice(start, next < 0 ? source.length : next);
+}
+
 function routeBody(method, route) {
   const marker = `app.${method}("${route}"`;
   const start = server.indexOf(marker);
@@ -60,7 +67,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=182/);
+  assert.match(indexHtml, /app\.js\?v=183/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -437,6 +444,34 @@ test("product reservations are bounded, idempotent and fail closed after expiry"
   assert.match(reservation, /order\.stockReservedAt = Date\.now\(\)/);
   assert.match(server, /late_payment_inventory_unavailable/);
   assert.match(server, /Paid order requires manual review because its inventory reservation expired/);
+});
+
+test("product purchases lock exact inventory, reject disabled items and replay before stock checks", () => {
+  const disabledCheck = new Function(`${functionBody(server, "catalogItemDisabled")}\nreturn catalogItemDisabled;`)();
+  assert.equal(disabledCheck({ status: "disabled" }), true);
+  assert.equal(disabledCheck({ status: "DISABLED" }), true);
+  assert.equal(disabledCheck({ active: false, status: "active" }), true);
+  assert.equal(disabledCheck({ status: "active" }), false);
+
+  const lockKeys = functionBody(server, "productPurchaseLockKeys");
+  assert.match(lockKeys, /product-position:\$\{storeId\}:\$\{productId\}:\$\{positionId\}/);
+  assert.match(lockKeys, /product-request:\$\{loginKey\(user\.login\)\}:\$\{clientRequestId\}/);
+
+  for (const [label, route] of [
+    ["balance", routeBody("post", "/api/orders/product/balance")],
+    ["deposit", routeBody("post", "/api/orders/product/deposit")]
+  ]) {
+    assert.match(route, /return await withOperationLocks\(\s*productPurchaseLockKeys\(user, storeId, productId, positionId, clientRequestId\)/, `${label} must hold the exact purchase locks and forward failures through Express`);
+    assert.match(route, /catalogItemDisabled\(product\) \|\| catalogItemDisabled\(position\)/, `${label} must reject disabled catalog records`);
+    const replayIndex = route.indexOf("const existingOrder = state.orders.find");
+    const storeReadIndex = route.indexOf('supabase.from("stores")');
+    const stockCheckIndex = route.indexOf("Number(position.stock || 0) <= 0");
+    const stockMutationIndex = route.indexOf("position.stock = Math.max(0, Number(position.stock || 0) - 1)");
+    assert.ok(replayIndex >= 0, `${label} must find an existing idempotent order`);
+    assert.ok(storeReadIndex > replayIndex, `${label} must replay before loading mutable inventory`);
+    assert.ok(stockCheckIndex > replayIndex, `${label} must replay before reporting sold out`);
+    assert.ok(stockMutationIndex > stockCheckIndex, `${label} must decrement stock only after validation`);
+  }
 });
 
 test("expensive user actions have endpoint-specific anti-abuse limits", () => {

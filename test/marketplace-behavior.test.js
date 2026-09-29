@@ -30,6 +30,67 @@ test("catalog starts without an implicit location and offers explicit all-locati
   assert.match(appClient, /country: event\.target\.value, city: "", district: ""/);
 });
 
+test("customer catalog exposes live category, city and package controls without forcing a product", () => {
+  const catalog = functionBody(appClient, "renderProductsCatalog");
+  const routeTo = functionBody(appClient, "routeTo");
+  const renderCurrent = functionBody(appClient, "renderCurrent");
+  assert.match(appClient, /district: "",\s*weight: "",\s*category: "Все товары"/);
+  assert.match(catalog, /data-catalog-category/);
+  assert.match(catalog, /data-catalog-city/);
+  assert.match(catalog, /data-catalog-weight/);
+  assert.match(catalog, /country: "", city: "", district: "", weight: ""/);
+  assert.doesNotMatch(catalog, /Показаны лучшие варианты в других районах/);
+  assert.doesNotMatch(routeTo, /Альфа \(A-PVP\)|chisinau|Центр/);
+  assert.doesNotMatch(renderCurrent, /Альфа \(A-PVP\).*chisinau.*Центр/s);
+});
+
+test("product purchase picker cascades only through in-stock positions and preserves exact offers", () => {
+  const selectorHarness = new Function(`
+    const filterOptions = { countries: { moldova: { cities: {
+      orhei: { label: "Орхей" }, chisinau: { label: "Кишинёв" }
+    } } } };
+    let activeProductMode = "any";
+    let activeProductCityKey = "";
+    let activeProductWeightKey = "";
+    let activeProductDistrictKey = "";
+    ${functionBody(appClient, "normalizedShopKey")}
+    ${functionBody(appClient, "normalizedWeightKey")}
+    ${functionBody(appClient, "enabledProductPositions")}
+    ${functionBody(appClient, "positionSaleMode")}
+    ${functionBody(appClient, "positionCityKey")}
+    ${functionBody(appClient, "positionCityName")}
+    ${functionBody(appClient, "customerWeightLabel")}
+    ${functionBody(appClient, "customerDistrictKey")}
+    ${functionBody(appClient, "customerDistrictLabel")}
+    ${functionBody(appClient, "customerWeightKey")}
+    ${functionBody(appClient, "productPurchaseSelection")}
+    return {
+      select: productPurchaseSelection,
+      chooseDistrict(value) { activeProductDistrictKey = value; }
+    };
+  `)();
+  const product = {
+    priceUsd: 20,
+    positions: [
+      { id: "buried", country: "moldova", city: "orhei", district: "Центр", weight: "0.6", deliveryType: "Закоп", priceUsd: 20, stock: 2, status: "ready" },
+      { id: "courier", country: "moldova", city: "orhei", district: "Центр", weight: "0.6 g", deliveryType: "Курьер", priceUsd: 22, stock: 1, status: "ready" },
+      { id: "sold-out", country: "moldova", city: "chisinau", district: "Ботаника", weight: "0.3", priceUsd: 18, stock: 0, status: "ready" },
+      { id: "disabled", country: "moldova", city: "chisinau", district: "Центр", weight: "1", priceUsd: 30, stock: 4, status: "disabled" }
+    ]
+  };
+  const initial = selectorHarness.select(product);
+  assert.deepEqual(initial.cities.map((item) => item.label), ["Орхей"]);
+  assert.deepEqual(initial.weights.map((item) => item.key), ["0.6"]);
+  assert.equal(initial.districts.length, 1);
+  assert.equal(initial.districts[0].positions.length, 2);
+  assert.equal(initial.selectedPositions.length, 0);
+  selectorHarness.chooseDistrict(initial.districts[0].key);
+  const selected = selectorHarness.select(product);
+  assert.deepEqual(selected.selectedPositions.map((item) => item.id).sort(), ["buried", "courier"]);
+  const offer = functionBody(appClient, "productPurchaseOfferView");
+  assert.match(offer, /data-buy-position="\$\{esc\(position\.id\)\}"/);
+});
+
 test("paid and legacy product orders expose disputes until review or a real dispute closure", () => {
   const clientRule = functionBody(appClient, "orderCanDispute");
   const openRoute = routeBody("post", "/api/orders/:id/dispute/open");
@@ -179,8 +240,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=115/);
-  assert.match(indexHtml, /app\.js\?v=182/);
+  assert.match(indexHtml, /styles\.css\?v=116/);
+  assert.match(indexHtml, /app\.js\?v=183/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

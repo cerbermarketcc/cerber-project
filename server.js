@@ -13780,6 +13780,17 @@ async function cancelWalletDeposit(deposit, state, providerPayload = {}) {
   await saveSettingsState(state);
 }
 
+function catalogItemDisabled(item = {}) {
+  return item?.active === false || String(item?.status || "").trim().toLowerCase() === "disabled";
+}
+
+function productPurchaseLockKeys(user = {}, storeId = "", productId = "", positionId = "", clientRequestId = "") {
+  return [
+    `product-position:${storeId}:${productId}:${positionId}`,
+    `product-request:${loginKey(user.login)}:${clientRequestId}`
+  ];
+}
+
 app.post("/api/orders/product/balance", async (req, res, next) => {
   try {
     requireDb();
@@ -13790,35 +13801,41 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
-    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
-    const store = row?.data || null;
-    if (!store) return res.status(404).json({ error: "Магазин не найден" });
-    const status = String(store.status || "active").toLowerCase();
-    if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
-      return res.status(409).json({ error: "Магазин временно остановлен" });
-    }
-    const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
-    const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
-    if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
-    if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
+    return await withOperationLocks(
+      productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
+      async () => {
+        const state = await loadSettingsState();
+        state.orders = Array.isArray(state.orders) ? state.orders : [];
+        const existingOrder = state.orders.find((item) => (
+          item.type === "product"
+          && item.clientRequestId === clientRequestId
+          && sameLogin(item.login, user.login)
+        ));
+        if (existingOrder) {
+          if (
+            String(existingOrder.storeId || "") !== storeId
+            || String(existingOrder.productId || "") !== productId
+            || String(existingOrder.positionId || "") !== positionId
+          ) {
+            return res.status(409).json({ error: "Idempotency key was already used for another product purchase" });
+          }
+          return res.json({ order: publicOrderForUser(existingOrder), reused: true, ...(await stateFor(user)) });
+        }
 
-    const state = await loadSettingsState();
-    state.orders = Array.isArray(state.orders) ? state.orders : [];
-    const existingOrder = state.orders.find((item) => (
-      item.type === "product"
-      && item.clientRequestId === clientRequestId
-      && sameLogin(item.login, user.login)
-    ));
-    if (existingOrder) {
-      if (
-        String(existingOrder.storeId || "") !== storeId
-        || String(existingOrder.productId || "") !== productId
-        || String(existingOrder.positionId || "") !== positionId
-      ) {
-        return res.status(409).json({ error: "Idempotency key was already used for another product purchase" });
-      }
-      return res.json({ order: publicOrderForUser(existingOrder), reused: true, ...(await stateFor(user)) });
-    }
+        const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+        const store = row?.data || null;
+        if (!store) return res.status(404).json({ error: "Магазин не найден" });
+        const status = String(store.status || "active").toLowerCase();
+        if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
+          return res.status(409).json({ error: "Магазин временно остановлен" });
+        }
+        const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
+        const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
+        if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
+        if (catalogItemDisabled(product) || catalogItemDisabled(position)) {
+          return res.status(409).json({ error: "Товар временно недоступен" });
+        }
+        if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
     state.ltcBalances = state.ltcBalances || {};
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
     const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
@@ -13917,7 +13934,10 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     }
     await saveSettingsState(state);
     notifyRealtime("order_paid", { orderId: order.id, storeId });
-    res.json({ order: publicOrderForUser(order), ...(await stateFor(user)) });
+        return res.json({ order: publicOrderForUser(order), ...(await stateFor(user)) });
+      },
+      { waitMs: 15000, ttlSeconds: 120 }
+    );
   } catch (error) {
     next(error);
   }
@@ -13936,53 +13956,59 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
     const coin = walletCoinFromRequest(req.body);
-    const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
-    const store = row?.data || null;
-    if (!store) return res.status(404).json({ error: "Магазин не найден" });
-    const status = String(store.status || "active").toLowerCase();
-    if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
-      return res.status(409).json({ error: "Магазин временно остановлен" });
-    }
-    const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
-    const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
-    if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
-    if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
+    return await withOperationLocks(
+      productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
+      async () => {
+        const state = await loadSettingsState();
+        state.orders = Array.isArray(state.orders) ? state.orders : [];
+        const existingOrder = state.orders.find((item) => (
+          item.type === "product"
+          && item.clientRequestId === clientRequestId
+          && sameLogin(item.login, user.login)
+        ));
+        if (existingOrder) {
+          if (
+            String(existingOrder.storeId || "") !== storeId
+            || String(existingOrder.productId || "") !== productId
+            || String(existingOrder.positionId || "") !== positionId
+          ) {
+            return res.status(409).json({ error: "Idempotency key was already used for another product payment" });
+          }
+          return res.json({
+            order: publicOrderForUser(existingOrder),
+            paymentUrl: existingOrder.paymentUrl || "",
+            reused: true,
+            ...(await stateFor(user))
+          });
+        }
 
-    const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
-    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
+        const { data: row } = await supabase.from("stores").select("data").eq("id", storeId).maybeSingle();
+        const store = row?.data || null;
+        if (!store) return res.status(404).json({ error: "Магазин не найден" });
+        const status = String(store.status || "active").toLowerCase();
+        if (store.salesBlocked || store.is_stopped || ["disabled", "disable", "stopped", "blocked"].includes(status)) {
+          return res.status(409).json({ error: "Магазин временно остановлен" });
+        }
+        const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item.id) === productId);
+        const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item.id) === positionId);
+        if (!product || !position) return res.status(404).json({ error: "Товар не найден" });
+        if (catalogItemDisabled(product) || catalogItemDisabled(position)) {
+          return res.status(409).json({ error: "Товар временно недоступен" });
+        }
+        if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
 
-    const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
-    const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
-    const fromPosition = positionItems.length > 0;
-    const sourceItems = fromPosition ? positionItems : productItems;
-    const requiresIssuedDescription = sourceItems.length > 0;
-    const reservedDescription = sourceItems[0] || "";
-    if (requiresIssuedDescription && !reservedDescription) {
-      return res.status(409).json({ error: "Нет доступных описаний для выдачи" });
-    }
+        const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+        if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
 
-    const state = await loadSettingsState();
-    state.orders = Array.isArray(state.orders) ? state.orders : [];
-    const existingOrder = state.orders.find((item) => (
-      item.type === "product"
-      && item.clientRequestId === clientRequestId
-      && sameLogin(item.login, user.login)
-    ));
-    if (existingOrder) {
-      if (
-        String(existingOrder.storeId || "") !== storeId
-        || String(existingOrder.productId || "") !== productId
-        || String(existingOrder.positionId || "") !== positionId
-      ) {
-        return res.status(409).json({ error: "Idempotency key was already used for another product payment" });
-      }
-      return res.json({
-        order: publicOrderForUser(existingOrder),
-        paymentUrl: existingOrder.paymentUrl || "",
-        reused: true,
-        ...(await stateFor(user))
-      });
-    }
+        const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
+        const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
+        const fromPosition = positionItems.length > 0;
+        const sourceItems = fromPosition ? positionItems : productItems;
+        const requiresIssuedDescription = sourceItems.length > 0;
+        const reservedDescription = sourceItems[0] || "";
+        if (requiresIssuedDescription && !reservedDescription) {
+          return res.status(409).json({ error: "Нет доступных описаний для выдачи" });
+        }
     const activePendingOrders = state.orders.filter((item) => (
       item.type === "product"
       && sameLogin(item.login, user.login)
@@ -14092,7 +14118,10 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     await saveOwnerStoreFallback(store);
     await saveSettingsState(state);
     notifyRealtime("order_created", { orderId: order.id, storeId });
-    res.json({ order: publicOrderForUser(order), paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
+        return res.json({ order: publicOrderForUser(order), paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
+      },
+      { waitMs: 15000, ttlSeconds: 120 }
+    );
   } catch (error) {
     next(error);
   }
