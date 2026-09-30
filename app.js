@@ -14298,7 +14298,7 @@ function renderFallbackScreen() {
   root.innerHTML = `
     <main class="auth-wrap">
       <section class="auth-card">
-        <img src="assets/logo1-transparent.png" alt="CERBER">
+        <img class="loading-screen-logo" src="assets/logo1-transparent.png" alt="CERBER">
         <h1>CERBER</h1>
         <p>Сайт загружается. Обновите страницу через несколько секунд.</p>
         <button class="primary" data-reload-page>Обновить</button>

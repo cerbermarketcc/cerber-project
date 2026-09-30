@@ -9182,3 +9182,15 @@ body,
     max-width: none;
   }
 }
+
+.auth-card > img.loading-screen-logo {
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+  aspect-ratio: 2 / 1;
+  margin: 0 auto 16px;
+  border-radius: 0;
+  object-fit: contain;
+  object-position: center;
+  filter: invert(1) brightness(1.05) !important;
+}
