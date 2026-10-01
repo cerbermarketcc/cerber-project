@@ -89,6 +89,58 @@ test("product purchase picker cascades only through in-stock positions and prese
   assert.deepEqual(selected.selectedPositions.map((item) => item.id).sort(), ["buried", "courier"]);
   const offer = functionBody(appClient, "productPurchaseOfferView");
   assert.match(offer, /data-buy-position="\$\{esc\(position\.id\)\}"/);
+  assert.match(offer, /Number\(position\.priceUsd \|\| 0\)/);
+  assert.doesNotMatch(offer, /product\.priceUsd/);
+});
+
+test("product pages show review totals and only position-level prices", () => {
+  const renderProduct = functionBody(appClient, "renderProductView");
+  const cardFacts = functionBody(appClient, "productCardFacts");
+  const cards = functionBody(appClient, "shopCardsTab");
+  const products = functionBody(appClient, "shopProductsTab");
+  const shopActions = functionBody(appClient, "bindShopPanelActions");
+  const ratingSummary = new Function("db", `${functionBody(appClient, "ratingSummaryText")}\nreturn ratingSummaryText;`);
+
+  assert.equal(ratingSummary({ lang: "ru" })(5, 1), "5.00 из 5.00 (1)");
+  assert.equal(ratingSummary({ lang: "md" })(4.5, 12), "4.50 din 5.00 (12)");
+  assert.equal(ratingSummary({ lang: "en" })(4, 3), "4.00 out of 5.00 (3)");
+  assert.match(renderProduct, /ratingSummaryText\(product\.rating \|\| 5, productReviewCount\)/);
+  assert.doesNotMatch(renderProduct, /<p class="price">|Number\(product\.priceUsd/);
+  assert.match(cardFacts, /Number\(position\.priceUsd \|\| 0\)/);
+  assert.doesNotMatch(cardFacts, /product\.priceUsd/);
+
+  assert.doesNotMatch(cards, /name="priceUsd"/);
+  assert.match(products, /Цена товара, USD<input name="priceUsd"[^>]+required/);
+  assert.match(shopActions, /const priceUsd = Number\(data\.get\("priceUsd"\) \|\| 0\)/);
+  assert.match(shopActions, /priceUsd <= 0\) throw new Error\("Укажите цену товара"\)/);
+  assert.match(shopActions, /Math\.abs\(Number\(position\.priceUsd \|\| 0\) - priceUsd\)/);
+  assert.match(shopActions, /priceUsd,\s*weight:/);
+});
+
+test("personal LTC address modal loads a server-generated QR without an amount", () => {
+  const details = functionBody(appClient, "showWalletDepositDetails");
+  const loaderStart = appClient.indexOf("async function loadPermanentWalletQr");
+  const loaderEnd = appClient.indexOf("\nfunction showWalletDepositDetails", loaderStart);
+  const loader = appClient.slice(loaderStart, loaderEnd);
+  assert.match(details, /data-wallet-deposit-qr=/);
+  assert.match(details, /любую сумму в кошельке/);
+  assert.match(details, /loadPermanentWalletQr\(deposit\.id\)/);
+  assert.match(loader, /\/api\/wallet\/deposits\/\$\{encodeURIComponent\(depositId\)\}\/qr/);
+  assert.match(loader, /safeContentUrl\(payload\.qrCodeDataUrl\)/);
+});
+
+test("product checkout requires the number of persons and shows it in order details", () => {
+  const checkout = functionBody(appClient, "openProductCheckoutModal");
+  const personsReader = functionBody(appClient, "checkoutPersonsCount");
+  const orderDetails = functionBody(appClient, "showProductOrder");
+  const sellerHistory = functionBody(appClient, "shopSaleHistoryList");
+  assert.match(checkout, /data-checkout-persons[^>]+name="personsCount"[^>]+min="1"[^>]+max="100"[^>]+required/);
+  assert.equal((checkout.match(/JSON\.stringify\(\{ storeId, productId, positionId, personsCount/g) || []).length, 2);
+  assert.match(personsReader, /Number\.isInteger\(personsCount\)/);
+  assert.match(personsReader, /personsCount < 1 \|\| personsCount > 100/);
+  assert.match(orderDetails, /Количество персон:/);
+  assert.match(sellerHistory, /<span>Персон<\/span>/);
+  assert.match(orderDetails, /Заказ зарегистрирован в розыгрыше от 500 ₽/);
 });
 
 test("paid and legacy product orders expose disputes until review or a real dispute closure", () => {
@@ -240,8 +292,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=117/);
-  assert.match(indexHtml, /app\.js\?v=184/);
+  assert.match(indexHtml, /styles\.css\?v=118/);
+  assert.match(indexHtml, /app\.js\?v=185/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

@@ -3102,6 +3102,7 @@ body[data-theme="dark"] .mirror-row {
 .marketplace-metrics {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   margin-top: 12px;
   color: var(--ink);
@@ -3111,6 +3112,11 @@ body[data-theme="dark"] .mirror-row {
 .marketplace-metrics strong {
   margin-left: 3px;
   font-size: 17px;
+}
+
+.market-rating-summary,
+.rating-summary {
+  white-space: nowrap;
 }
 
 .market-metric-divider {
@@ -6082,6 +6088,30 @@ body[data-theme="dark"] .mirror-row {
   overflow-wrap: anywhere;
 }
 
+.wallet-deposit-qr {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  margin: 18px 0;
+  text-align: center;
+}
+
+.wallet-deposit-qr img {
+  width: min(260px, 72vw);
+  aspect-ratio: 1;
+  object-fit: contain;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fff;
+}
+
+.wallet-deposit-qr p,
+.wallet-deposit-qr small {
+  margin: 0;
+  color: var(--muted);
+}
+
 .owner-store-manager label:has(input[name="isTop"]),
 .owner-store-manager label:has(input[name="visibleInCatalog"]),
 .owner-store-manager label:has(input[name="salesBlocked"]) {
@@ -6642,7 +6672,7 @@ details[data-shop-storage-item] .form {
 
 .seller-dashboard-table > div {
   display: grid;
-  grid-template-columns: 1.2fr 1fr .8fr .8fr;
+  grid-template-columns: 1.2fr 1fr .6fr .8fr .8fr;
   gap: 10px;
   min-width: 560px;
   border-bottom: 1px solid var(--line);

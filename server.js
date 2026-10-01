@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "financial-settlement-2026-09-20-v190";
+const cerberBuildVersion = "financial-settlement-2026-09-20-v191";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -99,6 +99,8 @@ const siteNotifyWebhookSecret = telegramWebhookSecretValue(process.env.SITE_NOTI
 const proverkaWebhookSecret = telegramWebhookSecretValue(process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret);
 const telegramWebhookSetupStatus = {};
 const walletDepositTtlMs = 40 * 60 * 1000;
+const raffleMinimumRub = 500;
+const raffleUsdRubRate = Math.max(1, Number(process.env.RAFFLE_USD_RUB_RATE || 90) || 90);
 const telegramLinkCodeTtlMs = 10 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const paymentReconcileIntervalMs = 15 * 1000;
@@ -2352,6 +2354,70 @@ function publicOrderForUser(order = {}) {
   return item;
 }
 
+function enrollCompletedOrdersInRaffle(state = {}) {
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  state.raffleEntries = Array.isArray(state.raffleEntries) ? state.raffleEntries : [];
+  const entriesByOrderId = new Map(state.raffleEntries
+    .filter((entry) => entry?.orderId)
+    .map((entry) => [String(entry.orderId), entry]));
+  let added = 0;
+
+  state.orders.forEach((order) => {
+    if (!isProductOrderRecord(order)) return;
+    const status = String(order.status || "").toLowerCase();
+    const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+    if (!["completed", "closed"].includes(status) || !["paid", "finished"].includes(paymentStatus)) return;
+
+    const existing = entriesByOrderId.get(String(order.id || ""));
+    if (existing) {
+      order.raffleQualified = true;
+      order.raffleEntryId = existing.id;
+      order.raffleEvaluatedAt = Number(order.raffleEvaluatedAt || existing.createdAt || Date.now());
+      order.raffleAmountRub = Number(existing.amountRub || order.raffleAmountRub || 0);
+      order.raffleThresholdRub = Number(existing.thresholdRub || raffleMinimumRub);
+      return;
+    }
+    if (order.raffleEvaluatedAt) return;
+
+    const amountUsd = Number(order.amountUsd || 0);
+    const amountRub = Math.round(amountUsd * raffleUsdRubRate * 100) / 100;
+    const evaluatedAt = Number(order.completedAt || order.closedAt || Date.now());
+    order.raffleEvaluatedAt = evaluatedAt;
+    order.raffleAmountRub = amountRub;
+    order.raffleThresholdRub = raffleMinimumRub;
+    order.raffleUsdRubRate = raffleUsdRubRate;
+    order.raffleQualified = Number.isFinite(amountRub) && amountRub >= raffleMinimumRub;
+    if (!order.raffleQualified) return;
+
+    const entry = {
+      id: `raffle-${order.id}`,
+      orderId: order.id,
+      login: order.login || "",
+      storeId: order.storeId || "",
+      amountUsd,
+      amountRub,
+      thresholdRub: raffleMinimumRub,
+      usdRubRate: raffleUsdRubRate,
+      personsCount: Number(order.personsCount || 0),
+      status: "active",
+      createdAt: evaluatedAt
+    };
+    state.raffleEntries.unshift(entry);
+    entriesByOrderId.set(String(order.id || ""), entry);
+    order.raffleEntryId = entry.id;
+    pushSiteNotification(state, order.login, {
+      id: `notice-raffle-${order.id}-${loginKey(order.login)}`,
+      eventType: "raffle_entry_created",
+      orderId: order.id,
+      storeId: order.storeId,
+      title: "Участие в розыгрыше",
+      body: `Завершённый заказ ${order.product || order.id} зарегистрирован в розыгрыше от 500 ₽.`
+    });
+    added += 1;
+  });
+  return added;
+}
+
 function isBrokenImageValue(value = "") {
   const image = String(value || "").trim();
   return !image || image === "[object File]" || image === "[object Blob]" || image === "undefined" || image === "null";
@@ -3820,6 +3886,9 @@ async function stateFor(user) {
     const userReferralPayments = user
       ? (Array.isArray(settingsData.referralPayments) ? settingsData.referralPayments : []).filter((item) => sameUser(item.login) || sameUser(item.referrerLogin))
       : [];
+    const userRaffleEntries = user
+      ? (Array.isArray(settingsData.raffleEntries) ? settingsData.raffleEntries : []).filter((item) => sameUser(item.login))
+      : [];
     const userReferralCodes = user && settingsData.referralCodes?.[userKey]
       ? { [userKey]: settingsData.referralCodes[userKey] }
       : {};
@@ -3851,6 +3920,7 @@ async function stateFor(user) {
         groupSettings: publicGroupSettings(settingsData.groupSettings || {}),
         referrals: userReferrals,
         referralPayments: userReferralPayments,
+        raffleEntries: userRaffleEntries,
         referralCodes: userReferralCodes,
         balances: userBalances,
         ltcBalances: userLtcBalances,
@@ -10039,6 +10109,7 @@ const PRESERVED_STATE_ARRAY_KEYS = [
   "walletWithdrawals",
   "referrals",
   "referralPayments",
+  "raffleEntries",
   "siteNotifications",
   "broadcasts",
   "userFilters",
@@ -10269,6 +10340,10 @@ async function saveSettingsStateNow(state, options = {}) {
   next.orders = allowEmptyKeys.has("orders")
     ? (Array.isArray(state?.orders) ? state.orders : [])
     : mergeDurableFinanceRecords(currentData.orders, state?.orders);
+  next.raffleEntries = allowEmptyKeys.has("raffleEntries")
+    ? (Array.isArray(state?.raffleEntries) ? state.raffleEntries : [])
+    : mergeDurableFinanceRecords(currentData.raffleEntries, state?.raffleEntries);
+  enrollCompletedOrdersInRaffle(next);
   const storedNext = settingsStateForStorage(next);
   const { error: settingsSaveError } = await withTimeout(
     supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: storedNext }, { onConflict: "id" }),
@@ -13171,6 +13246,7 @@ function adminBuildOverview(data) {
     exchangers: adminExchangersForState(state.exchangers || [], profiles),
     users: userRows,
     deals: [...productOrders.map(adminOrderForState), ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
+    raffleEntries: Array.isArray(state.raffleEntries) ? state.raffleEntries : [],
     disputes: disputes.map((item) => item.storeId || item.type === "product" ? adminOrderForState(item) : item),
     finances: {
       walletDeposits: walletDeposits.map(adminDepositForState),
@@ -13791,6 +13867,16 @@ function productPurchaseLockKeys(user = {}, storeId = "", productId = "", positi
   ];
 }
 
+function requestedProductPersonsCount(body = {}) {
+  const personsCount = Number(body.personsCount);
+  if (!Number.isInteger(personsCount) || personsCount < 1 || personsCount > 100) {
+    const error = new Error("Укажите количество персон от 1 до 100");
+    error.status = 400;
+    throw error;
+  }
+  return personsCount;
+}
+
 app.post("/api/orders/product/balance", async (req, res, next) => {
   try {
     requireDb();
@@ -13801,6 +13887,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
+    const personsCount = requestedProductPersonsCount(req.body);
     return await withOperationLocks(
       productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
       async () => {
@@ -13816,6 +13903,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
             String(existingOrder.storeId || "") !== storeId
             || String(existingOrder.productId || "") !== productId
             || String(existingOrder.positionId || "") !== positionId
+            || Number(existingOrder.personsCount || 0) !== personsCount
           ) {
             return res.status(409).json({ error: "Idempotency key was already used for another product purchase" });
           }
@@ -13838,12 +13926,12 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
         if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
     state.ltcBalances = state.ltcBalances || {};
     state.walletTransactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
-    const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+    const priceUsd = Number(position.priceUsd || 0);
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
     const ltcUsdRate = Number((await loadLitecoinUsdRate()).rate || 0);
     const ltcAmount = ltcUsdRate > 0 ? priceUsd / ltcUsdRate : 0;
     const balance = stateUserLtcBalance(state, user.login, user.login_key);
     const balanceUsd = stateUserUsdBalance(state, user.login, user.login_key);
-    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
     if (!Number.isFinite(ltcUsdRate) || ltcUsdRate <= 0) return res.status(503).json({ error: "Курс LTC временно недоступен" });
     if (balanceUsd + 0.00000001 < priceUsd) return res.status(400).json({ error: "Недостаточно средств на балансе" });
 
@@ -13883,7 +13971,8 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
       productDescription: product.description || "",
       reservedDescription,
       reservedFromPosition: fromPosition,
-      reservedStock: true
+      reservedStock: true,
+      personsCount
     };
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
@@ -13955,6 +14044,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
+    const personsCount = requestedProductPersonsCount(req.body);
     const coin = walletCoinFromRequest(req.body);
     return await withOperationLocks(
       productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
@@ -13971,6 +14061,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
             String(existingOrder.storeId || "") !== storeId
             || String(existingOrder.productId || "") !== productId
             || String(existingOrder.positionId || "") !== positionId
+            || Number(existingOrder.personsCount || 0) !== personsCount
           ) {
             return res.status(409).json({ error: "Idempotency key was already used for another product payment" });
           }
@@ -13997,7 +14088,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
         }
         if (Number(position.stock || 0) <= 0) return res.status(409).json({ error: "Товара сейчас нет" });
 
-        const priceUsd = Number(position.priceUsd || product.priceUsd || 0);
+        const priceUsd = Number(position.priceUsd || 0);
         if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
 
         const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
@@ -14022,6 +14113,9 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       && String(item.positionId || "") === positionId
     ));
     if (activePositionReservation) {
+      if (Number(activePositionReservation.personsCount || 0) !== personsCount) {
+        return res.status(409).json({ error: "Для этой позиции уже создан заказ с другим количеством персон" });
+      }
       return res.json({
         order: publicOrderForUser(activePositionReservation),
         paymentUrl: activePositionReservation.paymentUrl || "",
@@ -14059,7 +14153,8 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       productDescription: product.description || "",
       reservedDescription: "",
       reservedFromPosition: fromPosition,
-      reservedStock: false
+      reservedStock: false,
+      personsCount
     };
     applyProductOrderCommission(order, state, store);
 
@@ -14327,6 +14422,39 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
     deposits.unshift(addressRecord);
     await saveSettingsState({ ...state, walletDeposits: deposits });
     res.json({ deposit: addressRecord, ...(await stateFor(user)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/wallet/deposits/:id/qr", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    assertClientRateLimit(req, "wallet-deposit-qr", { limit: 30, windowMs: 60 * 1000, identity: user.login });
+    const state = await loadSettingsState();
+    const deposit = (Array.isArray(state.walletDeposits) ? state.walletDeposits : []).find((item) => (
+      item.kind === "permanent_address"
+      && String(item.id || "") === String(req.params.id || "")
+      && sameLogin(item.login, user.login)
+    ));
+    if (!deposit) return res.status(404).json({ error: "Адрес пополнения не найден" });
+
+    const address = String(deposit.payAddress || "").trim();
+    if (!isValidLitecoinAddress(address)) {
+      return res.status(400).json({ error: "Адрес пополнения недоступен" });
+    }
+    const paymentUri = `litecoin:${address}`;
+    const qrCodeDataUrl = await QRCode.toDataURL(paymentUri, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 280,
+      color: { dark: "#111111ff", light: "#ffffffff" }
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ qrCodeDataUrl, paymentUri });
   } catch (error) {
     next(error);
   }

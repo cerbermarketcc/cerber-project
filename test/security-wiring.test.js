@@ -67,7 +67,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=184/);
+  assert.match(indexHtml, /app\.js\?v=185/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -463,6 +463,8 @@ test("product purchases lock exact inventory, reject disabled items and replay b
   ]) {
     assert.match(route, /return await withOperationLocks\(\s*productPurchaseLockKeys\(user, storeId, productId, positionId, clientRequestId\)/, `${label} must hold the exact purchase locks and forward failures through Express`);
     assert.match(route, /catalogItemDisabled\(product\) \|\| catalogItemDisabled\(position\)/, `${label} must reject disabled catalog records`);
+    assert.match(route, /const priceUsd = Number\(position\.priceUsd \|\| 0\)/, `${label} must charge the selected position price`);
+    assert.doesNotMatch(route, /position\.priceUsd \|\| product\.priceUsd/, `${label} must not fall back to an ambiguous card price`);
     const replayIndex = route.indexOf("const existingOrder = state.orders.find");
     const storeReadIndex = route.indexOf('supabase.from("stores")');
     const stockCheckIndex = route.indexOf("Number(position.stock || 0) <= 0");
@@ -472,6 +474,65 @@ test("product purchases lock exact inventory, reject disabled items and replay b
     assert.ok(stockCheckIndex > replayIndex, `${label} must replay before reporting sold out`);
     assert.ok(stockMutationIndex > stockCheckIndex, `${label} must decrement stock only after validation`);
   }
+});
+
+test("product orders require a bounded persons count and keep it idempotent", () => {
+  const parsePersonsSource = server.match(/function requestedProductPersonsCount\(body = \{\}\) \{[\s\S]*?\n\}/)?.[0] || "";
+  const parsePersons = new Function(`${parsePersonsSource}\nreturn requestedProductPersonsCount;`)();
+  assert.equal(parsePersons({ personsCount: 1 }), 1);
+  assert.equal(parsePersons({ personsCount: "2" }), 2);
+  assert.equal(parsePersons({ personsCount: 100 }), 100);
+  for (const personsCount of [undefined, 0, 1.5, 101, "abc"]) {
+    assert.throws(() => parsePersons({ personsCount }), (error) => (
+      error?.status === 400 && /количество персон от 1 до 100/.test(error.message)
+    ));
+  }
+  for (const route of [
+    routeBody("post", "/api/orders/product/balance"),
+    routeBody("post", "/api/orders/product/deposit")
+  ]) {
+    assert.match(route, /const personsCount = requestedProductPersonsCount\(req\.body\)/);
+    assert.match(route, /Number\(existingOrder\.personsCount \|\| 0\) !== personsCount/);
+    assert.match(route, /reservedStock: (?:true|false),\s*personsCount/);
+  }
+});
+
+test("only fully paid completed orders enter the 500-ruble raffle once", () => {
+  const enroll = new Function(
+    "isProductOrderRecord",
+    "pushSiteNotification",
+    "loginKey",
+    "raffleMinimumRub",
+    "raffleUsdRubRate",
+    `${functionBody(server, "enrollCompletedOrdersInRaffle")}\nreturn enrollCompletedOrdersInRaffle;`
+  )(
+    (order) => order.type === "product",
+    (state, login, notification) => {
+      state.siteNotifications = [...(state.siteNotifications || []), { ...notification, login }];
+    },
+    (value) => String(value || "").toLowerCase(),
+    500,
+    90
+  );
+  const state = {
+    orders: [
+      { id: "eligible", type: "product", login: "client", storeId: "shop", product: "Item", amountUsd: 10, personsCount: 3, status: "completed", paymentStatus: "paid", completedAt: 1000 },
+      { id: "unpaid", type: "product", login: "client", amountUsd: 10, status: "completed", paymentStatus: "waiting" },
+      { id: "unfinished", type: "product", login: "client", amountUsd: 10, status: "active", paymentStatus: "paid" },
+      { id: "small", type: "product", login: "client", amountUsd: 2, status: "completed", paymentStatus: "paid", completedAt: 1000 }
+    ]
+  };
+  assert.equal(enroll(state), 1);
+  assert.equal(enroll(state), 0);
+  assert.equal(state.raffleEntries.length, 1);
+  assert.equal(state.raffleEntries[0].orderId, "eligible");
+  assert.equal(state.raffleEntries[0].personsCount, 3);
+  assert.equal(state.orders[0].raffleQualified, true);
+  assert.equal(state.orders[1].raffleQualified, undefined);
+  assert.equal(state.orders[2].raffleQualified, undefined);
+  assert.equal(state.orders[3].raffleQualified, false);
+  assert.equal(state.siteNotifications.length, 1);
+  assert.match(server, /enrollCompletedOrdersInRaffle\(next\)/);
 });
 
 test("expensive user actions have endpoint-specific anti-abuse limits", () => {
@@ -484,11 +545,27 @@ test("expensive user actions have endpoint-specific anti-abuse limits", () => {
     "product-payment-reservation",
     "payment-invoice-create",
     "wallet-deposit-create",
+    "wallet-deposit-qr",
     "wallet-withdrawal",
     "wallet-deposit-sync",
     "order-payment-sync"
   ];
   for (const scope of requiredScopes) assert.match(server, new RegExp(`assertClientRateLimit\\(req, "${scope}"`));
+});
+
+test("personal LTC QR codes are generated only for the authenticated address owner", () => {
+  const qr = routeBody("get", "/api/wallet/deposits/:id/qr");
+  assert.match(qr, /const user = await userFromRequest\(req\)/);
+  assert.match(qr, /if \(!user\) return res\.status\(401\)/);
+  assert.match(qr, /item\.kind === "permanent_address"/);
+  assert.match(qr, /String\(item\.id \|\| ""\) === String\(req\.params\.id \|\| ""\)/);
+  assert.match(qr, /sameLogin\(item\.login, user\.login\)/);
+  assert.match(qr, /if \(!deposit\) return res\.status\(404\)/);
+  assert.match(qr, /isValidLitecoinAddress\(address\)/);
+  assert.match(qr, /const paymentUri = `litecoin:\$\{address\}`;/);
+  assert.doesNotMatch(qr, /litecoin:\$\{address\}\?amount=/);
+  assert.match(qr, /QRCode\.toDataURL\(paymentUri/);
+  assert.match(qr, /setHeader\("Cache-Control", "private, no-store"\)/);
 });
 
 test("referral codes are server-owned and cannot be replaced by the client", () => {
