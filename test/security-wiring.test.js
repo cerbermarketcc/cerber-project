@@ -67,7 +67,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=185/);
+  assert.match(indexHtml, /app\.js\?v=186/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -465,6 +465,7 @@ test("product purchases lock exact inventory, reject disabled items and replay b
     assert.match(route, /catalogItemDisabled\(product\) \|\| catalogItemDisabled\(position\)/, `${label} must reject disabled catalog records`);
     assert.match(route, /const priceUsd = Number\(position\.priceUsd \|\| 0\)/, `${label} must charge the selected position price`);
     assert.doesNotMatch(route, /position\.priceUsd \|\| product\.priceUsd/, `${label} must not fall back to an ambiguous card price`);
+    assert.doesNotMatch(route, /personsCount|requestedProductPersonsCount/, `${label} must not contain the unrelated persons question`);
     const replayIndex = route.indexOf("const existingOrder = state.orders.find");
     const storeReadIndex = route.indexOf('supabase.from("stores")');
     const stockCheckIndex = route.indexOf("Number(position.stock || 0) <= 0");
@@ -476,63 +477,38 @@ test("product purchases lock exact inventory, reject disabled items and replay b
   }
 });
 
-test("product orders require a bounded persons count and keep it idempotent", () => {
-  const parsePersonsSource = server.match(/function requestedProductPersonsCount\(body = \{\}\) \{[\s\S]*?\n\}/)?.[0] || "";
-  const parsePersons = new Function(`${parsePersonsSource}\nreturn requestedProductPersonsCount;`)();
-  assert.equal(parsePersons({ personsCount: 1 }), 1);
-  assert.equal(parsePersons({ personsCount: "2" }), 2);
-  assert.equal(parsePersons({ personsCount: 100 }), 100);
-  for (const personsCount of [undefined, 0, 1.5, 101, "abc"]) {
-    assert.throws(() => parsePersons({ personsCount }), (error) => (
-      error?.status === 400 && /количество персон от 1 до 100/.test(error.message)
-    ));
-  }
-  for (const route of [
-    routeBody("post", "/api/orders/product/balance"),
-    routeBody("post", "/api/orders/product/deposit")
-  ]) {
-    assert.match(route, /const personsCount = requestedProductPersonsCount\(req\.body\)/);
-    assert.match(route, /Number\(existingOrder\.personsCount \|\| 0\) !== personsCount/);
-    assert.match(route, /reservedStock: (?:true|false),\s*personsCount/);
-  }
-});
-
-test("only fully paid completed orders enter the 500-ruble raffle once", () => {
-  const enroll = new Function(
-    "isProductOrderRecord",
-    "pushSiteNotification",
-    "loginKey",
-    "raffleMinimumRub",
-    "raffleUsdRubRate",
-    `${functionBody(server, "enrollCompletedOrdersInRaffle")}\nreturn enrollCompletedOrdersInRaffle;`
-  )(
-    (order) => order.type === "product",
-    (state, login, notification) => {
-      state.siteNotifications = [...(state.siteNotifications || []), { ...notification, login }];
-    },
-    (value) => String(value || "").toLowerCase(),
-    500,
-    90
-  );
+test("the accidental order metadata is removed without changing normal order data", () => {
+  const cleanup = new Function(
+    "accidentalOrderMetadataKeys",
+    `${functionBody(server, "stripAccidentalOrderMetadata")}
+${functionBody(server, "stripAccidentalOrderContainer")}
+${functionBody(server, "stripAccidentalOrderFeatureState")}
+return stripAccidentalOrderFeatureState;`
+  )([
+    "personsCount",
+    "raffleQualified",
+    "raffleEntryId",
+    "raffleEvaluatedAt",
+    "raffleAmountRub",
+    "raffleThresholdRub",
+    "raffleUsdRubRate"
+  ]);
   const state = {
-    orders: [
-      { id: "eligible", type: "product", login: "client", storeId: "shop", product: "Item", amountUsd: 10, personsCount: 3, status: "completed", paymentStatus: "paid", completedAt: 1000 },
-      { id: "unpaid", type: "product", login: "client", amountUsd: 10, status: "completed", paymentStatus: "waiting" },
-      { id: "unfinished", type: "product", login: "client", amountUsd: 10, status: "active", paymentStatus: "paid" },
-      { id: "small", type: "product", login: "client", amountUsd: 2, status: "completed", paymentStatus: "paid", completedAt: 1000 }
-    ]
+    raffleEntries: [{ id: "entry" }],
+    orders: [{ id: "order", status: "completed", personsCount: 4, raffleQualified: true }],
+    siteNotifications: [
+      { id: "notice-raffle-order-client", eventType: "raffle_entry_created" },
+      { id: "normal", eventType: "order_completed" }
+    ],
+    ownerStores: [{ id: "shop", productOrders: [{ id: "order", raffleEntryId: "entry", amountUsd: 10 }] }]
   };
-  assert.equal(enroll(state), 1);
-  assert.equal(enroll(state), 0);
-  assert.equal(state.raffleEntries.length, 1);
-  assert.equal(state.raffleEntries[0].orderId, "eligible");
-  assert.equal(state.raffleEntries[0].personsCount, 3);
-  assert.equal(state.orders[0].raffleQualified, true);
-  assert.equal(state.orders[1].raffleQualified, undefined);
-  assert.equal(state.orders[2].raffleQualified, undefined);
-  assert.equal(state.orders[3].raffleQualified, false);
-  assert.equal(state.siteNotifications.length, 1);
-  assert.match(server, /enrollCompletedOrdersInRaffle\(next\)/);
+  assert.equal(cleanup(state), true);
+  assert.equal(Object.hasOwn(state, "raffleEntries"), false);
+  assert.deepEqual(state.orders, [{ id: "order", status: "completed" }]);
+  assert.deepEqual(state.siteNotifications, [{ id: "normal", eventType: "order_completed" }]);
+  assert.deepEqual(state.ownerStores[0].productOrders, [{ id: "order", amountUsd: 10 }]);
+  assert.match(server, /removeAccidentalOrderFeatureData\(\)[\s\S]{0,300}migrateInlineStoreMedia/);
+  assert.doesNotMatch(adminClient, /raffleEntries|raffleQualified|personsCount|500 ₽/);
 });
 
 test("expensive user actions have endpoint-specific anti-abuse limits", () => {

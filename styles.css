@@ -6672,7 +6672,7 @@ details[data-shop-storage-item] .form {
 
 .seller-dashboard-table > div {
   display: grid;
-  grid-template-columns: 1.2fr 1fr .6fr .8fr .8fr;
+  grid-template-columns: 1.2fr 1fr .8fr .8fr;
   gap: 10px;
   min-width: 560px;
   border-bottom: 1px solid var(--line);

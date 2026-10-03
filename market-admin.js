@@ -1336,10 +1336,8 @@ function smallTable(headers, rows) {
 }
 
 function renderDeals() {
-  const raffleEntries = Array.isArray(data.raffleEntries) ? data.raffleEntries : [];
-  const raffleOrderIds = new Set(raffleEntries.map((entry) => String(entry.orderId || "")));
-  return `<article class="table-card"><div class="admin-table-actions"><strong>Участников розыгрыша от 500 ₽: ${raffleEntries.length}</strong></div><table><thead><tr><th>ID</th><th>Тип</th><th>Пользователь</th><th>Магазин</th><th>Персон</th><th>Сумма</th><th>Розыгрыш</th><th>Статус</th><th>Дата</th></tr></thead><tbody>
-    ${data.deals.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.type || "exchange")}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${esc(o.personsCount || "-")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td>${raffleOrderIds.has(String(o.id || "")) || o.raffleQualified ? "Участник" : "-"}</td><td>${esc(o.status || o.paymentStatus || "")}</td><td>${fmtDate(o.createdAt || o.date)}</td></tr>`).join("")}
+  return `<article class="table-card"><table><thead><tr><th>ID</th><th>Тип</th><th>Пользователь</th><th>Магазин</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>
+    ${data.deals.map((o) => `<tr><td>${esc(o.id)}</td><td>${esc(o.type || "exchange")}</td><td>${esc(o.login || o.fromLogin || "")}</td><td>${esc(o.storeName || o.storeId || o.toLogin || "")}</td><td>${fmtMoney(o.amountUsd || o.priceUsd)}</td><td>${esc(o.status || o.paymentStatus || "")}</td><td>${fmtDate(o.createdAt || o.date)}</td></tr>`).join("")}
   </tbody></table></article>`;
 }
 

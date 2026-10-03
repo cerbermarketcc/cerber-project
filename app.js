@@ -115,8 +115,7 @@ const PARTIAL_STATE_ARRAY_KEYS = [
   "storeApplications",
   "supportTickets",
   "referrals",
-  "referralPayments",
-  "raffleEntries"
+  "referralPayments"
 ];
 const PARTIAL_STATE_OBJECT_KEYS = [
   "balances",
@@ -327,7 +326,6 @@ const defaults = {
   exchangeRequests: [],
   referrals: [],
   referralPayments: [],
-  raffleEntries: [],
   referralCodes: {},
   balances: {},
   ltcBalances: {},
@@ -1635,7 +1633,6 @@ function normalizeDb(next) {
   if (!Array.isArray(next.exchangeRequests)) next.exchangeRequests = [];
   if (!Array.isArray(next.referrals)) next.referrals = [];
   if (!Array.isArray(next.referralPayments)) next.referralPayments = [];
-  if (!Array.isArray(next.raffleEntries)) next.raffleEntries = [];
   if (!next.referralCodes) next.referralCodes = {};
   if (!next.balances) next.balances = {};
   if (!next.ltcBalances) next.ltcBalances = {};
@@ -2780,7 +2777,6 @@ function prunePersonalStateForCurrentUser() {
     db.walletTransactions = [];
     db.walletDeposits = [];
     db.walletWithdrawals = [];
-    db.raffleEntries = [];
     db.balances = {};
     db.ltcBalances = {};
     db.supportTickets = [];
@@ -2791,7 +2787,6 @@ function prunePersonalStateForCurrentUser() {
   db.walletTransactions = (db.walletTransactions || []).filter((item) => sameLogin(item.login, login));
   db.walletDeposits = (db.walletDeposits || []).filter((item) => sameLogin(item.login, login));
   db.walletWithdrawals = (db.walletWithdrawals || []).filter((item) => sameLogin(item.login, login));
-  db.raffleEntries = (db.raffleEntries || []).filter((item) => sameLogin(item.login, login));
   db.supportTickets = (db.supportTickets || []).filter((item) => recordBelongsToLogin(item, login));
 }
 
@@ -5262,11 +5257,10 @@ function orderCard(order) {
       <div>
         <h3>${esc(order.product || "Заявка")}</h3>
         <p>${esc(order.storeName || "")}</p>
-        <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC${order.location ? ` · ${esc(order.location)}` : ""}${isProductOrder(order) && order.personsCount ? ` · ${esc(order.personsCount)} персон` : ""}</p>
+        <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
         ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
         ${productOrderIsPaid(order) ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
-        ${order.raffleQualified ? `<p class="notice">Заказ участвует в розыгрыше от 500 ₽.</p>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -5337,9 +5331,7 @@ function showProductOrder(orderId) {
     <p>${esc(order.storeName || "")}</p>
     <p>${esc(order.location || "")}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
-    ${order.personsCount ? `<p>Количество персон: ${esc(order.personsCount)}</p>` : ""}
     <p>Статус: ${productOrderStatus(order)}</p>
-    ${order.raffleQualified ? `<p class="notice">Заказ зарегистрирован в розыгрыше от 500 ₽.</p>` : ""}
     ${productOrderIsPaid(order) ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
     ${["completed", "closed"].includes(order.status) && !orderHasReview(order) ? `
       <form class="form" data-review-form="${esc(order.id)}">
@@ -6552,7 +6544,6 @@ function activateProductOrderAfterPayment(order, providerPayload = {}) {
 }
 
 async function handleProductPurchase(storeId, productId, positionId, options = {}) {
-  const personsCount = Math.max(1, Math.min(100, Math.trunc(Number(options.personsCount || 1))));
   if (!currentUser() || (API_ENABLED && !hasApiSession())) {
     authMode = "login";
     return renderAuth("Войдите или зарегистрируйтесь, чтобы купить товар");
@@ -6562,7 +6553,7 @@ async function handleProductPurchase(storeId, productId, positionId, options = {
       const clientRequestId = newClientRequestId("product-balance");
       const payload = await apiFetch("/api/orders/product/balance", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId, personsCount, clientRequestId })
+        body: JSON.stringify({ storeId, productId, positionId, clientRequestId })
       });
       applyRemoteState(payload);
       renderOrders("active");
@@ -6616,8 +6607,7 @@ async function handleProductPurchase(storeId, productId, positionId, options = {
     productDescription: product.description || "",
     reservedDescription,
     reservedFromPosition: issueFromPosition,
-    reservedStock: true,
-    personsCount
+    reservedStock: true
   };
   order.autoReleaseAt = productOrderAutoReleaseAt(order, store);
   db.orders.unshift(order);
@@ -6664,7 +6654,6 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   if (!product || !position) return;
   const priceUsd = Number(position.priceUsd || 0);
   if (!Number.isFinite(priceUsd) || priceUsd <= 0) return showToast("Цена товара не задана");
-  const personsCount = Math.max(1, Math.min(100, Math.trunc(Number(options.personsCount || 1))));
   if (Number(position.stock || 0) <= 0) return showToast("Товара сейчас нет");
   const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
   const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
@@ -6703,7 +6692,6 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     reservedDescription,
     reservedFromPosition: issueFromPosition,
     reservedStock: true,
-    personsCount,
     sellerLtcWallet: store.ltcWallet || "",
     platformLtcWallet: db.paymentSettings?.platformLtcWallet || "",
     platformCommissionPercent: commissionPercent,
@@ -6717,17 +6705,6 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
   showToast("Бронь создана. Заказ в разделе Активные.");
   renderOrders("active");
   return order;
-}
-
-function checkoutPersonsCount() {
-  const input = document.querySelector("[data-checkout-persons]");
-  const personsCount = Number(input?.value || 0);
-  if (!Number.isInteger(personsCount) || personsCount < 1 || personsCount > 100) {
-    showToast("Укажите количество персон от 1 до 100");
-    input?.focus();
-    return null;
-  }
-  return personsCount;
 }
 
 function openProductCheckoutModal(storeId, productId, positionId) {
@@ -6768,9 +6745,6 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       <span>${esc(store.name)} · ${esc(locationLabel(position))}</span>
       <b>${priceUsd.toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</b>
     </article>
-    <label class="field">Сколько персон?
-      <input data-checkout-persons name="personsCount" type="number" min="1" max="100" step="1" inputmode="numeric" value="1" required>
-    </label>
     ${allowedCoins.length > 1 ? `
       <label class="field">Монета и сеть
         <select data-checkout-coin>
@@ -6786,15 +6760,13 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-checkout-balance]")?.addEventListener("click", async (event) => {
-    const personsCount = checkoutPersonsCount();
-    if (personsCount === null) return;
     const button = event.currentTarget;
     setButtonLoading(button, true);
     try {
       const clientRequestId = newClientRequestId("product-balance");
       const payload = await apiFetch("/api/orders/product/balance", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId, personsCount, clientRequestId })
+        body: JSON.stringify({ storeId, productId, positionId, clientRequestId })
       });
       applyRemoteState(payload);
       document.querySelector("[data-modal]")?.classList.remove("open");
@@ -6805,8 +6777,6 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     }
   });
   document.querySelector("[data-checkout-deposit]")?.addEventListener("click", async (event) => {
-    const personsCount = checkoutPersonsCount();
-    if (personsCount === null) return;
     const button = event.currentTarget;
     setButtonLoading(button, true, "Создаём счет");
     const selectedCoinId = document.querySelector("[data-checkout-coin]")?.value || defaultCoin.id;
@@ -6815,7 +6785,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       const clientRequestId = newClientRequestId("product-payment");
       const payload = await apiFetch("/api/orders/product/deposit", {
         method: "POST",
-        body: JSON.stringify({ storeId, productId, positionId, personsCount, coinId: selectedCoin.id, payCurrency: selectedCoin.payCurrency, clientRequestId })
+        body: JSON.stringify({ storeId, productId, positionId, coinId: selectedCoin.id, payCurrency: selectedCoin.payCurrency, clientRequestId })
       });
       applyRemoteState(payload);
       document.querySelector("[data-modal]")?.classList.remove("open");
@@ -6847,7 +6817,6 @@ function renderProductPaymentOrder(orderId) {
           <h2>${esc(order.product)}</h2>
           <p>${esc(order.storeName || "")}</p>
           <p><span>Город:</span> ${esc(order.location || "")}</p>
-          ${order.personsCount ? `<p><span>Количество персон:</span> ${esc(order.personsCount)}</p>` : ""}
           <p><span>Стоимость:</span> ${Number(order.amountUsd || 0).toFixed(2)} $</p>
           <p><span>Бронь:</span> до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
         </div>
@@ -6894,7 +6863,6 @@ function markProductOrderPaid(orderId) {
     <p>Вы оплатили заказ: ${esc(order.product)}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
     <p>Город: ${esc(order.location || "")}</p>
-    ${order.personsCount ? `<p>Количество персон: ${esc(order.personsCount)}</p>` : ""}
     <p>${esc(order.reservedDescription || order.productDescription || "")}</p>
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
@@ -10676,7 +10644,7 @@ function renderOwnerPanelContent() {
           <article class="ref-item">
             <div>
               <h3>${esc(order.product || order.id)}</h3>
-              <p>${esc(order.login)} · ${esc(order.storeName || order.storeId)} · ${Number(order.amountUsd || 0).toFixed(2)} $ · ${esc(order.personsCount || "-")} персон</p>
+              <p>${esc(order.login)} · ${esc(order.storeName || order.storeId)} · ${Number(order.amountUsd || 0).toFixed(2)} $</p>
               <p>${order.disputeUntil ? `Срок: ${new Date(Number(order.disputeUntil)).toLocaleString()}` : "Срок не задан"}</p>
             </div>
             <div>
@@ -11749,12 +11717,11 @@ function sellerDashboardShell(store, standalone = false, activeTab = "dashboard"
               <span>${orders.length} всего</span>
             </div>
             <div class="seller-dashboard-table">
-              <div><strong>#</strong><strong>Клиент</strong><strong>Персон</strong><strong>Сумма</strong><strong>Статус</strong></div>
+              <div><strong>#</strong><strong>Клиент</strong><strong>Сумма</strong><strong>Статус</strong></div>
               ${recentOrders.length ? recentOrders.map((order) => `
                 <div>
                   <span>${esc(order.id || "-")}</span>
                   <span>${esc(order.login || "client")}</span>
-                  <span>${esc(order.personsCount || "-")}</span>
                   <span>${Number(order.amountUsd || 0).toFixed(2)} $</span>
                   <span>${esc(order.status || "new")}</span>
                 </div>
@@ -11918,9 +11885,9 @@ function shopPanelTabContent(tab, data) {
       <section class="seller-dashboard-card seller-wide-card">
         <div class="seller-card-head"><h3>Последние заказы</h3><span>${orders.length} всего</span></div>
         <div class="seller-dashboard-table">
-          <div><strong>#</strong><strong>Клиент</strong><strong>Персон</strong><strong>Сумма</strong><strong>Статус</strong></div>
+          <div><strong>#</strong><strong>Клиент</strong><strong>Сумма</strong><strong>Статус</strong></div>
           ${recentOrders.length ? recentOrders.map((order) => `
-            <div><span>${esc(order.id || "-")}</span><span>${esc(order.login || "client")}</span><span>${esc(order.personsCount || "-")}</span><span>${Number(order.amountUsd || 0).toFixed(2)} $</span><span>${esc(order.status || "new")}</span></div>
+            <div><span>${esc(order.id || "-")}</span><span>${esc(order.login || "client")}</span><span>${Number(order.amountUsd || 0).toFixed(2)} $</span><span>${esc(order.status || "new")}</span></div>
           `).join("") : `<p>Заказов пока нет.</p>`}
         </div>
       </section>
@@ -12093,7 +12060,6 @@ function shopSaleHistoryList(store, orders, title, emptyText) {
               <p><span>Заказ</span><strong>${esc(order.id || "-")}</strong></p>
               <p><span>Карточка</span><strong>${esc(product?.title || order.product || "-")}</strong></p>
               <p><span>Субтовар</span><strong>${esc(position?.title || order.positionTitle || order.product || "-")}</strong></p>
-              <p><span>Персон</span><strong>${esc(order.personsCount || "-")}</strong></p>
               <p><span>Цена</span><strong>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC</strong></p>
               <p><span>Локация</span><strong>${esc(order.location || locationLabel(position || {}))}</strong></p>
               <p><span>Статус</span><strong>${esc(order.status || "")} / ${esc(order.paymentStatus || "")}</strong></p>
@@ -12309,7 +12275,6 @@ function shopDisputeDetail(order, store = null) {
       <p><strong>Заказ:</strong> ${esc(order.id || "-")}</p>
       <p><strong>Клиент:</strong> ${esc(order.login || "-")}</p>
       <p><strong>Магазин:</strong> ${esc(store?.name || order.storeName || order.storeId || "-")}</p>
-      <p><strong>Персон:</strong> ${esc(order.personsCount || "-")}</p>
       <p><strong>Сумма:</strong> ${Number(order.amountUsd || 0).toFixed(2)} $</p>
       <p><strong>Открыт:</strong> ${esc(order.disputeOpenedAt || order.createdAt ? new Date(Number(order.disputeOpenedAt || order.createdAt)).toLocaleString() : "-")}</p>
       <p><strong>Закрыт:</strong> ${esc(order.disputeClosedAt || order.closedAt ? new Date(Number(order.disputeClosedAt || order.closedAt)).toLocaleString() : "-")}</p>
@@ -13703,7 +13668,7 @@ function renderSeller() {
         <h2>Добавить товар</h2>
         ${disputes.map((order) => `
           <article class="ref-item">
-            <div><h3>${esc(order.product || order.id)}</h3><p>${esc(order.login)} · ${Number(order.amountUsd || 0).toFixed(2)} $ · ${esc(order.personsCount || "-")} персон</p></div>
+            <div><h3>${esc(order.product || order.id)}</h3><p>${esc(order.login)} · ${Number(order.amountUsd || 0).toFixed(2)} $</p></div>
             <div>
               <span class="status-pill">Открыт</span>
               <button class="ghost-button" data-seller-dispute-chat="${esc(order.login)}">Ответить клиенту</button>

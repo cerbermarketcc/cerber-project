@@ -129,18 +129,10 @@ test("personal LTC address modal loads a server-generated QR without an amount",
   assert.match(loader, /safeContentUrl\(payload\.qrCodeDataUrl\)/);
 });
 
-test("product checkout requires the number of persons and shows it in order details", () => {
+test("product checkout contains no persons question or order raffle UI", () => {
   const checkout = functionBody(appClient, "openProductCheckoutModal");
-  const personsReader = functionBody(appClient, "checkoutPersonsCount");
-  const orderDetails = functionBody(appClient, "showProductOrder");
-  const sellerHistory = functionBody(appClient, "shopSaleHistoryList");
-  assert.match(checkout, /data-checkout-persons[^>]+name="personsCount"[^>]+min="1"[^>]+max="100"[^>]+required/);
-  assert.equal((checkout.match(/JSON\.stringify\(\{ storeId, productId, positionId, personsCount/g) || []).length, 2);
-  assert.match(personsReader, /Number\.isInteger\(personsCount\)/);
-  assert.match(personsReader, /personsCount < 1 \|\| personsCount > 100/);
-  assert.match(orderDetails, /Количество персон:/);
-  assert.match(sellerHistory, /<span>Персон<\/span>/);
-  assert.match(orderDetails, /Заказ зарегистрирован в розыгрыше от 500 ₽/);
+  assert.doesNotMatch(checkout, /personsCount|data-checkout-persons|Сколько персон/);
+  assert.doesNotMatch(appClient, /Количество персон|500 ₽|raffleQualified/);
 });
 
 test("paid and legacy product orders expose disputes until review or a real dispute closure", () => {
@@ -292,8 +284,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=118/);
-  assert.match(indexHtml, /app\.js\?v=185/);
+  assert.match(indexHtml, /styles\.css\?v=119/);
+  assert.match(indexHtml, /app\.js\?v=186/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

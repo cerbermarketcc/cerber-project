@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "financial-settlement-2026-09-20-v191";
+const cerberBuildVersion = "financial-settlement-2026-09-20-v192";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -99,8 +99,6 @@ const siteNotifyWebhookSecret = telegramWebhookSecretValue(process.env.SITE_NOTI
 const proverkaWebhookSecret = telegramWebhookSecretValue(process.env.PROVERKA_WEBHOOK_SECRET || telegramWebhookSecret);
 const telegramWebhookSetupStatus = {};
 const walletDepositTtlMs = 40 * 60 * 1000;
-const raffleMinimumRub = 500;
-const raffleUsdRubRate = Math.max(1, Number(process.env.RAFFLE_USD_RUB_RATE || 90) || 90);
 const telegramLinkCodeTtlMs = 10 * 60 * 1000;
 const nowpaymentsTimeoutMs = 25000;
 const paymentReconcileIntervalMs = 15 * 1000;
@@ -2354,70 +2352,6 @@ function publicOrderForUser(order = {}) {
   return item;
 }
 
-function enrollCompletedOrdersInRaffle(state = {}) {
-  state.orders = Array.isArray(state.orders) ? state.orders : [];
-  state.raffleEntries = Array.isArray(state.raffleEntries) ? state.raffleEntries : [];
-  const entriesByOrderId = new Map(state.raffleEntries
-    .filter((entry) => entry?.orderId)
-    .map((entry) => [String(entry.orderId), entry]));
-  let added = 0;
-
-  state.orders.forEach((order) => {
-    if (!isProductOrderRecord(order)) return;
-    const status = String(order.status || "").toLowerCase();
-    const paymentStatus = String(order.paymentStatus || "").toLowerCase();
-    if (!["completed", "closed"].includes(status) || !["paid", "finished"].includes(paymentStatus)) return;
-
-    const existing = entriesByOrderId.get(String(order.id || ""));
-    if (existing) {
-      order.raffleQualified = true;
-      order.raffleEntryId = existing.id;
-      order.raffleEvaluatedAt = Number(order.raffleEvaluatedAt || existing.createdAt || Date.now());
-      order.raffleAmountRub = Number(existing.amountRub || order.raffleAmountRub || 0);
-      order.raffleThresholdRub = Number(existing.thresholdRub || raffleMinimumRub);
-      return;
-    }
-    if (order.raffleEvaluatedAt) return;
-
-    const amountUsd = Number(order.amountUsd || 0);
-    const amountRub = Math.round(amountUsd * raffleUsdRubRate * 100) / 100;
-    const evaluatedAt = Number(order.completedAt || order.closedAt || Date.now());
-    order.raffleEvaluatedAt = evaluatedAt;
-    order.raffleAmountRub = amountRub;
-    order.raffleThresholdRub = raffleMinimumRub;
-    order.raffleUsdRubRate = raffleUsdRubRate;
-    order.raffleQualified = Number.isFinite(amountRub) && amountRub >= raffleMinimumRub;
-    if (!order.raffleQualified) return;
-
-    const entry = {
-      id: `raffle-${order.id}`,
-      orderId: order.id,
-      login: order.login || "",
-      storeId: order.storeId || "",
-      amountUsd,
-      amountRub,
-      thresholdRub: raffleMinimumRub,
-      usdRubRate: raffleUsdRubRate,
-      personsCount: Number(order.personsCount || 0),
-      status: "active",
-      createdAt: evaluatedAt
-    };
-    state.raffleEntries.unshift(entry);
-    entriesByOrderId.set(String(order.id || ""), entry);
-    order.raffleEntryId = entry.id;
-    pushSiteNotification(state, order.login, {
-      id: `notice-raffle-${order.id}-${loginKey(order.login)}`,
-      eventType: "raffle_entry_created",
-      orderId: order.id,
-      storeId: order.storeId,
-      title: "Участие в розыгрыше",
-      body: `Завершённый заказ ${order.product || order.id} зарегистрирован в розыгрыше от 500 ₽.`
-    });
-    added += 1;
-  });
-  return added;
-}
-
 function isBrokenImageValue(value = "") {
   const image = String(value || "").trim();
   return !image || image === "[object File]" || image === "[object Blob]" || image === "undefined" || image === "null";
@@ -3886,9 +3820,6 @@ async function stateFor(user) {
     const userReferralPayments = user
       ? (Array.isArray(settingsData.referralPayments) ? settingsData.referralPayments : []).filter((item) => sameUser(item.login) || sameUser(item.referrerLogin))
       : [];
-    const userRaffleEntries = user
-      ? (Array.isArray(settingsData.raffleEntries) ? settingsData.raffleEntries : []).filter((item) => sameUser(item.login))
-      : [];
     const userReferralCodes = user && settingsData.referralCodes?.[userKey]
       ? { [userKey]: settingsData.referralCodes[userKey] }
       : {};
@@ -3920,7 +3851,6 @@ async function stateFor(user) {
         groupSettings: publicGroupSettings(settingsData.groupSettings || {}),
         referrals: userReferrals,
         referralPayments: userReferralPayments,
-        raffleEntries: userRaffleEntries,
         referralCodes: userReferralCodes,
         balances: userBalances,
         ltcBalances: userLtcBalances,
@@ -5299,6 +5229,118 @@ function migrateStateStoreMedia(state = {}, stores = []) {
     publicStoresCache: replace(state.publicStoresCache).map(publicStoreForState),
     publicStoresCacheAt: Date.now()
   };
+}
+
+const accidentalOrderMetadataKeys = [
+  "personsCount",
+  "raffleQualified",
+  "raffleEntryId",
+  "raffleEvaluatedAt",
+  "raffleAmountRub",
+  "raffleThresholdRub",
+  "raffleUsdRubRate"
+];
+
+function stripAccidentalOrderMetadata(record = {}) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+  let changed = false;
+  accidentalOrderMetadataKeys.forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) return;
+    delete record[key];
+    changed = true;
+  });
+  return changed;
+}
+
+function stripAccidentalOrderContainer(container = {}) {
+  if (!container || typeof container !== "object" || Array.isArray(container)) return false;
+  let changed = false;
+  ["orders", "productOrders"].forEach((key) => {
+    if (!Array.isArray(container[key])) return;
+    container[key].forEach((order) => {
+      if (stripAccidentalOrderMetadata(order)) changed = true;
+    });
+  });
+  return changed;
+}
+
+function stripAccidentalOrderFeatureState(state = {}) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+  let changed = stripAccidentalOrderContainer(state);
+  if (Object.prototype.hasOwnProperty.call(state, "raffleEntries")) {
+    delete state.raffleEntries;
+    changed = true;
+  }
+  if (Array.isArray(state.siteNotifications)) {
+    const notifications = state.siteNotifications.filter((item) => (
+      String(item?.eventType || "") !== "raffle_entry_created"
+      && !String(item?.id || "").startsWith("notice-raffle-")
+    ));
+    if (notifications.length !== state.siteNotifications.length) {
+      state.siteNotifications = notifications;
+      changed = true;
+    }
+  }
+  ["ownerStores", "publicStoresCache", "stores"].forEach((key) => {
+    if (!Array.isArray(state[key])) return;
+    state[key].forEach((store) => {
+      if (stripAccidentalOrderContainer(store)) changed = true;
+    });
+  });
+  return changed;
+}
+
+function removeAccidentalOrderFeatureData() {
+  if (!supabase) return Promise.resolve({ settingsRows: 0, storeRows: 0 });
+  return withOperationLocks(
+    ["finance:state", "maintenance:remove-accidental-order-features"],
+    async () => {
+      const settingsResult = await withTimeout(
+        supabase
+          .from("app_settings")
+          .select("id,data")
+          .in("id", [mainSettingsRowId, mainSettingsBackupRowId, publicCatalogRowId, publicCatalogBackupRowId]),
+        "accidental order metadata settings query",
+        10000
+      );
+      if (settingsResult?.error) throw settingsResult.error;
+      const cleanedSettingsRows = (Array.isArray(settingsResult?.data) ? settingsResult.data : [])
+        .map((row) => ({ id: row.id, data: cloneJson(row.data || {}) }))
+        .filter((row) => stripAccidentalOrderFeatureState(row.data));
+      if (cleanedSettingsRows.length) {
+        const { error } = await withTimeout(
+          supabase.from("app_settings").upsert(cleanedSettingsRows, { onConflict: "id" }),
+          "accidental order metadata settings save",
+          12000
+        );
+        if (error) throw error;
+      }
+
+      const storesResult = await withTimeout(
+        supabase.from("stores").select("id,data").limit(500),
+        "accidental order metadata stores query",
+        10000
+      );
+      if (storesResult?.error) throw storesResult.error;
+      const cleanedStoreRows = (Array.isArray(storesResult?.data) ? storesResult.data : [])
+        .map((row) => ({ id: row.id, data: { ...cloneJson(row.data || {}), id: row.data?.id || row.id } }))
+        .filter((row) => stripAccidentalOrderContainer(row.data));
+      for (const row of cleanedStoreRows) {
+        await saveStoreRow(row.data, "accidental order metadata store save");
+      }
+
+      settingsBackupMemorySnapshot = null;
+      settingsBackupMemoryAt = 0;
+      publicStoresMemoryCache = [];
+      publicStoresMemoryCacheAt = 0;
+      publicCatalogMemorySnapshot = null;
+      publicCatalogMemorySnapshotAt = 0;
+      const result = { settingsRows: cleanedSettingsRows.length, storeRows: cleanedStoreRows.length };
+      console.log("[order-metadata-cleanup] complete", result);
+      return result;
+    },
+    { waitMs: 20000, ttlSeconds: 120 }
+  );
 }
 
 async function migrateInlineStoreMedia() {
@@ -10109,7 +10151,6 @@ const PRESERVED_STATE_ARRAY_KEYS = [
   "walletWithdrawals",
   "referrals",
   "referralPayments",
-  "raffleEntries",
   "siteNotifications",
   "broadcasts",
   "userFilters",
@@ -10340,10 +10381,6 @@ async function saveSettingsStateNow(state, options = {}) {
   next.orders = allowEmptyKeys.has("orders")
     ? (Array.isArray(state?.orders) ? state.orders : [])
     : mergeDurableFinanceRecords(currentData.orders, state?.orders);
-  next.raffleEntries = allowEmptyKeys.has("raffleEntries")
-    ? (Array.isArray(state?.raffleEntries) ? state.raffleEntries : [])
-    : mergeDurableFinanceRecords(currentData.raffleEntries, state?.raffleEntries);
-  enrollCompletedOrdersInRaffle(next);
   const storedNext = settingsStateForStorage(next);
   const { error: settingsSaveError } = await withTimeout(
     supabase.from("app_settings").upsert({ id: mainSettingsRowId, data: storedNext }, { onConflict: "id" }),
@@ -13246,7 +13283,6 @@ function adminBuildOverview(data) {
     exchangers: adminExchangersForState(state.exchangers || [], profiles),
     users: userRows,
     deals: [...productOrders.map(adminOrderForState), ...exchangeRequests].sort((a, b) => adminTimestamp(b) - adminTimestamp(a)).slice(0, 250),
-    raffleEntries: Array.isArray(state.raffleEntries) ? state.raffleEntries : [],
     disputes: disputes.map((item) => item.storeId || item.type === "product" ? adminOrderForState(item) : item),
     finances: {
       walletDeposits: walletDeposits.map(adminDepositForState),
@@ -13867,16 +13903,6 @@ function productPurchaseLockKeys(user = {}, storeId = "", productId = "", positi
   ];
 }
 
-function requestedProductPersonsCount(body = {}) {
-  const personsCount = Number(body.personsCount);
-  if (!Number.isInteger(personsCount) || personsCount < 1 || personsCount > 100) {
-    const error = new Error("Укажите количество персон от 1 до 100");
-    error.status = 400;
-    throw error;
-  }
-  return personsCount;
-}
-
 app.post("/api/orders/product/balance", async (req, res, next) => {
   try {
     requireDb();
@@ -13887,7 +13913,6 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
-    const personsCount = requestedProductPersonsCount(req.body);
     return await withOperationLocks(
       productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
       async () => {
@@ -13903,7 +13928,6 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
             String(existingOrder.storeId || "") !== storeId
             || String(existingOrder.productId || "") !== productId
             || String(existingOrder.positionId || "") !== positionId
-            || Number(existingOrder.personsCount || 0) !== personsCount
           ) {
             return res.status(409).json({ error: "Idempotency key was already used for another product purchase" });
           }
@@ -13971,8 +13995,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
       productDescription: product.description || "",
       reservedDescription,
       reservedFromPosition: fromPosition,
-      reservedStock: true,
-      personsCount
+      reservedStock: true
     };
     order.autoReleaseAt = now + order.autoReleaseHours * 60 * 60 * 1000;
     applyProductOrderCommission(order, state, store);
@@ -14044,7 +14067,6 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
     const storeId = String(req.body.storeId || "").trim();
     const productId = String(req.body.productId || "").trim();
     const positionId = String(req.body.positionId || "").trim();
-    const personsCount = requestedProductPersonsCount(req.body);
     const coin = walletCoinFromRequest(req.body);
     return await withOperationLocks(
       productPurchaseLockKeys(user, storeId, productId, positionId, clientRequestId),
@@ -14061,7 +14083,6 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
             String(existingOrder.storeId || "") !== storeId
             || String(existingOrder.productId || "") !== productId
             || String(existingOrder.positionId || "") !== positionId
-            || Number(existingOrder.personsCount || 0) !== personsCount
           ) {
             return res.status(409).json({ error: "Idempotency key was already used for another product payment" });
           }
@@ -14113,9 +14134,6 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       && String(item.positionId || "") === positionId
     ));
     if (activePositionReservation) {
-      if (Number(activePositionReservation.personsCount || 0) !== personsCount) {
-        return res.status(409).json({ error: "Для этой позиции уже создан заказ с другим количеством персон" });
-      }
       return res.json({
         order: publicOrderForUser(activePositionReservation),
         paymentUrl: activePositionReservation.paymentUrl || "",
@@ -14153,8 +14171,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       productDescription: product.description || "",
       reservedDescription: "",
       reservedFromPosition: fromPosition,
-      reservedStock: false,
-      personsCount
+      reservedStock: false
     };
     applyProductOrderCommission(order, state, store);
 
@@ -17580,7 +17597,9 @@ const server = app.listen(port, () => {
   startTelegramWebhookSetup("notifications", siteNotifyBotToken, siteNotifyEnsureWebhook, siteNotifyWebhookUrl());
   startTelegramWebhookSetup("proverka", proverkaBotToken, proverkaEnsureWebhook, `${publicBaseUrl}/api/proverka-bot/webhook`);
   setTimeout(() => {
-    migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", sanitizeErrorForLog(error)));
+    removeAccidentalOrderFeatureData()
+      .catch((error) => console.error("Accidental order metadata cleanup error", sanitizeErrorForLog(error)))
+      .finally(() => migrateInlineStoreMedia().catch((error) => console.error("Inline media startup migration error", sanitizeErrorForLog(error))));
   }, 1500);
   setTimeout(() => {
     reconcilePendingNowpaymentsOrders({ force: true }).catch((error) => console.error("Payment reconciliation startup error", sanitizeErrorForLog(error)));
