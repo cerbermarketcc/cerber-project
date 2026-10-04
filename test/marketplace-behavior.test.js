@@ -60,6 +60,8 @@ test("product purchase picker cascades only through in-stock positions and prese
     ${functionBody(appClient, "positionCityKey")}
     ${functionBody(appClient, "positionCityName")}
     ${functionBody(appClient, "customerWeightLabel")}
+    ${functionBody(appClient, "compareCustomerCityOptions")}
+    ${functionBody(appClient, "compareCustomerWeightOptions")}
     ${functionBody(appClient, "customerDistrictKey")}
     ${functionBody(appClient, "customerDistrictLabel")}
     ${functionBody(appClient, "customerWeightKey")}
@@ -91,6 +93,105 @@ test("product purchase picker cascades only through in-stock positions and prese
   assert.match(offer, /data-buy-position="\$\{esc\(position\.id\)\}"/);
   assert.match(offer, /Number\(position\.priceUsd \|\| 0\)/);
   assert.doesNotMatch(offer, /product\.priceUsd/);
+});
+
+test("customer cities and package sizes have one deterministic ascending order", () => {
+  const catalogHarness = new Function(`
+    const filterOptions = { countries: { moldova: { cities: {
+      orhei: { label: "Орхей" },
+      chisinau: { label: "Кишинёв" },
+      comrat: { label: "Комрат" },
+      ungheni: { label: "Унгены" },
+      balti: { label: "Бельцы" }
+    } } } };
+    let activeProductMode = "any";
+    let activeProductCityKey = "";
+    let activeProductWeightKey = "";
+    let activeProductDistrictKey = "";
+    function catalogFilters() { return {}; }
+    function categoryMatches() { return true; }
+    function searchText() { return ""; }
+    function productSearchBlob() { return ""; }
+    function publicStores() { return []; }
+    function sortedStoreProducts() { return []; }
+    function productFilteredPositions(product) { return enabledProductPositions(product); }
+    ${functionBody(appClient, "normalizedShopKey")}
+    ${functionBody(appClient, "normalizedWeightKey")}
+    ${functionBody(appClient, "enabledProductPositions")}
+    ${functionBody(appClient, "positionSaleMode")}
+    ${functionBody(appClient, "positionCityKey")}
+    ${functionBody(appClient, "positionCityName")}
+    ${functionBody(appClient, "customerWeightLabel")}
+    ${functionBody(appClient, "compareCustomerCityOptions")}
+    ${functionBody(appClient, "compareCustomerWeightOptions")}
+    ${functionBody(appClient, "customerDistrictKey")}
+    ${functionBody(appClient, "customerDistrictLabel")}
+    ${functionBody(appClient, "customerWeightKey")}
+    ${functionBody(appClient, "formatUsdPrice")}
+    ${functionBody(appClient, "catalogQuickFilterOptions")}
+    ${functionBody(appClient, "productPurchaseSelection")}
+    ${functionBody(appClient, "productCardFacts")}
+    return {
+      quick: catalogQuickFilterOptions,
+      select: productPurchaseSelection,
+      facts: productCardFacts
+    };
+  `)();
+  const position = (id, city, weight, priceUsd) => ({
+    id,
+    country: "moldova",
+    city,
+    district: "Центр",
+    weight,
+    priceUsd,
+    stock: 1,
+    status: "ready"
+  });
+  const product = { positions: [
+    position("orhei", "orhei", "2", 25),
+    position("chisinau-1", "chisinau", "1", 24),
+    position("chisinau-comma", "chisinau", "0,6 г", 23),
+    position("ungheni", "ungheni", "0.6", 22),
+    position("balti", "balti", "10", 30),
+    position("chisinau-small", "chisinau", "0.3", 20),
+    position("comrat", "comrat", "1.5", 26)
+  ] };
+  const expectedCities = ["Кишинёв", "Бельцы", "Унгены", "Комрат", "Орхей"];
+
+  const quick = catalogHarness.quick({}, [{ product, store: {} }]);
+  assert.deepEqual(quick.cityOptions.map((item) => item.label), expectedCities);
+  assert.deepEqual(quick.weightOptions.map((item) => item.key), ["0.3", "0.6", "1", "1.5", "2", "10"]);
+
+  const selection = catalogHarness.select(product);
+  assert.deepEqual(selection.cities.map((item) => item.label), expectedCities);
+  assert.deepEqual(selection.weights.map((item) => item.key), ["0.3", "0.6", "1"]);
+
+  const facts = catalogHarness.facts(product, {});
+  assert.equal(facts.cities, expectedCities.join(", "));
+  assert.equal(facts.weights, "0.3 г, 0.6 г, 1 г, 1.5 г, 2 г, 10 г");
+  assert.match(functionBody(appClient, "renderFilters"), /sort\(compareCustomerCityOptions\)/);
+});
+
+test("customer marketplace hides exact inventory counts", () => {
+  const store = functionBody(appClient, "storeCard");
+  const product = functionBody(appClient, "productCardBody");
+  const selector = functionBody(appClient, "productPurchaseSelectorView");
+  const offer = functionBody(appClient, "productPurchaseOfferView");
+  const legacyPosition = functionBody(appClient, "positionCard");
+  const detailedPosition = functionBody(appClient, "positionCardView");
+  const legacyPayment = functionBody(appClient, "renderProductPaymentView");
+
+  assert.match(store, /Товаров: \$\{products\.length\}/);
+  assert.doesNotMatch(store, /шт\. в наличии|productStockSummary\(product\)\.stock/);
+  assert.match(product, /facts\.positions\.length/);
+  assert.doesNotMatch(product, /tr\("pieces"\)|0 шт\./);
+  assert.doesNotMatch(selector, /totalStock|tr\("quantity"\)|option\.positions\.reduce|шт\./);
+  assert.doesNotMatch(offer, /position\.stock|tr\("pieces"\)/);
+  assert.doesNotMatch(detailedPosition, /tr\("quantity"\)|tr\("pieces"\)/);
+  assert.doesNotMatch(legacyPosition, /<span>Кол-во<\/span>|\$\{esc\(position\.stock \|\| 0\)\} шт/);
+  assert.doesNotMatch(legacyPayment, /Готовая позиция \([^)]*шт/);
+  assert.match(styles, /\.purchase-position-summary p:first-child/);
+  assert.match(appClient, /enabledProductPositions\(product, \{ inStockOnly: true \}\)/);
 });
 
 test("product pages show review totals and only position-level prices", () => {
@@ -284,8 +385,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=119/);
-  assert.match(indexHtml, /app\.js\?v=186/);
+  assert.match(indexHtml, /styles\.css\?v=120/);
+  assert.match(indexHtml, /app\.js\?v=187/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

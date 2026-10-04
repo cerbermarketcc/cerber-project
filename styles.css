@@ -9010,13 +9010,6 @@ body,
   gap: 3px;
 }
 
-.district-pills button small {
-  color: currentColor;
-  font-size: 10px;
-  font-weight: 600;
-  opacity: .7;
-}
-
 .purchase-offers {
   display: grid;
   gap: 10px;
@@ -9186,9 +9179,8 @@ body,
     padding: 9px;
   }
 
-  .purchase-position-summary p:nth-child(2) {
+  .purchase-position-summary p:first-child {
     grid-column: 1 / -1;
-    grid-row: 2;
   }
 
   .purchase-position-summary span {

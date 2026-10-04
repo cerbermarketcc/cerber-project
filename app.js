@@ -3557,6 +3557,30 @@ function customerWeightLabel(value = "") {
   return /\p{L}/u.test(text) ? text : `${text} г`;
 }
 
+function compareCustomerCityOptions(a = {}, b = {}) {
+  const priority = ["chisinau", "balti", "ungheni"];
+  const cityCode = (option) => String(option.city || option.position?.city || "").trim().toLowerCase();
+  const label = (option) => String(option.label || (option.position ? positionCityName(option.position) : "")).trim();
+  const rank = (option) => {
+    const index = priority.indexOf(cityCode(option));
+    return index >= 0 ? index : priority.length;
+  };
+  return rank(a) - rank(b)
+    || label(a).localeCompare(label(b), "ru", { sensitivity: "base", numeric: true })
+    || cityCode(a).localeCompare(cityCode(b), "en");
+}
+
+function compareCustomerWeightOptions(a = {}, b = {}) {
+  const rawValue = (option) => option.value ?? option.position?.weight ?? option.weight ?? option.label ?? "";
+  const numericValue = (option) => {
+    const value = Number.parseFloat(normalizedWeightKey(rawValue(option)));
+    return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+  };
+  return numericValue(a) - numericValue(b)
+    || customerWeightLabel(rawValue(a)).localeCompare(customerWeightLabel(rawValue(b)), "ru", { sensitivity: "base", numeric: true })
+    || normalizedWeightKey(rawValue(a)).localeCompare(normalizedWeightKey(rawValue(b)), "en");
+}
+
 function customerDistrictKey(position = {}) {
   return normalizedShopKey(position.district) || "__without_district__";
 }
@@ -3590,7 +3614,7 @@ function catalogQuickFilterOptions(filters = catalogFilters(), rows = null) {
       label: positionCityName(position)
     });
   });
-  const cityOptions = [...cityMap.values()].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  const cityOptions = [...cityMap.values()].sort(compareCustomerCityOptions);
   const cityPositions = filters.city
     ? positions.filter((position) => (
       position.city === filters.city
@@ -3603,10 +3627,7 @@ function catalogQuickFilterOptions(filters = catalogFilters(), rows = null) {
     if (!key || weightMap.has(key)) return;
     weightMap.set(key, { key, value: String(position.weight ?? "").trim(), label: customerWeightLabel(position.weight) });
   });
-  const weightOptions = [...weightMap.values()].sort((a, b) => (
-    Number.parseFloat(a.value) - Number.parseFloat(b.value)
-    || a.label.localeCompare(b.label, "ru")
-  ));
+  const weightOptions = [...weightMap.values()].sort(compareCustomerWeightOptions);
   return { cityOptions, weightOptions };
 }
 
@@ -5658,7 +5679,10 @@ function renderFilters() {
       <label class="field">Город
         <select name="city">
           <option value="" ${!filters.city ? "selected" : ""}>Все города</option>
-          ${country ? Object.entries(country.cities).map(([key, item]) => `<option value="${key}" ${filters.city === key ? "selected" : ""}>${item.label}</option>`).join("") : ""}
+          ${country ? Object.entries(country.cities)
+            .map(([key, item]) => ({ city: key, label: item.label }))
+            .sort(compareCustomerCityOptions)
+            .map((option) => `<option value="${option.city}" ${filters.city === option.city ? "selected" : ""}>${option.label}</option>`).join("") : ""}
         </select>
       </label>
       <label class="field">Район
@@ -5731,7 +5755,6 @@ function storeCard(store) {
   const stoppedLabel = db.lang === "en" ? "Stopped" : db.lang === "md" ? "Oprit" : "Остановлен";
   const isStopped = storeIsStopped(store);
   const products = sortedStoreProducts(store);
-  const stock = products.reduce((sum, product) => sum + productStockSummary(product).stock, 0);
   return `
     <article class="shop-card ${isStopped ? "is-stopped" : ""}">
       <button class="shop-click" ${isStopped ? "disabled" : `data-store="${esc(store.id)}"`}>
@@ -5742,7 +5765,7 @@ function storeCard(store) {
               <div class="shop-title"><h2>${esc(storeName)}</h2><span class="verify">✓</span></div>
               ${isStopped ? `<span class="stopped-store-badge">${esc(stoppedLabel)}</span>` : ""}
               <p class="desc">${esc(storeShort)}</p>
-              <p class="store-card-stock">${products.length} товаров · ${stock} шт. в наличии</p>
+              <p class="store-card-stock">Товаров: ${products.length}</p>
             </div>
           </div>
           ${marketplaceMetricsView(store.rating, store.reviews, "Магазин активен")}
@@ -5990,11 +6013,14 @@ function productCardFacts(product = {}, filters = catalogFilters()) {
   const filtered = productFilteredPositions(product, filters);
   const available = filtered.filter((position) => Number(position.stock || 0) > 0);
   const positions = available.length ? available : filtered.length ? filtered : enabledProductPositions(product);
-  const cityLabels = [...new Set(positions.map(positionCityName).filter(Boolean))];
+  const cityLabels = [...new Map(positions.map((position) => [
+    positionCityKey(position),
+    { country: String(position.country || ""), city: String(position.city || ""), label: positionCityName(position) }
+  ])).values()].sort(compareCustomerCityOptions).map((option) => option.label);
   const weightLabels = [...new Map(positions.map((position) => [
     normalizedWeightKey(position.weight) || "__without_weight__",
-    customerWeightLabel(position.weight)
-  ])).values()];
+    { value: String(position.weight ?? "").trim(), label: customerWeightLabel(position.weight) }
+  ])).values()].sort(compareCustomerWeightOptions).map((option) => option.label);
   const prices = [...new Set(positions
     .map((position) => Number(position.priceUsd || 0))
     .filter((price) => price > 0))].sort((a, b) => a - b);
@@ -6026,7 +6052,7 @@ function productCardBody(product, store) {
         <div><dt>Фасовки</dt><dd>${esc(facts.weights)}</dd></div>
         <div><dt>Цены</dt><dd>${esc(facts.priceText)}</dd></div>
       </dl>
-      <p class="product-stock ${facts.stock ? "in-stock" : "out-of-stock"}">${facts.stock ? `${facts.positions.length} ${tr("positions").toLowerCase()} · ${facts.stock} ${tr("pieces")}` : "Нет в наличии · 0 шт."}</p>
+      <p class="product-stock ${facts.stock ? "in-stock" : "out-of-stock"}">${facts.stock ? `${facts.positions.length} ${tr("positions").toLowerCase()}` : "Нет в наличии"}</p>
       <span class="product-card-buy">${esc(tr("buy")).toUpperCase()}</span>
     </div>
   `;
@@ -6104,7 +6130,7 @@ function productPurchaseSelection(product = {}) {
     const key = positionCityKey(position);
     if (!cityMap.has(key)) cityMap.set(key, { key, label: positionCityName(position), position });
   });
-  const cities = [...cityMap.values()].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  const cities = [...cityMap.values()].sort(compareCustomerCityOptions);
   if (!cities.some((option) => option.key === activeProductCityKey)) activeProductCityKey = cities[0]?.key || "";
   const cityPositions = allAvailable.filter((position) => positionCityKey(position) === activeProductCityKey);
   const weightMap = new Map();
@@ -6112,10 +6138,7 @@ function productPurchaseSelection(product = {}) {
     const key = customerWeightKey(position);
     if (!weightMap.has(key)) weightMap.set(key, { key, label: customerWeightLabel(position.weight), position });
   });
-  const weights = [...weightMap.values()].sort((a, b) => (
-    Number.parseFloat(a.position.weight) - Number.parseFloat(b.position.weight)
-    || a.label.localeCompare(b.label, "ru")
-  ));
+  const weights = [...weightMap.values()].sort(compareCustomerWeightOptions);
   if (!weights.some((option) => option.key === activeProductWeightKey)) activeProductWeightKey = weights[0]?.key || "";
   const weightPositions = cityPositions.filter((position) => customerWeightKey(position) === activeProductWeightKey);
   const districtMap = new Map();
@@ -6145,7 +6168,7 @@ function productPurchaseOfferView(position, product, store, multiple = false) {
     <div class="purchase-offer ${multiple ? "has-alternatives" : ""}">
       <div class="purchase-offer-copy">
         <strong data-dynamic-translate>${esc(deliveryType)}</strong>
-        <span>${esc(mode)} · ${esc(position.stock || 0)} ${tr("pieces")} · ${esc(formatUsdPrice(priceUsd))}</span>
+        <span>${esc(mode)} · ${esc(formatUsdPrice(priceUsd))}</span>
         <small data-ltc-price data-usd="${priceUsd}">${ltcAmount.toFixed(6)} LTC</small>
       </div>
       <button class="primary buy-button" data-buy-position="${esc(position.id)}" data-product-store="${esc(store.id)}" data-product="${esc(product.id)}">${tr("buy")}</button>
@@ -6159,7 +6182,6 @@ function productPurchaseSelectorView(product, store) {
     return `<article class="panel empty-state purchase-empty"><p>Этого товара сейчас нет в наличии.</p></article>`;
   }
   const summaryPositions = selection.selectedPositions.length ? selection.selectedPositions : selection.weightPositions;
-  const totalStock = summaryPositions.reduce((sum, position) => sum + Number(position.stock || 0), 0);
   const prices = [...new Set(summaryPositions.map((position) => Number(position.priceUsd || 0)).filter((price) => price > 0))].sort((a, b) => a - b);
   const priceText = prices.length > 1
     ? `${formatUsdPrice(prices[0])} – ${formatUsdPrice(prices.at(-1))}`
@@ -6182,7 +6204,6 @@ function productPurchaseSelectorView(product, store) {
       </div>
       <article class="position-card mega-position-card purchase-position-card">
         <div class="purchase-position-summary">
-          <p><span>${tr("quantity")}</span><strong>${esc(totalStock)} ${tr("pieces")}</strong></p>
           <p><span>${tr("titleLabel")}</span><strong data-dynamic-translate>${esc(productTitle)}</strong></p>
           <p><span>${tr("weight")}</span><strong>${esc(selectedWeight)}</strong></p>
           <p><span>${tr("price")}</span><strong>${esc(priceText)}</strong></p>
@@ -6190,7 +6211,7 @@ function productPurchaseSelectorView(product, store) {
         <div class="purchase-district-block">
           <h2>Выберите район</h2>
           <div class="purchase-choice-pills district-pills" role="radiogroup" aria-label="Район">
-            ${selection.districts.map((option) => `<button class="${activeProductDistrictKey === option.key ? "active" : ""}" data-product-district-choice="${esc(option.key)}" aria-pressed="${activeProductDistrictKey === option.key}">${esc(option.label)}<small>${option.positions.reduce((sum, position) => sum + Number(position.stock || 0), 0)} шт.</small></button>`).join("")}
+            ${selection.districts.map((option) => `<button class="${activeProductDistrictKey === option.key ? "active" : ""}" data-product-district-choice="${esc(option.key)}" aria-pressed="${activeProductDistrictKey === option.key}">${esc(option.label)}</button>`).join("")}
           </div>
         </div>
         ${selection.selectedPositions.length ? `
@@ -6333,7 +6354,6 @@ function positionCardView(position, product, store) {
   return `
     <article class="position-card mega-position-card">
       <div class="position-grid mega-position-grid">
-        <p><span>${tr("quantity")}</span><strong>${esc(position.stock || 0)} ${tr("pieces")}</strong></p>
         <p><span>${tr("titleLabel")}</span><strong data-dynamic-translate>${esc(positionTitle)}</strong></p>
         <p><span>${tr("type")}</span><strong data-dynamic-translate>${esc(deliveryType)}</strong></p>
         <p><span>Формат</span><strong>${positionSaleMode(position) === "preorder" ? tr("preorder") : tr("ready")}</strong></p>
@@ -6405,7 +6425,6 @@ function positionCard(position, product, store) {
         <p>${esc(position.description || product.description || "")}</p>
       </div>
       <div class="position-grid">
-        <p><span>Кол-во</span><strong>${esc(position.stock || 0)} шт</strong></p>
         <p><span>Тип</span><strong>${esc(position.deliveryType || "Курьер")}</strong></p>
         <p><span>Цена</span><strong>${priceUsd.toFixed(2)} $</strong></p>
         <p><span>LTC</span><strong data-ltc-price data-usd="${priceUsd}">${usdToLtc(priceUsd).toFixed(6)} LTC</strong></p>
@@ -6479,7 +6498,7 @@ function renderProductPaymentView(storeId, productId, positionId) {
       <article class="payment-summary-card">
         <div>
           <h2>${esc(product.title)}</h2>
-          <p>Готовая позиция (${esc(position.stock || 0)} шт)</p>
+          <p>Готовая позиция</p>
           <p>${esc(product.category)}</p>
           <p><span>Магазин:</span> <strong>${esc(store.name)}</strong> <span class="verify">✓</span></p>
           <p><span>Локация:</span> ${esc(locationLabel(position))}</p>
