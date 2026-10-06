@@ -47,7 +47,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "financial-settlement-2026-09-20-v193";
+const cerberBuildVersion = "financial-settlement-2026-10-06-v194";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
@@ -10891,6 +10891,27 @@ async function lifecycleStoreForOrder(state = {}, storeId = "") {
   return row?.data || (Array.isArray(state.ownerStores) ? state.ownerStores.find((item) => String(item?.id || "") === id) : null) || null;
 }
 
+function upsertProductOrderIntoStore(store = null, order = {}) {
+  if (!store?.id || !order?.id) return false;
+  store.productOrders = Array.isArray(store.productOrders) ? store.productOrders : [];
+  const normalizedOrder = {
+    ...order,
+    type: order.type || "product",
+    storeId: order.storeId || store.id,
+    storeName: order.storeName || store.name || store.id
+  };
+  const index = store.productOrders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
+  if (index >= 0) {
+    const next = { ...store.productOrders[index], ...normalizedOrder };
+    if (JSON.stringify(next) === JSON.stringify(store.productOrders[index])) return false;
+    store.productOrders[index] = next;
+  } else {
+    store.productOrders.unshift(normalizedOrder);
+  }
+  store.productOrders = store.productOrders.slice(0, 500);
+  return true;
+}
+
 async function syncProductOrderEverywhere(state = {}, order = {}, store = null) {
   if (!order?.id) return order;
   state.orders = Array.isArray(state.orders) ? state.orders : [];
@@ -10900,11 +10921,7 @@ async function syncProductOrderEverywhere(state = {}, order = {}, store = null) 
 
   const resolvedStore = store || await lifecycleStoreForOrder(state, order.storeId);
   if (resolvedStore?.id) {
-    resolvedStore.productOrders = Array.isArray(resolvedStore.productOrders) ? resolvedStore.productOrders : [];
-    const storeOrderIndex = resolvedStore.productOrders.findIndex((item) => String(item?.id || "") === String(order.id || ""));
-    if (storeOrderIndex >= 0) resolvedStore.productOrders[storeOrderIndex] = { ...resolvedStore.productOrders[storeOrderIndex], ...order };
-    else resolvedStore.productOrders.unshift({ ...order, storeId: order.storeId || resolvedStore.id, storeName: order.storeName || resolvedStore.name || resolvedStore.id });
-    resolvedStore.productOrders = resolvedStore.productOrders.slice(0, 500);
+    upsertProductOrderIntoStore(resolvedStore, order);
     await saveStoreRow(resolvedStore, "order lifecycle store save");
     await saveOwnerStoreFallback(resolvedStore);
   }
@@ -11608,7 +11625,7 @@ function orderLtcBreakdown(order = {}, state = {}, store = null) {
   const commissionUsd = adminPlatformCommission(order, state, store);
   const commissionRatio = amountUsd > 0
     ? Math.min(1, Math.max(0, commissionUsd / amountUsd))
-    : Math.min(1, Math.max(0, Number(order.platformCommissionPercent || storeCommissionPercentForOrder(store)) / 100));
+    : Math.min(1, Math.max(0, Number(order.platformCommissionPercent || storeCommissionPercentForOrder(store, state)) / 100));
   const transactions = Array.isArray(state.walletTransactions) ? state.walletTransactions : [];
   const storeTx = transactions.find((tx) => tx.id === `tx-store-sale-${order.id}`);
   const ownerTx = transactions.find((tx) => tx.id === `tx-owner-commission-${order.id}`);
@@ -11858,11 +11875,14 @@ function storeLedgerFinance(state = {}, store = null, orders = []) {
   /* c8 ignore stop */
 }
 
-function storeCommissionPercentForOrder(store = null) {
-  if (!store) return 0;
-  if (store.commissionPercent != null) return Math.max(0, Number(store.commissionPercent || 0));
-  if (store.platformCommissionPercent != null) return Math.max(0, Number(store.platformCommissionPercent || 0));
-  return 0;
+function storeCommissionPercentForOrder(store = null, state = {}) {
+  if (store?.commissionPercent != null) return Math.max(0, Number(store.commissionPercent || 0));
+  if (store?.platformCommissionPercent != null) return Math.max(0, Number(store.platformCommissionPercent || 0));
+  return Math.max(0, Number(
+    state.ownerSettings?.platformCommissionPercent
+    ?? state.paymentSettings?.platformCommissionPercent
+    ?? 0
+  ));
 }
 
 function adminIsUserBlocked(state, login) {
@@ -12162,8 +12182,11 @@ function adminBuildStoreFromBody(body = {}, existing = null) {
 function adminPlatformCommission(order, state, store) {
   const fixed = Number(order?.platformCommissionUsd || 0);
   if (fixed > 0) return fixed;
-  const storeCommission = store ? storeCommissionPercentForOrder(store) : Number(order?.platformCommissionPercent || 0);
-  return adminOrderAmount(order) * Math.max(0, storeCommission) / 100;
+  const savedPercent = Number(order?.platformCommissionPercent || 0);
+  const percent = savedPercent > 0
+    ? savedPercent
+    : storeCommissionPercentForOrder(store, state);
+  return adminOrderAmount(order) * Math.max(0, percent) / 100;
 }
 
 function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
@@ -12298,8 +12321,15 @@ function requestedWithdrawalLtc(body = {}, availableLtc = 0) {
 function applyProductOrderCommission(order, state = {}, store = null) {
   if (!order) return order;
   const amount = adminOrderAmount(order);
-  const percent = Math.max(0, Number(store ? storeCommissionPercentForOrder(store) : (order.platformCommissionPercent || 0)));
   const fixedCommission = Number(order.platformCommissionUsd || 0);
+  const savedPercent = Number(order.platformCommissionPercent || 0);
+  const percent = Math.max(0, Number(
+    fixedCommission > 0 && amount > 0
+      ? fixedCommission * 100 / amount
+      : savedPercent > 0
+        ? savedPercent
+        : storeCommissionPercentForOrder(store, state)
+  ));
   const commission = fixedCommission > 0 ? fixedCommission : amount * percent / 100;
   order.platformCommissionPercent = percent;
   order.platformCommissionUsd = Math.max(0, commission);
@@ -12408,6 +12438,74 @@ function recordProductOrderLedger(order, state = {}, store = null) {
     state.ownerBalanceLtc = roundLtc(state.ownerBalanceLtc + commissionLtc);
   }
   order.ledgerRecordedAt = order.ledgerRecordedAt || Date.now();
+}
+
+function productOrderEligibleForFinanceRepair(order = {}) {
+  if (!isProductOrderRecord(order)) return false;
+  const paymentStatus = String(order.paymentStatus || "").toLowerCase();
+  if (["paid", "finished"].includes(paymentStatus)) return true;
+  const status = String(order.status || "").toLowerCase();
+  return !paymentStatus && Boolean(order.paidAt) && ["paid", "completed", "closed"].includes(status);
+}
+
+async function reconcilePaidProductOrderFinancials() {
+  if (!supabase) return { checked: 0, repaired: 0, stores: 0 };
+  return withOperationLocks(
+    ["finance:state", "finance:product-order-repair"],
+    async () => {
+      const state = await loadSettingsState();
+      state.orders = Array.isArray(state.orders) ? state.orders : [];
+      const orders = state.orders.filter(productOrderEligibleForFinanceRepair);
+      if (!orders.length) return { checked: 0, repaired: 0, stores: 0 };
+
+      const { data: storeRows, error: storeError } = await withTimeout(
+        supabase.from("stores").select("id,data").order("created_at", { ascending: true }).limit(500),
+        "finance repair stores query",
+        10000
+      );
+      if (storeError) throw storeError;
+      const stores = (Array.isArray(storeRows) ? storeRows : [])
+        .map((row) => row?.data)
+        .filter((store) => store?.id);
+      const storeById = new Map(stores.map((store) => [String(store.id || ""), store]));
+      const changedStores = new Map();
+      let repaired = 0;
+
+      for (const order of orders) {
+        const beforeOrder = JSON.stringify(order);
+        const beforeLedger = JSON.stringify((Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+          .filter((tx) => String(tx?.orderId || "") === String(order.id || "")));
+        const store = storeById.get(String(order.storeId || "")) || null;
+        order.type = "product";
+        order.paymentStatus = "paid";
+        applyProductOrderCommission(order, state, store);
+        applyProductOrderLtcSettlement(order, state, store);
+        recordProductOrderLedger(order, state, store);
+        if (adminIsWithdrawableStoreOrder(order)) await settleProductReferralReward(state, order);
+        if (store && upsertProductOrderIntoStore(store, order)) changedStores.set(String(store.id), store);
+        const afterLedger = JSON.stringify((Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
+          .filter((tx) => String(tx?.orderId || "") === String(order.id || "")));
+        if (beforeOrder !== JSON.stringify(order) || beforeLedger !== afterLedger) repaired += 1;
+      }
+
+      if (!repaired && !changedStores.size) return { checked: orders.length, repaired: 0, stores: 0 };
+      for (const store of changedStores.values()) {
+        await saveStoreRow(store, "paid order finance repair store save");
+      }
+      if (changedStores.size) {
+        const changedById = new Map([...changedStores.values()].map((store) => [String(store.id || ""), store]));
+        const ownerStores = Array.isArray(state.ownerStores) ? state.ownerStores : [];
+        const existingIds = new Set(ownerStores.map((store) => String(store?.id || "")));
+        state.ownerStores = ownerStores.map((store) => changedById.get(String(store?.id || "")) || store);
+        changedStores.forEach((store, id) => {
+          if (!existingIds.has(id)) state.ownerStores.push(store);
+        });
+      }
+      await saveSettingsState(state);
+      return { checked: orders.length, repaired, stores: changedStores.size };
+    },
+    { waitMs: 20000, ttlSeconds: 180 }
+  );
 }
 
 function recoverProductOrderFromHistory(state = {}, stores = [], messages = [], options = {}) {
@@ -13491,6 +13589,7 @@ async function completeProductOrder(order, state, providerPayload = {}) {
               order.status = "manual_review";
               order.paymentStatus = "review";
               order.paymentReviewReason = "late_payment_inventory_unavailable";
+              await syncProductOrderEverywhere(state, order, store);
               await saveSettingsState(state);
               const error = new Error("Paid order requires manual review because its inventory reservation expired");
               error.status = 409;
@@ -13525,7 +13624,6 @@ async function completeProductOrder(order, state, providerPayload = {}) {
             order.stockReservedAt = Date.now();
           }
         }
-        await saveStoreRow(store, "payment provider store save");
       }
       if (!wasAlreadyPaid) {
         await notifySiteUser(state, order.login, {
@@ -13555,6 +13653,7 @@ async function completeProductOrder(order, state, providerPayload = {}) {
           });
         }
       }
+      await syncProductOrderEverywhere(state, order, store);
     } else {
       applyProductOrderCommission(order, state, null);
       applyProductOrderLtcSettlement(order, state, null);
@@ -14016,8 +14115,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
       date: new Date(now).toLocaleString("ru-RU"),
       status: "completed"
     });
-    await saveStoreRow(store, "balance purchase store save");
-    await saveOwnerStoreFallback(store);
+    await syncProductOrderEverywhere(state, order, store);
     await notifySiteUser(state, user.login, {
       id: `notice-order-paid-${order.id}-${loginKey(user.login)}`,
       eventType: "order_paid",
@@ -14226,8 +14324,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       title: "Новый заказ ожидает оплату",
       body: `Клиент ${user.login} создал заказ ${order.product || order.id} в магазине ${store.name || store.id}.`
     });
-    await saveStoreRow(store, "payment reservation store save");
-    await saveOwnerStoreFallback(store);
+    await syncProductOrderEverywhere(state, order, store);
     await saveSettingsState(state);
     notifyRealtime("order_created", { orderId: order.id, storeId });
         return res.json({ order: publicOrderForUser(order), paymentUrl: order.paymentUrl, ...(await stateFor(user)) });
@@ -17608,7 +17705,9 @@ const server = app.listen(port, () => {
     resumeQueuedWithdrawalPayouts().catch((error) => console.error("Payout queue startup error", sanitizeErrorForLog(error)));
   }, 3500);
   setTimeout(() => {
-    loadSettingsState()
+    reconcilePaidProductOrderFinancials()
+      .then((result) => console.log("Paid order finance repair completed", result))
+      .then(() => loadSettingsState())
       .then((state) => mirrorFinanceStateToTables(state))
       .catch((error) => console.error("Finance mirror startup backfill error", sanitizeErrorForLog(error)));
   }, 5000);

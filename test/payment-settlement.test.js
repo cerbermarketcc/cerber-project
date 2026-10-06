@@ -73,6 +73,142 @@ function settlementHarness() {
   return { context, order, state, store };
 }
 
+test("global owner commission is used when a legacy store has no own percentage", () => {
+  const context = {
+    adminOrderAmount: (order) => Number(order.amountUsd || 0)
+  };
+  vm.runInNewContext([
+    "storeCommissionPercentForOrder", "adminPlatformCommission", "applyProductOrderCommission"
+  ].map((name) => functionSource(name)).join("\n"), context);
+  const state = { ownerSettings: { platformCommissionPercent: 3 } };
+  const store = { id: "legacy-shop" };
+  const order = { id: "legacy-order", amountUsd: 100 };
+
+  context.applyProductOrderCommission(order, state, store);
+
+  assert.equal(order.platformCommissionPercent, 3);
+  assert.equal(order.platformCommissionUsd, 3);
+  assert.equal(order.sellerAmountUsd, 97);
+  assert.equal(context.adminPlatformCommission(order, state, store), 3);
+});
+
+test("an explicit zero store commission overrides the global owner percentage", () => {
+  const context = {
+    adminOrderAmount: (order) => Number(order.amountUsd || 0)
+  };
+  vm.runInNewContext([
+    "storeCommissionPercentForOrder", "adminPlatformCommission", "applyProductOrderCommission"
+  ].map((name) => functionSource(name)).join("\n"), context);
+  const state = { ownerSettings: { platformCommissionPercent: 3 } };
+  const store = { id: "free-shop", commissionPercent: 0 };
+  const order = { id: "free-order", amountUsd: 100 };
+
+  context.applyProductOrderCommission(order, state, store);
+
+  assert.equal(order.platformCommissionPercent, 0);
+  assert.equal(order.platformCommissionUsd, 0);
+  assert.equal(order.sellerAmountUsd, 100);
+});
+
+test("store order mirror is inserted once and updated in place", () => {
+  const context = {};
+  vm.runInNewContext(functionSource("upsertProductOrderIntoStore"), context);
+  const store = { id: "shop-1", name: "Shop", productOrders: [] };
+  const order = { id: "order-1", type: "product", status: "active", paymentStatus: "paid" };
+
+  assert.equal(context.upsertProductOrderIntoStore(store, order), true);
+  assert.equal(store.productOrders.length, 1);
+  assert.equal(store.productOrders[0].storeId, store.id);
+  assert.equal(context.upsertProductOrderIntoStore(store, order), false);
+
+  order.status = "completed";
+  assert.equal(context.upsertProductOrderIntoStore(store, order), true);
+  assert.equal(store.productOrders.length, 1);
+  assert.equal(store.productOrders[0].status, "completed");
+});
+
+test("both purchase paths persist orders into the store finance history", () => {
+  const completion = functionSource("completeProductOrder");
+  assert.match(completion, /syncProductOrderEverywhere\(state, order, store\)/);
+  assert.match(source, /app\.post\("\/api\/orders\/product\/balance"[\s\S]*?syncProductOrderEverywhere\(state, order, store\)[\s\S]*?notifyRealtime\("order_paid"/);
+  assert.match(source, /app\.post\("\/api\/orders\/product\/deposit"[\s\S]*?syncProductOrderEverywhere\(state, order, store\)[\s\S]*?notifyRealtime\("order_created"/);
+});
+
+test("startup finance repair backfills a paid order once and mirrors it to the store", async () => {
+  const order = {
+    id: "legacy-paid-order",
+    type: "product",
+    storeId: "legacy-shop",
+    amountUsd: 100,
+    status: "active",
+    paymentStatus: "paid",
+    paidAt: 100
+  };
+  const state = { orders: [order], walletTransactions: [], ownerSettings: { platformCommissionPercent: 3 } };
+  const store = { id: "legacy-shop", name: "Legacy shop", productOrders: [] };
+  let stateSaves = 0;
+  let storeSaves = 0;
+  const context = {
+    supabase: {
+      from: () => ({
+        select: () => ({
+          order: () => ({ limit: async () => ({ data: [{ id: store.id, data: store }], error: null }) })
+        })
+      })
+    },
+    withOperationLocks: async (_keys, callback) => callback(),
+    loadSettingsState: async () => state,
+    withTimeout: (value) => value,
+    isProductOrderRecord: (item) => item?.type === "product",
+    applyProductOrderCommission: (item) => {
+      item.platformCommissionPercent = 3;
+      item.platformCommissionUsd = 3;
+      item.sellerAmountUsd = 97;
+    },
+    applyProductOrderLtcSettlement: (item) => {
+      item.ltcSettlementVersion = 1;
+      item.settlementGrossLtc = 1;
+      item.platformCommissionLtc = 0.03;
+      item.sellerAmountLtc = 0.97;
+    },
+    recordProductOrderLedger: (item, financeState) => {
+      financeState.walletTransactions = financeState.walletTransactions || [];
+      for (const [id, scope, amountLtc] of [
+        [`tx-store-sale-${item.id}`, "store", 0.97],
+        [`tx-owner-commission-${item.id}`, "owner", 0.03]
+      ]) {
+        if (!financeState.walletTransactions.some((tx) => tx.id === id)) {
+          financeState.walletTransactions.push({ id, orderId: item.id, scope, amountLtc, status: scope === "store" ? "held" : "completed" });
+        }
+      }
+      item.ledgerRecordedAt = item.ledgerRecordedAt || 200;
+    },
+    adminIsWithdrawableStoreOrder: () => false,
+    settleProductReferralReward: async () => {},
+    saveStoreRow: async () => { storeSaves += 1; },
+    saveSettingsState: async () => { stateSaves += 1; }
+  };
+  vm.runInNewContext([
+    "upsertProductOrderIntoStore", "productOrderEligibleForFinanceRepair", "reconcilePaidProductOrderFinancials"
+  ].map((name) => functionSource(name)).join("\n"), context);
+
+  const first = await context.reconcilePaidProductOrderFinancials();
+  assert.equal(first.repaired, 1);
+  assert.equal(first.stores, 1);
+  assert.equal(store.productOrders.length, 1);
+  assert.equal(state.walletTransactions.length, 2);
+  assert.equal(stateSaves, 1);
+  assert.equal(storeSaves, 1);
+
+  const second = await context.reconcilePaidProductOrderFinancials();
+  assert.equal(second.repaired, 0);
+  assert.equal(second.stores, 0);
+  assert.equal(store.productOrders.length, 1);
+  assert.equal(state.walletTransactions.length, 2);
+  assert.equal(stateSaves, 1);
+  assert.equal(storeSaves, 1);
+});
+
 test("paid active sale is recorded as held and cannot be withdrawn before completion", async () => {
   const { context, order, state, store } = settlementHarness();
   context.recordProductOrderLedger(order, state, store);
