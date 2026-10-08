@@ -26,28 +26,27 @@ function harness(scope = "site") {
   return { context, account, req, advance: ms => { now += ms; } };
 }
 
-for (const scope of ["site", "store"]) {
-  test(`${scope} MFA challenge remains valid before its deadline and fails after expiry`, async () => {
-    const h = harness(scope);
-    h.advance(599000);
-    assert.equal((await h.context.accountForMfaChallenge(h.req, scope)).account.id, h.account.id);
-    h.advance(2000);
-    await assert.rejects(h.context.accountForMfaChallenge(h.req, scope), error => error.status === 401 && error.code === "MFA_CHALLENGE_INVALID");
-  });
-  test(`${scope} MFA challenge rejects changed device, scope, signature and revoked credentials`, async () => {
-    const h = harness(scope);
-    assert.equal(h.context.verifyMfaChallenge(h.req, scope === "site" ? "store" : "site"), null);
-    const original = h.req.body.challengeToken;
-    h.req.body.challengeToken = original + "tampered";
-    assert.equal(h.context.verifyMfaChallenge(h.req, scope), null);
-    h.req.body.challengeToken = original;
-    h.req.headers["user-agent"] = "another-browser";
-    assert.equal(h.context.verifyMfaChallenge(h.req, scope), null);
-    h.req.headers["user-agent"] = "test-browser";
-    h.account.session_version += 1;
-    await assert.rejects(h.context.accountForMfaChallenge(h.req, scope), error => error.code === "MFA_CHALLENGE_INVALID");
-  });
-}
+test("site MFA challenge remains valid before its deadline and fails after expiry", async () => {
+  const h = harness("site");
+  h.advance(599000);
+  assert.equal((await h.context.accountForMfaChallenge(h.req, "site")).account.id, h.account.id);
+  h.advance(2000);
+  await assert.rejects(h.context.accountForMfaChallenge(h.req, "site"), error => error.status === 401 && error.code === "MFA_CHALLENGE_INVALID");
+});
+
+test("site MFA challenge rejects changed device, scope, signature and revoked credentials", async () => {
+  const h = harness("site");
+  assert.equal(h.context.verifyMfaChallenge(h.req, "store"), null);
+  const original = h.req.body.challengeToken;
+  h.req.body.challengeToken = original + "tampered";
+  assert.equal(h.context.verifyMfaChallenge(h.req, "site"), null);
+  h.req.body.challengeToken = original;
+  h.req.headers["user-agent"] = "another-browser";
+  assert.equal(h.context.verifyMfaChallenge(h.req, "site"), null);
+  h.req.headers["user-agent"] = "test-browser";
+  h.account.session_version += 1;
+  await assert.rejects(h.context.accountForMfaChallenge(h.req, "site"), error => error.code === "MFA_CHALLENGE_INVALID");
+});
 
 test("permission and service failures do not log the owner out as an expired session", () => {
   const fn = admin.slice(admin.indexOf("function adminAuthError("), admin.indexOf("async function refreshData("));

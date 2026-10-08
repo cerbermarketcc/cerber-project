@@ -90,7 +90,7 @@ const checks = [
   ["unapproved Origin blocked", (await request({ path: "/api/auth/login", method: "POST", headers: { ...jsonHeaders, Origin: "https://evil.example" }, body: "{}" })).status === 403, "expected 403"],
   ["large anonymous body blocked", (await request({ path: "/api/auth/login", method: "POST", headers: jsonHeaders, body: Buffer.alloc(300 * 1024, 97) })).status === 413, "expected 413"],
   ["admin API requires full MFA session", (await request({ path: "/api/admin/overview" })).status === 401, "expected 401"],
-  ["store API requires full MFA session", (await request({ path: "/api/store-admin/state" })).status === 401, "expected 401"],
+  ["store API requires an authenticated store session", (await request({ path: "/api/store-admin/state" })).status === 401, "expected 401"],
   ["deep health requires full MFA session", (await request({ path: "/api/health/deep" })).status === 401, "expected 401"],
   ["MFA setup requires password challenge", (await request({ path: "/api/admin/2fa/setup", method: "POST", headers: jsonHeaders, body: "{}" })).status === 401, "expected 401"],
   ["legacy owner API disabled", (await request({ path: "/api/owner/state" })).status === 410, "expected 410"],

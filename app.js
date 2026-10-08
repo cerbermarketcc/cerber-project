@@ -4770,8 +4770,6 @@ function renderSellerAdminLogin(storeId = "", message = "") {
           timeoutMs: 12000,
           body: JSON.stringify({ storeId: store.id, password })
         });
-        if (payload.requiresMfaSetup) return renderStoreMfaSetup(payload.challengeToken, payload.admin, payload.store || { id: store.id, name: store.name }, "seller");
-        if (payload.requiresMfa) return renderStoreMfaVerify(payload.challengeToken, payload.admin, payload.store || { id: store.id, name: store.name }, "seller");
         completeStoreAdminLogin(payload, store.id, "seller");
         return;
       } catch (error) {
@@ -11784,7 +11782,6 @@ const SHOP_PANEL_TABS = [
   ["connect", "M", "Связь"],
   ["staff", "A", "Персонал"],
   ["logs", "L", "Логи"],
-  ["security", "2", "Безопасность"],
   ["settings", "*", "Настройки"]
 ];
 
@@ -11896,7 +11893,6 @@ function shopPanelTabContent(tab, data) {
     }
   }
   if (tab === "settings") return shopSettingsTab(store);
-  if (tab === "security") return shopSecurityTab();
   if (tab === "logs") return shopActivityLogsTab(store);
   if (tab === "orders") {
     return `
@@ -12550,7 +12546,6 @@ function shopStaffTab(store) {
           <div class="seller-source">
             <span>${esc(member.login || "")}${member.name ? ` · ${esc(member.name)}` : ""}<br><small>${esc(labels || "нет прав")}</small></span>
             <strong class="shop-staff-actions">
-              <button class="ghost-button" type="button" data-shop-staff-mfa-reset="${esc(member.login || "")}">Сбросить 2FA</button>
               <button class="ghost-button danger" type="button" data-shop-staff-delete="${esc(member.login || "")}">Удалить</button>
             </strong>
           </div>
@@ -12619,34 +12614,6 @@ function shopActivityLogsTab(store) {
     </section>`;
 }
 
-function shopSecurityTab() {
-  return `
-    <section class="seller-dashboard-hero"><div><h2>Безопасность</h2><p>Управление двухфакторной защитой текущего административного доступа.</p></div></section>
-    <section class="seller-dashboard-card seller-wide-card">
-      <div class="seller-card-head"><h3>Новые резервные коды</h3><span>старые будут отключены</span></div>
-      <form class="form" data-shop-recovery-rotate>
-        <div class="row">
-          <label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label>
-          <label class="field">Код Authenticator<input name="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
-        </div>
-        <button class="primary">Создать новые коды</button>
-      </form>
-      <div class="recovery-codes" data-shop-recovery-output hidden></div>
-    </section>
-    <section class="seller-dashboard-card seller-wide-card">
-      <div class="seller-card-head"><h3>Перенастроить 2FA</h3><span>потребуется новый QR-код</span></div>
-      <p class="desc">Отключение завершит текущую административную сессию. При следующем входе настройка 2FA будет обязательной.</p>
-      <form class="form" data-shop-mfa-disable>
-        <div class="row">
-          <label class="field">Текущий пароль<input name="password" type="password" autocomplete="current-password" required></label>
-          <label class="field">Код Authenticator<input name="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
-        </div>
-        <button class="ghost-button danger">Отключить и настроить заново</button>
-      </form>
-    </section>
-  `;
-}
-
 function shopPanelSession() {
   return storageGet(SHOP_PANEL_SESSION_KEY) || "";
 }
@@ -12686,103 +12653,6 @@ function completeStoreAdminLogin(payload = {}, fallbackStoreId = "", destination
   renderShopPanel(payload.staff?.role === "staff" ? firstAllowedShopTab() : "dashboard");
 }
 
-function renderStoreRecoveryCodes(payload = {}, fallbackStoreId = "", destination = "shop") {
-  const codes = Array.isArray(payload.recoveryCodes) ? payload.recoveryCodes : [];
-  root.innerHTML = `
-    <main class="auth-wrap shop-panel-login">
-      <section class="auth-card">
-        <h1>Резервные коды</h1>
-        <p>Сохраните эти одноразовые коды. После закрытия страницы они больше не показываются.</p>
-        <div class="recovery-codes">${codes.map((code) => `<code>${esc(code)}</code>`).join("")}</div>
-        <button class="primary" data-store-recovery-continue>Я сохранил коды</button>
-      </section>
-    </main>
-  `;
-  document.querySelector("[data-store-recovery-continue]").onclick = () => completeStoreAdminLogin(payload, fallbackStoreId, destination);
-  bindButtonFeedback(root);
-}
-
-async function renderStoreMfaSetup(challengeToken, account = {}, storeInfo = {}, destination = "shop", message = "") {
-  try {
-    const setup = await apiFetch("/api/store-admin/2fa/setup", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${challengeToken}` },
-      body: JSON.stringify({ challengeToken })
-    });
-    root.innerHTML = `
-      <main class="auth-wrap shop-panel-login">
-        <section class="auth-card">
-          <h1>Настройка 2FA магазина</h1>
-          <p>${esc(storeInfo.name || storeInfo.id || "Магазин")} · ${esc(account.login || "администратор")}</p>
-          ${message ? `<p class="notice">${esc(message)}</p>` : ""}
-          <img class="mfa-qr" src="${esc(setup.qrCodeDataUrl)}" alt="QR-код для Authenticator">
-          <label class="field">Секрет для ручного ввода<input value="${esc(setup.secret)}" readonly></label>
-          <form class="form" data-store-mfa-setup-form>
-            <label class="field">Текущий 6-значный код<input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
-            <button class="primary">Подтвердить и включить 2FA</button>
-          </form>
-        </section>
-      </main>
-    `;
-    document.querySelector("[data-store-mfa-setup-form]").onsubmit = async (event) => {
-      event.preventDefault();
-      const totp = new FormData(event.currentTarget).get("totp");
-      setButtonLoading(event.currentTarget.querySelector("button"), true, "Проверяю...");
-      try {
-        const confirmed = await apiFetch("/api/store-admin/2fa/confirm", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${challengeToken}` },
-          body: JSON.stringify({ challengeToken, totp })
-        });
-        renderStoreRecoveryCodes(confirmed, storeInfo.id, destination);
-      } catch (error) {
-        renderStoreMfaSetup(challengeToken, account, storeInfo, destination, error.message);
-      }
-    };
-    bindButtonFeedback(root);
-  } catch (error) {
-    if (destination === "seller") renderSellerAdminLogin(storeInfo.id, error.message);
-    else renderShopPanelLogin(error.message);
-  }
-}
-
-function renderStoreMfaVerify(challengeToken, account = {}, storeInfo = {}, destination = "shop", message = "") {
-  root.innerHTML = `
-    <main class="auth-wrap shop-panel-login">
-      <section class="auth-card">
-        <h1>Подтверждение входа</h1>
-        <p>${esc(storeInfo.name || storeInfo.id || "Магазин")} · ${esc(account.login || "администратор")}</p>
-        ${message ? `<p class="notice">${esc(message)}</p>` : ""}
-        <form class="form" data-store-mfa-verify-form>
-          <label class="field">Код 2FA или recovery-код<input name="factor" autocomplete="one-time-code" maxlength="20" required></label>
-          <button class="primary">Подтвердить</button>
-        </form>
-      </section>
-    </main>
-  `;
-  document.querySelector("[data-store-mfa-verify-form]").onsubmit = async (event) => {
-    event.preventDefault();
-    const factor = String(new FormData(event.currentTarget).get("factor") || "").trim();
-    setButtonLoading(event.currentTarget.querySelector("button"), true, "Проверяю...");
-    try {
-      const payload = await apiFetch("/api/store-admin/2fa/verify", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${challengeToken}` },
-        body: JSON.stringify({ challengeToken, ...(factor.replace(/\D/g, "").length === 6 ? { totp: factor } : { recoveryCode: factor }) })
-      });
-      completeStoreAdminLogin(payload, storeInfo.id, destination);
-    } catch (error) {
-      if (error.code === "MFA_CHALLENGE_INVALID" || /2FA setup session/i.test(error.message)) {
-        const message = "Запрос подтверждения входа истёк или был отменён. Введите логин и пароль заново, затем новый код Authenticator.";
-        if (destination === "seller") return renderSellerAdminLogin(storeInfo.id, message);
-        return renderShopPanelLogin(message);
-      }
-      renderStoreMfaVerify(challengeToken, account, storeInfo, destination, error.message);
-    }
-  };
-  bindButtonFeedback(root);
-}
-
 function renderShopPanelLogin(message = "") {
   const storeId = shopPanelHashId() || shopPanelSession();
   const hashStore = db.stores.find((store) => store.id === storeId);
@@ -12820,8 +12690,6 @@ function renderShopPanelLogin(message = "") {
         method: "POST",
         body: JSON.stringify({ storeId: loginStoreId, login, password })
       });
-      if (payload.requiresMfaSetup) return renderStoreMfaSetup(payload.challengeToken, payload.admin, payload.store || { id: loginStoreId }, "shop");
-      if (payload.requiresMfa) return renderStoreMfaVerify(payload.challengeToken, payload.admin, payload.store || { id: loginStoreId }, "shop");
       completeStoreAdminLogin(payload, loginStoreId, "shop");
     } catch (error) {
       renderShopPanelLogin(error.message || "Неверный пароль");
@@ -13447,67 +13315,6 @@ function bindShopPanelActions(store, activeTab) {
       store.staff = (store.staff || []).filter((member) => !sameLogin(member.login, button.dataset.shopStaffDelete));
       await shopPersistAndRender("staff");
     };
-  });
-
-  document.querySelectorAll("[data-shop-staff-mfa-reset]").forEach((button) => {
-    button.onclick = async () => {
-      const login = String(button.dataset.shopStaffMfaReset || "").trim();
-      if (!login || !confirm(`Сбросить 2FA сотрудника ${login}? Его текущие административные сессии будут завершены.`)) return;
-      const token = sellerAdminApiSessionToken();
-      if (!token) return showToast("Войдите в Shop Admin заново");
-      try {
-        await apiFetch(`/api/store-admin/staff/${encodeURIComponent(login)}/2fa/reset`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: JSON.stringify({})
-        });
-        showToast("2FA сотрудника сброшена. При следующем входе он настроит её заново.");
-      } catch (error) {
-        showToast(error.message || "Не удалось сбросить 2FA");
-      }
-    };
-  });
-
-  document.querySelector("[data-shop-recovery-rotate]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    await runShopFormSubmit(form, "Создаю...", async () => {
-      const data = new FormData(form);
-      const token = sellerAdminApiSessionToken();
-      if (!token) throw new Error("Войдите в Shop Admin заново");
-      const payload = await apiFetch("/api/store-admin/2fa/recovery-codes", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: data.get("password"), totp: data.get("totp") })
-      });
-      const output = document.querySelector("[data-shop-recovery-output]");
-      if (output) {
-        output.hidden = false;
-        output.innerHTML = (payload.recoveryCodes || []).map((code) => `<code>${esc(code)}</code>`).join("");
-      }
-      form.reset();
-      showToast("Новые одноразовые коды созданы. Старые больше не действуют.");
-    });
-  });
-
-  document.querySelector("[data-shop-mfa-disable]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    if (!confirm("Отключить 2FA и завершить текущую административную сессию?")) return;
-    await runShopFormSubmit(form, "Отключаю...", async () => {
-      const data = new FormData(form);
-      const token = sellerAdminApiSessionToken();
-      if (!token) throw new Error("Войдите в Shop Admin заново");
-      await apiFetch("/api/store-admin/2fa", {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: data.get("password"), totp: data.get("totp") })
-      });
-      storageRemove(SHOP_PANEL_SESSION_KEY);
-      storageRemove(SHOP_PANEL_STAFF_SESSION_KEY);
-      clearSellerAdminApiSession();
-      renderShopPanelLogin("2FA отключена. Войдите и настройте её заново.");
-    });
   });
 
   document.querySelector("[data-shop-wallet-form]")?.addEventListener("submit", async (event) => {

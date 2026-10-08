@@ -12,9 +12,9 @@
 
 Исходное состояние содержало несколько критических архитектурных рисков: общие административные секреты без обязательной 2FA, слишком широкое доверие к клиентским финансовым данным, небезопасные legacy-пути восстановления заказов, недостаточную изоляцию Supabase, хранение токенов в браузере и возможность повторной обработки некоторых событий.
 
-В ветке исправлений реализованы обязательная TOTP 2FA для всех административных ролей и обеих административных областей, серверная RBAC/IDOR-защита, проверка NOWPayments IPN, идемпотентность и межпроцессные финансовые блокировки, строгий публичный контракт данных, безопасная загрузка файлов, security headers, rate limiting, server-side sessions и regression tests.
+Для центральной административной панели реализована обязательная TOTP 2FA. По политике владельца от 2026-10-08 владельцы и сотрудники магазинов входят в Shop Admin по паролю; их сессии по-прежнему привязаны к устройству, магазину, роли и версиям учётных данных. Также реализованы серверная RBAC/IDOR-защита, проверка NOWPayments IPN, идемпотентность и межпроцессные финансовые блокировки, строгий публичный контракт данных, безопасная загрузка файлов, security headers, rate limiting, server-side sessions и regression tests.
 
-Обычные клиенты не получили 2FA: регистрация и вход клиентов используют прежний flow с captcha и server-side session. 2FA применяется только к `owner`, `admin`, `manager`, `moderator`, `support`, владельцам магазинов и сотрудникам магазинов с административным доступом.
+Обычные клиенты не получили 2FA: регистрация и вход клиентов используют прежний flow с captcha и server-side session. 2FA применяется к центральным административным ролям `owner`, `admin`, `manager`, `moderator` и `support`.
 
 Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `cerber.to` и `cerber.love`. Все apex- и `www`-имена обслуживаются одним Cloudflare Worker Custom Domain gateway; gateway подтверждает запрос серверным секретом, а прямой адрес Render возвращает `404`. Код проходит build, targeted security/regression tests и production HTTP smoke checks. Владелец сообщил о применении SQL-миграций и замене production-переменных; статус чувствительных значений и deep health нельзя независимо подтвердить без административной MFA-сессии, поэтому обязательная ротация ранее раскрытых секретов остаётся предметом ручной проверки.
 
@@ -25,7 +25,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | Frontend | `index.html`, `app.js`, `styles.css` | Полностью недоверенная среда; значения и запросы могут быть изменены пользователем |
 | Owner admin | `market-admin.html`, `market-admin.js` | Полный доступ только после password + TOTP/recovery code |
 | Text admin | `text-admin.html`, `text-admin.js` | Тот же обязательный MFA flow, включая первичную настройку |
-| Store admin | Клиентский shop panel в `app.js` | Отдельная MFA-учётная запись владельца/сотрудника магазина |
+| Store admin | Клиентский shop panel в `app.js` | Отдельная учётная запись владельца/сотрудника магазина, вход по паролю |
 | Backend | `server.js`, Express | Единственная доверенная точка проверки auth, RBAC, цены, баланса и статусов |
 | Security core | `security-core.js` | TOTP, recovery codes, input bounds, payment validation, RBAC, upload validation |
 | Database | Supabase/Postgres | Service-role доступ только у backend; private tables закрываются RLS/revokes |
@@ -40,12 +40,13 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 - Provider -> webhook: payload считается недоверенным до проверки подписи и сохранённой операции.
 - Public Supabase access -> DB: `anon` и `authenticated` не должны читать private tables.
 - Admin challenge -> admin session: password challenge не является полноценной сессией и не принимается admin API.
-- Store admin -> store objects: `storeId` берётся из проверенного MFA token, а не из тела запроса.
+- Store admin -> store objects: `storeId` берётся из подписанной password-authenticated сессии, а не из тела запроса.
 
 ### Хранение сессий и секретов
 
 - Customer session: purpose-bound случайные access/remember tokens, в БД хранятся только HMAC digests; production TTL access 24 часа, remember 30 дней; обязательная привязка к User-Agent; logout отзывает токен текущей вкладки и remember-cookie.
 - Admin session: HMAC token на 2 часа, `mfa: true`, device hash, credential/session version; аккаунт повторно проверяется в БД на каждом admin request.
+- Store admin session: HMAC token на 12 часов с `authentication: "password"`, device hash, store ID, role, credential/session version; аккаунт повторно проверяется в БД на каждом запросе Shop Admin.
 - MFA challenge: отдельный purpose-bound token на 10 минут; не принимается `verifyAdminToken`.
 - TOTP secret: отдельный для каждого администратора, AES-256-GCM encrypted at rest.
 - Recovery codes: показываются один раз, в БД хранятся HMAC hashes, каждый код одноразовый.
@@ -81,9 +82,8 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | GET | `/api/admin/overview`, `/users/:login`, `/disputes/:id` | Full MFA admin | RBAC allowlist | Filters/path IDs | Role-filtered admin data |
 | POST/PATCH/DELETE | `/api/admin/stores*`, `/exchangers*`, `/messages*`, `/support*`, `/broadcasts` | Full MFA admin | RBAC plus owner-only where critical | Explicit normalized fields | Administrative state |
 | POST | `/api/admin/users/:login/balance`, `/orders/recover`, `/withdrawals*`, `/settings` | Full MFA admin | Owner only + finance lock/idempotency | Bounded amount/status/settings | Critical financial data |
-| POST | `/api/store-admin/login` | Password + rate limit | Store owner/staff | Store/login/password | Returns MFA challenge only |
-| POST | `/api/store-admin/2fa/setup`, `/confirm`, `/verify` | Store MFA challenge | Matching store account/device | TOTP/recovery code | One-time QR/secret or full token |
-| GET/PUT/POST/PATCH/DELETE | `/api/store-admin/*` | Full store MFA | Token store ID + staff permissions | Explicit product/store/message fields | Current store only |
+| POST | `/api/store-admin/login` | Password + rate limit | Store owner/staff | Store/login/password | Returns password-authenticated store session |
+| GET/PUT/POST/PATCH/DELETE | `/api/store-admin/*` | Signed store session | Token store ID + staff permissions | Explicit product/store/message fields | Current store only |
 | GET | `/api/health/deep`, `/api/admin/db-diagnostics` | Full site MFA | Role allowlist | None | Sanitized diagnostics |
 | POST/PUT | `/api/cms-texts` write | Full site MFA | Role allowlist | Safe text catalog | CMS content only |
 | POST | `/api/translate`, `/api/broadcasts/:id/track` | Public + strict rate/idempotency | None/current notification | Bounded text/action | No account secrets |
@@ -223,7 +223,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 - Affected: login, registration, MFA, messaging, translation, payment creation/sync and withdrawals.
 - Cause: missing endpoint-specific limits and idempotency.
 - Impact: brute force, credential stuffing, spam and provider/API exhaustion.
-- Fix: separate account/IP lockouts, randomized failure delay, `Retry-After`, body limits, challenge TTL and idempotency keys. Site/store password and MFA failures are persisted atomically in Postgres; an in-memory limiter remains as fail-safe.
+- Fix: separate account/IP lockouts, randomized failure delay, `Retry-After`, body limits, challenge TTL and idempotency keys. Site password/MFA failures and store password failures are persisted atomically in Postgres; an in-memory limiter remains as fail-safe.
 - Test: privileged account/IP lockout migration and route wiring; expensive-action rate-limit regression.
 - Status: **FIXED IN CODE; `supabase-auth-rate-limits.sql` REQUIRED**.
 
@@ -317,10 +317,10 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 | Wrong/reused TOTP | Rejected; atomic `last_totp_step` prevents replay |
 | Recovery code | One use; hash removed and credential version rotated |
 | Direct `/api/admin/*` with password challenge | 401 |
-| Direct `/api/store-admin/*` with password challenge | 401 |
+| Direct `/api/store-admin/*` without a signed store session | 401 |
 | Disabled/reset account with old session | 401 after version mismatch |
-| Owner resets another admin/store admin 2FA | Implemented and logged |
-| Store owner resets staff 2FA | Implemented and logged |
+| Owner resets another central administrator's 2FA | Implemented and logged |
+| Store owner/staff password login | Signed, device-bound, store-scoped session |
 | Ordinary customer registration/login | No TOTP/QR/recovery flow |
 | Text admin first login | Full setup/verify flow implemented |
 
@@ -388,7 +388,7 @@ Production commit `af73ec8` развёрнут на `cerber.cc`, `cerber.vip`, `
 - Source and `node_modules` blocked.
 - Unapproved Host/Origin blocked.
 - Oversized body rejected.
-- Admin/store/deep-health denied without full MFA session.
+- Admin/deep-health denied without full MFA session; store API denied without a signed store session.
 - MFA setup denied without password challenge.
 - Legacy owner/Telegram password routes disabled.
 

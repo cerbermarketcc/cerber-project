@@ -47,9 +47,8 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "financial-settlement-2026-10-06-v194";
+const cerberBuildVersion = "store-password-login-2026-10-08-v195";
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
-const storeAdminMfaRateScope = "store-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
 const cleanLaunchResetMarkerRowId = `maintenance_${cleanLaunchResetId}`;
@@ -846,25 +845,23 @@ app.use((req, res, next) => {
 });
 app.use(async (req, res, next) => {
   try {
+    const securityPath = String(req.path || "/").toLowerCase().replace(/\/+$/, "") || "/";
     const siteMfaPublicRoutes = new Set([
       "/api/admin/login",
       "/api/admin/2fa/setup",
       "/api/admin/2fa/confirm",
       "/api/admin/2fa/verify"
     ]);
-    const storeMfaPublicRoutes = new Set([
-      "/api/store-admin/login",
-      "/api/store-admin/2fa/setup",
-      "/api/store-admin/2fa/confirm",
-      "/api/store-admin/2fa/verify"
+    const storeAuthPublicRoutes = new Set([
+      "/api/store-admin/login"
     ]);
     const siteAdminPath = (
-      (req.path.startsWith("/api/admin/") && !siteMfaPublicRoutes.has(req.path))
-      || req.path === "/api/health/deep"
-      || (req.path === "/api/cms-texts" && req.method !== "GET")
+      (securityPath.startsWith("/api/admin/") && !siteMfaPublicRoutes.has(securityPath))
+      || securityPath === "/api/health/deep"
+      || (securityPath === "/api/cms-texts" && req.method !== "GET")
     );
-    const storeAdminPath = req.path.startsWith("/api/store-admin/") && !storeMfaPublicRoutes.has(req.path);
-    if (siteMfaPublicRoutes.has(req.path) || storeMfaPublicRoutes.has(req.path)) {
+    const storeAdminPath = securityPath.startsWith("/api/store-admin/") && !storeAuthPublicRoutes.has(securityPath);
+    if (siteMfaPublicRoutes.has(securityPath) || storeAuthPublicRoutes.has(securityPath)) {
       res.setHeader("Cache-Control", "no-store");
       res.setHeader("Pragma", "no-cache");
     }
@@ -900,7 +897,6 @@ app.use(async (req, res, next) => {
         !account
         || account.scope !== "store"
         || account.disabled
-        || !account.totp_enabled
         || String(account.store_id || "") !== String(token.storeId || "")
         || Number(account.credential_version || 1) !== Number(token.credentialVersion || 0)
         || Number(account.session_version || 1) !== Number(token.sessionVersion || 0)
@@ -4423,7 +4419,7 @@ function signSellerAdminToken(storeId, meta = {}, account = {}, req = {}) {
     accountId: account.id,
     credentialVersion: Number(account.credential_version || 1),
     sessionVersion: Number(account.session_version || 1),
-    mfa: true,
+    authentication: "password",
     tokenVersion: securityTokenVersion,
     deviceHash: requestDeviceHash(req),
     createdAt: now,
@@ -4636,7 +4632,7 @@ function verifySellerAdminToken(req) {
     if (data.tokenVersion !== securityTokenVersion || createdAt < securityTokenEpochMs) return null;
     if (!data.deviceHash || data.deviceHash !== requestDeviceHash(req)) return null;
     if (data.expiresAt && Date.now() > Number(data.expiresAt)) return null;
-    if (!data.mfa || !data.accountId || !Number.isFinite(Number(data.credentialVersion)) || !Number.isFinite(Number(data.sessionVersion))) return null;
+    if (data.authentication !== "password" || !data.accountId || !Number.isFinite(Number(data.credentialVersion)) || !Number.isFinite(Number(data.sessionVersion))) return null;
     return data;
   } catch {
     return null;
@@ -5472,12 +5468,11 @@ function sellerMetaForAccount(account = {}) {
     : { role: "owner" };
 }
 
-async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {}, account = {}) {
+async function storePasswordAuthenticatedResponse(req, res, store = {}, principal = {}, account = {}) {
   const meta = sellerMetaForAccount(account);
   const token = signSellerAdminToken(store.id, meta, account, req);
   resetClientRateLimit(req, "store-admin-login-ip");
   resetClientRateLimit(req, "store-admin-login", `${store.id}:${account.login}`);
-  await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, true, { clearIp: true });
   appendAdminLog(account.role === "staff" ? "store_staff_login" : "store_admin_login", account.login || store.id, {
     storeId: store.id,
     accountId: account.id,
@@ -5494,42 +5489,10 @@ async function storeMfaAuthenticatedResponse(req, res, store = {}, principal = {
   });
 }
 
-async function continueStoreMfaLogin(req, res, store = {}, principal = {}) {
+async function continueStorePasswordLogin(req, res, store = {}, principal = {}) {
   const account = await ensureStoreAdminAccount(store, principal);
   if (!account || account.disabled) return res.status(403).json({ error: "Store administrator access is disabled" });
-  const challengeToken = signMfaChallenge(account, req);
-  if (!account.totp_enabled) {
-    return res.json({
-      requiresMfaSetup: true,
-      challengeToken,
-      admin: adminAccountPublic(account),
-      store: { id: store.id, name: store.name || store.id }
-    });
-  }
-  if (!req.body.totp && !req.body.recoveryCode) {
-    return res.json({ requiresMfa: true, challengeToken, admin: adminAccountPublic(account), store: { id: store.id, name: store.name || store.id } });
-  }
-  const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, storeAdminMfaRateScope, account, req.body);
-  if (!verifiedAccount) {
-    await delay(privilegedLoginFailureDelay());
-    return res.status(401).json({ error: "Invalid or already used 2FA code" });
-  }
-  return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
-}
-
-async function storePrincipalForAccount(account = {}) {
-  const store = await loadStoreWithFallback(account.store_id);
-  if (!store) return { store: null, principal: null };
-  if (account.role === "owner") return { store, principal: { role: "owner", login: store.ownerLogin || store.id } };
-  const staff = (Array.isArray(store.staff) ? store.staff : []).find((member) => sameLogin(member?.login, account.login));
-  return { store, principal: staff ? { ...staff, role: "staff" } : null };
-}
-
-async function verifyStoreAccountPassword(account = {}, password = "") {
-  const { store, principal } = await storePrincipalForAccount(account);
-  if (!store || !principal) return false;
-  if (account.role === "owner") return Boolean((await verifyStoreOwnerCredentials(store, password)).ok);
-  return verifyPanelPassword(password, principal.passwordHash, principal.password);
+  return storePasswordAuthenticatedResponse(req, res, store, principal, account);
 }
 
 app.post("/api/store-admin/login", async (req, res, next) => {
@@ -5573,7 +5536,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     if (ownerAuth.ok) {
       await markPrivilegedLoginAttempt(req, "store-admin-login", privilegedIdentity, true);
       const authenticatedStore = await reconcileStoreOwnerCredentials(store, password, ownerAuth);
-      return continueStoreMfaLogin(req, res, authenticatedStore, {
+      return continueStorePasswordLogin(req, res, authenticatedStore, {
         role: "owner",
         login: authenticatedStore.ownerLogin || authenticatedStore.id
       });
@@ -5587,7 +5550,7 @@ app.post("/api/store-admin/login", async (req, res, next) => {
     await markPrivilegedLoginAttempt(req, "store-admin-login", privilegedIdentity, true);
     await persistStoreSecretMigration(store);
     const permissions = Array.isArray(staff.permissions) ? staff.permissions.map(String).filter(Boolean) : [];
-    return continueStoreMfaLogin(req, res, store, { ...staff, role: "staff", permissions });
+    return continueStorePasswordLogin(req, res, store, { ...staff, role: "staff", permissions });
   } catch (error) {
     next(error);
   }
@@ -5602,114 +5565,6 @@ app.get("/api/cms-base-texts", async (_req, res, next) => {
   }
 });
 
-app.post("/api/store-admin/2fa/setup", async (req, res, next) => {
-  try {
-    assertClientRateLimit(req, "store-admin-mfa-setup", { limit: 10, windowMs: 10 * 60 * 1000 });
-    const { account } = await accountForMfaChallenge(req, "store");
-    const setup = await beginMfaSetup(account);
-    res.json({
-      account: adminAccountPublic(setup.account),
-      secret: setup.secret,
-      otpauthUrl: setup.otpauthUrl,
-      qrCodeDataUrl: setup.qrCodeDataUrl
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/store-admin/2fa/confirm", async (req, res, next) => {
-  try {
-    assertClientRateLimit(req, "store-admin-mfa-confirm", { limit: 8, windowMs: 10 * 60 * 1000 });
-    const { account } = await accountForMfaChallenge(req, "store");
-    await assertPrivilegedLoginRateLimit(req, storeAdminMfaRateScope, account.id);
-    const confirmed = await confirmMfaSetup(account, req.body.totp || req.body.code);
-    if (!confirmed) {
-      await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, false);
-      await delay(privilegedLoginFailureDelay());
-      return res.status(401).json({ error: "Invalid or already used 2FA code" });
-    }
-    await markPrivilegedLoginAttempt(req, storeAdminMfaRateScope, account.id, true, { clearIp: true });
-    const { store, principal } = await storePrincipalForAccount(confirmed.account);
-    if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
-    await appendAdminLog("store_admin_mfa_enabled", confirmed.account.login, {
-      accountId: confirmed.account.id,
-      storeId: store.id,
-      ...requestSource(req)
-    });
-    const meta = sellerMetaForAccount(confirmed.account);
-    res.json({
-      token: signSellerAdminToken(store.id, meta, confirmed.account, req),
-      admin: adminAccountPublic(confirmed.account),
-      recoveryCodes: confirmed.recoveryCodes,
-      store: storeForAdminState(store, meta),
-      staff: confirmed.account.role === "staff"
-        ? { role: "staff", login: confirmed.account.login, name: principal.name || "", permissions: meta.permissions }
-        : { role: "owner", permissions: null },
-      ...(await stateForStoreAdmin(store.id, meta))
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/store-admin/2fa/verify", async (req, res, next) => {
-  try {
-    assertClientRateLimit(req, "store-admin-mfa-verify", { limit: 8, windowMs: 10 * 60 * 1000 });
-    const { account } = await accountForMfaChallenge(req, "store");
-    if (!account.totp_enabled) return res.status(409).json({ error: "2FA setup is required" });
-    const verifiedAccount = await verifyRateLimitedAdminSecondFactor(req, storeAdminMfaRateScope, account, req.body);
-    if (!verifiedAccount) {
-      await delay(privilegedLoginFailureDelay());
-      return res.status(401).json({ error: "Invalid or already used 2FA code" });
-    }
-    const { store, principal } = await storePrincipalForAccount(verifiedAccount);
-    if (!store || !principal) return res.status(401).json({ error: "Store administrator no longer exists" });
-    return storeMfaAuthenticatedResponse(req, res, store, principal, verifiedAccount);
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/store-admin/2fa/recovery-codes", async (req, res, next) => {
-  try {
-    const token = verifySellerAdminToken(req);
-    let account = await loadAdminAccountById(token.accountId);
-    if (!account || !(await verifyStoreAccountPassword(account, String(req.body.password || "")))) {
-      return res.status(401).json({ error: "Identity confirmation failed" });
-    }
-    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
-    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
-    const recoveryCodes = generateRecoveryCodes(10);
-    const { error } = await supabase.from("admin_accounts")
-      .update({ recovery_code_hashes: recoveryCodeHashes(mfaRecoverySecret(account), account.id, recoveryCodes), updated_at: new Date().toISOString() })
-      .eq("id", account.id)
-      .eq("credential_version", account.credential_version);
-    if (error) throw adminAccountMigrationError(error);
-    await appendAdminLog("store_admin_recovery_codes_rotated", account.login, { accountId: account.id, storeId: account.store_id, ...requestSource(req) });
-    res.json({ recoveryCodes, remaining: recoveryCodes.length });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.delete("/api/store-admin/2fa", async (req, res, next) => {
-  try {
-    const token = verifySellerAdminToken(req);
-    let account = await loadAdminAccountById(token.accountId);
-    if (!account || !(await verifyStoreAccountPassword(account, String(req.body.password || "")))) {
-      return res.status(401).json({ error: "Identity confirmation failed" });
-    }
-    account = await consumeAdminTotp(account, req.body.totp || req.body.code);
-    if (!account) return res.status(401).json({ error: "Invalid or already used 2FA code" });
-    await resetAdminAccountMfa(account);
-    await appendAdminLog("store_admin_mfa_disabled", account.login, { accountId: account.id, storeId: account.store_id, ...requestSource(req) });
-    res.json({ ok: true, requiresMfaSetup: true });
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post("/api/store-admin/logout", async (req, res, next) => {
   try {
     const token = verifySellerAdminToken(req);
@@ -5717,21 +5572,6 @@ app.post("/api/store-admin/logout", async (req, res, next) => {
     if (account) await revokeAdminAccountSessions(account);
     await appendAdminLog("store_admin_logout", account?.login || token.storeId, { accountId: token.accountId, storeId: token.storeId, ...requestSource(req) });
     res.json({ ok: true });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/store-admin/staff/:login/2fa/reset", async (req, res, next) => {
-  try {
-    const token = verifySellerAdminToken(req);
-    if (token.role !== "owner") return res.status(403).json({ error: "Store owner access required" });
-    const accountId = storeAdminAccountId(token.storeId, { role: "staff", login: req.params.login });
-    const account = await loadAdminAccountById(accountId);
-    if (!account || account.store_id !== token.storeId) return res.status(404).json({ error: "Store administrator not found" });
-    const reset = await resetAdminAccountMfa(account);
-    await appendAdminLog("store_staff_mfa_reset", token.account?.login || token.storeId, { accountId: reset.id, storeId: token.storeId, ...requestSource(req) });
-    res.json({ account: adminAccountPublic(reset) });
   } catch (error) {
     next(error);
   }
@@ -7200,30 +7040,6 @@ app.post("/api/admin/accounts/:id/2fa/reset", async (req, res, next) => {
     if (account.id === owner.accountId) return res.status(400).json({ error: "Use personal 2FA settings for your own account" });
     const reset = await resetAdminAccountMfa(account);
     await appendAdminLog("admin_mfa_reset_by_owner", owner.login, { accountId: reset.id, ...requestSource(req) });
-    res.json({ account: adminAccountPublic(reset) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/api/admin/stores/:id/2fa/reset", async (req, res, next) => {
-  try {
-    const owner = requireOwnerAdmin(req);
-    const store = await loadStoreWithFallback(req.params.id);
-    if (!store) return res.status(404).json({ error: "Store not found" });
-    const staffLogin = String(req.body.staffLogin || "").trim();
-    const accountId = storeAdminAccountId(store.id, staffLogin
-      ? { role: "staff", login: staffLogin }
-      : { role: "owner", login: store.ownerLogin || store.id });
-    const account = await loadAdminAccountById(accountId);
-    if (!account) return res.status(404).json({ error: "Store administrator has not started 2FA enrollment yet" });
-    const reset = await resetAdminAccountMfa(account);
-    await appendAdminLog("store_admin_mfa_reset_by_owner", owner.login, {
-      accountId: reset.id,
-      storeId: store.id,
-      staffLogin,
-      ...requestSource(req)
-    });
     res.json({ account: adminAccountPublic(reset) });
   } catch (error) {
     next(error);

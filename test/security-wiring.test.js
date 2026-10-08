@@ -31,9 +31,25 @@ function routeBody(method, route) {
   return server.slice(start, nextRoute < 0 ? server.length : nextRoute);
 }
 
-test("all administrative APIs require an enabled database-backed MFA account", () => {
-  assert.match(server, /siteAdminPath[\s\S]{0,1800}!account\.totp_enabled/);
-  assert.match(server, /storeAdminPath[\s\S]{0,1800}!account\.totp_enabled/);
+test("site APIs require MFA while store APIs accept only a database-backed password session", () => {
+  const start = server.indexOf("const securityPath");
+  const end = server.indexOf("\napp.use(", start);
+  assert.notEqual(start, -1, "administrative authentication middleware must exist");
+  assert.notEqual(end, -1, "administrative authentication middleware must be bounded");
+  const middleware = server.slice(start, end);
+  const storeBlockStart = middleware.indexOf("if (storeAdminPath)");
+  assert.notEqual(storeBlockStart, -1, "store authentication block must exist");
+  const storeBlock = middleware.slice(storeBlockStart);
+
+  assert.match(middleware, /const securityPath = String\(req\.path \|\| "\/"\)\.toLowerCase\(\)\.replace\(\/\\\/\+\$\/, ""\) \|\| "\/"/);
+  assert.doesNotMatch(middleware, /req\.path\.startsWith\("\/api\/(?:admin|store-admin)\//);
+  assert.match(middleware, /siteAdminPath[\s\S]{0,900}!account\.totp_enabled/);
+  assert.match(middleware, /siteAdminPath[\s\S]{0,300}verifyAdminToken\(req\)/);
+  assert.match(storeBlock, /verifySellerAdminToken\(req\)/);
+  assert.doesNotMatch(storeBlock, /!account\.totp_enabled/);
+  assert.match(storeBlock, /account\.scope !== "store"/);
+  assert.match(storeBlock, /String\(account\.store_id \|\| ""\) !== String\(token\.storeId \|\| ""\)/);
+  assert.match(storeBlock, /account\.role !== token\.role/);
   assert.match(server, /adminRoleCanRequest\(account\.role, req\)/);
   assert.match(server, /account\.credential_version[\s\S]{0,300}token\.credentialVersion/);
   assert.match(server, /account\.session_version[\s\S]{0,300}token\.sessionVersion/);
@@ -43,9 +59,44 @@ test("admin MFA challenges cannot authorize APIs and sensitive responses are not
   assert.match(server, /purpose: "admin-mfa-challenge"/);
   assert.match(server, /update\(`challenge:\$\{payload\}`\)/);
   assert.match(server, /if \(!data\.mfa \|\| !data\.accountId/);
-  assert.match(server, /siteMfaPublicRoutes\.has\(req\.path\)[\s\S]{0,220}Cache-Control", "no-store"/);
+  assert.match(server, /siteMfaPublicRoutes\.has\(securityPath\)[\s\S]{0,220}Cache-Control", "no-store"/);
   assert.match(server, /accountForMfaChallenge\(req, "site"\)/);
-  assert.match(server, /accountForMfaChallenge\(req, "store"\)/);
+});
+
+test("store owners and staff receive a password-authenticated session without a 2FA branch", () => {
+  const storeLogin = routeBody("post", "/api/store-admin/login");
+  const continueLogin = functionBody(server, "continueStorePasswordLogin");
+  const authenticatedResponse = functionBody(server, "storePasswordAuthenticatedResponse");
+  const signToken = functionBody(server, "signSellerAdminToken");
+  const verifyToken = functionBody(server, "verifySellerAdminToken");
+
+  assert.equal((storeLogin.match(/continueStorePasswordLogin\(/g) || []).length, 2, "owner and staff password paths must both finish login");
+  assert.match(continueLogin, /ensureStoreAdminAccount\(store, principal\)/);
+  assert.match(continueLogin, /storePasswordAuthenticatedResponse\(req, res, store, principal, account\)/);
+  assert.doesNotMatch(`${storeLogin}\n${continueLogin}`, /requiresMfa|challengeToken|verifyRateLimitedAdminSecondFactor|req\.body\.(?:totp|recoveryCode)/);
+  assert.match(authenticatedResponse, /signSellerAdminToken\(store\.id, meta, account, req\)/);
+  assert.match(signToken, /authentication: "password"/);
+  assert.doesNotMatch(signToken, /\bmfa\s*:/);
+  assert.match(verifyToken, /data\.authentication !== "password"/);
+
+  assert.doesNotMatch(server, /app\.(?:post|delete)\("\/api\/store-admin\/2fa/);
+  assert.doesNotMatch(server, /app\.post\("\/api\/store-admin\/staff\/:login\/2fa\/reset"/);
+  assert.doesNotMatch(appClient, /\/api\/store-admin\/2fa/);
+  assert.doesNotMatch(appClient, /renderStoreMfa(?:Setup|Verify)/);
+  assert.doesNotMatch(appClient, /\/api\/store-admin\/staff\/\$\{[^}]+\}\/2fa\/reset/);
+});
+
+test("site owner login still requires a verified second factor before issuing its token", () => {
+  const adminLogin = routeBody("post", "/api/admin/login");
+  const signToken = functionBody(server, "signAdminToken");
+  const verifyToken = functionBody(server, "verifyAdminToken");
+
+  assert.match(adminLogin, /if \(!account\.totp_enabled\)[\s\S]{0,500}requiresMfaSetup: true/);
+  assert.match(adminLogin, /if \(!req\.body\.totp && !req\.body\.recoveryCode\)[\s\S]{0,200}requiresMfa: true/);
+  assert.match(adminLogin, /verifyRateLimitedAdminSecondFactor\(req, siteAdminMfaRateScope, account, req\.body\)/);
+  assert.match(adminLogin, /signAdminToken\(verifiedAccount, req\)/);
+  assert.match(signToken, /mfa: true/);
+  assert.match(verifyToken, /if \(!data\.mfa \|\| !data\.accountId/);
 });
 
 test("ordinary customer authentication remains separate from administrative 2FA", () => {
@@ -67,7 +118,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=187/);
+  assert.match(indexHtml, /app\.js\?v=188/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -90,16 +141,13 @@ test("privileged login failures are locked by account and IP across server insta
   assert.doesNotMatch(adminLogin, /Invalid login credentials/);
 });
 
-test("admin recovery codes remain usable during MFA lockout without weakening TOTP limits", () => {
+test("site admin recovery codes remain usable during MFA lockout without weakening TOTP limits", () => {
   const adminMfa = routeBody("post", "/api/admin/2fa/verify");
-  const storeMfa = routeBody("post", "/api/store-admin/2fa/verify");
   assert.match(server, /function isRecoveryCodeSubmission[\s\S]{0,220}normalizeRecoveryCode\(body\.recoveryCode\)\.length === 12/);
   assert.match(server, /function verifyRateLimitedAdminSecondFactor[\s\S]{0,700}Number\(error\?\.status\) !== 429 \|\| !isRecoveryCodeSubmission\(body\)/);
   assert.match(server, /const siteAdminMfaRateScope = "site-admin-mfa-v2"/);
-  assert.match(server, /const storeAdminMfaRateScope = "store-admin-mfa-v2"/);
   assert.match(server, /markPrivilegedLoginAttempt\(req, siteAdminMfaRateScope, account\.id, true, \{ clearIp: true \}\)/);
   assert.match(adminMfa, /verifyRateLimitedAdminSecondFactor\(req, siteAdminMfaRateScope, account, req\.body\)/);
-  assert.match(storeMfa, /verifyRateLimitedAdminSecondFactor\(req, storeAdminMfaRateScope, account, req\.body\)/);
   assert.match(adminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
   assert.match(textAdminClient, /function adminSecondFactorBody[\s\S]{0,240}\^\\d\{6\}\$/);
   assert.doesNotMatch(`${adminClient}\n${textAdminClient}`, /replace\(\/\\D\/g, ""\)\.length === 6/);
