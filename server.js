@@ -38,6 +38,7 @@ import {
   validateProviderPayout,
   validateProviderPayment,
   validIdempotencyKey,
+  verifyOnionGatewaySignature,
   verifyTotpCode
 } from "./security-core.js";
 
@@ -47,7 +48,18 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "store-password-login-2026-10-08-v195";
+const cerberBuildVersion = "cerber-render-onion-2026-10-12-v198";
+const officialOnionHost = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
+const onionGatewayPublicKey = crypto.createPublicKey(`-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAUrSjBVbXjhw2XBf8O5WMru6cKl/1jl+q4VeEuaabYng=
+-----END PUBLIC KEY-----`);
+const onionGatewayVerification = Symbol("cerber-onion-gateway-verification");
+const onionGatewayReadinessClientId = "79d1fe67ae9d46d6ae7f07c7f05549db";
+const onionGatewayNonceTtlMs = 90_000;
+const onionGatewayNonceLimit = 20_000;
+const onionGatewayHealthNonceLimit = 256;
+const onionGatewayNonces = new Map();
+const onionGatewayHealthNonces = new Map();
 const siteAdminMfaRateScope = "site-admin-mfa-v2";
 const incidentSessionResetId = "security-incident-2026-08-12-v1";
 const cleanLaunchResetId = "clean-marketplace-launch-2026-08-30-v3";
@@ -594,6 +606,44 @@ function hasVerifiedCloudflareOrigin(req = {}) {
     && secretValuesMatch(req.headers?.[cloudflareOriginHeader], cloudflareOriginSecret);
 }
 
+function verifiedOnionGatewayRequest(req = {}) {
+  if (req[onionGatewayVerification] !== undefined) return req[onionGatewayVerification];
+  const fields = {
+    timestamp: String(req.headers?.["x-cerber-onion-timestamp"] || ""),
+    nonce: String(req.headers?.["x-cerber-onion-nonce"] || "").toLowerCase(),
+    clientId: String(req.headers?.["x-cerber-onion-client"] || "").toLowerCase(),
+    method: String(req.method || "").toUpperCase(),
+    url: String(req.originalUrl || req.url || ""),
+    onionHost: String(req.headers?.["x-cerber-onion-host"] || "").toLowerCase(),
+    signature: String(req.headers?.["x-cerber-onion-signature"] || "")
+  };
+  const now = Date.now();
+  const valid = String(req.headers?.["x-cerber-onion-version"] || "") === "v1"
+    && fields.onionHost === officialOnionHost
+    && verifyOnionGatewaySignature(fields, onionGatewayPublicKey, { now, maxSkewMs: onionGatewayNonceTtlMs });
+  const readinessProbe = fields.clientId === onionGatewayReadinessClientId
+    && fields.method === "GET"
+    && fields.url === "/api/health";
+  const nonceCache = readinessProbe ? onionGatewayHealthNonces : onionGatewayNonces;
+  const nonceLimit = readinessProbe ? onionGatewayHealthNonceLimit : onionGatewayNonceLimit;
+  if (!valid || nonceCache.has(fields.nonce)) {
+    req[onionGatewayVerification] = null;
+    return null;
+  }
+  if (nonceCache.size >= nonceLimit) {
+    for (const [nonce, expiresAt] of nonceCache) {
+      if (expiresAt <= now) nonceCache.delete(nonce);
+    }
+    if (nonceCache.size >= nonceLimit) {
+      req[onionGatewayVerification] = null;
+      return null;
+    }
+  }
+  nonceCache.set(fields.nonce, now + onionGatewayNonceTtlMs);
+  req[onionGatewayVerification] = { clientId: fields.clientId, onionHost: fields.onionHost };
+  return req[onionGatewayVerification];
+}
+
 function maskSecret(value = "") {
   const text = String(value || "");
   if (!text) return "";
@@ -602,6 +652,7 @@ function maskSecret(value = "") {
 }
 
 function requestUsesHttps(req = {}) {
+  if (verifiedOnionGatewayRequest(req)) return false;
   const forwardedProtocol = String(req.headers?.["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
   return Boolean(req.secure || forwardedProtocol === "https" || isProduction);
 }
@@ -735,16 +786,18 @@ app.use((req, res, next) => {
   }
   const originBypassRoute = isOriginBypassRoute(req);
   const verifiedCloudflareOrigin = hasVerifiedCloudflareOrigin(req);
+  const verifiedOnionGateway = verifiedOnionGatewayRequest(req);
   if (
     blockDirectRenderOrigin
     && directRenderHosts.has(requestHostname(req))
     && !originBypassRoute
     && !verifiedCloudflareOrigin
+    && !verifiedOnionGateway
   ) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
-  if (enforceCloudflareOriginSecret && cloudflareOriginSecret && !originBypassRoute && !verifiedCloudflareOrigin) {
+  if (enforceCloudflareOriginSecret && cloudflareOriginSecret && !originBypassRoute && !verifiedCloudflareOrigin && !verifiedOnionGateway) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).send("Not found");
   }
@@ -768,7 +821,8 @@ app.use((req, res, next) => {
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
   res.setHeader("Content-Security-Policy", cspDirectives);
-  if (req.secure || String(req.headers["x-forwarded-proto"] || "").includes("https")) {
+  if (verifiedOnionGateway) res.setHeader("X-Cerber-Onion-Verified", "1");
+  if (!verifiedOnionGateway && (req.secure || String(req.headers["x-forwarded-proto"] || "").includes("https"))) {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
   }
   if (req.method === "OPTIONS") {
@@ -1692,6 +1746,8 @@ function requireAdmin(req) {
 }
 
 function clientIp(req) {
+  const onionGateway = verifiedOnionGatewayRequest(req);
+  if (onionGateway?.clientId) return `onion:${onionGateway.clientId}`;
   const cloudflareIp = String(req.headers?.["cf-connecting-ip"] || "").split(",")[0].trim();
   if (/^[0-9a-f:.]{3,64}$/i.test(cloudflareIp)) return cloudflareIp;
   return String(req.ip || req.socket?.remoteAddress || "local").trim().slice(0, 128);
@@ -4647,9 +4703,11 @@ app.get("/api/auth/captcha", (req, res) => {
 app.post("/api/auth/register", async (req, res, next) => {
   try {
     requireDb();
+    const loginAttemptIdentity = String(req.body.login || "");
     assertClientRateLimit(req, "auth-register-ip", { limit: 10, windowMs: 15 * 60 * 1000 });
     assertClientRateLimit(req, "auth-register", { limit: 5, windowMs: 15 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
+    await assertPrivilegedLoginRateLimit(req, "customer-login", loginAttemptIdentity);
     await ensureSeed();
     const login = String(req.body.login || "").trim();
     const password = String(req.body.password || "");
@@ -4671,6 +4729,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     if (existing) {
       if (String(existing.role || "user").toLowerCase() !== "user") return res.status(403).json({ error: "Служебный аккаунт недоступен через публичный вход" });
       if (await passwordMatchesProfile(existing, password)) {
+        await markPrivilegedLoginAttempt(req, "customer-login", existing.login_key || key, true);
         const state = await loadAuthSettingsState("register recovery settings");
         if (adminIsUserBlocked(state, existing.login)) {
           return res.status(403).json({ error: state.blockedUsers?.[key]?.reason || "Ваш аккаунт заблокирован" });
@@ -4682,6 +4741,8 @@ app.post("/api/auth/register", async (req, res, next) => {
         });
         return res.json({ token, recovered: true, ...(await authStateForUserWithStores(existing, state)) });
       }
+      await markPrivilegedLoginAttempt(req, "customer-login", existing.login_key || key, false);
+      await delay(privilegedLoginFailureDelay());
       return res.status(409).json({ error: "Такой логин уже есть" });
     }
 
@@ -4701,13 +4762,17 @@ app.post("/api/auth/register", async (req, res, next) => {
       const { data: duplicateProfile, error: duplicateReadError } = await supabase.from("profiles").select("*").eq("login_key", key).maybeSingle();
       if (duplicateReadError) throw duplicateReadError;
       if (duplicateProfile && await passwordMatchesProfile(duplicateProfile, password)) {
+        await markPrivilegedLoginAttempt(req, "customer-login", duplicateProfile.login_key || key, true);
         user = duplicateProfile;
         error = null;
       } else {
+        await markPrivilegedLoginAttempt(req, "customer-login", duplicateProfile?.login_key || key, false);
+        await delay(privilegedLoginFailureDelay());
         return res.status(409).json({ error: "Такой логин уже есть" });
       }
     }
     if (error) throw error;
+    await markPrivilegedLoginAttempt(req, "customer-login", key, true);
     await withTimeout(saveSettingsState(state), "register referral save", 6000).catch((saveError) => {
       console.error("[auth] referral save delayed", { login, message: saveError.message });
       saveReferralRegistrationAsync(login, referralCode, referralOwnerLogin).catch((retryError) => {
@@ -4729,9 +4794,11 @@ app.post("/api/auth/register", async (req, res, next) => {
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     requireDb();
+    const loginAttemptIdentity = String(req.body.login || "");
     assertClientRateLimit(req, "auth-login-ip", { limit: 30, windowMs: 10 * 60 * 1000 });
     assertClientRateLimit(req, "auth-login", { limit: 10, windowMs: 10 * 60 * 1000, identity: req.body.login });
     await verifyCaptcha(req.body.captchaToken, req);
+    await assertPrivilegedLoginRateLimit(req, "customer-login", loginAttemptIdentity);
     await ensureSeed();
     const key = loginKey(req.body.login);
     const password = String(req.body.password || "");
@@ -4745,10 +4812,12 @@ app.post("/api/auth/login", async (req, res, next) => {
       ? await passwordMatchesProfile(user, password)
       : await bcrypt.compare(password || "invalid", invalidPasswordTimingHash);
     if (!user || !passwordValid) {
+      await markPrivilegedLoginAttempt(req, "customer-login", key || loginAttemptIdentity, false);
       await delay(300 + crypto.randomInt(0, 250));
       appendAdminLog("user_login_failed", key || "unknown", { loginKey: key, ...requestSource(req) }).catch(() => {});
       return res.status(401).json({ error: "Неверный логин или пароль" });
     }
+    await markPrivilegedLoginAttempt(req, "customer-login", user.login_key || key, true);
     if (String(user.role || "user").toLowerCase() !== "user") return res.status(403).json({ error: "Служебный аккаунт недоступен через публичный вход" });
     const state = await loadAuthSettingsState("login settings");
     if (adminIsUserBlocked(state, user.login)) {
@@ -14685,9 +14754,7 @@ app.post("/api/payments/nowpayments/payout-ipn", async (req, res, next) => {
 
 const botCaptchaEmojis = ["😀", "🔥", "💎", "🍀", "⚡", "🌙", "⭐", "🍋", "🎯", "🧊", "🚀", "✅"];
 const torLinks = [
-  "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
-  "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
-  "ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+  officialOnionHost
 ];
 const browserLinks = ["cerber.vip", "cerber.to", "cerber.love", "cerber.cc"];
 
@@ -17599,9 +17666,10 @@ publicRealtimeServer.on("connection", (socket) => {
 server.on("upgrade", (req, socket, head) => {
   const directRenderRequest = directRenderHosts.has(requestHostname(req));
   const verifiedCloudflareOrigin = hasVerifiedCloudflareOrigin(req);
+  const verifiedOnionGateway = verifiedOnionGatewayRequest(req);
   if (
-    (blockDirectRenderOrigin && directRenderRequest && !verifiedCloudflareOrigin)
-    || (enforceCloudflareOriginSecret && cloudflareOriginSecret && !verifiedCloudflareOrigin)
+    (blockDirectRenderOrigin && directRenderRequest && !verifiedCloudflareOrigin && !verifiedOnionGateway)
+    || (enforceCloudflareOriginSecret && cloudflareOriginSecret && !verifiedCloudflareOrigin && !verifiedOnionGateway)
   ) {
     socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
     socket.destroy();

@@ -361,6 +361,21 @@ test("official mirrors promote the courier school with a safe Telegram link", ()
   assert.match(styles, /\.courier-school-promo\s*\{[\s\S]{0,260}grid-column: 1 \/ -1/);
 });
 
+test("official mirrors expose the generated Cerber vanity onion", () => {
+  const mirrors = functionBody(appClient, "officialMirrorsView");
+  const vanity = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
+  const escapedVanity = vanity.replaceAll(".", "\\.");
+  assert.match(appClient, new RegExp(escapedVanity));
+  assert.match(server, new RegExp(escapedVanity));
+  assert.match(mirrors, /officialOnionMirrors\.map/);
+  assert.match(mirrors, /href="http:\/\/\$\{esc\(domain\)\}"/);
+  assert.match(mirrors, /data-copy="\$\{esc\(domain\)\}"/);
+  assert.match(functionBody(appClient, "safeContentUrl"), /officialOnionMirrors\.includes\(url\.hostname\.toLowerCase\(\)\)/);
+  assert.match(styles, /\.official-onion-row\s*\{/);
+  assert.doesNotMatch(appClient, /u725c5lilm6dipuw|ptxutaluz75azss|ncfou7zv7qv2zsc/);
+  assert.doesNotMatch(server, /u725c5lilm6dipuw|ptxutaluz75azss|ncfou7zv7qv2zsc/);
+});
+
 test("mobile product cards show complete three-by-four artwork", () => {
   assert.match(styles, /grid-template-columns: clamp\(118px, 40vw, 154px\) minmax\(0, 1fr\)/);
   assert.match(styles, /aspect-ratio: 3 \/ 4;[\s\S]{0,220}object-fit: cover;/);
@@ -385,8 +400,8 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "usdt_sol", payCurrency: "usdtsol"/);
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
-  assert.match(indexHtml, /styles\.css\?v=120/);
-  assert.match(indexHtml, /app\.js\?v=188/);
+  assert.match(indexHtml, /styles\.css\?v=121/);
+  assert.match(indexHtml, /app\.js\?v=189/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

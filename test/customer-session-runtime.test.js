@@ -62,6 +62,7 @@ function sessionHarness() {
     adminSecret: () => "test-admin-secret",
     secretFingerprint: (value) => crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 24),
     secretValuesMatch: (a, b) => a === b,
+    verifiedOnionGatewayRequest: () => null,
     requireDb: () => {},
     withTimeout: (promise) => promise,
     isLoginBlocked: async () => false,

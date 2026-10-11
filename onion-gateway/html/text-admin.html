@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CERBER Text Admin</title>
+    <link rel="stylesheet" href="text-admin.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">CERBER</p>
+          <h1>Text Admin</h1>
+        </div>
+        <div class="top-actions">
+          <a class="site-link" href="/market-admin.html">Основная админка</a>
+          <a class="site-link secondary" href="/">Открыть сайт</a>
+        </div>
+      </section>
+
+      <section class="login" data-login>
+        <h2>Вход</h2>
+        <form data-login-form>
+          <label>
+            Логин
+            <input name="login" autocomplete="username" value="admin" required>
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button type="submit">Продолжить</button>
+        </form>
+      </section>
+
+      <section class="editor" data-editor hidden>
+        <div class="toolbar">
+          <label>
+            Поиск
+            <input data-search placeholder="login, admin, search...">
+          </label>
+          <label>
+            Язык
+            <select data-language>
+              <option value="ru">RU</option>
+              <option value="md">MD</option>
+              <option value="en">EN</option>
+            </select>
+          </label>
+          <button type="button" data-save>Сохранить</button>
+        </div>
+        <p class="status" data-status></p>
+        <div class="grid" data-fields></div>
+      </section>
+    </main>
+    <script src="text-admin.js?v=4"></script>
+  </body>
+</html>

@@ -148,11 +148,9 @@ const WALLET_COINS = [
   { id: "sol", payCurrency: "sol", symbol: "SOL", name: "Solana", network: "SOL", accent: "#14f195" }
 ];
 const officialOnionMirrors = [
-  "u725c5lilm6dipuwdesddow7bnzppeqcoqxlcs3xa5yur2lmt7zl5eqd.onion",
-  "ptxutaluz75azssnxnfp5l4ygy7f67svtnkqdn6eolmykgx3ft5pp3ad.onion",
-  "ncfou7zv7qv2zscufcc6q2wgb3r22gq3a4wkdq2jbkw3tmdbah4wwuyd.onion"
+  "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion"
 ];
-const officialClearDomains = ["cerber.to", "cerber.love", "cerber.vip"];
+const officialClearDomains = ["cerber.cc", "cerber.to", "cerber.love", "cerber.vip"];
 const TELEGRAM_EMOJIS = ["👍", "❤️", "🔥", "😁", "👏", "🎉", "🤝", "💯", "😎", "🙏", "💸", "✅"];
 const SITE_EMOJI_ASSETS = Array.from({ length: 104 }, (_, index) => {
   const id = String(index + 1).padStart(3, "0");
@@ -4402,6 +4400,7 @@ function safeContentUrl(value, fallback = "") {
     const url = new URL(source, location.origin);
     if (url.username || url.password) return fallback;
     if (url.protocol === "https:") return url.href;
+    if (url.protocol === "http:" && !url.port && officialOnionMirrors.includes(url.hostname.toLowerCase())) return url.href;
     if (url.protocol === "blob:" && url.origin === location.origin) return url.href;
     if (IS_LOCAL_APP_HOST && url.protocol === "http:") return url.href;
   } catch {}
@@ -5172,6 +5171,13 @@ function officialMirrorsView() {
     <section class="official-mirrors official-mirrors-compact">
       <strong>Официальные зеркала</strong>
       <div class="official-domain-list">${officialClearDomains.map((domain) => `<button data-copy="${esc(domain)}" title="Скопировать">${esc(domain)}</button>`).join("")}</div>
+      ${officialOnionMirrors.map((domain) => `
+        <div class="official-onion-row">
+          <span class="official-onion-label">TOR</span>
+          <a href="http://${esc(domain)}" target="_blank" rel="noopener noreferrer">${esc(domain)}</a>
+          <button type="button" data-copy="${esc(domain)}" title="Скопировать Tor адрес">Скопировать</button>
+        </div>
+      `).join("")}
       <div class="courier-school-promo">
         <span class="courier-school-copy">Школа Курьеров от Cerber <span class="courier-school-arrow" aria-hidden="true">→</span></span>
         <a class="courier-school-link" href="https://t.me/HRcerber" target="_blank" rel="noopener noreferrer" aria-label="Открыть HRCerber в Telegram">HRCerber</a>

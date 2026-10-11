@@ -118,7 +118,7 @@ test("all public mirrors use one shared customer account database without cross-
   assert.match(registration, /supabase\.from\("profiles"\)\.insert\(profileInsert\)/);
   assert.match(login, /supabase\.from\("profiles"\)\.select\("\*"\)\.eq\("login_key", key\)/);
   assert.doesNotMatch(`${registration}\n${login}`, /req\.(?:hostname|headers\.host)|domain|origin.*login_key/i);
-  assert.match(indexHtml, /app\.js\?v=188/);
+  assert.match(indexHtml, /app\.js\?v=189/);
 });
 
 test("privileged login failures are locked by account and IP across server instances", () => {
@@ -492,6 +492,23 @@ test("product reservations are bounded, idempotent and fail closed after expiry"
   assert.match(reservation, /order\.stockReservedAt = Date\.now\(\)/);
   assert.match(server, /late_payment_inventory_unavailable/);
   assert.match(server, /Paid order requires manual review because its inventory reservation expired/);
+});
+
+test("the Tor gateway must authenticate every proxied request before receiving onion semantics", () => {
+  assert.match(server, /verifyOnionGatewaySignature\(fields, onionGatewayPublicKey/);
+  assert.match(server, /nonceCache\.has\(fields\.nonce\)/);
+  assert.match(server, /fields\.onionHost === officialOnionHost/);
+  assert.match(server, /if \(verifiedOnionGatewayRequest\(req\)\) return false/);
+  assert.match(server, /return `onion:\$\{onionGateway\.clientId\}`/);
+  assert.match(server, /X-Cerber-Onion-Verified", "1"/);
+  assert.match(server, /server\.on\("upgrade"[\s\S]{0,500}verifiedOnionGatewayRequest\(req\)/);
+  assert.match(server, /assertPrivilegedLoginRateLimit\(req, "customer-login", loginAttemptIdentity\)/);
+  assert.match(server, /markPrivilegedLoginAttempt\(req, "customer-login", key \|\| loginAttemptIdentity, false\)/);
+  assert.match(server, /const onionGatewayNonceLimit = 20_000/);
+  assert.match(server, /const onionGatewayHealthNonceLimit = 256/);
+  assert.match(server, /const nonceCache = readinessProbe \? onionGatewayHealthNonces : onionGatewayNonces/);
+  assert.match(server, /if \(nonceCache\.size >= nonceLimit\)[\s\S]{0,500}return null/);
+  assert.doesNotMatch(server, /ONION_GATEWAY_PRIVATE|BEGIN PRIVATE KEY/);
 });
 
 test("product purchases lock exact inventory, reject disabled items and replay before stock checks", () => {

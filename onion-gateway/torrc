@@ -1,0 +1,10 @@
+User debian-tor
+RunAsDaemon 0
+SocksPort 0
+SafeLogging 1
+AvoidDiskWrites 1
+DataDirectory /var/lib/tor/data
+HiddenServiceDir /var/lib/tor/cerber
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:8080
+Log notice stdout

@@ -9,6 +9,47 @@ export function constantTimeEqual(left = "", right = "") {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+export function onionGatewaySignaturePayload(fields = {}) {
+  return [
+    "v1",
+    String(fields.timestamp || ""),
+    String(fields.nonce || ""),
+    String(fields.clientId || ""),
+    String(fields.method || "").toUpperCase(),
+    String(fields.url || ""),
+    String(fields.onionHost || "").toLowerCase()
+  ].join("\n");
+}
+
+export function verifyOnionGatewaySignature(fields = {}, publicKey = "", options = {}) {
+  const now = Number(options.now ?? Date.now());
+  const maxSkewMs = Math.max(1_000, Math.min(5 * 60_000, Number(options.maxSkewMs || 90_000)));
+  const timestamp = Number(fields.timestamp || 0);
+  const nonce = String(fields.nonce || "");
+  const clientId = String(fields.clientId || "");
+  const method = String(fields.method || "").toUpperCase();
+  const url = String(fields.url || "");
+  const onionHost = String(fields.onionHost || "").toLowerCase();
+  const signature = String(fields.signature || "");
+  if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > maxSkewMs) return false;
+  if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{32}$/.test(clientId)) return false;
+  if (!/^[A-Z]{3,10}$/.test(method) || !url.startsWith("/") || url.length > 8_192) return false;
+  if (!/^cerber[a-z2-7]{50}\.onion$/.test(onionHost)) return false;
+  if (!/^[A-Za-z0-9_-]{80,100}$/.test(signature)) return false;
+  try {
+    const signatureBuffer = Buffer.from(signature, "base64url");
+    if (signatureBuffer.length !== 64) return false;
+    return crypto.verify(
+      null,
+      Buffer.from(onionGatewaySignaturePayload({ timestamp, nonce, clientId, method, url, onionHost })),
+      publicKey,
+      signatureBuffer
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function base32Encode(value) {
   const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || "");
   let bits = "";

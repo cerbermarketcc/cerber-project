@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
@@ -16,6 +17,7 @@ import {
   mediaMagicMatches,
   normalizePublicBaseUrl,
   normalizeTelegramLinkCode,
+  onionGatewaySignaturePayload,
   parseInlineMedia,
   recoveryCodeHashes,
   sanitizeAuditDetails,
@@ -27,8 +29,27 @@ import {
   validateProviderPayout,
   validateProviderPayment,
   validIdempotencyKey,
+  verifyOnionGatewaySignature,
   verifyTotpCode
 } from "../security-core.js";
+
+test("onion gateway signatures bind the client, request target, hostname and timestamp", () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const now = 1_800_000_000_000;
+  const fields = {
+    timestamp: String(now),
+    nonce: "a".repeat(32),
+    clientId: "b".repeat(32),
+    method: "POST",
+    url: "/api/auth/login?source=tor",
+    onionHost: "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion"
+  };
+  fields.signature = crypto.sign(null, Buffer.from(onionGatewaySignaturePayload(fields)), privateKey).toString("base64url");
+  assert.equal(verifyOnionGatewaySignature(fields, publicKey, { now }), true);
+  assert.equal(verifyOnionGatewaySignature({ ...fields, url: "/api/admin/state" }, publicKey, { now }), false);
+  assert.equal(verifyOnionGatewaySignature({ ...fields, clientId: "c".repeat(32) }, publicKey, { now }), false);
+  assert.equal(verifyOnionGatewaySignature(fields, publicKey, { now: now + 90_001 }), false);
+});
 
 test("clean launch removes marketplace, money and user-owned state", () => {
   const source = {

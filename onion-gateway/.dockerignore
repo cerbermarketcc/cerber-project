@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!entrypoint.sh
+!torrc
+!gateway.mjs
+!html/
+!html/*.html
