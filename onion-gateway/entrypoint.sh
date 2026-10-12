@@ -113,6 +113,8 @@ node /app/gateway.mjs --validate-identity "${STAGING_DIR}" "${ONION_HOSTNAME}" \
   || die "Tor identity validation failed"
 
 install -d -m 0700 -o debian-tor -g debian-tor "${HIDDEN_SERVICE_DIR}"
+chown debian-tor:debian-tor "${HIDDEN_SERVICE_DIR}"
+chmod 0700 "${HIDDEN_SERVICE_DIR}"
 install -m 0600 -o debian-tor -g debian-tor "${STAGING_DIR}/hs_ed25519_public_key" "${HIDDEN_SERVICE_DIR}/hs_ed25519_public_key"
 install -m 0600 -o debian-tor -g debian-tor "${STAGING_DIR}/hs_ed25519_secret_key" "${HIDDEN_SERVICE_DIR}/hs_ed25519_secret_key"
 printf '%s\n' "${ONION_HOSTNAME}" > "${HIDDEN_SERVICE_DIR}/hostname"
