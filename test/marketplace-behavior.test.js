@@ -368,8 +368,9 @@ test("official mirrors expose the generated Cerber vanity onion", () => {
   assert.match(appClient, new RegExp(escapedVanity));
   assert.match(server, new RegExp(escapedVanity));
   assert.match(mirrors, /officialOnionMirrors\.map/);
-  assert.match(mirrors, /href="http:\/\/\$\{esc\(domain\)\}"/);
-  assert.match(mirrors, /data-copy="\$\{esc\(domain\)\}"/);
+  assert.match(mirrors, /const onionUrl = `http:\/\/\$\{domain\}\/`/);
+  assert.match(mirrors, /href="\$\{esc\(onionUrl\)\}"/);
+  assert.match(mirrors, /data-copy="\$\{esc\(onionUrl\)\}"/);
   assert.match(functionBody(appClient, "safeContentUrl"), /officialOnionMirrors\.includes\(url\.hostname\.toLowerCase\(\)\)/);
   assert.match(styles, /\.official-onion-row\s*\{/);
   assert.doesNotMatch(appClient, /u725c5lilm6dipuw|ptxutaluz75azss|ncfou7zv7qv2zsc/);

@@ -48,7 +48,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "cerber-render-onion-2026-10-12-v198";
+const cerberBuildVersion = "cerber-render-onion-2026-10-13-v199";
 const officialOnionHost = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
 const onionGatewayPublicKey = crypto.createPublicKey(`-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAUrSjBVbXjhw2XBf8O5WMru6cKl/1jl+q4VeEuaabYng=

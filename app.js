@@ -5171,13 +5171,16 @@ function officialMirrorsView() {
     <section class="official-mirrors official-mirrors-compact">
       <strong>Официальные зеркала</strong>
       <div class="official-domain-list">${officialClearDomains.map((domain) => `<button data-copy="${esc(domain)}" title="Скопировать">${esc(domain)}</button>`).join("")}</div>
-      ${officialOnionMirrors.map((domain) => `
-        <div class="official-onion-row">
-          <span class="official-onion-label">TOR</span>
-          <a href="http://${esc(domain)}" target="_blank" rel="noopener noreferrer">${esc(domain)}</a>
-          <button type="button" data-copy="${esc(domain)}" title="Скопировать Tor адрес">Скопировать</button>
-        </div>
-      `).join("")}
+      ${officialOnionMirrors.map((domain) => {
+        const onionUrl = `http://${domain}/`;
+        return `
+          <div class="official-onion-row">
+            <span class="official-onion-label">TOR</span>
+            <a href="${esc(onionUrl)}" target="_blank" rel="noopener noreferrer">${esc(onionUrl)}</a>
+            <button type="button" data-copy="${esc(onionUrl)}" title="Скопировать полную Tor ссылку">Скопировать ссылку</button>
+          </div>
+        `;
+      }).join("")}
       <div class="courier-school-promo">
         <span class="courier-school-copy">Школа Курьеров от Cerber <span class="courier-school-arrow" aria-hidden="true">→</span></span>
         <a class="courier-school-link" href="https://t.me/HRcerber" target="_blank" rel="noopener noreferrer" aria-label="Открыть HRCerber в Telegram">HRCerber</a>
