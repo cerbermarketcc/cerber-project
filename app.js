@@ -4390,6 +4390,48 @@ function esc(value) {
   }[char]));
 }
 
+function safeDescriptionLink(value = "") {
+  const source = String(value || "").trim();
+  if (!source) return "";
+  try {
+    const url = new URL(source);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function linkedPlainText(value = "") {
+  const source = String(value ?? "");
+  const urlPattern = /https?:\/\/[^\s<>"']+/gi;
+  let html = "";
+  let cursor = 0;
+  let match;
+  const appendText = (text) => {
+    html += esc(text).replace(/\r?\n/g, "<br>");
+  };
+  while ((match = urlPattern.exec(source))) {
+    appendText(source.slice(cursor, match.index));
+    let label = match[0];
+    let suffix = "";
+    while (/[),.!?;:\]}]$/.test(label)) {
+      suffix = label.slice(-1) + suffix;
+      label = label.slice(0, -1);
+    }
+    const href = safeDescriptionLink(label);
+    if (href) {
+      html += `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer nofollow ugc" data-description-link>${esc(label)}</a>`;
+    } else {
+      appendText(label);
+    }
+    appendText(suffix);
+    cursor = match.index + match[0].length;
+  }
+  appendText(source.slice(cursor));
+  return html;
+}
+
 function safeContentUrl(value, fallback = "") {
   const source = String(value || "").trim();
   if (!source) return fallback;
@@ -4428,11 +4470,17 @@ function sanitizeRenderedHtml(value = "") {
       }
       if (!["href", "src", "poster", "action", "formaction", "xlink:href"].includes(name)) return;
       if (name === "xlink:href" && attribute.value.startsWith("#")) return;
-      const safeUrl = safeContentUrl(attribute.value);
+      const safeUrl = name === "href" && element.matches("a[data-description-link]")
+        ? safeDescriptionLink(attribute.value)
+        : safeContentUrl(attribute.value);
       if (safeUrl) element.setAttribute(attribute.name, safeUrl);
       else element.removeAttribute(attribute.name);
     });
-    if (element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
+    if (element.getAttribute("target") === "_blank") {
+      element.setAttribute("rel", element.matches("a[data-description-link]")
+        ? "noopener noreferrer nofollow ugc"
+        : "noopener noreferrer");
+    }
   });
   return template.innerHTML;
 }
@@ -5287,8 +5335,8 @@ function orderCard(order) {
         <p>${esc(order.storeName || "")}</p>
         <p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${productOrderLtcAmount(order).toFixed(8)} LTC${order.location ? ` · ${esc(order.location)}` : ""}</p>
         ${order.status === "pending_payment" ? `<p>Бронь до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>` : ""}
-        ${order.status === "pending_payment" && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
-        ${productOrderIsPaid(order) ? `<p>Оплачено. ${esc(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</p>` : ""}
+        ${order.status === "pending_payment" && !API_ENABLED && order.sellerLtcWallet ? `<p class="mono-line">${esc(order.sellerLtcWallet)}</p>` : ""}
+        ${productOrderIsPaid(order) ? `<div class="order-card-issued"><strong>Оплачено.</strong><div>${linkedPlainText(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.")}</div></div>` : ""}
         ${order.totalMdl ? `<p>${Number(order.amountUsd || 0).toFixed(2)} $ · ${Number(order.ltcAmount || request?.ltcAmount || 0).toFixed(6)} LTC · ${Number(order.totalMdl || 0).toFixed(2)} MDL</p>` : ""}
       </div>
       <div class="order-side">
@@ -5307,6 +5355,7 @@ function orderCard(order) {
 
 function productOrderStatus(order) {
   if (order.disputeOpen || order.status === "dispute") return "Спор";
+  if (order.status === "manual_review" || order.paymentStatus === "review") return "Требует проверки";
   if (order.status === "pending_payment") {
     const providerStatus = String(order.providerPaymentStatus || "").toLowerCase();
     if (providerStatus === "confirming") return "Оплата подтверждается";
@@ -5344,14 +5393,110 @@ function productOrderDisputeChat(order) {
   `;
 }
 
+function productOrderDeliveryFacts(order = {}) {
+  const metadata = order.orderMetadata && typeof order.orderMetadata === "object" ? order.orderMetadata : {};
+  const storeSnapshot = metadata.store && typeof metadata.store === "object" ? metadata.store : {};
+  const productSnapshot = metadata.product && typeof metadata.product === "object" ? metadata.product : {};
+  const positionSnapshot = metadata.position && typeof metadata.position === "object" ? metadata.position : {};
+  const locationParts = String(order.location || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const country = String(order.country || order.positionCountry || positionSnapshot.country || "moldova").trim();
+  const cityCode = String(order.city || order.positionCity || positionSnapshot.city || "").trim();
+  const city = String(
+    order.cityLabel
+    || filterOptions.countries[country]?.cities?.[cityCode]?.label
+    || cityCode
+    || locationParts[0]
+    || ""
+  ).trim();
+  const district = String(order.district || order.positionDistrict || positionSnapshot.district || locationParts.slice(1).join(", ") || "").trim();
+  const baseProduct = String(order.productTitle || productSnapshot.title || order.product || "").trim();
+  const exactPosition = String(order.positionTitle || positionSnapshot.title || "").trim();
+  const subtype = String(order.productSubtype || order.subtype || "").trim();
+  const productWithSubtype = subtype && !normalizedShopKey(baseProduct).includes(normalizedShopKey(subtype))
+    ? [baseProduct, subtype].filter(Boolean).join(" · ")
+    : baseProduct;
+  return {
+    store: String(order.storeName || storeSnapshot.name || order.store || order.storeId || "").trim(),
+    product: exactPosition || productWithSubtype,
+    weight: String(order.weight || order.positionWeight || order.packageWeight || positionSnapshot.weight || "").trim(),
+    city,
+    district
+  };
+}
+
+function paidProductDeliveryView(order = {}) {
+  const facts = productOrderDeliveryFacts(order);
+  const description = String(order.reservedDescription || order.productDescription || "Описание заказа сохранено в карточке.");
+  return `
+    <section class="order-delivery-card">
+      <dl class="order-delivery-facts">
+        <div><dt>Магазин</dt><dd>${esc(facts.store || "—")}</dd></div>
+        <div><dt>Товар</dt><dd>${esc(facts.product || "—")}</dd></div>
+        <div><dt>Фасовка / граммаж</dt><dd>${esc(facts.weight || "—")}</dd></div>
+        <div><dt>Город</dt><dd>${esc(facts.city || "—")}</dd></div>
+        <div><dt>Район</dt><dd>${esc(facts.district || "—")}</dd></div>
+      </dl>
+      <div class="order-issued-description">
+        <h3>Описание и данные для получения</h3>
+        <div>${linkedPlainText(description)}</div>
+      </div>
+    </section>
+  `;
+}
+
+function productOrderPayAmountText(order = {}, linkedDeposit = null, fallback = 0) {
+  const values = [
+    linkedDeposit?.payAmountText,
+    order.payAmountText,
+    linkedDeposit?.payAmount,
+    order.payAmount,
+    order.walletDepositAmountLtc,
+    fallback
+  ];
+  for (const value of values) {
+    const source = String(value ?? "").trim();
+    if (/^\d{1,48}(?:\.\d{1,48})?$/.test(source) && /[1-9]/.test(source)) return source;
+  }
+  const numeric = Number(fallback || 0);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric.toFixed(8) : "0";
+}
+
+async function loadProductOrderPaymentQr(orderId) {
+  const image = document.querySelector("[data-order-payment-qr]");
+  const status = document.querySelector("[data-order-payment-qr-status]");
+  const details = document.querySelector("[data-order-payment-qr-details]");
+  if (!image || image.dataset.orderPaymentQr !== String(orderId)) return;
+  try {
+    const payload = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/payment-qr`, { timeoutMs: 10000 });
+    if (image.dataset.orderPaymentQr !== String(orderId)) return;
+    const source = safeContentUrl(payload.qrCodeDataUrl);
+    if (!source) throw new Error("QR-код недоступен");
+    image.src = source;
+    image.hidden = false;
+    if (status) status.hidden = true;
+    if (details) {
+      details.textContent = payload.amountIncluded
+        ? "QR содержит адрес и точную сумму этого счёта."
+        : "QR содержит адрес. Проверьте сеть и скопируйте точную сумму отдельно.";
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || "QR-код временно недоступен";
+  }
+}
+
 function showProductOrder(orderId) {
   const order = db.orders.find((item) => item.id === orderId);
   if (!order) return;
   const linkedDeposit = order.walletDepositId ? (db.walletDeposits || []).find((item) => item.id === order.walletDepositId) : null;
   const ltcAmount = productOrderLtcAmount(order);
   const orderCoin = walletCoinById(linkedDeposit?.coinId || order.coinId || "ltc");
-  const orderDepositAddress = linkedDeposit?.payAddress || order.walletDepositAddress || "";
-  const orderDepositPayAmount = Number(linkedDeposit?.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
+  const orderDepositAddress = linkedDeposit?.payAddress || order.payAddress || order.walletDepositAddress || "";
+  const orderDepositPayAmount = Number(linkedDeposit?.payAmount || order.payAmount || order.walletDepositAmountLtc || ltcAmount || 0);
+  const orderDepositPayAmountText = productOrderPayAmountText(order, linkedDeposit, orderDepositPayAmount);
+  const paymentAddress = orderDepositAddress || (!API_ENABLED ? String(order.sellerWallet || order.sellerLtcWallet || "") : "");
   const orderDepositUsd = Number(linkedDeposit?.amountUsd || order.walletDepositAmountUsd || order.amountUsd || 0);
   const orderPaymentUrl = linkedDeposit?.paymentUrl || order.walletDepositPaymentUrl || order.paymentUrl || "";
   showModal(`
@@ -5360,7 +5505,7 @@ function showProductOrder(orderId) {
     <p>${esc(order.location || "")}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
     <p>Статус: ${productOrderStatus(order)}</p>
-    ${productOrderIsPaid(order) ? `<p><strong>Успешно оплачено.</strong></p><p>${esc(order.reservedDescription || order.productDescription || "")}</p>` : ""}
+    ${productOrderIsPaid(order) ? `<p><strong>Успешно оплачено.</strong></p>${paidProductDeliveryView(order)}` : ""}
     ${["completed", "closed"].includes(order.status) && !orderHasReview(order) ? `
       <form class="form" data-review-form="${esc(order.id)}">
         <label class="field">Оценка
@@ -5381,28 +5526,31 @@ function showProductOrder(orderId) {
         <h3>Оплата ${esc(walletCoinLabel(orderCoin.id))}</h3>
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p>Истекает через ${Math.max(0, Math.ceil((Number(order.paymentExpiresAt || 0) - Date.now()) / 60000))} минут</p>
-        <p><span>Сумма:</span><strong>${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+        <p><span>Сумма:</span><strong>${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
         ${order.providerPaymentStatus ? `<p><span>Статус платежа:</span><strong>${esc(productOrderStatus(order))}</strong></p>` : ""}
         ${orderDepositAddress ? `
-          <p><span>Счет пополнения:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${orderDepositPayAmount.toFixed(8)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+          <p><span>Счёт заказа:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
           <p><span>Куда оплатить:</span><strong class="mono-line">${esc(orderDepositAddress)}</strong></p>
-          <button class="ghost-button" data-copy="${esc(walletDepositCopyText(linkedDeposit || {
-            amountUsd: orderDepositUsd,
-            payAmount: orderDepositPayAmount,
-            payAddress: orderDepositAddress,
-            coinId: orderCoin.id,
-            payCurrency: orderCoin.payCurrency
-          }))}">Скопировать счет пополнения</button>
+          ${API_ENABLED ? `
+            <div class="wallet-deposit-qr order-payment-qr">
+              <img data-order-payment-qr="${esc(order.id)}" alt="QR-код оплаты заказа" hidden>
+              <p data-order-payment-qr-status>Создаём QR-код…</p>
+              <small data-order-payment-qr-details>Отсканируйте QR и обязательно проверьте сеть и сумму.</small>
+            </div>
+          ` : ""}
+          <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${orderDepositAddress}\nСумма: ${orderDepositPayAmountText} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать счёт</button>
         ` : ""}
         ${orderPaymentUrl ? `<a class="primary link-button" href="${esc(orderPaymentUrl)}" target="_blank" rel="noopener">Открыть основную ссылку оплаты</a>` : ""}
         ${API_ENABLED ? `<p class="notice">По этому заказу уже открыт криптосчёт. Сменить способ оплаты нельзя: дождитесь подтверждения платежа или истечения брони.</p>` : userBalance() >= Number(order.amountUsd || 0) ? `<button class="primary" data-pay-from-balance="${esc(order.id)}">Оплатить с баланса CERBER</button>` : `<p class="notice">На балансе недостаточно средств для оплаты с кошелька CERBER.</p>`}
-        ${order.sellerWallet || order.sellerLtcWallet ? `<p><span>Кошелек магазина:</span><strong class="mono-line">${esc(order.sellerWallet || order.sellerLtcWallet)}</strong></p>` : ""}
-        <div class="row">
-          <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || ""}\nСумма: ${orderDepositPayAmount.toFixed(8)} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать всё</button>
-          <button class="ghost-button" data-copy="${esc(orderDepositAddress || order.sellerWallet || order.sellerLtcWallet || "")}">Скопировать кошелек</button>
-          <button class="ghost-button" data-copy="${orderDepositPayAmount.toFixed(8)}">Скопировать сумму</button>
-        </div>
-        ${orderCoin.id === "ltc" && (order.sellerWallet || order.sellerLtcWallet) ? `<a class="primary link-button" href="litecoin:${esc(order.sellerWallet || order.sellerLtcWallet)}?amount=${orderDepositPayAmount.toFixed(8)}">Открыть LTC-ссылку</a>` : ""}
+        ${!API_ENABLED && (order.sellerWallet || order.sellerLtcWallet) ? `<p><span>Кошелёк магазина:</span><strong class="mono-line">${esc(order.sellerWallet || order.sellerLtcWallet)}</strong></p>` : ""}
+        ${paymentAddress ? `
+          <div class="row">
+            <button class="ghost-button" data-copy="${esc(`Сеть: ${walletCoinLabel(orderCoin.id)}\nАдрес: ${paymentAddress}\nСумма: ${orderDepositPayAmountText} ${walletCoinLabel(orderCoin.id)}`)}">Скопировать всё</button>
+            <button class="ghost-button" data-copy="${esc(paymentAddress)}">Скопировать адрес</button>
+            <button class="ghost-button" data-copy="${esc(orderDepositPayAmountText)}">Скопировать сумму</button>
+          </div>
+        ` : ""}
+        ${orderCoin.id === "ltc" && paymentAddress ? `<a class="primary link-button" href="litecoin:${esc(paymentAddress)}?amount=${esc(orderDepositPayAmountText)}">Открыть LTC-ссылку</a>` : ""}
         <p class="desc">После подтверждения оплаты заказ станет активным, и здесь появится описание товара. Сделку можно завершить после получения товара.</p>
         ${API_ENABLED ? "" : `<button class="ghost-button" data-order-cancel="${esc(order.id)}">Отменить заказ</button>`}
       </div>
@@ -5439,6 +5587,7 @@ function showProductOrder(orderId) {
   });
   document.querySelector("[data-client-dispute-reply]")?.addEventListener("submit", sendClientDisputeReply);
   document.querySelectorAll("[data-review-form]").forEach((form) => form.addEventListener("submit", handleProductReview));
+  if (API_ENABLED && order.status === "pending_payment" && orderDepositAddress) loadProductOrderPaymentQr(order.id);
 }
 
 async function sendClientDisputeReply(event) {
@@ -6552,6 +6701,30 @@ function productOrderAutoReleaseAt(order, store = null) {
   return paidAt + hours * 60 * 60 * 1000;
 }
 
+function localProductOrderMetadata(store = {}, product = {}, position = {}) {
+  const storeSnapshot = { id: String(store.id || ""), name: String(store.name || "") };
+  const productSnapshot = { id: String(product.id || ""), title: String(product.title || "") };
+  const positionSnapshot = {
+    id: String(position.id || ""),
+    title: String(position.title || product.title || ""),
+    weight: String(position.weight || ""),
+    country: String(position.country || ""),
+    city: String(position.city || ""),
+    district: String(position.district || "")
+  };
+  return {
+    orderMetadata: { store: storeSnapshot, product: productSnapshot, position: positionSnapshot },
+    productTitle: productSnapshot.title,
+    productSubtype: String(product.subtype || position.subtype || ""),
+    positionTitle: positionSnapshot.title,
+    weight: positionSnapshot.weight,
+    country: positionSnapshot.country,
+    city: positionSnapshot.city,
+    district: positionSnapshot.district,
+    deliveryType: String(position.deliveryType || "")
+  };
+}
+
 function activateProductOrderAfterPayment(order, providerPayload = {}) {
   if (!order || order.status !== "pending_payment") return false;
   const store = storeById(order.storeId);
@@ -6563,6 +6736,8 @@ function activateProductOrderAfterPayment(order, providerPayload = {}) {
   order.autoReleaseHours = Math.max(0, Number(order.autoReleaseHours ?? store?.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24));
   order.autoReleaseAt = productOrderAutoReleaseAt(order, store);
   order.paymentProviderPayload = providerPayload;
+  order.reservationStatus = "consumed";
+  order.reservationConsumedAt = paidAt;
   delete order.completedAt;
   if (product) product.purchases = Number(product.purchases || 0) + 1;
   if (store) store.orders = Number(store.orders || 0) + 1;
@@ -6625,12 +6800,15 @@ async function handleProductPurchase(storeId, productId, positionId, options = {
     paymentStatus: "paid",
     createdAt: Date.now(),
     paidAt: Date.now(),
+    stockReservedAt: Date.now(),
+    reservationStatus: "consumed",
     autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)),
     autoReleaseAt: null,
     amountUsd: priceUsd,
     ltcAmount,
     location: locationLabel(position),
     productDescription: product.description || "",
+    ...localProductOrderMetadata(store, product, position),
     reservedDescription,
     reservedFromPosition: issueFromPosition,
     reservedStock: true
@@ -6706,6 +6884,8 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     paymentStatus: "waiting",
     createdAt: Date.now(),
     paymentExpiresAt: Date.now() + 40 * 60 * 1000,
+    stockReservedAt: Date.now(),
+    reservationStatus: "active",
     autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? db.ownerSettings?.defaultAutoReleaseHours ?? 24)),
     autoReleaseAt: null,
     amountUsd: priceUsd,
@@ -6715,6 +6895,7 @@ function handleProductReservation(storeId, productId, positionId, options = {}) 
     sellerWallet: storeWalletForCoin(store, coin.id),
     location: locationLabel(position),
     productDescription: product.description || "",
+    ...localProductOrderMetadata(store, product, position),
     reservedDescription,
     reservedFromPosition: issueFromPosition,
     reservedStock: true,
@@ -6780,9 +6961,9 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     ` : `<p class="desc">Оплата через ${esc(walletCoinLabel(defaultCoin.id))}</p>`}
     <div class="checkout-actions">
       <button class="primary" data-checkout-balance ${enough ? "" : "disabled"}>Оплатить с баланса</button>
-      <button class="primary" data-checkout-deposit>Пополнить и оплатить</button>
+      <button class="primary" data-checkout-deposit>Создать криптосчёт</button>
     </div>
-    ${enough ? `<p class="desc">На балансе достаточно средств. После оплаты описание товара появится в деталях заказа.</p>` : `<p class="notice">На балансе недостаточно средств. Пополните баланс на нужную сумму, заказ будет в обработке 40 минут.</p>`}
+    ${enough ? `<p class="desc">На балансе достаточно средств. Можно оплатить сразу или создать криптосчёт.</p>` : `<p class="notice">Криптосчёт действует 40 минут. После его создания выбранный товар сразу резервируется за вами.</p>`}
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-checkout-balance]")?.addEventListener("click", async (event) => {
@@ -6888,8 +7069,7 @@ function markProductOrderPaid(orderId) {
     <h2>Оплата успешна</h2>
     <p>Вы оплатили заказ: ${esc(order.product)}</p>
     <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
-    <p>Город: ${esc(order.location || "")}</p>
-    <p>${esc(order.reservedDescription || order.productDescription || "")}</p>
+    ${paidProductDeliveryView(order)}
     <button class="primary" data-close-modal>${tr("close")}</button>
   `);
 }
@@ -10758,7 +10938,10 @@ function bindOwnerPanel() {
   document.querySelectorAll("[data-owner-profile-form]").forEach((form) => form.addEventListener("submit", handleOwnerProfileSave));
   document.querySelectorAll("[data-owner-store-filter-form]").forEach((form) => form.addEventListener("submit", handleOwnerStoreFilterSave));
   document.querySelectorAll("[data-owner-add-product]").forEach((form) => form.addEventListener("submit", handleOwnerAddProduct));
-  document.querySelectorAll("[data-owner-add-position]").forEach((form) => form.addEventListener("submit", handleOwnerAddPosition));
+  document.querySelectorAll("[data-owner-add-position]").forEach((form) => {
+    bindShopDeliveryPreview(form);
+    form.addEventListener("submit", handleOwnerAddPosition);
+  });
   document.querySelectorAll("[data-owner-delete-product]").forEach((button) => button.onclick = () => ownerDeleteProduct(button.dataset.ownerDeleteProduct, button.dataset.storeId));
   document.querySelectorAll("[data-owner-delete-position]").forEach((button) => button.onclick = () => ownerDeletePosition(button.dataset.ownerDeletePosition, button.dataset.productId, button.dataset.storeId));
 }
@@ -10859,7 +11042,7 @@ function ownerProductManager(store, product) {
           <label class="field">Район<select name="district" data-location-district>${districtSelectOptions((store.countries || [])[0] || "moldova", (store.cities || [])[0] || "chisinau")}</select></label>
         </div>
         <label class="field">Описание позиции<textarea name="description"></textarea></label>
-        <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный товар"></textarea></label>
+        ${shopDeliveryEditor([])}
         <button class="primary">Добавить позицию</button>
       </form>
       <div class="owner-position-list">
@@ -11138,6 +11321,8 @@ function handleOwnerAddPosition(event) {
   const data = new FormData(form);
   const priceUsd = Number(data.get("priceUsd") || 0);
   if (priceUsd <= 0) return showToast("Укажите цену позиции");
+  const deliveryItems = shopDeliveryItemsFromForm(form);
+  if (!deliveryItems.length) return showToast("Добавьте хотя бы одно описание для выдачи");
   product.positions = product.positions || [];
   product.positions.unshift({
     id: `position-${Date.now()}`,
@@ -11150,8 +11335,8 @@ function handleOwnerAddPosition(event) {
     deliveryType: String(data.get("deliveryType") || "Товар").trim(),
     saleMode: String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready",
     weight: String(data.get("weight") || "-").trim(),
-    deliveryItems: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
-    stock: String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length,
+    deliveryItems,
+    stock: deliveryItems.length,
     status: "ready"
   });
   const positionPrices = product.positions.map((position) => Number(position.priceUsd || 0)).filter((value) => value > 0);
@@ -11353,7 +11538,7 @@ function adminStoreEditor(store) {
         <label class="field">LTC счет магазина<input name="ltcWallet" value="${esc(store.ltcWallet || "")}" placeholder="ltc1..."></label>
         <label class="field">Название товара<select name="title" required>${productCategorySelectOptions(product.category || product.title)}</select></label>
         <label class="field">Описание товара<textarea name="description">${esc(product.description || "")}</textarea></label>
-        <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ">${esc((product.deliveryItems || []).join("\n"))}</textarea></label>
+        ${shopDeliveryEditor((Array.isArray(position.deliveryItems) && position.deliveryItems.length) ? position.deliveryItems : (product.deliveryItems || []))}
         <div class="row">
           <label class="field">Цена позиции, $<input name="priceUsd" type="number" min="0.01" step="0.01" value="${esc(position.priceUsd || product.priceUsd || 50)}" required></label>
         </div>
@@ -11392,6 +11577,7 @@ function bindAdminProductForms() {
   bindLocationSelects();
   bindStoreFilterSelects();
   document.querySelectorAll("[data-admin-product-form]").forEach((form) => {
+    bindShopDeliveryPreview(form);
     form.onsubmit = async (event) => {
       event.preventDefault();
       const data = new FormData(form);
@@ -11428,7 +11614,8 @@ function bindAdminProductForms() {
       product.category = selectedCategory;
       product.description = data.get("description").trim();
       product.sellerManaged = true;
-      product.deliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      product.deliveryItems = shopDeliveryItemsFromForm(form);
+      if (!product.deliveryItems.length) return showToast("Добавьте хотя бы одно описание для выдачи");
       const mainFile = data.get("mainImage");
       const storeImage = data.get("storeImage");
       const galleryFiles = Array.from(data.getAll("images")).filter((file) => file && file.size).slice(0, 5);
@@ -11460,6 +11647,7 @@ function bindAdminProductForms() {
       position.deliveryType = data.get("deliveryType").trim() || "Товар";
       position.saleMode = String(data.get("saleMode") || "ready") === "preorder" ? "preorder" : "ready";
       position.weight = data.get("weight").trim();
+      position.deliveryItems = [...product.deliveryItems];
       position.stock = product.deliveryItems.length;
       saveDb();
       if (route === "seller") {
@@ -12133,7 +12321,7 @@ function shopStorageTab(store, products, stats = {}) {
             const country = String(position.country || shopDefaultCountry(store));
             const city = String(position.city || shopDefaultCity(store));
             const district = String(position.district || "");
-            const deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems.join(position.delimiter || "\n") : "";
+            const deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
             return `
               <details class="seller-source" data-shop-storage-item>
                 <summary>
@@ -12160,8 +12348,7 @@ function shopStorageTab(store, products, stats = {}) {
                     <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
                     ${shopDistrictField(store, country, city, district, position.id)}
                   </div>
-                  <label class="field">Разделитель адресов<input name="delimiter" value="${esc(position.delimiter === "\n" ? "новая строка" : position.delimiter || "новая строка")}"></label>
-                  <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом">${esc(deliveryItems)}</textarea></label>
+                  ${shopDeliveryEditor(deliveryItems)}
                   <div class="row">
                     <button class="primary">Сохранить субтовар</button>
                     <button class="ghost-button danger" type="button" data-shop-position-delete="${esc(position.id)}" data-card-id="${esc(product.id)}">Удалить субтовар</button>
@@ -12200,8 +12387,7 @@ function shopProductsTab(store, products) {
           <label class="field">Город<select name="city" data-shop-location-city>${scopedCitySelectOptions(store, country, city)}</select></label>
           ${shopDistrictField(store, country, city, "", "new-product")}
         </div>
-        <label class="field">Разделитель адресов<input name="delimiter" value="новая строка" placeholder="Например: . или |"></label>
-        <label class="field">Адреса и описание для выдачи<textarea name="deliveryItems" placeholder="Каждый адрес отделите выбранным символом" required></textarea></label>
+        ${shopDeliveryEditor([])}
         <div class="shop-delivery-preview" data-shop-delivery-preview></div>
         <button class="primary">Проверить и добавить адреса</button>
       </form>` : `<p>Сначала создайте карточку.</p>`}
@@ -12846,6 +13032,39 @@ function renderShopPanel(activeTab = "dashboard") {
   root.querySelector(".seller-dashboard-nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
 }
 
+function shopDeliveryEditorRow(value = "", index = 0) {
+  return `
+    <div class="shop-delivery-editor-row" data-shop-delivery-row>
+      <span class="shop-delivery-editor-number" data-shop-delivery-number>${index + 1}</span>
+      <label class="field">
+        <span>Описание выдаваемого товара</span>
+        <textarea name="deliveryItem" rows="3" maxlength="4000" placeholder="Адрес, ориентир, инструкция или ссылка">${esc(value)}</textarea>
+      </label>
+      <button class="ghost-button danger" type="button" data-shop-delivery-remove aria-label="Удалить строку ${index + 1}">Удалить</button>
+    </div>
+  `;
+}
+
+function shopDeliveryEditor(items = [], minimumRows = 3) {
+  const values = (Array.isArray(items) ? items : [])
+    .map((item) => String(item ?? ""))
+    .slice(0, 5000);
+  const rowCount = Math.max(minimumRows, values.length);
+  while (values.length < rowCount) values.push("");
+  return `
+    <div class="shop-delivery-editor" data-shop-delivery-editor>
+      <div class="shop-delivery-editor-head">
+        <strong>Отдельные товары для выдачи</strong>
+        <span>Каждая строка — одна единица склада. Внутри описания можно использовать несколько строк.</span>
+      </div>
+      <div class="shop-delivery-editor-list" data-shop-delivery-list>
+        ${values.map((value, index) => shopDeliveryEditorRow(value, index)).join("")}
+      </div>
+      <button class="ghost-button shop-delivery-add" type="button" data-shop-delivery-add>+1 строка</button>
+    </div>
+  `;
+}
+
 function shopLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
@@ -12863,6 +13082,12 @@ function shopDeliveryItemKey(value = "") {
 }
 
 function shopDeliveryItemsFromForm(form) {
+  const structuredRows = Array.from(form?.querySelectorAll('textarea[name="deliveryItem"]') || []);
+  if (structuredRows.length) {
+    return structuredRows
+      .map((field) => String(field.value || "").trim())
+      .filter(Boolean);
+  }
   const data = new FormData(form);
   return shopSplitDeliveryItems(data.get("deliveryItems"), String(data.get("delimiter") || "новая строка"));
 }
@@ -12910,6 +13135,19 @@ async function shopInventoryDuplicatePreview(items = []) {
   });
 }
 
+function renumberShopDeliveryRows(form) {
+  const rows = Array.from(form?.querySelectorAll("[data-shop-delivery-row]") || []);
+  rows.forEach((row, index) => {
+    const number = row.querySelector("[data-shop-delivery-number]");
+    const remove = row.querySelector("[data-shop-delivery-remove]");
+    if (number) number.textContent = String(index + 1);
+    if (remove) {
+      remove.disabled = rows.length <= 3;
+      remove.setAttribute("aria-label", `Удалить строку ${index + 1}`);
+    }
+  });
+}
+
 function bindShopDeliveryPreview(form) {
   if (!form) return;
   let timer = null;
@@ -12919,6 +13157,7 @@ function bindShopDeliveryPreview(form) {
     const currentSequence = sequence;
     clearTimeout(timer);
     paintShopDeliveryPreview(form);
+    if (!form.querySelector("[data-shop-delivery-preview]")) return;
     const items = shopDeliveryItemsFromForm(form);
     if (!items.length || Number(form.dataset.deliveryDuplicateCount || 0) > 0) return;
     timer = setTimeout(async () => {
@@ -12930,8 +13169,36 @@ function bindShopDeliveryPreview(form) {
       }
     }, 450);
   };
-  form.querySelector('[name="deliveryItems"]')?.addEventListener("input", update);
-  form.querySelector('[name="delimiter"]')?.addEventListener("input", update);
+  form.addEventListener("input", (event) => {
+    if (event.target.matches('[name="deliveryItem"], [name="deliveryItems"], [name="delimiter"]')) update();
+  });
+  form.addEventListener("click", (event) => {
+    const addButton = event.target.closest("[data-shop-delivery-add]");
+    if (addButton) {
+      event.preventDefault();
+      const list = form.querySelector("[data-shop-delivery-list]");
+      const count = list?.querySelectorAll("[data-shop-delivery-row]").length || 0;
+      if (!list || count >= 5000) return;
+      list.insertAdjacentHTML("beforeend", shopDeliveryEditorRow("", count));
+      form.dataset.shopFormDirty = "1";
+      markShopPanelFormActivity();
+      renumberShopDeliveryRows(form);
+      list.lastElementChild?.querySelector("textarea")?.focus();
+      update();
+      return;
+    }
+    const removeButton = event.target.closest("[data-shop-delivery-remove]");
+    if (!removeButton) return;
+    event.preventDefault();
+    const rows = form.querySelectorAll("[data-shop-delivery-row]");
+    if (rows.length <= 3) return;
+    removeButton.closest("[data-shop-delivery-row]")?.remove();
+    form.dataset.shopFormDirty = "1";
+    markShopPanelFormActivity();
+    renumberShopDeliveryRows(form);
+    update();
+  });
+  renumberShopDeliveryRows(form);
   update();
 }
 
@@ -13039,7 +13306,7 @@ function bindShopPanelActions(store, activeTab) {
   console.log("[shop-admin] bind actions", { storeId: store?.id, activeTab });
   bindLocationSelects();
   bindShopLocationSelects(store);
-  bindShopDeliveryPreview(document.querySelector("[data-shop-product-form]"));
+  document.querySelectorAll("[data-shop-product-form], [data-shop-position-edit]").forEach(bindShopDeliveryPreview);
   document.querySelector("[data-shop-profile-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -13186,7 +13453,7 @@ function bindShopPanelActions(store, activeTab) {
       if (priceUsd <= 0) throw new Error("Укажите цену товара");
       const delimiterInput = String(data.get("delimiter") || "новая строка").trim();
       const delimiter = normalizedShopKey(delimiterInput) === "новая строка" ? "\n" : delimiterInput;
-      const deliveryItems = shopSplitDeliveryItems(data.get("deliveryItems"), delimiterInput);
+      const deliveryItems = shopDeliveryItemsFromForm(form);
       if (!deliveryItems.length) throw new Error("Добавьте хотя бы один адрес");
       const duplicatePreview = await shopInventoryDuplicatePreview(deliveryItems);
       if (Number(duplicatePreview.duplicateCount || 0) > 0) {
@@ -13263,7 +13530,7 @@ function bindShopPanelActions(store, activeTab) {
 
         const data = new FormData(form);
         const delimiterInput = String(data.get("delimiter") || "новая строка").trim();
-        const deliveryItems = shopSplitDeliveryItems(data.get("deliveryItems"), delimiterInput);
+        const deliveryItems = shopDeliveryItemsFromForm(form);
 
         position.title = String(data.get("title") || product.title || "").trim();
         position.description = String(data.get("description") || "").trim();
@@ -13514,17 +13781,14 @@ function renderSeller() {
           <label class="field">${tr("name")}<input name="title" required></label>
           <label class="field">${tr("short")}<input name="category" required></label>
           <label class="field">Описание<textarea name="description"></textarea></label>
-          <div class="row">
-            <label class="field">Цена, $<input name="priceUsd" type="number" min="0" step="0.01" value="50" required></label>
-            <label class="field">Кол-во<input name="stock" type="number" min="0" step="1" value="1" required></label>
-          </div>
+          <label class="field">Цена, $<input name="priceUsd" type="number" min="0.01" step="0.01" value="50" required></label>
           <label class="field">Тип<input name="deliveryType" value="Курьер"></label>
           <div class="row" data-location-group>
             <label class="field">Страна<select name="country" data-location-country>${scopedCountrySelectOptions(sellerCountries, sellerDefaultCountry)}</select></label>
             <label class="field">Город<select name="city" data-location-city>${citySelectOptions(sellerDefaultCountry, sellerDefaultCity)}</select></label>
             <label class="field">Район<select name="district" data-location-district>${districtSelectOptions(sellerDefaultCountry, sellerDefaultCity, "")}</select></label>
           </div>
-          <label class="field">Описания для выдачи клиенту<textarea name="deliveryItems" placeholder="Каждая новая строка = один доступный заказ"></textarea></label>
+          ${shopDeliveryEditor([])}
           <label class="field">Главное фото<input name="mainImage" type="file" accept="image/*"></label>
           <label class="field">${tr("upload")}<input name="images" type="file" accept="image/*" multiple></label>
           <button class="primary">${tr("addProduct")}</button>
@@ -13583,7 +13847,9 @@ function renderSeller() {
     };
   });
   bindLocationSelects();
-  document.querySelector("[data-product-form]").onsubmit = async (event) => {
+  const sellerProductForm = document.querySelector("[data-product-form]");
+  bindShopDeliveryPreview(sellerProductForm);
+  sellerProductForm.onsubmit = async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     await runShopFormSubmit(form, "Добавляю...", async () => {
@@ -13595,9 +13861,8 @@ function renderSeller() {
       const images = [mainImage, ...gallery.filter((image) => image !== mainImage)].slice(0, 5);
       const priceUsd = Number(data.get("priceUsd") || 0);
       const productId = `product-${Date.now()}`;
-      const rawDeliveryItems = String(data.get("deliveryItems") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-      const fallbackDeliveryText = String(data.get("description") || data.get("title") || "Товар").trim();
-      const deliveryItems = rawDeliveryItems.length ? rawDeliveryItems : [fallbackDeliveryText];
+      const deliveryItems = shopDeliveryItemsFromForm(form);
+      if (!deliveryItems.length) throw new Error("Добавьте хотя бы одно описание для выдачи");
       store.products.unshift({
         id: productId,
         title: data.get("title").trim(),
@@ -13622,7 +13887,7 @@ function renderSeller() {
           district: String(data.get("district") || "").trim(),
           deliveryType: data.get("deliveryType").trim() || "Курьер",
           deliveryItems,
-          stock: Math.max(1, deliveryItems.length),
+          stock: deliveryItems.length,
           status: "ready"
         }],
         reviewsList: []

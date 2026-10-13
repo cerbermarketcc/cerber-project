@@ -230,6 +230,40 @@ test("personal LTC address modal loads a server-generated QR without an amount",
   assert.match(loader, /safeContentUrl\(payload\.qrCodeDataUrl\)/);
 });
 
+test("pending product orders show the server QR and never fall back to a seller wallet", () => {
+  const details = functionBody(appClient, "showProductOrder");
+  const loader = functionBody(appClient, "loadProductOrderPaymentQr");
+  assert.match(details, /data-order-payment-qr=/);
+  assert.match(details, /loadProductOrderPaymentQr\(order\.id\)/);
+  assert.match(details, /order\.payAddress \|\| order\.walletDepositAddress/);
+  assert.match(details, /const paymentAddress = orderDepositAddress \|\| \(!API_ENABLED/);
+  assert.doesNotMatch(details, /litecoin:\$\{esc\(order\.sellerWallet/);
+  assert.match(details, /orderDepositPayAmountText/);
+  assert.match(loader, /\/api\/orders\/\$\{encodeURIComponent\(orderId\)\}\/payment-qr/);
+  assert.match(loader, /safeContentUrl\(payload\.qrCodeDataUrl\)/);
+});
+
+test("paid delivery shows immutable order facts and safe clickable links", () => {
+  const facts = functionBody(appClient, "productOrderDeliveryFacts");
+  const view = functionBody(appClient, "paidProductDeliveryView");
+  const linkifier = functionBody(appClient, "linkedPlainText");
+  const snapshot = functionBody(server, "productOrderMetadataSnapshot");
+  assert.match(facts, /orderMetadata/);
+  assert.match(facts, /storeSnapshot\.name/);
+  assert.match(facts, /positionSnapshot\.weight/);
+  assert.match(view, /Магазин/);
+  assert.match(view, /Товар/);
+  assert.match(view, /Фасовка \/ граммаж/);
+  assert.match(view, /Город/);
+  assert.match(view, /Район/);
+  assert.match(view, /linkedPlainText\(description\)/);
+  assert.match(linkifier, /https\?:\\\/\\\//);
+  assert.match(linkifier, /noopener noreferrer nofollow ugc/);
+  assert.match(snapshot, /productTitle/);
+  assert.match(snapshot, /positionTitle/);
+  assert.match(snapshot, /district: positionSnapshot\.district/);
+});
+
 test("product checkout contains no persons question or order raffle UI", () => {
   const checkout = functionBody(appClient, "openProductCheckoutModal");
   assert.doesNotMatch(checkout, /personsCount|data-checkout-persons|Сколько персон/);
@@ -318,14 +352,28 @@ test("shop staff can add inventory but cannot modify or delete existing data", (
   assert.match(styles, /\.is-staff-panel \[data-shop-position-delete\]/);
 });
 
-test("shop inventory keeps delimiters, supports custom districts and renders a duplicate preview", () => {
+test("shop inventory uses numbered multiline delivery rows and keeps duplicate preview", () => {
   const storage = functionBody(appClient, "shopStorageTab");
   const products = functionBody(appClient, "shopProductsTab");
   const settings = functionBody(appClient, "shopSettingsTab");
-  assert.match(storage, /join\(position\.delimiter \|\| "\\n"\)/);
+  const editorStart = appClient.indexOf("function shopDeliveryEditor(items");
+  const editorEnd = appClient.indexOf("\nfunction shopLines", editorStart);
+  const editor = appClient.slice(editorStart, editorEnd);
+  const editorRow = functionBody(appClient, "shopDeliveryEditorRow");
+  assert.ok(editorStart >= 0 && editorEnd > editorStart);
+  const reader = functionBody(appClient, "shopDeliveryItemsFromForm");
+  const binder = functionBody(appClient, "bindShopDeliveryPreview");
+  assert.match(storage, /shopDeliveryEditor\(deliveryItems\)/);
   assert.match(storage, /<strong>Открыть<\/strong>/);
   assert.doesNotMatch(storage, /name="status"/);
+  assert.match(products, /shopDeliveryEditor\(\[\]\)/);
   assert.match(products, /data-shop-delivery-preview/);
+  assert.match(editor, /Math\.max\(minimumRows, values\.length\)/);
+  assert.match(editor, /data-shop-delivery-add/);
+  assert.match(editorRow, /name="deliveryItem"/);
+  assert.match(reader, /textarea\[name="deliveryItem"\]/);
+  assert.match(binder, /data-shop-delivery-remove/);
+  assert.match(binder, /renumberShopDeliveryRows/);
   assert.match(appClient, /function shopDistrictField/);
   assert.match(appClient, /Введите свой район или выберите из списка/);
   assert.match(appClient, /function bindShopDeliveryPreview/);

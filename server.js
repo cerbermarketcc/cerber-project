@@ -48,7 +48,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "cerber-render-onion-2026-10-13-v199";
+const cerberBuildVersion = "cerber-render-onion-2026-10-13-v200";
 const officialOnionHost = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
 const onionGatewayPublicKey = crypto.createPublicKey(`-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAUrSjBVbXjhw2XBf8O5WMru6cKl/1jl+q4VeEuaabYng=
@@ -2368,6 +2368,12 @@ function publicOrderForUser(order = {}) {
   const providerPayload = item.paymentProviderPayload && typeof item.paymentProviderPayload === "object"
     ? item.paymentProviderPayload
     : {};
+  item.payAmountText = providerPayAmountText(item.payAmountText)
+    || providerPayAmountText(item.payAmount)
+    || providerPayAmountText(providerPayload.pay_amount)
+    || providerPayAmountText(providerPayload.payAmount)
+    || providerPayAmountText(item.walletDepositAmountLtc);
+  if (!item.payAmountText) delete item.payAmountText;
   item.payAmount = Number(item.payAmount || providerPayload.pay_amount || providerPayload.payAmount || 0);
   item.payCurrency = String(item.payCurrency || providerPayload.pay_currency || providerPayload.payCurrency || item.coinId || "");
   item.providerActuallyPaid = Number(item.providerActuallyPaid || providerPayload.actually_paid || 0);
@@ -3773,9 +3779,6 @@ async function stateFor(user) {
           console.error("[stateFor] referral code save failed", { message: error.message });
         });
       }
-    }
-    if (await normalizeServerOrders(settingsData)) {
-      await saveSettingsState(settingsData);
     }
     const allMessages = sanitizeMessagesForVisualReset((messages || []).map((row) => row.data));
     let orders = hydrateOrdersDisputeHistory(
@@ -9010,6 +9013,20 @@ function nowpaymentsPaymentIsPaid(status = "") {
   return ["finished", "paid"].includes(String(status || "").toLowerCase());
 }
 
+function nowpaymentsPaymentWasObserved(payload = {}) {
+  const status = String(payload.payment_status || payload.status || payload.providerPaymentStatus || "").toLowerCase();
+  return [
+    "confirming",
+    "confirmed",
+    "sending",
+    "finished",
+    "paid",
+    "partially_paid",
+    "partially-paid",
+    "wrong_asset_confirmed"
+  ].includes(status) || Number(payload.actually_paid || payload.providerActuallyPaid || 0) > 0;
+}
+
 function nowpaymentsPaymentCoversExpected(payload = {}, expected = {}) {
   if (expected && Object.keys(expected).length) return validateProviderPayment(payload, expected).ok;
   const expectedCrypto = Number(payload.pay_amount || 0);
@@ -9974,6 +9991,60 @@ function walletCoinFromRequest(body = {}) {
   return walletCoins.find((coin) => coin.id === requested || coin.payCurrency === requested) || walletCoins[0];
 }
 
+function providerPayAmountText(value = "") {
+  const source = String(value ?? "").trim();
+  if (!source || source.length > 96) return "";
+  let plain = source;
+  const scientific = /^(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(source);
+  if (scientific) {
+    const exponent = Number(scientific[3]);
+    if (!Number.isInteger(exponent) || Math.abs(exponent) > 48) return "";
+    const integer = scientific[1];
+    const fraction = scientific[2] || "";
+    const digits = `${integer}${fraction}`;
+    const decimalIndex = integer.length + exponent;
+    if (decimalIndex <= 0) plain = `0.${"0".repeat(-decimalIndex)}${digits}`;
+    else if (decimalIndex >= digits.length) plain = `${digits}${"0".repeat(decimalIndex - digits.length)}`;
+    else plain = `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
+  }
+  if (!/^\d{1,48}(?:\.\d{1,48})?$/.test(plain)) return "";
+  const [wholeSource, fraction = ""] = plain.split(".");
+  const whole = wholeSource.replace(/^0+(?=\d)/, "");
+  const normalized = fraction ? `${whole}.${fraction}` : whole;
+  if (!/[1-9]/.test(normalized)) return "";
+  return normalized;
+}
+
+function paymentQrAddressIsValid(coin = {}, value = "") {
+  const address = String(value || "").trim();
+  const payCurrency = String(coin.payCurrency || "").toLowerCase();
+  if (payCurrency === "ltc") return isValidLitecoinAddress(address);
+  if (["eth", "usdterc20"].includes(payCurrency)) return /^0x[a-f0-9]{40}$/i.test(address);
+  if (["trx", "usdttrc20"].includes(payCurrency)) return /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address);
+  if (["sol", "usdtsol"].includes(payCurrency)) return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+  return false;
+}
+
+function productOrderPaymentQrPayload(order = {}) {
+  const requestedCurrency = String(order.payCurrency || order.coinId || "").trim().toLowerCase();
+  const coin = walletCoins.find((item) => item.id === requestedCurrency || item.payCurrency === requestedCurrency);
+  if (!coin) return null;
+  const address = String(order.payAddress || order.walletDepositAddress || "").trim();
+  const payAmountText = providerPayAmountText(order.payAmountText)
+    || providerPayAmountText(order.payAmount)
+    || providerPayAmountText(order.walletDepositAmountLtc);
+  if (!paymentQrAddressIsValid(coin, address) || !payAmountText) return null;
+  const amountIncluded = coin.id === "ltc";
+  return {
+    address,
+    coinId: coin.id,
+    payCurrency: coin.payCurrency,
+    payAmountText,
+    amountIncluded,
+    paymentUri: amountIncluded ? `litecoin:${address}?amount=${payAmountText}` : address
+  };
+}
+
 function cleanAttachmentUrl(value = "") {
   const url = String(value || "").trim();
   if (!url || url.length > maxDataImageLength) return "";
@@ -10831,32 +10902,76 @@ async function findProductOrderForDispute(state = {}, orderId = "") {
   return { order: null, store: null, source: "" };
 }
 
+function productReservationStatus(order = {}) {
+  const explicit = String(order.reservationStatus || "").trim().toLowerCase();
+  if (["active", "payment_seen", "consumed", "released", "manual_review"].includes(explicit)) return explicit;
+  if (order.stockRestoredAt || order.reservationRestored) return "released";
+  if (productOrderPaymentConfirmed(order)) return "consumed";
+  if (order.stockReservedAt || order.reservedStock) return "active";
+  return "none";
+}
+
+function productReservationIsHeld(order = {}) {
+  return ["active", "payment_seen"].includes(productReservationStatus(order));
+}
+
+function productReservationWasActuallyTaken(order = {}) {
+  return Boolean(order.stockReservedAt || order.reservedStock);
+}
+
+function productOrderPaymentWasObserved(order = {}) {
+  return productReservationStatus(order) === "payment_seen"
+    || nowpaymentsPaymentWasObserved({
+      status: order.providerPaymentStatus || order.paymentStatus,
+      providerActuallyPaid: order.providerActuallyPaid
+    });
+}
+
 async function restoreExpiredProductReservation(state = {}, order = {}) {
-  if (order.reservationRestored || order.stockRestoredAt) return false;
+  if (!productReservationIsHeld(order) || !productReservationWasActuallyTaken(order)) return false;
   const store = await lifecycleStoreForOrder(state, order.storeId);
-  if (!store) return false;
+  if (!store) {
+    order.reservationStatus = "manual_review";
+    order.reservationReviewReason = "reservation_store_missing";
+    order.reservationReviewAt = Date.now();
+    return false;
+  }
+
+  const embeddedOrder = (Array.isArray(store.productOrders) ? store.productOrders : [])
+    .find((item) => String(item?.id || "") === String(order.id || ""));
+  if (embeddedOrder && productReservationStatus(embeddedOrder) === "released") {
+    Object.assign(order, embeddedOrder);
+    return false;
+  }
+
   const product = (Array.isArray(store.products) ? store.products : []).find((item) => String(item?.id || "") === String(order.productId || ""));
   const position = (Array.isArray(product?.positions) ? product.positions : []).find((item) => String(item?.id || "") === String(order.positionId || ""));
-  if (!product && !position) return false;
+  if (!product || !position) {
+    order.reservationStatus = "manual_review";
+    order.reservationReviewReason = !product ? "reservation_product_missing" : "reservation_position_missing";
+    order.reservationReviewAt = Date.now();
+    return false;
+  }
+
   if (order.reservedDescription) {
-    if (order.reservedFromPosition && position) {
+    if (order.reservedFromPosition) {
       position.deliveryItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
       if (!position.deliveryItems.includes(order.reservedDescription)) position.deliveryItems.unshift(order.reservedDescription);
-    } else if (product) {
+    } else {
       product.deliveryItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
       if (!product.deliveryItems.includes(order.reservedDescription)) product.deliveryItems.unshift(order.reservedDescription);
     }
   }
-  if (position) {
-    position.stock = Math.max(0, Number(position.stock || 0)) + 1;
-    order.stockRestoredAt = Date.now();
-  }
+  position.stock = Math.max(0, Number(position.stock || 0)) + 1;
+  const restoredAt = Date.now();
+  order.stockRestoredAt = restoredAt;
+  order.reservationReleasedAt = restoredAt;
   order.reservationRestored = true;
-  if (store.id) {
-    await saveStoreRow(store, "order reservation restore store save");
-    if (Array.isArray(state.ownerStores)) {
-      state.ownerStores = state.ownerStores.map((item) => String(item?.id || "") === String(store.id) ? { ...item, ...store } : item);
-    }
+  order.reservationStatus = "released";
+  upsertProductOrderIntoStore(store, order);
+  await saveStoreRow(store, "order reservation restore store save");
+  if (Array.isArray(state.ownerStores)) {
+    state.ownerStores = state.ownerStores.map((item) => String(item?.id || "") === String(store.id) ? { ...item, ...store } : item);
   }
   return true;
 }
@@ -10910,7 +11025,45 @@ async function normalizeServerOrders(state = {}) {
     const status = String(order.status || "").toLowerCase();
     const paymentStatus = String(order.paymentStatus || "").toLowerCase();
     if (status === "pending_payment" && paymentStatus !== "paid" && order.paymentExpiresAt && now >= Number(order.paymentExpiresAt || 0)) {
-      await restoreExpiredProductReservation(state, order);
+      const expiresAt = Number(order.paymentExpiresAt || 0);
+      const currentReservationStatus = productReservationStatus(order);
+      if (currentReservationStatus === "manual_review") {
+        nextOrders.push(order);
+        continue;
+      }
+      if (productOrderPaymentWasObserved(order)) {
+        if (currentReservationStatus === "active") {
+          order.reservationStatus = "payment_seen";
+          order.paymentObservedAt = Number(order.paymentObservedAt || order.lastPaymentCheckAt || now);
+          changed = true;
+        }
+        nextOrders.push(order);
+        continue;
+      }
+
+      const providerStatus = String(order.providerPaymentStatus || "").toLowerCase();
+      const providerCheckedAt = Number(order.providerStatusCheckedAt || order.lastPaymentCheckAt || 0);
+      const providerCheckFailedAt = Number(order.reservationCheckFailedAt || 0);
+      const providerConfirmedUnpaid = !order.paymentId || (
+        providerCheckedAt >= expiresAt
+        && providerCheckFailedAt < providerCheckedAt
+        && (["waiting", "failed", "expired", "cancelled", "canceled", "refunded"].includes(providerStatus))
+        && Number(order.providerActuallyPaid || 0) <= 0
+      );
+      // A provider timeout or a stale pre-expiry status must never release stock:
+      // the customer may already have broadcast the transfer.
+      if (!providerConfirmedUnpaid) {
+        nextOrders.push(order);
+        continue;
+      }
+
+      const hadReservedUnit = productReservationWasActuallyTaken(order) && productReservationIsHeld(order);
+      const restored = hadReservedUnit ? await restoreExpiredProductReservation(state, order) : false;
+      if (hadReservedUnit && !restored) {
+        changed = currentReservationStatus !== productReservationStatus(order) || changed;
+        nextOrders.push(order);
+        continue;
+      }
       changed = true;
       pushSiteNotification(state, order.login, {
         id: `notice-order-expired-${order.id}-${loginKey(order.login)}`,
@@ -10977,6 +11130,10 @@ async function normalizeServerOrders(state = {}) {
   return changed;
 }
 
+async function reconcileProductOrderLifecycleUnlocked(state = {}) {
+  return normalizeServerOrders(state);
+}
+
 async function loadSettingsState() {
   await ensureSeed();
   const { data: settings, error: settingsError } = await withTimeout(
@@ -11015,9 +11172,6 @@ async function loadSettingsState() {
   state.supportTickets = Array.isArray(state.supportTickets) ? state.supportTickets : [];
   await mergeFinanceMirrorIntoState(state);
   state = sanitizeStateForVisualReset(state);
-  if (await normalizeServerOrders(state)) {
-    await saveSettingsState(state);
-  }
   return state;
 }
 
@@ -11212,9 +11366,6 @@ async function adminLoadMarketplace(options = {}) {
   state = settingsStateForRuntime(state);
   await mergeFinanceMirrorIntoState(state);
   state = sanitizeStateForVisualReset(state);
-  // The owner dashboard must perform the same due-order release as customer
-  // and seller reads; otherwise an expired hold remains invisible here.
-  if (await normalizeServerOrders(state)) await saveSettingsState(state);
   state.adminLogs = mergeById(
     mergeById(adminLogMemory, auditLogs),
     Array.isArray(state.adminLogs) ? state.adminLogs : []
@@ -13430,12 +13581,12 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   const paidAt = Date.now();
   const statusBeforePayment = String(order.status || "").toLowerCase();
   const paymentStatusBeforePayment = String(order.paymentStatus || "").toLowerCase();
+  const reservationStatusBeforePayment = productReservationStatus(order);
   const wasAlreadyPaid = paymentStatusBeforePayment === "paid" || ["active", "completed", "closed", "paid"].includes(statusBeforePayment);
   const hadUnrestoredReservation = statusBeforePayment === "pending_payment"
     && paymentStatusBeforePayment !== "paid"
-    && !order.stockRestoredAt
-    && !order.reservationRestored;
-  if (hadUnrestoredReservation && !order.stockReservedAt) order.stockReservedAt = Number(order.createdAt || paidAt);
+    && productReservationIsHeld(order)
+    && productReservationWasActuallyTaken(order);
   order.paymentStatus = "paid";
   if (!wasAlreadyPaid) {
     order.status = "active";
@@ -13456,6 +13607,27 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   order.providerOutcomeCurrency = String(providerPayload.outcome_currency ?? order.providerOutcomeCurrency ?? "").toLowerCase();
   order.payCurrency = String(providerPayload.pay_currency ?? order.payCurrency ?? order.coinId ?? "ltc").toLowerCase();
 
+  const lateReservationPayment = !wasAlreadyPaid && ["released", "manual_review"].includes(reservationStatusBeforePayment);
+  if (lateReservationPayment) {
+    order.status = "manual_review";
+    order.paymentStatus = "review";
+    order.reservationStatus = "manual_review";
+    order.paymentReviewReason = "late_payment_after_reservation_release";
+    order.reservationReviewReason = order.reservationReviewReason || "late_payment_after_reservation_release";
+    order.reservationReviewAt = Number(order.reservationReviewAt || paidAt);
+    const reviewStore = await lifecycleStoreForOrder(state, order.storeId);
+    await syncProductOrderEverywhere(state, order, reviewStore);
+    await saveSettingsState(state);
+    const error = new Error("Paid order requires manual review because its inventory reservation expired");
+    error.status = 409;
+    throw error;
+  }
+
+  if (hadUnrestoredReservation) {
+    order.reservationStatus = "consumed";
+    order.reservationConsumedAt = Number(order.reservationConsumedAt || paidAt);
+  }
+
   if (order.storeId) {
     const { data: row } = await supabase.from("stores").select("data").eq("id", order.storeId).maybeSingle();
     const store = row?.data;
@@ -13469,29 +13641,6 @@ async function completeProductOrder(order, state, providerPayload = {}) {
         if (product) {
           product.purchases = Number(product.purchases || 0) + 1;
           const position = (product.positions || []).find((item) => item.id === order.positionId);
-          if (order.stockRestoredAt || order.reservationRestored) {
-            if (!position || Number(position.stock || 0) <= 0) {
-              order.status = "manual_review";
-              order.paymentStatus = "review";
-              order.paymentReviewReason = "late_payment_inventory_unavailable";
-              await syncProductOrderEverywhere(state, order, store);
-              await saveSettingsState(state);
-              const error = new Error("Paid order requires manual review because its inventory reservation expired");
-              error.status = 409;
-              throw error;
-            }
-            position.stock = Math.max(0, Number(position.stock || 0) - 1);
-            if (order.reservedDescription) {
-              const deliveryItems = order.reservedFromPosition
-                ? (Array.isArray(position.deliveryItems) ? position.deliveryItems : [])
-                : (Array.isArray(product.deliveryItems) ? product.deliveryItems : []);
-              const restoredIndex = deliveryItems.indexOf(order.reservedDescription);
-              if (restoredIndex >= 0) deliveryItems.splice(restoredIndex, 1);
-            }
-            order.stockReservedAt = Date.now();
-            order.reservationRestored = false;
-            delete order.stockRestoredAt;
-          }
           if (!order.reservedDescription) {
             const positionItems = Array.isArray(position?.deliveryItems) ? position.deliveryItems : [];
             const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
@@ -13555,14 +13704,14 @@ async function completeProductOrder(order, state, providerPayload = {}) {
 }
 
 async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {}) {
-  if (!nowpaymentsApiKey || !supabase) return paymentReconcileStatus;
+  if (!supabase) return paymentReconcileStatus;
   if (paymentReconcilePromise) return paymentReconcilePromise;
   paymentReconcilePromise = (async () => {
     const startedAt = Date.now();
     const state = await loadSettingsState();
     const orders = Array.isArray(state.orders) ? state.orders : [];
     const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
-    const candidates = orders
+    const candidates = (nowpaymentsApiKey ? orders : [])
       .filter((order) => (
         order?.type === "product"
         && order.paymentId
@@ -13580,19 +13729,26 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
     const statuses = {};
     const errors = [];
     for (const order of candidates) {
-      if (!force && Date.now() - Number(order.lastPaymentCheckAt || 0) < 20 * 1000) continue;
+      const reservationExpired = Boolean(order.paymentExpiresAt && Date.now() >= Number(order.paymentExpiresAt || 0));
+      if (!force && !reservationExpired && Date.now() - Number(order.lastPaymentCheckAt || 0) < 20 * 1000) continue;
       try {
         const payment = await nowpaymentsRequest(`payment/${encodeURIComponent(order.paymentId)}`, { method: "GET" });
         const status = String(payment.payment_status || payment.status || "waiting").toLowerCase();
         const previousStatus = String(order.providerPaymentStatus || "").toLowerCase();
+        const checkedAt = Date.now();
         checked += 1;
         statuses[status] = Number(statuses[status] || 0) + 1;
-        order.lastPaymentCheckAt = Date.now();
+        order.lastPaymentCheckAt = checkedAt;
+        order.providerStatusCheckedAt = checkedAt;
+        delete order.reservationCheckFailedAt;
+        delete order.reservationCheckError;
         order.providerPaymentStatus = status;
         order.providerActuallyPaid = Number(payment.actually_paid || 0);
         order.providerOutcomeAmount = Number(payment.outcome_amount || 0);
         order.providerOutcomeCurrency = String(payment.outcome_currency || "").toLowerCase();
-        order.payAmount = Number(payment.pay_amount || order.payAmount || 0);
+        const refreshedPayAmountText = providerPayAmountText(payment.pay_amount);
+        if (refreshedPayAmountText) order.payAmountText = refreshedPayAmountText;
+        order.payAmount = Number(order.payAmountText || payment.pay_amount || order.payAmount || 0);
         order.payAddress = String(payment.pay_address || order.payAddress || "");
         order.walletDepositAmountLtc = order.payAmount || Number(order.walletDepositAmountLtc || 0);
         order.walletDepositAddress = order.payAddress || order.walletDepositAddress || "";
@@ -13607,9 +13763,24 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
         } else if (nowpaymentsPaymentIsPaid(status)) {
           order.paymentStatus = "underpaid";
           order.paymentReviewReason = "provider_amount_below_expected";
+          order.reservationStatus = "payment_seen";
+          order.paymentObservedAt = Number(order.paymentObservedAt || checkedAt);
+          changed = true;
+        } else if (nowpaymentsPaymentWasObserved(payment)) {
+          order.reservationStatus = "payment_seen";
+          order.paymentObservedAt = Number(order.paymentObservedAt || checkedAt);
+          if (["partially_paid", "partially-paid", "wrong_asset_confirmed"].includes(status)) {
+            order.paymentStatus = "underpaid";
+            order.paymentReviewReason = status === "wrong_asset_confirmed"
+              ? "provider_wrong_asset_confirmed"
+              : "provider_amount_below_expected";
+          }
           changed = true;
         }
       } catch (error) {
+        order.reservationCheckFailedAt = Date.now();
+        order.reservationCheckError = String(error.message || error).slice(0, 160);
+        changed = true;
         errors.push(String(error.message || error).slice(0, 200));
       }
     }
@@ -13635,7 +13806,7 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
       const before = stateUserLtcBalance(state, login);
       if (reconcileUserLtcBalanceFromLedger(state, login) > before + 0.000000001) changed = true;
     }
-    const depositCandidates = deposits
+    const depositCandidates = (nowpaymentsApiKey ? deposits : [])
       .filter((deposit) => (
         deposit?.paymentId
         && ["waiting", "processing", "pending"].includes(String(deposit.status || "waiting").toLowerCase())
@@ -13672,7 +13843,7 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
     }
     let permanentChecked = 0;
     let permanentCompleted = 0;
-    const permanentCandidates = permanentWalletAddresses(state)
+    const permanentCandidates = (nowpaymentsApiKey ? permanentWalletAddresses(state) : [])
       .sort((a, b) => Number(permanentAddressLastCheckAt.get(a.id) || 0) - Number(permanentAddressLastCheckAt.get(b.id) || 0))
       .slice(0, 5);
     for (const address of permanentCandidates) {
@@ -13711,15 +13882,18 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
       }
     }
     let permanentListChecked = 0;
-    try {
-      const listResult = await scanPermanentWalletPayments(state);
-      permanentListChecked = listResult.checked;
-      permanentCompleted += listResult.credited;
-      changed = changed || listResult.credited > 0;
-    } catch (error) {
-      errors.push(`permanent list: ${String(error.message || error).slice(0, 160)}`);
+    if (nowpaymentsApiKey) {
+      try {
+        const listResult = await scanPermanentWalletPayments(state);
+        permanentListChecked = listResult.checked;
+        permanentCompleted += listResult.credited;
+        changed = changed || listResult.credited > 0;
+      } catch (error) {
+        errors.push(`permanent list: ${String(error.message || error).slice(0, 160)}`);
+      }
     }
-    if (changed && completed === 0) await saveSettingsState(state);
+    if (await reconcileProductOrderLifecycleUnlocked(state)) changed = true;
+    if (changed) await saveSettingsState(state);
     paymentReconcileStatus = {
       state: errors.length && !(checked + depositsChecked) ? "error" : "ready",
       checked,
@@ -13880,6 +14054,40 @@ function catalogItemDisabled(item = {}) {
   return item?.active === false || String(item?.status || "").trim().toLowerCase() === "disabled";
 }
 
+function productOrderMetadataSnapshot(store = {}, product = {}, position = {}) {
+  const clean = (value, max = 240) => String(value ?? "").trim().slice(0, max);
+  const storeSnapshot = {
+    id: clean(store.id, 160),
+    name: clean(store.name)
+  };
+  const productSnapshot = {
+    id: clean(product.id, 160),
+    title: clean(product.title)
+  };
+  const positionSnapshot = {
+    id: clean(position.id, 160),
+    title: clean(position.title || product.title),
+    weight: clean(position.weight, 80),
+    country: clean(position.country, 80),
+    city: clean(position.city, 120),
+    district: clean(position.district, 160)
+  };
+  return {
+    storeSnapshot,
+    productSnapshot,
+    positionSnapshot,
+    orderMetadata: { store: storeSnapshot, product: productSnapshot, position: positionSnapshot },
+    productTitle: productSnapshot.title,
+    productSubtype: clean(product.subtype || position.subtype, 160),
+    positionTitle: positionSnapshot.title,
+    weight: positionSnapshot.weight,
+    country: positionSnapshot.country,
+    city: positionSnapshot.city,
+    district: positionSnapshot.district,
+    deliveryType: clean(position.deliveryType, 120)
+  };
+}
+
 function productPurchaseLockKeys(user = {}, storeId = "", productId = "", positionId = "", clientRequestId = "") {
   return [
     `product-position:${storeId}:${productId}:${positionId}`,
@@ -13971,12 +14179,16 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
       paymentProvider: "balance",
       createdAt: now,
       paidAt: now,
+      stockReservedAt: now,
+      reservationStatus: "consumed",
+      reservationConsumedAt: now,
       autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
       autoReleaseAt: 0,
       amountUsd: priceUsd,
       ltcAmount,
       location: [position.city, position.district].filter(Boolean).join(", "),
       productDescription: product.description || "",
+      ...productOrderMetadataSnapshot(store, product, position),
       reservedDescription,
       reservedFromPosition: fromPosition,
       reservedStock: true
@@ -14109,7 +14321,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       && sameLogin(item.login, user.login)
       && String(item.status || "").toLowerCase() === "pending_payment"
       && String(item.paymentStatus || "").toLowerCase() !== "paid"
-      && (!item.paymentExpiresAt || Date.now() < Number(item.paymentExpiresAt))
+      && productReservationIsHeld(item)
     ));
     const activePositionReservation = activePendingOrders.find((item) => (
       String(item.storeId || "") === storeId
@@ -14143,6 +14355,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       paymentProvider: "nowpayments",
       createdAt: now,
       paymentExpiresAt: now + walletDepositTtlMs,
+      reservationStatus: "active",
       autoReleaseHours: Math.max(0, Number(store.autoReleaseHours ?? state.ownerSettings?.defaultAutoReleaseHours ?? 24)),
       autoReleaseAt: 0,
       amountUsd: priceUsd,
@@ -14152,6 +14365,7 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       sellerWallet: coin.id === "ltc" ? String(store.ltcWallet || "") : String(store.wallets?.[coin.id] || ""),
       location: [position.city, position.district].filter(Boolean).join(", "),
       productDescription: product.description || "",
+      ...productOrderMetadataSnapshot(store, product, position),
       reservedDescription: "",
       reservedFromPosition: fromPosition,
       reservedStock: false
@@ -14169,7 +14383,8 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
 
     order.paymentId = payment.payment_id || payment.id || "";
     order.payAddress = payment.pay_address || payment.address || "";
-    order.payAmount = Number(payment.pay_amount || 0);
+    order.payAmountText = providerPayAmountText(payment.pay_amount);
+    order.payAmount = Number(order.payAmountText || payment.pay_amount || 0);
     order.ltcAmount = order.payAmount;
     order.paymentUrl = payment.payment_url || payment.invoice_url || "";
     order.paymentStatus = payment.payment_status || "waiting";
@@ -14188,9 +14403,9 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
 
     if (requiresIssuedDescription) {
       order.reservedDescription = sourceItems.shift() || "";
-      order.reservedStock = Boolean(order.reservedDescription);
     }
     position.stock = Math.max(0, Number(position.stock || 0) - 1);
+    order.reservedStock = true;
     order.stockReservedAt = Date.now();
     state.orders.unshift(order);
     await notifySiteUser(state, user.login, {
@@ -14216,6 +14431,44 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       },
       { waitMs: 15000, ttlSeconds: 120 }
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/orders/:id/payment-qr", async (req, res, next) => {
+  try {
+    requireDb();
+    const user = await userFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Сессия не найдена" });
+
+    assertClientRateLimit(req, "order-payment-qr", { limit: 30, windowMs: 60 * 1000, identity: user.login });
+    res.setHeader("Cache-Control", "private, no-store");
+    const state = await loadSettingsState();
+    const order = (Array.isArray(state.orders) ? state.orders : []).find((item) => (
+      item?.type === "product"
+      && String(item.id || "") === String(req.params.id || "")
+      && sameLogin(item.login, user.login)
+    ));
+    if (!order) return res.status(404).json({ error: "Заказ не найден" });
+    if (String(order.status || "").toLowerCase() !== "pending_payment"
+      || String(order.paymentStatus || "").toLowerCase() === "paid") {
+      return res.status(409).json({ error: "Заказ не ожидает оплату" });
+    }
+    const expiresAt = Number(order.paymentExpiresAt || 0);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      return res.status(410).json({ error: "Бронь на оплату истекла" });
+    }
+
+    const qr = productOrderPaymentQrPayload(order);
+    if (!qr) return res.status(409).json({ error: "Платёжные реквизиты заказа недоступны" });
+    const qrCodeDataUrl = await QRCode.toDataURL(qr.paymentUri, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 280,
+      color: { dark: "#111111ff", light: "#ffffffff" }
+    });
+    res.json({ ...qr, expiresAt, qrCodeDataUrl });
   } catch (error) {
     next(error);
   }

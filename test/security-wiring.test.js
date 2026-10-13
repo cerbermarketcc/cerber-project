@@ -487,11 +487,71 @@ test("production test routes and repeated broadcast statistics are fail-closed",
 
 test("product reservations are bounded, idempotent and fail closed after expiry", () => {
   const reservation = routeBody("post", "/api/orders/product/deposit");
+  const normalization = functionBody(server, "normalizeServerOrders");
+  const settingsRead = functionBody(server, "loadSettingsState");
   assert.match(reservation, /activePositionReservation/);
   assert.match(reservation, /activePendingOrders\.length >= 5/);
   assert.match(reservation, /order\.stockReservedAt = Date\.now\(\)/);
-  assert.match(server, /late_payment_inventory_unavailable/);
+  assert.match(reservation, /reservationStatus: "active"/);
+  assert.match(normalization, /providerCheckedAt >= expiresAt/);
+  assert.match(normalization, /providerCheckFailedAt < providerCheckedAt/);
+  assert.match(normalization, /productOrderPaymentWasObserved\(order\)/);
+  assert.match(server, /late_payment_after_reservation_release/);
   assert.match(server, /Paid order requires manual review because its inventory reservation expired/);
+  assert.doesNotMatch(settingsRead, /normalizeServerOrders|saveSettingsState/);
+  assert.match(server, /reconcilePendingNowpaymentsOrders[\s\S]{0,250}withOperationLocks\([\s\S]{0,80}"finance:state"/);
+});
+
+test("an expired product reservation restores its exact stock only once", async () => {
+  const reservationStatus = new Function(
+    "productOrderPaymentConfirmed",
+    `${functionBody(server, "productReservationStatus")}
+${functionBody(server, "productReservationIsHeld")}
+${functionBody(server, "productReservationWasActuallyTaken")}
+return { productReservationStatus, productReservationIsHeld, productReservationWasActuallyTaken };`
+  )(() => false);
+  const store = {
+    id: "store-1",
+    products: [{ id: "product-1", deliveryItems: [], positions: [{ id: "position-1", stock: 0, deliveryItems: [] }] }],
+    productOrders: []
+  };
+  let saves = 0;
+  const restore = new Function(
+    "lifecycleStoreForOrder",
+    "productReservationIsHeld",
+    "productReservationWasActuallyTaken",
+    "productReservationStatus",
+    "upsertProductOrderIntoStore",
+    "saveStoreRow",
+    `${functionBody(server, "restoreExpiredProductReservation").replace(/^function /, "async function ")}
+return restoreExpiredProductReservation;`
+  )(
+    async () => store,
+    reservationStatus.productReservationIsHeld,
+    reservationStatus.productReservationWasActuallyTaken,
+    reservationStatus.productReservationStatus,
+    (target, order) => { target.productOrders = [{ ...order }]; },
+    async () => { saves += 1; }
+  );
+  const state = { ownerStores: [store] };
+  const order = {
+    id: "order-1",
+    storeId: store.id,
+    productId: "product-1",
+    positionId: "position-1",
+    reservationStatus: "active",
+    stockReservedAt: Date.now(),
+    reservedStock: true,
+    reservedFromPosition: true,
+    reservedDescription: "строка выдачи"
+  };
+  assert.equal(await restore(state, order), true);
+  assert.equal(store.products[0].positions[0].stock, 1);
+  assert.deepEqual(store.products[0].positions[0].deliveryItems, ["строка выдачи"]);
+  assert.equal(order.reservationStatus, "released");
+  assert.equal(await restore(state, order), false);
+  assert.equal(store.products[0].positions[0].stock, 1);
+  assert.equal(saves, 1);
 });
 
 test("the Tor gateway must authenticate every proxied request before receiving onion semantics", () => {
@@ -584,6 +644,7 @@ test("expensive user actions have endpoint-specific anti-abuse limits", () => {
     "private-message",
     "product-balance-purchase",
     "product-payment-reservation",
+    "order-payment-qr",
     "payment-invoice-create",
     "wallet-deposit-create",
     "wallet-deposit-qr",
@@ -607,6 +668,58 @@ test("personal LTC QR codes are generated only for the authenticated address own
   assert.doesNotMatch(qr, /litecoin:\$\{address\}\?amount=/);
   assert.match(qr, /QRCode\.toDataURL\(paymentUri/);
   assert.match(qr, /setHeader\("Cache-Control", "private, no-store"\)/);
+});
+
+test("order payment QR codes use authenticated server-owned invoice fields", () => {
+  const qr = routeBody("get", "/api/orders/:id/payment-qr");
+  const reservation = routeBody("post", "/api/orders/product/deposit");
+  const publicProjection = functionBody(server, "publicOrderForUser");
+  assert.match(qr, /const user = await userFromRequest\(req\)/);
+  assert.match(qr, /if \(!user\) return res\.status\(401\)/);
+  assert.match(qr, /sameLogin\(item\.login, user\.login\)/);
+  assert.match(qr, /pending_payment/);
+  assert.match(qr, /expiresAt <= Date\.now\(\)/);
+  assert.match(qr, /productOrderPaymentQrPayload\(order\)/);
+  assert.match(qr, /QRCode\.toDataURL\(qr\.paymentUri/);
+  assert.match(qr, /setHeader\("Cache-Control", "private, no-store"\)/);
+  assert.doesNotMatch(qr, /req\.(?:body|query)\.(?:address|amount|payAddress|payAmount)/);
+  assert.match(reservation, /order\.payAmountText = providerPayAmountText\(payment\.pay_amount\)/);
+  assert.match(publicProjection, /item\.payAmountText = providerPayAmountText\(item\.payAmountText\)/);
+
+  const amountText = new Function(`${functionBody(server, "providerPayAmountText")}\nreturn providerPayAmountText;`)();
+  assert.equal(amountText("0.01000000"), "0.01000000");
+  assert.equal(amountText(1e-7), "0.0000001");
+  assert.equal(amountText("0"), "");
+  assert.equal(amountText("1e999"), "");
+
+  const payload = new Function(
+    "walletCoins",
+    "isValidLitecoinAddress",
+    `${functionBody(server, "providerPayAmountText")}
+${functionBody(server, "paymentQrAddressIsValid")}
+${functionBody(server, "productOrderPaymentQrPayload")}
+return productOrderPaymentQrPayload;`
+  )(
+    [
+      { id: "ltc", payCurrency: "ltc" },
+      { id: "eth", payCurrency: "eth" },
+      { id: "usdt_trc20", payCurrency: "usdttrc20" }
+    ],
+    (address) => /^ltc1[a-z0-9]+$/i.test(address)
+  );
+  const ltcAddress = `ltc1q${"a".repeat(38)}`;
+  assert.deepEqual(payload({ payCurrency: "ltc", payAddress: ltcAddress, payAmountText: "0.01000000" }), {
+    address: ltcAddress,
+    coinId: "ltc",
+    payCurrency: "ltc",
+    payAmountText: "0.01000000",
+    amountIncluded: true,
+    paymentUri: `litecoin:${ltcAddress}?amount=0.01000000`
+  });
+  const ethAddress = `0x${"a".repeat(40)}`;
+  assert.equal(payload({ coinId: "eth", walletDepositAddress: ethAddress, payAmount: "0.125" }).paymentUri, ethAddress);
+  assert.equal(payload({ coinId: "eth", walletDepositAddress: "javascript:alert(1)", payAmount: "1" }), null);
+  assert.equal(payload({ coinId: "unknown", walletDepositAddress: ethAddress, payAmount: "1" }), null);
 });
 
 test("referral codes are server-owned and cannot be replaced by the client", () => {
