@@ -838,3 +838,7 @@ test("one-time clean launch reset removes customer data and preserves only the s
 test("root POST navigation recovers from a Cloudflare challenge replay", () => {
   assert.match(server, /app\.post\("\/", \(_req, res\) => \{[\s\S]{0,180}res\.redirect\(303, "\/"\);/);
 });
+
+test("admin page POST navigation recovers as a safe GET", () => {
+  assert.match(server, /app\.post\(\["\/market-admin", "\/market-admin\.html"\], \(_req, res\) => \{[\s\S]{0,300}res\.redirect\(303, "\/market-admin\.html"\);/);
+});

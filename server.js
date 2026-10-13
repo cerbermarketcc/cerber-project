@@ -48,7 +48,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "cerber-render-onion-2026-10-13-v200";
+const cerberBuildVersion = "cerber-render-onion-2026-10-13-v201";
 const officialOnionHost = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
 const onionGatewayPublicKey = crypto.createPublicKey(`-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAUrSjBVbXjhw2XBf8O5WMru6cKl/1jl+q4VeEuaabYng=
@@ -17780,6 +17780,15 @@ app.get(["/text-admin", "/text-admin.html"], (_req, res) => {
 app.get(["/market-admin", "/market-admin.html"], (_req, res) => {
   res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   res.sendFile(path.join(__dirname, "market-admin.html"));
+});
+
+// A managed browser challenge or page reload can replay this navigation as
+// POST. Recover with a 303 so the browser performs a fresh GET without
+// treating the admin page itself as a form endpoint.
+app.post(["/market-admin", "/market-admin.html"], (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  res.redirect(303, "/market-admin.html");
 });
 
 // A Cloudflare managed challenge can occasionally leave mobile browsers
