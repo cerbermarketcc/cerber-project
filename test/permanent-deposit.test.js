@@ -64,6 +64,8 @@ function harness() {
     pay_currency: "ltc",
     payment_status: "finished",
     actually_paid: actuallyPaid,
+    outcome_currency: "ltc",
+    outcome_amount: actuallyPaid,
     pay_amount: 10,
     ...extra
   });
@@ -84,6 +86,19 @@ test("different confirmed payment IDs credit their actual amounts to one permane
   assert.deepEqual(state.walletTransactions.map((item) => item.amountLtc), [0.025, 0.01]);
   assert.equal(state.walletDeposits.find((item) => item.paymentId === "extra-2").amountUsd, 2.5);
   assert.equal(notices.length, 2);
+});
+
+test("a final LTC outcome is credited instead of the customer's pre-fee transfer", async () => {
+  const { context, state, payment } = harness();
+  const result = await context.completePermanentWalletPayment(state, payment("settled", 0.02, {
+    outcome_currency: "ltc",
+    outcome_amount: 0.019
+  }));
+
+  assert.equal(result.credited, true);
+  assert.equal(result.deposit.amountLtc, 0.019);
+  assert.equal(state.ltcBalances.alice, 0.019);
+  assert.equal(state.walletTransactions[0].amountLtc, 0.019);
 });
 
 test("replaying a payment ID does not create a second ledger credit or notification", async () => {
@@ -125,8 +140,8 @@ test("pending payments and missing or zero actual paid amount never credit a bal
 
   assert.equal(pending.credited, false);
   assert.equal(pending.reason, "status_confirmed");
-  assert.equal(missing.reason, "paid_amount_missing");
-  assert.equal(zero.reason, "paid_amount_missing");
+  assert.equal(missing.reason, "ltc_outcome_missing");
+  assert.equal(zero.reason, "ltc_outcome_missing");
   assert.equal(state.walletTransactions.length, 0);
   assert.equal(state.ltcBalances.alice, 0);
 });

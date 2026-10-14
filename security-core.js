@@ -382,6 +382,7 @@ export function trustedWalletCreditLtc(deposit = {}, providerPayload = {}) {
   const outcomeCurrency = String(providerPayload.outcome_currency || providerPayload.outcomeCurrency || "").trim().toLowerCase();
   const outcomeAmount = finitePositive(providerPayload.outcome_amount || providerPayload.outcomeAmount);
   if (outcomeCurrency === "ltc" && outcomeAmount) return outcomeAmount;
+  if (Number(deposit.settlementPolicyVersion || 0) >= 2) return 0;
 
   const payCurrency = String(deposit.payCurrency || deposit.coinId || providerPayload.pay_currency || "").trim().toLowerCase();
   const actuallyPaid = finitePositive(providerPayload.actually_paid || providerPayload.actuallyPaid);

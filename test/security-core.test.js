@@ -282,6 +282,8 @@ test("wallet credit ignores client LTC estimates and uses only trusted provider 
   };
   assert.equal(trustedWalletCreditLtc(deposit, { actually_paid: 100, price_amount: 100 }), 2);
   assert.equal(trustedWalletCreditLtc(deposit, { outcome_currency: "ltc", outcome_amount: 1.75 }), 1.75);
+  assert.equal(trustedWalletCreditLtc({ ...deposit, settlementPolicyVersion: 2 }, { actually_paid: 100, price_amount: 100 }), 0);
+  assert.equal(trustedWalletCreditLtc({ ...deposit, settlementPolicyVersion: 2 }, { outcome_currency: "ltc", outcome_amount: 1.75 }), 1.75);
   assert.equal(trustedWalletCreditLtc({ ...deposit, ltcUsdRateAtCreation: 0 }, { actually_paid: 100 }), 0);
   assert.equal(trustedWalletCreditLtc({ payCurrency: "ltc" }, { actually_paid: 0.25 }), 0.25);
 });

@@ -310,6 +310,8 @@ test("customer USD balance is ledger-based and independent from the live LTC rat
   assert.doesNotMatch(fixedBalance, /litecoinToUsd|loadLitecoinUsdRate/);
   assert.match(balancePurchase, /stateUserUsdBalance\(state, user\.login, user\.login_key\)/);
   assert.match(balancePurchase, /balanceUsd \+ 0\.00000001 < priceUsd/);
+  assert.match(balancePurchase, /balance < ltcAmount/);
+  assert.doesNotMatch(balancePurchase, /Math\.max\(0, balance - ltcAmount\)/);
   assert.match(balancePurchase, /amountUsd: -priceUsd/);
   assert.match(appClient, /const usdBalance = userBalance\(\)/);
   assert.match(appClient, /const usd = userBalance\(\)/);
@@ -450,7 +452,7 @@ test("SOL and USDT Solana payment models remain available", () => {
     assert.match(source, /id: "sol", payCurrency: "sol"/);
   }
   assert.match(indexHtml, /styles\.css\?v=121/);
-  assert.match(indexHtml, /app\.js\?v=189/);
+  assert.match(indexHtml, /app\.js\?v=190/);
 });
 
 test("public bootstrap keeps assets light and avoids duplicate state requests", () => {

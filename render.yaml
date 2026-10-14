@@ -57,6 +57,12 @@ services:
         sync: false
       - key: NOWPAYMENTS_PAYOUTS_ENABLED
         sync: false
+      - key: NOWPAYMENTS_PAYOUT_FEE_PAYER
+        value: "sender"
+      - key: NOWPAYMENTS_PAYOUT_FEE_RESERVE_MULTIPLIER
+        value: "2"
+      - key: NOWPAYMENTS_PAYOUT_FEE_RESERVE_MIN_LTC
+        value: "0.0001"
       - key: INCIDENT_PAYOUT_UNLOCK
         sync: false
       - key: NOWPAYMENTS_EMAIL

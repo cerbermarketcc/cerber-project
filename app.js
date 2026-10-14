@@ -5464,6 +5464,65 @@ function productOrderPayAmountText(order = {}, linkedDeposit = null, fallback = 
   return Number.isFinite(numeric) && numeric > 0 ? numeric.toFixed(8) : "0";
 }
 
+function withdrawalLtcBreakdown(withdrawal = {}) {
+  const firstFinite = (keys, fallback = 0) => {
+    for (const key of keys) {
+      const value = Number(withdrawal?.[key]);
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+    const value = Number(fallback);
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  };
+  const hasDebit = ["grossDebitLtc", "requestedGrossLtc"].some((key) => (
+    withdrawal?.[key] !== undefined && Number.isFinite(Number(withdrawal[key]))
+  ));
+  const hasFee = withdrawal?.estimatedNetworkFeeLtc !== undefined
+    && Number.isFinite(Number(withdrawal.estimatedNetworkFeeLtc));
+  const hasRecipient = ["recipientAmountLtc", "expectedReceivedLtc"].some((key) => (
+    withdrawal?.[key] !== undefined && Number.isFinite(Number(withdrawal[key]))
+  ));
+  const amountLtc = firstFinite(["amountLtc"]);
+  const grossDebitLtc = firstFinite(["grossDebitLtc", "requestedGrossLtc"], amountLtc);
+  const estimatedNetworkFeeLtc = firstFinite(["estimatedNetworkFeeLtc"]);
+  const actualNetworkFeeLtc = firstFinite(["actualNetworkFeeLtc"], estimatedNetworkFeeLtc);
+  const reservedNetworkFeeLtc = firstFinite(["reservedNetworkFeeLtc"], estimatedNetworkFeeLtc);
+  const refundedFeeReserveLtc = firstFinite(["refundedFeeReserveLtc"]);
+  const payoutFeeDebtLtc = firstFinite(["payoutFeeDebtLtc", "feeReserveExceededLtc"]);
+  const recipientAmountLtc = firstFinite(
+    ["expectedReceivedLtc", "recipientAmountLtc"],
+    hasFee ? Math.max(0, grossDebitLtc - estimatedNetworkFeeLtc) : amountLtc
+  );
+  return {
+    amountLtc,
+    grossDebitLtc,
+    estimatedNetworkFeeLtc,
+    actualNetworkFeeLtc,
+    reservedNetworkFeeLtc,
+    refundedFeeReserveLtc,
+    payoutFeeDebtLtc,
+    recipientAmountLtc,
+    hasDetails: hasDebit || hasFee || hasRecipient
+  };
+}
+
+function shopWithdrawalAmountView(withdrawal = {}) {
+  const values = withdrawalLtcBreakdown(withdrawal);
+  if (!values.hasDetails) {
+    return `${values.amountLtc.toFixed(8)} LTC<br><small>${finiteMoney(withdrawal.amountUsd).toFixed(2)} $ на момент заявки</small>`;
+  }
+  const actualFeeKnown = withdrawal?.actualNetworkFeeLtc !== undefined && Number.isFinite(Number(withdrawal.actualNetworkFeeLtc));
+  const reserve = values.reservedNetworkFeeLtc > values.estimatedNetworkFeeLtc
+    ? `<br><small>Резерв комиссии: ${values.reservedNetworkFeeLtc.toFixed(8)} LTC; остаток возвращается после подтверждения</small>`
+    : "";
+  const refund = values.refundedFeeReserveLtc > 0
+    ? `<br><small>Возвращено из резерва: ${values.refundedFeeReserveLtc.toFixed(8)} LTC</small>`
+    : "";
+  const debt = values.payoutFeeDebtLtc > 0
+    ? `<br><small>Доплата комиссии из доли получателя: ${values.payoutFeeDebtLtc.toFixed(8)} LTC</small>`
+    : "";
+  return `С баланса: ${values.grossDebitLtc.toFixed(8)} LTC<br><small>${actualFeeKnown ? "Фактическая" : "Расчётная"} комиссия сети: ${actualFeeKnown ? "" : "≈ "}${values.actualNetworkFeeLtc.toFixed(8)} LTC</small>${reserve}${refund}${debt}<br><small>Получателю: ≈ ${values.recipientAmountLtc.toFixed(8)} LTC</small>`;
+}
+
 async function loadProductOrderPaymentQr(orderId) {
   const image = document.querySelector("[data-order-payment-qr]");
   const status = document.querySelector("[data-order-payment-qr-status]");
@@ -5503,7 +5562,7 @@ function showProductOrder(orderId) {
     <h2>${esc(order.product)}</h2>
     <p>${esc(order.storeName || "")}</p>
     <p>${esc(order.location || "")}</p>
-    <p>Цена: ${Number(order.amountUsd || 0).toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</p>
+    <p>Цена товара: ${Number(order.amountUsd || 0).toFixed(2)} $</p>
     <p>Статус: ${productOrderStatus(order)}</p>
     ${productOrderIsPaid(order) ? `<p><strong>Успешно оплачено.</strong></p>${paidProductDeliveryView(order)}` : ""}
     ${["completed", "closed"].includes(order.status) && !orderHasReview(order) ? `
@@ -5526,10 +5585,12 @@ function showProductOrder(orderId) {
         <h3>Оплата ${esc(walletCoinLabel(orderCoin.id))}</h3>
         <p>Бронь активна до ${new Date(Number(order.paymentExpiresAt || 0)).toLocaleString()}</p>
         <p>Истекает через ${Math.max(0, Math.ceil((Number(order.paymentExpiresAt || 0) - Date.now()) / 60000))} минут</p>
-        <p><span>Сумма:</span><strong>${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+        <p><span>Точная сумма к оплате:</span><strong>${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+        <p class="desc">Отправьте именно указанную сумму. До завершения платежа сумма может обновляться вместе с курсом.</p>
         ${order.providerPaymentStatus ? `<p><span>Статус платежа:</span><strong>${esc(productOrderStatus(order))}</strong></p>` : ""}
         ${orderDepositAddress ? `
-          <p><span>Счёт заказа:</span><strong>${orderDepositUsd.toFixed(2)} $ · ${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
+          <p><span>Цена товара:</span><strong>${orderDepositUsd.toFixed(2)} $</strong></p>
+          <p><span>К оплате:</span><strong>${esc(orderDepositPayAmountText)} ${esc(walletCoinLabel(orderCoin.id))}</strong></p>
           <p><span>Куда оплатить:</span><strong class="mono-line">${esc(orderDepositAddress)}</strong></p>
           ${API_ENABLED ? `
             <div class="wallet-deposit-qr order-payment-qr">
@@ -6941,8 +7002,10 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     showToast("Цена товара не задана");
     return;
   }
-  const ltcAmount = usdToLtc(priceUsd);
-  const enough = userBalance() >= priceUsd && priceUsd > 0;
+  const requiredLtc = Number(usdToLtc(priceUsd).toFixed(8));
+  const enough = userBalance() >= priceUsd
+    && requiredLtc > 0
+    && userLtcBalance() >= requiredLtc;
   const allowedCoins = storeEnabledCoins(store);
   const defaultCoin = allowedCoins[0] || walletCoinById("ltc");
   showModal(`
@@ -6950,7 +7013,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
     <article class="checkout-mini">
       <strong>${esc(product.title)}</strong>
       <span>${esc(store.name)} · ${esc(locationLabel(position))}</span>
-      <b>${priceUsd.toFixed(2)} $ · ${ltcAmount.toFixed(6)} LTC</b>
+      <b>Цена товара: ${priceUsd.toFixed(2)} $</b>
     </article>
     ${allowedCoins.length > 1 ? `
       <label class="field">Монета и сеть
@@ -6964,6 +7027,7 @@ function openProductCheckoutModal(storeId, productId, positionId) {
       <button class="primary" data-checkout-deposit>Создать криптосчёт</button>
     </div>
     ${enough ? `<p class="desc">На балансе достаточно средств. Можно оплатить сразу или создать криптосчёт.</p>` : `<p class="notice">Криптосчёт действует 40 минут. После его создания выбранный товар сразу резервируется за вами.</p>`}
+    <p class="desc">После создания криптосчёта появится текущая точная сумма в LTC. Проверяйте её перед отправкой: она может обновляться вместе с курсом.</p>
     <button class="ghost-button" data-close-modal>${tr("close")}</button>
   `);
   document.querySelector("[data-checkout-balance]")?.addEventListener("click", async (event) => {
@@ -12687,7 +12751,7 @@ function shopFinancesTab(store, finance = {}, financeRows) {
   </section>
   <section class="seller-dashboard-card seller-wide-card">
     <div class="seller-card-head"><h3>История выводов</h3><span>${withdrawals.length}</span></div>
-    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small>${item.payoutFailureMessage ? `<br><small>${esc(item.payoutFailureMessage)}</small>` : ""}</span><strong>${finiteMoney(item.amountLtc).toFixed(8)} LTC<br><small>${finiteMoney(item.amountUsd).toFixed(2)} $ на момент заявки</small></strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
+    ${withdrawals.length ? withdrawals.slice(0, 30).map((item) => `<div class="seller-source"><span>${shopFinanceDate(item.createdAt)} · ${esc(walletWithdrawalStatusText(item.status))}<br><small>${esc(item.address || "")}</small>${item.payoutFailureMessage ? `<br><small>${esc(item.payoutFailureMessage)}</small>` : ""}</span><strong>${shopWithdrawalAmountView(item)}</strong></div>`).join("") : `<p>Выводов пока нет.</p>`}
   </section>`;
 }
 
@@ -13686,6 +13750,7 @@ function openShopPayoutModal(event) {
   showModal(`
     <h2>Вывести средства</h2>
     <p class="desc">Доступно: <strong>${availableLtc.toFixed(8)} LTC</strong> · сейчас примерно <strong>${ltcToUsd(availableLtc).toFixed(2)} $</strong></p>
+    <p class="desc">Комиссия сети рассчитывается перед отправкой. После создания заявки в истории будут показаны сумма списания и ожидаемая сумма получения.</p>
     <form class="form" data-shop-payout-form>
       <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.00000001" step="0.00000001" max="${esc(availableLtc.toFixed(8))}" value="${esc(availableLtc.toFixed(8))}" required></label>
       <button class="ghost-button" type="button" data-shop-payout-all="${esc(availableLtc.toFixed(8))}">Всё</button>

@@ -257,6 +257,65 @@ function fmtLtc(value) {
   return `${Number(value || 0).toFixed(8)} LTC`;
 }
 
+function adminWithdrawalLtcBreakdown(withdrawal = {}) {
+  const firstFinite = (keys, fallback = 0) => {
+    for (const key of keys) {
+      const value = Number(withdrawal?.[key]);
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+    const value = Number(fallback);
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  };
+  const hasDebit = ["grossDebitLtc", "requestedGrossLtc"].some((key) => (
+    withdrawal?.[key] !== undefined && Number.isFinite(Number(withdrawal[key]))
+  ));
+  const hasFee = withdrawal?.estimatedNetworkFeeLtc !== undefined
+    && Number.isFinite(Number(withdrawal.estimatedNetworkFeeLtc));
+  const hasRecipient = ["recipientAmountLtc", "expectedReceivedLtc"].some((key) => (
+    withdrawal?.[key] !== undefined && Number.isFinite(Number(withdrawal[key]))
+  ));
+  const amountLtc = firstFinite(["amountLtc"]);
+  const grossDebitLtc = firstFinite(["grossDebitLtc", "requestedGrossLtc"], amountLtc);
+  const estimatedNetworkFeeLtc = firstFinite(["estimatedNetworkFeeLtc"]);
+  const actualNetworkFeeLtc = firstFinite(["actualNetworkFeeLtc"], estimatedNetworkFeeLtc);
+  const reservedNetworkFeeLtc = firstFinite(["reservedNetworkFeeLtc"], estimatedNetworkFeeLtc);
+  const refundedFeeReserveLtc = firstFinite(["refundedFeeReserveLtc"]);
+  const payoutFeeDebtLtc = firstFinite(["payoutFeeDebtLtc", "feeReserveExceededLtc"]);
+  const recipientAmountLtc = firstFinite(
+    ["expectedReceivedLtc", "recipientAmountLtc"],
+    hasFee ? Math.max(0, grossDebitLtc - estimatedNetworkFeeLtc) : amountLtc
+  );
+  return {
+    amountLtc,
+    grossDebitLtc,
+    estimatedNetworkFeeLtc,
+    actualNetworkFeeLtc,
+    reservedNetworkFeeLtc,
+    refundedFeeReserveLtc,
+    payoutFeeDebtLtc,
+    recipientAmountLtc,
+    hasDetails: hasDebit || hasFee || hasRecipient
+  };
+}
+
+function adminWithdrawalAmountCell(withdrawal = {}) {
+  const values = adminWithdrawalLtcBreakdown(withdrawal);
+  if (!values.hasDetails) {
+    return `${values.amountLtc.toFixed(6)} LTC<br><span class="muted">${fmtMoney(withdrawal.amountUsd || 0)}</span>`;
+  }
+  const actualFeeKnown = withdrawal?.actualNetworkFeeLtc !== undefined && Number.isFinite(Number(withdrawal.actualNetworkFeeLtc));
+  const reserve = values.reservedNetworkFeeLtc > values.estimatedNetworkFeeLtc
+    ? `<br>Резерв комиссии: ${fmtLtc(values.reservedNetworkFeeLtc)}; остаток возвращается после подтверждения`
+    : "";
+  const refund = values.refundedFeeReserveLtc > 0
+    ? `<br>Возвращено из резерва: ${fmtLtc(values.refundedFeeReserveLtc)}`
+    : "";
+  const debt = values.payoutFeeDebtLtc > 0
+    ? `<br>Доплата комиссии из доли получателя: ${fmtLtc(values.payoutFeeDebtLtc)}`
+    : "";
+  return `С баланса: ${fmtLtc(values.grossDebitLtc)}<br><span class="muted">${actualFeeKnown ? "Фактическая" : "Расчётная"} комиссия сети: ${actualFeeKnown ? "" : "≈ "}${fmtLtc(values.actualNetworkFeeLtc)}${reserve}${refund}${debt}<br>Получателю: ≈ ${fmtLtc(values.recipientAmountLtc)}</span>`;
+}
+
 function cryptoValue(usd, ltc) {
   return `${fmtMoney(usd)} · ${fmtLtc(ltc)}`;
 }
@@ -1032,6 +1091,7 @@ function renderDashboard() {
     <article class="split-card">
       <h2>Вывести средства владельца</h2>
       <p class="muted">Доступно после завершения сделок: <strong>${fmtLtc(s.ownerWithdrawableLtc)}</strong> · сейчас примерно <strong>${fmtMoney(s.ownerWithdrawableUsd || 0)}</strong>. Комиссия по активным оплаченным заказам пока не доступна к выводу. Курс: 1 LTC = ${fmtMoney(s.ltcUsdRate || 0)}.</p>
+      <p class="muted">Комиссия сети рассчитывается перед отправкой. В истории выводов отображаются сумма списания и ожидаемая сумма получения.</p>
       <form data-owner-withdraw-form>
         <div class="row">
           <label class="field">Сумма LTC<input name="amountLtc" type="number" min="0.00000001" step="0.00000001" max="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}" value="${esc(Number(s.ownerWithdrawableLtc || 0).toFixed(8))}"></label>
@@ -1691,7 +1751,7 @@ function renderFinance() {
   return `<section class="grid">${bucketCard("Successful deposits", buckets.successful)}${bucketCard("Pending", buckets.pending)}${bucketCard("Cancelled", buckets.cancelled)}${bucketCard("Failed", buckets.failed)}${statCard("Referral rewards", cryptoValue(referralTotals.rewardsUsd || 0, referralTotals.rewardsLtc), `${Number(referralTotals.count || 0)} refs`)}${statCard("From purchases", cryptoValue(referralTotals.productRewardsUsd || 0, referralTotals.productRewardsLtc), "product orders")}</section>
   <article class="table-card"><h3>Referral rewards</h3><table><thead><tr><th>ID</th><th>Inviter</th><th>Referral</th><th>Base</th><th>Reward</th><th>Source</th><th>Date</th></tr></thead><tbody>${referralPayments.slice(0, 160).map((p) => `<tr><td>${esc(p.id)}</td><td>${esc(p.referrerLogin || "")}</td><td>${esc(p.referralLogin || "")}</td><td>${fmtMoney(p.amount || p.amountUsd || 0)}</td><td>${fmtMoney(p.rewardCurrentUsd || p.reward || 0)}<br><span class="muted">${fmtLtc(p.rewardLtc)}</span></td><td>${esc(p.sourceId || "")}</td><td>${fmtDate(p.createdAt || p.date)}</td></tr>`).join("")}</tbody></table></article>
   <article class="table-card"><h3>Deposits</h3><table><thead><tr><th>ID</th><th>Login</th><th>Amount</th><th>Coin</th><th>Status</th><th>Address</th><th>Date</th></tr></thead><tbody>${deposits.slice(0, 160).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.login)}</td><td>${fmtMoney(d.amountUsd || d.priceAmount || 0)}</td><td>${esc(d.payCurrency || d.coinId || "ltc")}</td><td><span class="status ${statusClass(d.status)}">${esc(d.status)}</span></td><td>${esc(d.payAddress || "")}</td><td>${fmtDate(d.createdAt)}</td></tr>`).join("")}</tbody></table></article>
-  <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${Number(w.amountLtc || 0).toFixed(6)} LTC<br><span class="muted">${fmtMoney(w.amountUsd || 0)}</span></td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span>${w.providerStatus && w.providerStatus !== w.status ? `<br><span class="muted">Статус выплаты: ${esc(w.providerStatus)}</span>` : ""}${w.payoutFailureMessage || w.providerStatusCheckError ? `<br><span class="muted">${esc(w.payoutFailureMessage || w.providerStatusCheckError)}</span>` : ""}</td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
+  <article class="table-card"><h3>Withdrawals</h3><table><thead><tr><th>ID</th><th>Store</th><th>Login</th><th>Amount</th><th>Address</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>${withdrawals.slice(0, 160).map((w) => `<tr><td>${esc(w.id)}</td><td>${esc(w.scope === "owner" ? "Site owner" : (w.storeName || w.storeId || "-"))}</td><td>${esc(w.login)}</td><td>${adminWithdrawalAmountCell(w)}</td><td>${esc(w.address || "")}</td><td><span class="status ${statusClass(w.status)}">${esc(w.status)}</span>${w.providerStatus && w.providerStatus !== w.status ? `<br><span class="muted">Статус выплаты: ${esc(w.providerStatus)}</span>` : ""}${w.payoutFailureMessage || w.providerStatusCheckError ? `<br><span class="muted">${esc(w.payoutFailureMessage || w.providerStatusCheckError)}</span>` : ""}</td><td>${fmtDate(w.createdAt)}</td><td>${withdrawalActions(w)}</td></tr>`).join("")}</tbody></table></article>`;
 }
 
 function renderSettings() {

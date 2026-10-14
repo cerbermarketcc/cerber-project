@@ -48,7 +48,7 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 const port = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
-const cerberBuildVersion = "cerber-render-onion-2026-10-13-v201";
+const cerberBuildVersion = "cerber-render-onion-2026-10-13-v202";
 const officialOnionHost = "cerberw35yusilaylptolh7e7sziwveoyaynhmkico4o6iql3gfm4tad.onion";
 const onionGatewayPublicKey = crypto.createPublicKey(`-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAUrSjBVbXjhw2XBf8O5WMru6cKl/1jl+q4VeEuaabYng=
@@ -90,6 +90,20 @@ const nowpaymentsPermanentDepositsEnabled = String(process.env.NOWPAYMENTS_PERMA
 const incidentPayoutUnlockVersion = "reviewed-2026-08-12-v1";
 const nowpaymentsPayoutsEnabled = String(process.env.NOWPAYMENTS_PAYOUTS_ENABLED || "").toLowerCase() === "true"
   && secretValuesMatch(process.env.INCIDENT_PAYOUT_UNLOCK, incidentPayoutUnlockVersion);
+// Payout network fees can be charged to the custody balance. Treat that as the
+// safe default so one recipient can never consume another recipient's share.
+// Use "receiver" only when the matching merchant dashboard setting is enabled.
+const nowpaymentsPayoutFeePayer = String(process.env.NOWPAYMENTS_PAYOUT_FEE_PAYER || "sender").toLowerCase() === "receiver"
+  ? "receiver"
+  : "sender";
+const configuredPayoutFeeReserveMultiplier = Number(process.env.NOWPAYMENTS_PAYOUT_FEE_RESERVE_MULTIPLIER || 2);
+const nowpaymentsPayoutFeeReserveMultiplier = Math.max(1, Math.min(10,
+  Number.isFinite(configuredPayoutFeeReserveMultiplier) ? configuredPayoutFeeReserveMultiplier : 2
+));
+const configuredPayoutFeeReserveMinimumLtc = Number(process.env.NOWPAYMENTS_PAYOUT_FEE_RESERVE_MIN_LTC || 0.0001);
+const nowpaymentsPayoutFeeReserveMinimumLtc = Math.max(0, Math.min(0.01,
+  Number.isFinite(configuredPayoutFeeReserveMinimumLtc) ? configuredPayoutFeeReserveMinimumLtc : 0.0001
+));
 const nowpaymentsEmail = process.env.NOWPAYMENTS_EMAIL || "";
 const nowpaymentsPassword = process.env.NOWPAYMENTS_PASSWORD || "";
 const permanentDepositsReady = Boolean(nowpaymentsPermanentDepositsEnabled && nowpaymentsApiKey
@@ -6166,6 +6180,9 @@ app.post("/api/store-admin/withdrawals", async (req, res, next) => {
       storeName: store.name || store.id,
       login: store.ownerLogin || store.id,
       amountUsd,
+      payoutFeePolicyVersion: 3,
+      requestedGrossLtc: roundLtc(amountLtc),
+      grossDebitLtc: roundLtc(amountLtc),
       amountLtc: normalizeNowpaymentsPayoutAmount(amountLtc),
       ltcUsdRateAtRequest: finance.rate,
       coinId: "ltc",
@@ -8572,6 +8589,9 @@ app.post("/api/admin/withdrawals/owner", async (req, res, next) => {
       scope: "owner",
       login: admin.login,
       amountUsd,
+      payoutFeePolicyVersion: 3,
+      requestedGrossLtc: roundLtc(amountLtc),
+      grossDebitLtc: roundLtc(amountLtc),
       amountLtc: normalizeNowpaymentsPayoutAmount(amountLtc),
       ltcUsdRateAtRequest: currentRate,
       coinId: "ltc",
@@ -9013,6 +9033,42 @@ function nowpaymentsPaymentIsPaid(status = "") {
   return ["finished", "paid"].includes(String(status || "").toLowerCase());
 }
 
+function productOrderUsesFinalProviderSettlement(order = {}) {
+  return order?.type === "product"
+    && String(order.paymentProvider || "").toLowerCase() === "nowpayments"
+    && (Number(order.feePolicyVersion || 0) >= 2 || Number(order.settlementPolicyVersion || 0) >= 2);
+}
+
+function productOrderFinalProviderOutcome(order = {}, providerPayload = null) {
+  const payload = providerPayload && typeof providerPayload === "object" ? providerPayload : {};
+  const status = String(
+    payload.payment_status
+    || payload.status
+    || order.providerPaymentStatus
+    || order.paymentProviderPayload?.payment_status
+    || ""
+  ).toLowerCase();
+  const outcomeCurrency = String(
+    payload.outcome_currency
+    || payload.outcomeCurrency
+    || order.providerOutcomeCurrency
+    || order.paymentProviderPayload?.outcome_currency
+    || ""
+  ).toLowerCase();
+  const outcomeAmount = Number(
+    payload.outcome_amount
+    ?? payload.outcomeAmount
+    ?? order.providerOutcomeAmount
+    ?? order.paymentProviderPayload?.outcome_amount
+    ?? 0
+  );
+  const ready = status === "finished"
+    && outcomeCurrency === "ltc"
+    && Number.isFinite(outcomeAmount)
+    && outcomeAmount > 0;
+  return { ready, status, outcomeCurrency, outcomeAmount: ready ? outcomeAmount : 0 };
+}
+
 function nowpaymentsPaymentWasObserved(payload = {}) {
   const status = String(payload.payment_status || payload.status || payload.providerPaymentStatus || "").toLowerCase();
   return [
@@ -9209,7 +9265,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
   }
   const validation = validateProviderPayout(record, {
     currency: withdrawal.payCurrency || withdrawal.coinId || "ltc",
-    amount: withdrawal.amountLtc,
+    amount: withdrawal.recipientAmountLtc || withdrawal.amountLtc,
     address: withdrawal.address
   });
   withdrawal.provider = "nowpayments";
@@ -9218,6 +9274,8 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
   withdrawal.providerStatusId = String(statusResult.id || record.id || record.payout_id || "");
   withdrawal.providerStatusCheckedAt = Date.now();
   withdrawal.providerUpdatedAt = Date.now();
+  const actualFeeLtc = nowpaymentsPayoutFeeLtc(record);
+  if (Number.isFinite(actualFeeLtc)) withdrawal.actualNetworkFeeLtc = actualFeeLtc;
 
   if (!validation.ok) {
     withdrawal.status = "manual_review";
@@ -9226,6 +9284,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
     return { status, validation, terminal: false };
   }
   delete withdrawal.providerVerificationError;
+  const feeReconciliation = reconcilePayoutFeeReserve(withdrawal, actualFeeLtc);
 
   if (status === "finished") {
     withdrawal.status = "paid";
@@ -9237,7 +9296,7 @@ function applyNowpaymentsPayoutStatus(withdrawal = {}, statusResult = {}) {
     delete withdrawal.autoPayoutErrorCode;
     delete withdrawal.autoPayoutStage;
     delete withdrawal.payoutFailureMessage;
-    return { status, validation, terminal: true };
+    return { status, validation, feeReconciliation, terminal: true };
   }
   if (["rejected", "rejected_not_checked", "cancelled", "canceled"].includes(status)) {
     withdrawal.status = "rejected";
@@ -9273,6 +9332,208 @@ function normalizeNowpaymentsPayoutAmount(value = 0) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
   return Math.floor((amount + Number.EPSILON) * 1e6) / 1e6;
+}
+
+function nowpaymentsPayoutFeeLtc(payload = {}) {
+  const candidates = [
+    payload?.fee,
+    payload?.network_fee,
+    payload?.networkFee,
+    payload?.data?.fee,
+    payload?.data?.network_fee,
+    payload?.result?.fee,
+    typeof payload?.result === "number" || typeof payload?.result === "string" ? payload.result : undefined
+  ];
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || candidate === "") continue;
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value >= 0) return roundLtc(value);
+    return Number.NaN;
+  }
+  return Number.NaN;
+}
+
+function nowpaymentsMinimumPayoutLtc(payload = {}) {
+  const candidates = [
+    payload?.result,
+    payload?.min_amount,
+    payload?.minAmount,
+    payload?.minimum,
+    payload?.data?.result,
+    payload?.data?.min_amount,
+    payload?.data?.minimum
+  ];
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || candidate === "" || typeof candidate === "object") continue;
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return roundLtc(value);
+    return Number.NaN;
+  }
+  return Number.NaN;
+}
+
+function payoutFeeReserveLtc(estimatedFeeLtc = 0) {
+  const estimatedFee = roundLtc(estimatedFeeLtc);
+  if (!(estimatedFee >= 0)) return 0;
+  const bufferedFee = Math.max(
+    estimatedFee * nowpaymentsPayoutFeeReserveMultiplier,
+    estimatedFee + nowpaymentsPayoutFeeReserveMinimumLtc
+  );
+  return Math.ceil(Math.max(0, bufferedFee) * 1e8) / 1e8;
+}
+
+function payoutAmountsForGrossDebit(grossDebitLtc = 0, estimatedFeeLtc = 0) {
+  const grossDebit = roundLtc(grossDebitLtc);
+  const estimatedFee = roundLtc(estimatedFeeLtc);
+  const requestedReserve = payoutFeeReserveLtc(estimatedFee);
+  const recipientAmount = normalizeNowpaymentsPayoutAmount(Math.max(0, grossDebit - requestedReserve));
+  const effectiveReserve = roundLtc(Math.max(0, grossDebit - recipientAmount));
+  return {
+    payoutFeePolicyVersion: 3,
+    payoutFeePayer: "sender",
+    requestedGrossLtc: grossDebit,
+    grossDebitLtc: grossDebit,
+    recipientAmountLtc: recipientAmount,
+    amountLtc: recipientAmount,
+    estimatedNetworkFeeLtc: estimatedFee,
+    reservedNetworkFeeLtc: effectiveReserve,
+    // Requiring the full claimant debit to exist in custody prevents an
+    // earlier historical shortfall from being hidden by the fee reserve.
+    providerRequiredLtc: grossDebit,
+    expectedReceivedLtc: recipientAmount
+  };
+}
+
+function reconcilePayoutFeeReserve(withdrawal = {}, actualFeeLtc = Number.NaN) {
+  if (Number(withdrawal.payoutFeePolicyVersion || 0) < 3 || withdrawal.payoutFeePayer !== "sender") {
+    return { reconciled: false, accounted: true, reserveCovered: true };
+  }
+  const actualFee = Number(actualFeeLtc);
+  if (!Number.isFinite(actualFee) || actualFee < 0) return { reconciled: false, accounted: true, reserveCovered: true };
+
+  const requestedGross = roundLtc(withdrawal.requestedGrossLtc || withdrawal.grossDebitLtc);
+  const recipientAmount = roundLtc(withdrawal.recipientAmountLtc || withdrawal.amountLtc);
+  const reservedFee = roundLtc(Math.max(0,
+    Number(withdrawal.reservedNetworkFeeLtc || 0) || requestedGross - recipientAmount
+  ));
+  const actualDebit = roundLtc(recipientAmount + actualFee);
+  const reserveExceeded = roundLtc(Math.max(0, actualFee - reservedFee));
+  if (reserveExceeded > 0.00000001) {
+    withdrawal.feeReserveExceededLtc = reserveExceeded;
+    // Charge an unexpected fee spike only to the claimant who created this
+    // payout. A negative remainder stays against that scope's future earnings
+    // and is never shifted to the store/owner on the other side.
+    withdrawal.grossDebitLtc = actualDebit;
+    withdrawal.payoutFeeDebtLtc = reserveExceeded;
+    withdrawal.refundedFeeReserveLtc = 0;
+    return {
+      reconciled: true,
+      accounted: true,
+      reserveCovered: false,
+      requestedGross,
+      recipientAmount,
+      reservedFee,
+      actualFee,
+      actualDebit,
+      reserveExceeded
+    };
+  }
+
+  withdrawal.grossDebitLtc = Math.min(requestedGross, actualDebit);
+  withdrawal.refundedFeeReserveLtc = roundLtc(Math.max(0, requestedGross - withdrawal.grossDebitLtc));
+  delete withdrawal.feeReserveExceededLtc;
+  delete withdrawal.payoutFeeDebtLtc;
+  return {
+    reconciled: true,
+    accounted: true,
+    reserveCovered: true,
+    requestedGross,
+    recipientAmount,
+    reservedFee,
+    actualFee,
+    actualDebit: withdrawal.grossDebitLtc,
+    refundedFeeReserveLtc: withdrawal.refundedFeeReserveLtc
+  };
+}
+
+async function quoteNowpaymentsLtcPayout(grossDebitLtc = 0) {
+  const grossDebit = roundLtc(grossDebitLtc);
+  if (!(grossDebit > 0)) {
+    const error = new Error("Сумма выплаты должна быть больше нуля");
+    error.status = 400;
+    error.payoutErrorCode = "below_minimum";
+    error.payoutStage = "fee_quote";
+    throw error;
+  }
+
+  let recipientAmount = normalizeNowpaymentsPayoutAmount(grossDebit);
+  let estimatedFee = 0;
+  let plan = payoutAmountsForGrossDebit(grossDebit, estimatedFee);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const feePayload = await nowpaymentsPayoutStep("fee_quote", () => nowpaymentsRequest(
+      `payout/fee?currency=ltc&amount=${encodeURIComponent(recipientAmount.toFixed(6))}`,
+      { method: "GET" }
+    ));
+    estimatedFee = nowpaymentsPayoutFeeLtc(feePayload);
+    if (!Number.isFinite(estimatedFee)) {
+      const error = new Error("Платёжный сервис не вернул корректную сетевую комиссию LTC");
+      error.status = 502;
+      error.payoutErrorCode = "provider_unavailable";
+      error.payoutStage = "fee_quote";
+      throw error;
+    }
+    if (nowpaymentsPayoutFeePayer === "receiver") {
+      recipientAmount = normalizeNowpaymentsPayoutAmount(grossDebit);
+      plan = {
+        payoutFeePolicyVersion: 3,
+        payoutFeePayer: "receiver",
+        requestedGrossLtc: grossDebit,
+        grossDebitLtc: grossDebit,
+        recipientAmountLtc: recipientAmount,
+        amountLtc: recipientAmount,
+        estimatedNetworkFeeLtc: estimatedFee,
+        reservedNetworkFeeLtc: 0,
+        providerRequiredLtc: recipientAmount,
+        expectedReceivedLtc: normalizeNowpaymentsPayoutAmount(Math.max(0, recipientAmount - estimatedFee))
+      };
+      break;
+    }
+    const next = payoutAmountsForGrossDebit(grossDebit, estimatedFee);
+    plan = next;
+    if (next.recipientAmountLtc === recipientAmount) break;
+    recipientAmount = next.recipientAmountLtc;
+    if (!(recipientAmount > 0)) break;
+  }
+
+  if (!(plan.recipientAmountLtc > 0)) {
+    const error = new Error("Сумма выплаты не покрывает сетевую комиссию LTC");
+    error.status = 400;
+    error.payoutErrorCode = "below_minimum";
+    error.payoutStage = "fee_quote";
+    throw error;
+  }
+
+  const minimumPayload = await nowpaymentsPayoutStep("minimum", () => nowpaymentsRequest(
+    "payout-withdrawal/min-amount/ltc",
+    { method: "GET" }
+  ));
+  const minimumLtc = nowpaymentsMinimumPayoutLtc(minimumPayload);
+  if (!Number.isFinite(minimumLtc)) {
+    const error = new Error("Платёжный сервис не вернул минимальную сумму выплаты LTC");
+    error.status = 502;
+    error.payoutErrorCode = "provider_unavailable";
+    error.payoutStage = "minimum";
+    throw error;
+  }
+  if (plan.recipientAmountLtc + 1e-8 < minimumLtc) {
+    const error = new Error("Сумма после сетевой комиссии меньше минимальной выплаты LTC");
+    error.status = 400;
+    error.payoutErrorCode = "below_minimum";
+    error.payoutStage = "minimum";
+    error.minimumPayoutLtc = minimumLtc;
+    throw error;
+  }
+  return { ...plan, minimumPayoutLtc: minimumLtc, feeEstimatedAt: Date.now() };
 }
 
 function nowpaymentsAvailableLtc(payload = {}) {
@@ -9384,7 +9645,7 @@ function isValidLitecoinAddress(value = "") {
   return address === address.toLowerCase() || address === address.toUpperCase();
 }
 
-async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", description = "" } = {}) {
+async function createNowpaymentsLtcPayout({ grossDebitLtc = 0, amountLtc = 0, address = "", description = "" } = {}) {
   if (!nowpaymentsPayoutsEnabled) {
     const error = new Error("Автоматические NOWPayments payouts выключены");
     error.status = 503;
@@ -9401,13 +9662,10 @@ async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", descrip
     error.payoutErrorCode = "two_factor_failed";
     throw error;
   }
-  const payoutAmount = normalizeNowpaymentsPayoutAmount(amountLtc);
-  if (payoutAmount <= 0) {
-    const error = new Error("Сумма выплаты слишком мала после округления до 6 знаков LTC");
-    error.status = 400;
-    error.payoutErrorCode = "below_minimum";
-    throw error;
-  }
+  const token = await nowpaymentsPayoutStep("auth", () => nowpaymentsPayoutToken());
+  await nowpaymentsPayoutStep("validate_address", () => nowpaymentsRequest("payout/validate-address", {
+    body: { address, currency: "ltc", extra_id: null }
+  }));
   const balancePayload = await nowpaymentsPayoutStep("balance", () => nowpaymentsRequest("balance", { method: "GET" }));
   const availableLtc = nowpaymentsAvailableLtc(balancePayload);
   if (!Number.isFinite(availableLtc)) {
@@ -9417,17 +9675,18 @@ async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", descrip
     error.payoutStage = "balance";
     throw error;
   }
-  if (availableLtc + 1e-8 < payoutAmount) {
+  // Quote the dynamic network fee immediately before creating the payout. The
+  // recipient amount is reduced so amount + fee stays inside this claimant's
+  // own ledger debit.
+  const payoutPlan = await quoteNowpaymentsLtcPayout(grossDebitLtc || amountLtc);
+  const payoutAmount = payoutPlan.recipientAmountLtc;
+  if (availableLtc + 1e-8 < payoutPlan.providerRequiredLtc) {
     const error = new Error("Insufficient LTC on NOWPayments Primary balance");
     error.status = 409;
     error.payoutErrorCode = "insufficient_balance";
     error.payoutStage = "balance";
     throw error;
   }
-  const token = await nowpaymentsPayoutStep("auth", () => nowpaymentsPayoutToken());
-  await nowpaymentsPayoutStep("validate_address", () => nowpaymentsRequest("payout/validate-address", {
-    body: { address, currency: "ltc", extra_id: null }
-  }));
   const payout = await nowpaymentsPayoutStep("create_payout", () => nowpaymentsRequest("payout", {
     token,
     body: {
@@ -9477,7 +9736,7 @@ async function createNowpaymentsLtcPayout({ amountLtc = 0, address = "", descrip
     payout,
     payoutId,
     verification,
-    amountLtc: payoutAmount,
+    ...payoutPlan,
     withdrawalIds: nowpaymentsPayoutWithdrawalIds(payout),
     statusResult,
     statusCheckError
@@ -9490,7 +9749,7 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
   if (!nowpaymentsPayoutsEnabled) return withdrawal;
   try {
     const payoutResult = await createNowpaymentsLtcPayout({
-      amountLtc: withdrawal.amountLtc,
+      grossDebitLtc: withdrawal.grossDebitLtc || withdrawal.amountLtc,
       address: address || withdrawal.address || "",
       description
     });
@@ -9498,7 +9757,18 @@ async function attachNowpaymentsPayoutToWithdrawal(withdrawal, { address = "", d
     withdrawal.provider = "nowpayments";
     withdrawal.providerPayoutId = payoutResult.payoutId;
     withdrawal.providerWithdrawalIds = payoutResult.withdrawalIds;
+    withdrawal.payoutFeePolicyVersion = payoutResult.payoutFeePolicyVersion;
+    withdrawal.payoutFeePayer = payoutResult.payoutFeePayer;
+    withdrawal.requestedGrossLtc = payoutResult.requestedGrossLtc;
+    withdrawal.grossDebitLtc = payoutResult.grossDebitLtc;
     withdrawal.amountLtc = payoutResult.amountLtc;
+    withdrawal.recipientAmountLtc = payoutResult.recipientAmountLtc;
+    withdrawal.estimatedNetworkFeeLtc = payoutResult.estimatedNetworkFeeLtc;
+    withdrawal.reservedNetworkFeeLtc = payoutResult.reservedNetworkFeeLtc;
+    withdrawal.providerRequiredLtc = payoutResult.providerRequiredLtc;
+    withdrawal.expectedReceivedLtc = payoutResult.expectedReceivedLtc;
+    withdrawal.minimumPayoutLtc = payoutResult.minimumPayoutLtc;
+    withdrawal.feeEstimatedAt = payoutResult.feeEstimatedAt;
     withdrawal.providerPayload = {
       payoutId: payoutResult.payoutId,
       payout: payoutResult.payout,
@@ -9557,7 +9827,22 @@ async function processNowpaymentsWithdrawalPayoutUnlocked(withdrawalId = "") {
   const latestWithdrawal = latestState.walletWithdrawals.find((item) => String(item.id || "") === String(withdrawalId));
   if (!latestWithdrawal) return;
   [
+    "payoutFeePolicyVersion",
+    "payoutFeePayer",
+    "requestedGrossLtc",
+    "grossDebitLtc",
     "amountLtc",
+    "recipientAmountLtc",
+    "estimatedNetworkFeeLtc",
+    "reservedNetworkFeeLtc",
+    "actualNetworkFeeLtc",
+    "refundedFeeReserveLtc",
+    "feeReserveExceededLtc",
+    "payoutFeeDebtLtc",
+    "providerRequiredLtc",
+    "expectedReceivedLtc",
+    "minimumPayoutLtc",
+    "feeEstimatedAt",
     "status",
     "provider",
     "providerStatus",
@@ -9819,7 +10104,6 @@ async function completePermanentWalletPayment(state, payment = {}, options = {})
   const status = String(payment.payment_status || payment.status || "").toLowerCase();
   if (status !== "finished") return { credited: false, reason: `status_${status || "missing"}` };
   const paidCoin = Number(payment.actually_paid);
-  if (!Number.isFinite(paidCoin) || paidCoin <= 0) return { credited: false, reason: "paid_amount_missing" };
   const deposits = Array.isArray(state.walletDeposits) ? state.walletDeposits : [];
   const existing = deposits.find((item) => String(item.paymentId || "") === paymentId);
   if (existing) {
@@ -9831,8 +10115,13 @@ async function completePermanentWalletPayment(state, payment = {}, options = {})
   }
   const outcomeLtc = String(payment.outcome_currency || "").toLowerCase() === "ltc"
     ? Number(payment.outcome_amount || 0) : 0;
-  const paidLtc = roundLtc(address.payCurrency === "ltc" ? paidCoin : outcomeLtc);
-  if (!paidLtc) return { credited: false, reason: "ltc_outcome_missing" };
+  // Only the final LTC outcome is backed by the merchant custody balance.
+  // `actually_paid` is the customer's gross transfer before processing fees.
+  if (!(Number.isFinite(outcomeLtc) && outcomeLtc > 0)) {
+    return { credited: false, reason: "ltc_outcome_missing" };
+  }
+  const paidLtc = roundLtc(outcomeLtc);
+  const receivedCoin = Number.isFinite(paidCoin) && paidCoin > 0 ? paidCoin : outcomeLtc;
   const rate = Number((await loadLitecoinUsdRate()).rate || 0);
   if (!Number.isFinite(rate) || rate <= 0) return { credited: false, reason: "ltc_rate_missing" };
   const paidUsd = Number((paidLtc * rate).toFixed(2));
@@ -9846,7 +10135,7 @@ async function completePermanentWalletPayment(state, payment = {}, options = {})
     payAddress: address.payAddress,
     payCurrency: address.payCurrency,
     coinId: address.coinId,
-    payAmount: paidCoin,
+    payAmount: receivedCoin,
     amountLtc: paidLtc,
     amountUsd: paidUsd,
     ltcUsdRateAtCredit: rate,
@@ -9871,7 +10160,7 @@ async function completePermanentWalletPayment(state, payment = {}, options = {})
     title: "Пополнение баланса",
     amountLtc: paidLtc,
     amountUsd: paidUsd,
-    payAmount: paidCoin,
+    payAmount: receivedCoin,
     payCurrency: address.payCurrency,
     coinId: address.coinId,
     paymentId,
@@ -9891,7 +10180,7 @@ async function completePermanentWalletPayment(state, payment = {}, options = {})
       id: `notice-wallet-deposit-completed-${deposit.id}-${loginKey(address.login)}`,
       eventType: "wallet_deposit_completed",
       title: "Баланс пополнен",
-      body: `Получено ${paidCoin} ${address.payCurrency.toUpperCase()}. Зачислено ${paidLtc.toFixed(8)} LTC (${paidUsd.toFixed(2)} $).`
+      body: `Получено ${receivedCoin} ${address.payCurrency.toUpperCase()}. Зачислено ${paidLtc.toFixed(8)} LTC (${paidUsd.toFixed(2)} $).`
     });
     if (referralPayment) await notifySiteUser(state, referralPayment.referrerLogin, {
       id: `notice-referral-reward-${referralPayment.id}-${loginKey(referralPayment.referrerLogin)}`,
@@ -11637,6 +11926,10 @@ function orderProviderValue(order = {}, ...keys) {
 }
 
 function orderActualGrossLtc(order = {}) {
+  if (productOrderUsesFinalProviderSettlement(order)) {
+    const finalOutcome = productOrderFinalProviderOutcome(order);
+    return finalOutcome.ready ? roundLtc(finalOutcome.outcomeAmount) : 0;
+  }
   const settled = Number(order.settlementGrossLtc ?? order.grossAmountLtc);
   if (Number.isFinite(settled) && settled > 0) return roundLtc(settled);
 
@@ -11666,7 +11959,17 @@ function orderLtcBreakdown(order = {}, state = {}, store = null) {
   const storeTx = transactions.find((tx) => tx.id === `tx-store-sale-${order.id}`);
   const ownerTx = transactions.find((tx) => tx.id === `tx-owner-commission-${order.id}`);
   const actualGrossLtc = orderActualGrossLtc(order);
-  const hasSettlement = Number(order.ltcSettlementVersion || 0) >= 1;
+  const finalProviderSettlement = productOrderUsesFinalProviderSettlement(order);
+  const hasSettlement = Number(order.ltcSettlementVersion || 0) >= 1 && !finalProviderSettlement;
+
+  if (finalProviderSettlement && !(actualGrossLtc > 0)) {
+    return {
+      grossLtc: 0,
+      commissionLtc: 0,
+      sellerLtc: 0,
+      rateAtPayment: cachedLitecoinUsdRate()
+    };
+  }
 
   let sellerLtc = hasSettlement ? Number(order.sellerAmountLtc || 0) : 0;
   let commissionLtc = hasSettlement ? Number(order.platformCommissionLtc || 0) : 0;
@@ -11692,10 +11995,13 @@ function orderLtcBreakdown(order = {}, state = {}, store = null) {
     sellerLtc = Math.max(0, grossLtc - commissionLtc);
   }
 
+  const roundedGrossLtc = roundLtc(grossLtc);
+  const roundedCommissionLtc = Math.min(roundedGrossLtc, roundLtc(commissionLtc));
+  const roundedSellerLtc = roundLtc(Math.max(0, roundedGrossLtc - roundedCommissionLtc));
   return {
-    grossLtc: roundLtc(grossLtc),
-    commissionLtc: roundLtc(commissionLtc),
-    sellerLtc: roundLtc(sellerLtc),
+    grossLtc: roundedGrossLtc,
+    commissionLtc: roundedCommissionLtc,
+    sellerLtc: roundedSellerLtc,
     rateAtPayment: grossLtc > 0 && amountUsd > 0 ? Number((amountUsd / grossLtc).toFixed(8)) : cachedLitecoinUsdRate()
   };
 }
@@ -11703,13 +12009,17 @@ function orderLtcBreakdown(order = {}, state = {}, store = null) {
 function applyProductOrderLtcSettlement(order, state = {}, store = null) {
   if (!order) return order;
   const breakdown = orderLtcBreakdown(order, state, store);
-  order.ltcSettlementVersion = 1;
+  if (productOrderUsesFinalProviderSettlement(order) && !(breakdown.grossLtc > 0)) return order;
+  order.ltcSettlementVersion = productOrderUsesFinalProviderSettlement(order) ? 2 : 1;
   order.settlementCurrency = "ltc";
   order.settlementGrossLtc = breakdown.grossLtc;
   order.grossAmountLtc = breakdown.grossLtc;
   order.platformCommissionLtc = breakdown.commissionLtc;
   order.sellerAmountLtc = breakdown.sellerLtc;
   order.ltcUsdRateAtPayment = breakdown.rateAtPayment;
+  if (productOrderUsesFinalProviderSettlement(order)) {
+    order.settlementFinalizedAt = Number(order.settlementFinalizedAt || Date.now());
+  }
   return order;
 }
 
@@ -12236,6 +12546,10 @@ function activeWithdrawalUsd(state = {}, scope = "", storeId = "") {
 }
 
 function withdrawalAmountLtc(withdrawal = {}) {
+  if (Number(withdrawal.payoutFeePolicyVersion || 0) >= 2) {
+    const grossDebitLtc = Number(withdrawal.grossDebitLtc || 0);
+    if (Number.isFinite(grossDebitLtc) && grossDebitLtc > 0) return roundLtc(grossDebitLtc);
+  }
   const amountLtc = Number(withdrawal.amountLtc || 0);
   if (Number.isFinite(amountLtc) && amountLtc > 0) return roundLtc(amountLtc);
   const amountUsd = Number(withdrawal.amountUsd || 0);
@@ -13566,6 +13880,15 @@ async function createWalletDepositRecord(user, options = {}) {
 }
 
 async function completeProductOrder(order, state, providerPayload = {}) {
+  if (productOrderUsesFinalProviderSettlement(order)) {
+    const finalOutcome = productOrderFinalProviderOutcome(order, providerPayload);
+    if (!finalOutcome.ready) {
+      const error = new Error("Payment settlement is not final yet");
+      error.status = 409;
+      error.code = "PAYMENT_SETTLEMENT_NOT_FINAL";
+      throw error;
+    }
+  }
   const providerValidation = validateProviderPayment(providerPayload, {
     id: order.id,
     paymentId: order.paymentId,
@@ -13606,6 +13929,9 @@ async function completeProductOrder(order, state, providerPayload = {}) {
   order.providerOutcomeAmount = Number(providerPayload.outcome_amount ?? order.providerOutcomeAmount ?? 0);
   order.providerOutcomeCurrency = String(providerPayload.outcome_currency ?? order.providerOutcomeCurrency ?? "").toLowerCase();
   order.payCurrency = String(providerPayload.pay_currency ?? order.payCurrency ?? order.coinId ?? "ltc").toLowerCase();
+  if (productOrderUsesFinalProviderSettlement(order)) {
+    order.settlementFinalizedAt = Number(order.settlementFinalizedAt || paidAt);
+  }
 
   const lateReservationPayment = !wasAlreadyPaid && ["released", "manual_review"].includes(reservationStatusBeforePayment);
   if (lateReservationPayment) {
@@ -13743,6 +14069,7 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
         delete order.reservationCheckFailedAt;
         delete order.reservationCheckError;
         order.providerPaymentStatus = status;
+        if (Number(order.ltcSettlementVersion || 0) < 1) order.settlementPolicyVersion = 2;
         order.providerActuallyPaid = Number(payment.actually_paid || 0);
         order.providerOutcomeAmount = Number(payment.outcome_amount || 0);
         order.providerOutcomeCurrency = String(payment.outcome_currency || "").toLowerCase();
@@ -13754,13 +14081,15 @@ async function reconcilePendingNowpaymentsOrdersUnlocked({ force = false } = {})
         order.walletDepositAddress = order.payAddress || order.walletDepositAddress || "";
         order.paymentProviderPayload = payment;
         changed = changed || previousStatus !== status;
-        if (nowpaymentsPaymentIsPaid(status) && nowpaymentsPaymentCoversExpected(payment, order)) {
+        const finalProviderSettlementReady = !productOrderUsesFinalProviderSettlement(order)
+          || productOrderFinalProviderOutcome(order, payment).ready;
+        if (nowpaymentsPaymentIsPaid(status) && finalProviderSettlementReady && nowpaymentsPaymentCoversExpected(payment, order)) {
           order.ltcAmount = Number(payment.actually_paid || payment.pay_amount || order.payAmount || order.ltcAmount || 0);
           delete order.paymentReviewReason;
           await completeProductOrder(order, state, payment);
           completed += 1;
           changed = true;
-        } else if (nowpaymentsPaymentIsPaid(status)) {
+        } else if (nowpaymentsPaymentIsPaid(status) && finalProviderSettlementReady) {
           order.paymentStatus = "underpaid";
           order.paymentReviewReason = "provider_amount_below_expected";
           order.reservationStatus = "payment_seen";
@@ -14145,11 +14474,14 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     const priceUsd = Number(position.priceUsd || 0);
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) return res.status(400).json({ error: "Цена товара не задана" });
     const ltcUsdRate = Number((await loadLitecoinUsdRate()).rate || 0);
-    const ltcAmount = ltcUsdRate > 0 ? priceUsd / ltcUsdRate : 0;
-    const balance = stateUserLtcBalance(state, user.login, user.login_key);
+    const ltcAmount = ltcUsdRate > 0 ? roundLtc(priceUsd / ltcUsdRate) : 0;
+    const balance = roundLtc(stateUserLtcBalance(state, user.login, user.login_key));
     const balanceUsd = stateUserUsdBalance(state, user.login, user.login_key);
     if (!Number.isFinite(ltcUsdRate) || ltcUsdRate <= 0) return res.status(503).json({ error: "Курс LTC временно недоступен" });
     if (balanceUsd + 0.00000001 < priceUsd) return res.status(400).json({ error: "Недостаточно средств на балансе" });
+    if (!(ltcAmount > 0) || balance < ltcAmount) {
+      return res.status(400).json({ error: "Недостаточно LTC на балансе по текущему курсу" });
+    }
 
     const positionItems = Array.isArray(position.deliveryItems) ? position.deliveryItems : [];
     const productItems = Array.isArray(product.deliveryItems) ? product.deliveryItems : [];
@@ -14197,7 +14529,7 @@ app.post("/api/orders/product/balance", async (req, res, next) => {
     applyProductOrderCommission(order, state, store);
     applyProductOrderLtcSettlement(order, state, store);
     recordProductOrderLedger(order, state, store);
-    setStateUserLtcBalance(state, user.login, Math.max(0, balance - ltcAmount), user.login_key);
+    setStateUserLtcBalance(state, user.login, roundLtc(balance - ltcAmount), user.login_key);
     state.orders.unshift(order);
     state.walletTransactions.unshift({
       id: `tx-${order.id}`,
@@ -14353,6 +14685,8 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       status: "pending_payment",
       paymentStatus: "waiting",
       paymentProvider: "nowpayments",
+      feePolicyVersion: 2,
+      paymentFeePayer: "merchant",
       createdAt: now,
       paymentExpiresAt: now + walletDepositTtlMs,
       reservationStatus: "active",
@@ -14376,6 +14710,11 @@ app.post("/api/orders/product/deposit", async (req, res, next) => {
       price_amount: priceUsd,
       price_currency: "usd",
       pay_currency: coin.payCurrency,
+      // Customer-paid provider fees require a fixed-rate payment that expires
+      // before the 40-minute stock reservation. Keep this payment floating and
+      // split only the final LTC outcome that actually reached custody.
+      is_fee_paid_by_user: false,
+      is_fixed_rate: false,
       order_id: order.id,
       order_description: `${order.product || "CERBER order"} / ${order.storeName || ""}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
@@ -14498,12 +14837,20 @@ app.post(["/api/payments/gateway/create", "/api/payments/nowpayments/create"], a
       price_amount: Number(order.amountUsd || 0),
       price_currency: "usd",
       pay_currency: coin.payCurrency,
+      // Match the direct-payment policy and preserve the full reservation.
+      // Final merchant-side fees are removed before seller/owner shares split.
+      is_fee_paid_by_user: false,
+      is_fixed_rate: false,
       order_id: order.id,
       order_description: `${order.product || "CERBER order"} / ${order.storeName || ""}`,
       ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`,
       success_url: `${publicBaseUrl}/`,
       cancel_url: `${publicBaseUrl}/`
     };
+
+    order.paymentProvider = "nowpayments";
+    order.feePolicyVersion = 2;
+    order.paymentFeePayer = "merchant";
 
     const response = await fetch("https://api.nowpayments.io/v1/invoice", {
       method: "POST",
@@ -14571,6 +14918,7 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
         clientRequestId,
         login: user.login,
         status: "waiting",
+        settlementPolicyVersion: 2,
         amountUsd,
         amountLtcExpected,
         ltcUsdRateAtCreation,
@@ -14584,6 +14932,8 @@ app.post(["/api/wallet/deposits/create", "/api/wallet/nowpayments/create"], asyn
         price_amount: amountUsd,
         price_currency: "usd",
         pay_currency: legacyCoin.payCurrency,
+        is_fee_paid_by_user: false,
+        is_fixed_rate: false,
         order_id: deposit.id,
         order_description: `CERBER MARKET wallet top up / ${user.login}`,
         ipn_callback_url: `${publicBaseUrl}/api/payments/nowpayments/ipn`
@@ -14932,10 +15282,25 @@ app.post("/api/payments/nowpayments/ipn", async (req, res, next) => {
     }
 
     order.providerPaymentStatus = status;
+    if (Number(order.ltcSettlementVersion || 0) < 1) order.settlementPolicyVersion = 2;
     order.providerActuallyPaid = Number(req.body.actually_paid || 0);
     order.providerOutcomeAmount = Number(req.body.outcome_amount || 0);
     order.providerOutcomeCurrency = String(req.body.outcome_currency || "").toLowerCase();
     order.lastPaymentCheckAt = Date.now();
+    const callbackPayAmountText = providerPayAmountText(req.body.pay_amount);
+    if (callbackPayAmountText) {
+      order.payAmountText = callbackPayAmountText;
+      order.payAmount = Number(callbackPayAmountText);
+      order.walletDepositAmountLtc = order.payAmount;
+    }
+    if (productOrderUsesFinalProviderSettlement(order) && !productOrderFinalProviderOutcome(order, req.body).ready) {
+      if (nowpaymentsPaymentWasObserved(req.body)) {
+        order.reservationStatus = "payment_seen";
+        order.paymentObservedAt = Number(order.paymentObservedAt || order.lastPaymentCheckAt);
+      }
+      await saveSettingsState({ ...state, orders });
+      return res.json({ ok: true, ignored: status || "settlement_pending" });
+    }
     if (!paid) {
       await saveSettingsState({ ...state, orders });
       return res.json({ ok: true, ignored: status });

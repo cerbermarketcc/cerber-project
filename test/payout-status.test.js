@@ -16,11 +16,14 @@ function functionSource(name) {
 function harness() {
   const context = { Date, Set, String, validateProviderPayout };
   vm.runInNewContext([
+    "roundLtc",
+    "nowpaymentsPayoutFeeLtc",
     "nowpaymentsPayoutLookupIds",
     "nowpaymentsPayoutRecords",
     "nowpaymentsPayoutRecord",
     "nowpaymentsPayoutStatusValue",
     "nowpaymentsPayoutErrorCode",
+    "reconcilePayoutFeeReserve",
     "applyNowpaymentsPayoutStatus"
   ].map(functionSource).join("\n"), context);
   return context;
@@ -89,4 +92,26 @@ test("wrapped payout records still require the stored currency, amount, and addr
   assert.equal(result.terminal, false);
   assert.equal(item.status, "manual_review");
   assert.equal(item.requiresManualReview, true);
+});
+
+test("a final fee spike is charged only to the same claimant ledger", () => {
+  const context = harness();
+  const item = {
+    ...withdrawal(),
+    payoutFeePolicyVersion: 3,
+    payoutFeePayer: "sender",
+    requestedGrossLtc: 0.05,
+    grossDebitLtc: 0.05,
+    recipientAmountLtc: 0.048,
+    amountLtc: 0.048,
+    reservedNetworkFeeLtc: 0.002
+  };
+  const result = context.applyNowpaymentsPayoutStatus(item, {
+    payload: [providerRecord({ amount: "0.048", fee: "0.003" })]
+  });
+
+  assert.equal(result.validation.ok, true);
+  assert.equal(item.status, "paid");
+  assert.equal(item.grossDebitLtc, 0.051);
+  assert.equal(item.payoutFeeDebtLtc, 0.001);
 });
